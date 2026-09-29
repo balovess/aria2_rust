@@ -1,25 +1,27 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tracing::warn;
 
 use crate::engine::bittorrent::download::command::BtDownloadCommand;
+use crate::engine::bittorrent::download::execute::types::DiscoveredPeer;
 use crate::engine::bittorrent::peer::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
 use crate::engine::bittorrent::peer::handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bittorrent::peer::interaction::{BtPeerConnectionOptions, BtPeerInteraction};
 use crate::engine::bittorrent::peer::stats::PeerStats;
 use crate::error::{Aria2Error, Result};
+use crate::request::request_group::BtPeerSource;
 use crate::util::rwlock_ext::RwLockRecover;
 
+type CheckedOutPeer = (
+    DiscoveredPeer,
+    crate::engine::bittorrent::peer::storage::PeerEntry,
+);
+
 impl BtDownloadCommand {
-    fn return_checked_out_peers(
-        &self,
-        checked_out: &[(
-            aria2_protocol::bittorrent::peer::connection::PeerAddr,
-            crate::engine::bittorrent::peer::storage::PeerEntry,
-        )],
-    ) {
+    fn return_checked_out_peers(&self, checked_out: &[CheckedOutPeer]) {
         let mut storage = self
             .peer_storage
             .lock()
@@ -48,10 +50,7 @@ impl BtDownloadCommand {
 
     fn reconcile_checked_out_peers(
         &self,
-        checked_out: &[(
-            aria2_protocol::bittorrent::peer::connection::PeerAddr,
-            crate::engine::bittorrent::peer::storage::PeerEntry,
-        )],
+        checked_out: &[CheckedOutPeer],
         active_connections: &[BtPeerConn],
     ) {
         let active: HashSet<_> = active_connections
@@ -63,7 +62,7 @@ impl BtDownloadCommand {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (address, peer) in checked_out {
-            if active.contains(&(address.ip.clone(), address.port)) {
+            if active.contains(&(address.address.ip.clone(), address.address.port)) {
                 storage.set_peer_active(&peer.ip, peer.port, true);
             } else {
                 storage.return_peer(peer);
@@ -95,7 +94,7 @@ impl BtDownloadCommand {
     ///    → disconnect duplicate peer
     pub(in crate::engine::bittorrent::download::execute) async fn connect_to_peers(
         &mut self,
-        peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
+        initial_peers: &[DiscoveredPeer],
         info_hash_raw: &[u8; 20],
         info_hash_v2: Option<[u8; 32]>,
         num_pieces: u32,
@@ -130,41 +129,45 @@ impl BtDownloadCommand {
             0
         };
         let peer_limit = if max_peers == 0 {
-            peer_addrs.len()
+            initial_peers.len()
         } else {
-            remaining_slots.min(peer_addrs.len())
+            remaining_slots.min(initial_peers.len())
         };
         let mut eligible_peers = Vec::with_capacity(peer_limit);
-        for peer in peer_addrs.iter().take(peer_limit) {
-            if let Ok(ip) = peer.ip.parse::<std::net::IpAddr>()
+        for peer in initial_peers {
+            if let Ok(ip) = peer.address.ip.parse::<std::net::IpAddr>()
                 && self.is_peer_temporarily_rejected(&ip.to_string())
             {
-                tracing::debug!(peer = %ip, port = peer.port, "Skipping temporarily rejected peer");
+                tracing::debug!(peer = %ip, port = peer.address.port, "Skipping temporarily rejected peer");
                 continue;
             }
-            eligible_peers.push(peer.clone());
+            eligible_peers.push(peer);
         }
 
-        let mut seen = HashSet::with_capacity(eligible_peers.len());
-        eligible_peers.retain(|peer| seen.insert((peer.ip.clone(), peer.port)));
         let caretaker_id = self.group.recover().gid().value();
-        let mut checked_out = Vec::with_capacity(eligible_peers.len());
+        let mut checked_out = Vec::with_capacity(peer_limit);
         {
             let mut storage = self
                 .peer_storage
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for peer in eligible_peers {
+                if checked_out.len() == peer_limit {
+                    break;
+                }
                 let entry = crate::engine::bittorrent::peer::storage::PeerEntry::new(
-                    peer.ip.clone(),
-                    peer.port,
+                    peer.address.ip.clone(),
+                    peer.address.port,
                 );
                 if let Some(checked_peer) = storage.add_and_checkout_peer(entry, caretaker_id) {
-                    checked_out.push((peer, checked_peer));
+                    checked_out.push(((*peer).clone(), checked_peer));
                 }
             }
         }
-        let eligible_peers: Vec<_> = checked_out.iter().map(|(peer, _)| peer.clone()).collect();
+        let eligible_peers: Vec<_> = checked_out
+            .iter()
+            .map(|(peer, _)| peer.address.clone())
+            .collect();
         if self.group.recover().is_halt_requested() {
             self.return_checked_out_peers(&checked_out);
             self.persist_checkpoint_for_halt().await?;
@@ -215,8 +218,23 @@ impl BtDownloadCommand {
             }
         };
 
+        let source_by_address: HashMap<SocketAddr, BtPeerSource> = checked_out
+            .iter()
+            .filter_map(|(peer, _)| {
+                peer.address
+                    .ip
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+                    .map(|ip| (SocketAddr::new(ip, peer.address.port), peer.source))
+            })
+            .collect();
         let mut active_connections = conn_result.connections;
         for conn in &mut active_connections {
+            if let Ok(ip) = conn.ip_addr.parse::<std::net::IpAddr>()
+                && let Some(source) = source_by_address.get(&SocketAddr::new(ip, conn.port))
+            {
+                conn.set_source(*source);
+            }
             self.apply_peer_exchange_policy(conn);
         }
 

@@ -775,7 +775,7 @@ impl BtDownloadCommand {
             // Process-wide rate limiter (set via set_global_limiter after construction)
             global_limiter: None,
             torrent_upload_limiter,
-            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+            outbound_network_policy: Arc::new(policy.clone()),
 
             peer_rejection: crate::engine::bittorrent::peer::storage::PeerRejectionState::shared(),
             peer_storage,
@@ -800,7 +800,10 @@ impl BtDownloadCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_web_seed_urls, normalized_announce_list, normalized_web_seed_list};
+    use super::{
+        BtDownloadCommand, DownloadOptions, GroupId, file_web_seed_urls, normalized_announce_list,
+        normalized_web_seed_list,
+    };
 
     #[test]
     fn fills_a_missing_tier_from_the_single_announce_field() {
@@ -863,5 +866,24 @@ mod tests {
             ),
             vec!["https://seed.test/root/file%20name.bin"]
         );
+    }
+
+    #[test]
+    fn with_policy_constructor_installs_the_policy_for_peer_connections() {
+        let torrent = crate::engine::bittorrent::download::command_tests::build_test_torrent();
+        let source = "127.0.0.1"
+            .parse()
+            .expect("test source address should parse");
+        let policy = crate::network::OutboundNetworkPolicy::single(source);
+        let command = BtDownloadCommand::new_with_policy(
+            GroupId::new(902),
+            &torrent,
+            &DownloadOptions::default(),
+            None,
+            &policy,
+        )
+        .expect("BT command should construct with an outbound policy");
+
+        assert_eq!(command.outbound_network_policy.addresses(), vec![source]);
     }
 }

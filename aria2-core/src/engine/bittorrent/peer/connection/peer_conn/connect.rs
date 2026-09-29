@@ -14,14 +14,7 @@ use super::super::types::{ConnectionType, SendBuffer};
 use super::super::utp_connection::UtpPeerConnection;
 use super::{BtPeerConn, InnerConnection, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
 
-#[derive(Clone, Copy)]
-pub struct MseConnectionOptions {
-    pub force_encryption: bool,
-    pub prefer_encryption: bool,
-    pub local_peer_id: [u8; 20],
-    pub timeout: std::time::Duration,
-    pub dht_enabled: bool,
-}
+use aria2_protocol::bittorrent::peer::mse::MseConnectionOptions;
 
 #[derive(Clone)]
 pub struct UtpConnectionOptions {
@@ -37,35 +30,84 @@ impl BtPeerConn {
     // Connection constructors
     // -----------------------------------------------------------------------
 
-    /// Connect via MSE using the task's peer identity and connection timeout.
-    pub async fn connect_mse_with_options(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        options: MseConnectionOptions,
-    ) -> Result<Self> {
-        Self::connect_mse_with_policy(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            options,
-            &OutboundNetworkPolicy::direct(),
-        )
-        .await
+    fn from_outgoing_transport(
+        inner: InnerConnection,
+        ip_addr: String,
+        endpoint: std::net::SocketAddr,
+        connection_type: ConnectionType,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            actor_id: super::PeerActorId::allocate(),
+            inner,
+            ip_addr,
+            port: endpoint.port(),
+            peer_id: None,
+            remote_client: Arc::new(std::sync::RwLock::new(None)),
+            incoming: false,
+            source: crate::request::request_group::BtPeerSource::Unknown,
+            local_peer: false,
+            disconnected_gracefully: false,
+            seeder: false,
+            first_contact_time: now,
+            connection_type,
+            peer_allowed_fast: HashSet::new(),
+            am_allowed_fast: HashSet::new(),
+            session_resource: None,
+            send_buffer: SendBuffer::new(),
+            last_keepalive_sent: now,
+            last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
+            stats: PeerStats::new([0u8; 20], endpoint),
+            pending_pex_peers: Vec::new(),
+            pex_enabled: true,
+            upload_state: None,
+            upload_progress: None,
+            actor_startup: None,
+        }
+    }
+
+    fn from_incoming_transport(
+        inner: InnerConnection,
+        endpoint: std::net::SocketAddr,
+        peer_id: Option<[u8; 20]>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            actor_id: super::PeerActorId::allocate(),
+            inner,
+            ip_addr: endpoint.ip().to_string(),
+            port: endpoint.port(),
+            peer_id,
+            remote_client: Arc::new(std::sync::RwLock::new(None)),
+            incoming: true,
+            source: crate::request::request_group::BtPeerSource::Incoming,
+            local_peer: endpoint.ip().is_loopback()
+                || matches!(endpoint.ip(), std::net::IpAddr::V4(address) if address.is_private()),
+            disconnected_gracefully: false,
+            seeder: false,
+            first_contact_time: now,
+            connection_type: ConnectionType::Tcp,
+            peer_allowed_fast: HashSet::new(),
+            am_allowed_fast: HashSet::new(),
+            session_resource: None,
+            send_buffer: SendBuffer::new(),
+            last_keepalive_sent: now,
+            last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
+            stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
+            pending_pex_peers: Vec::new(),
+            pex_enabled: true,
+            upload_state: None,
+            upload_progress: None,
+            actor_startup: None,
+        }
     }
 
     /// Connect through the process-wide outbound network policy.
     pub async fn connect_mse_with_policy(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        options: MseConnectionOptions,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<Self> {
-        Self::connect_mse_with_hashes(addr, info_hash_v1, info_hash_v2, options, policy).await
-    }
-
-    async fn connect_mse_with_hashes(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
@@ -79,111 +121,26 @@ impl BtPeerConn {
             .await
             .map_err(|_| Aria2Error::Fatal(FatalError::Config("peer connection timeout".into())))?
             .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
-        let connection =
-            aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_stream(
-                stream,
-                info_hash_v1,
-                info_hash_v2,
-                aria2_protocol::bittorrent::peer::encrypted_connection::MseConnectionOptions {
-                    force_encryption: options.force_encryption,
-                    prefer_encryption: options.prefer_encryption,
-                    local_peer_id: options.local_peer_id,
-                    timeout: options.timeout,
-                    dht_enabled: options.dht_enabled,
-                },
-            )
-            .await;
+        let connection = aria2_protocol::bittorrent::peer::mse::connect_with_stream(
+            stream,
+            info_hash_v1,
+            info_hash_v2,
+            options,
+        )
+        .await;
         match connection {
-            Ok(conn) => {
-                let now = Instant::now();
-                Ok(Self {
-                    actor_id: super::PeerActorId::allocate(),
-                    inner: InnerConnection::Encrypted(conn),
-                    ip_addr: addr.ip.clone(),
-                    port: addr.port,
-                    peer_id: None,
-                    remote_client: Arc::new(std::sync::RwLock::new(None)),
-                    incoming: false,
-                    source: crate::request::request_group::BtPeerSource::Unknown,
-                    local_peer: false,
-                    disconnected_gracefully: false,
-                    seeder: false,
-                    first_contact_time: now,
-                    connection_type: ConnectionType::Tcp,
-                    peer_allowed_fast: HashSet::new(),
-                    am_allowed_fast: HashSet::new(),
-                    session_resource: None,
-                    send_buffer: SendBuffer::new(),
-                    last_keepalive_sent: now,
-                    last_message_received: now,
-                    keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-                    peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-                    stats: PeerStats::new(
-                        [0u8; 20],
-                        std::net::SocketAddr::new(
-                            addr.ip.parse().map_err(|_| {
-                                Aria2Error::Fatal(FatalError::Config(format!(
-                                    "Invalid peer IP address: {}",
-                                    addr.ip
-                                )))
-                            })?,
-                            addr.port,
-                        ),
-                    ),
-                    pending_pex_peers: Vec::new(),
-                    pex_enabled: true,
-                    upload_state: None,
-                    upload_progress: None,
-                    actor_startup: None,
-                })
-            }
+            Ok(conn) => Ok(Self::from_outgoing_transport(
+                InnerConnection::Tcp(conn),
+                addr.ip.clone(),
+                socket_addr,
+                ConnectionType::Tcp,
+            )),
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
         }
     }
 
-    /// Connect via plain TCP using the task's peer identity and timeout.
-    pub async fn connect_plain_with_options(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_plain_with_hashes(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            local_peer_id,
-            timeout,
-            dht_enabled,
-            &OutboundNetworkPolicy::direct(),
-        )
-        .await
-    }
-
+    /// Connect via plain TCP using the selected outbound network policy.
     pub async fn connect_plain_with_policy(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<Self> {
-        Self::connect_plain_with_hashes(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            local_peer_id,
-            timeout,
-            dht_enabled,
-            policy,
-        )
-        .await
-    }
-
-    async fn connect_plain_with_hashes(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
@@ -212,129 +169,23 @@ impl BtPeerConn {
             Err(_) => Err(format!("Peer connection timeout: {socket_addr}")),
         };
         match result {
-            Ok(conn) => {
-                let now = Instant::now();
-                Ok(Self {
-                    actor_id: super::PeerActorId::allocate(),
-                    inner: InnerConnection::Plain(conn),
-                    ip_addr: addr.ip.clone(),
-                    port: addr.port,
-                    peer_id: None,
-                    remote_client: Arc::new(std::sync::RwLock::new(None)),
-                    incoming: false,
-                    source: crate::request::request_group::BtPeerSource::Unknown,
-                    local_peer: false,
-                    disconnected_gracefully: false,
-                    seeder: false,
-                    first_contact_time: now,
-                    connection_type: ConnectionType::Tcp,
-                    peer_allowed_fast: HashSet::new(),
-                    am_allowed_fast: HashSet::new(),
-                    session_resource: None,
-                    send_buffer: SendBuffer::new(),
-                    last_keepalive_sent: now,
-                    last_message_received: now,
-                    keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-                    peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-                    stats: PeerStats::new(
-                        [0u8; 20],
-                        std::net::SocketAddr::new(
-                            addr.ip.parse().map_err(|_| {
-                                Aria2Error::Fatal(FatalError::Config(format!(
-                                    "Invalid peer IP address: {}",
-                                    addr.ip
-                                )))
-                            })?,
-                            addr.port,
-                        ),
-                    ),
-                    pending_pex_peers: Vec::new(),
-                    pex_enabled: true,
-                    upload_state: None,
-                    upload_progress: None,
-                    actor_startup: None,
-                })
-            }
+            Ok(conn) => Ok(Self::from_outgoing_transport(
+                InnerConnection::Tcp(conn),
+                addr.ip.clone(),
+                socket_addr,
+                ConnectionType::Tcp,
+            )),
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
         }
     }
 
     /// Wrap an already handshaken incoming TCP peer.
-    pub(crate) fn from_incoming_plain(
+    pub(crate) fn from_incoming_tcp(
         conn: aria2_protocol::bittorrent::peer::connection::PeerConnection,
         endpoint: std::net::SocketAddr,
     ) -> Self {
-        let now = Instant::now();
         let peer_id = conn.remote_peer_id().copied();
-        Self {
-            actor_id: super::PeerActorId::allocate(),
-            inner: InnerConnection::Plain(conn),
-            ip_addr: endpoint.ip().to_string(),
-            port: endpoint.port(),
-            peer_id,
-            remote_client: Arc::new(std::sync::RwLock::new(None)),
-            incoming: true,
-            source: crate::request::request_group::BtPeerSource::Incoming,
-            local_peer: endpoint.ip().is_loopback()
-                || matches!(endpoint.ip(), std::net::IpAddr::V4(address) if address.is_private()),
-            disconnected_gracefully: false,
-            seeder: false,
-            first_contact_time: now,
-            connection_type: ConnectionType::Tcp,
-            peer_allowed_fast: HashSet::new(),
-            am_allowed_fast: HashSet::new(),
-            session_resource: None,
-            send_buffer: SendBuffer::new(),
-            last_keepalive_sent: now,
-            last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-            stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
-            pending_pex_peers: Vec::new(),
-            pex_enabled: true,
-            upload_state: None,
-            upload_progress: None,
-            actor_startup: None,
-        }
-    }
-
-    /// Wrap an incoming peer after the shared listener completed MSE.
-    pub(crate) fn from_incoming_encrypted(
-        conn: aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection,
-        endpoint: std::net::SocketAddr,
-    ) -> Self {
-        let now = Instant::now();
-        let peer_id = conn.remote_peer_id().copied();
-        Self {
-            actor_id: super::PeerActorId::allocate(),
-            inner: InnerConnection::Encrypted(conn),
-            ip_addr: endpoint.ip().to_string(),
-            port: endpoint.port(),
-            peer_id,
-            remote_client: Arc::new(std::sync::RwLock::new(None)),
-            incoming: true,
-            source: crate::request::request_group::BtPeerSource::Incoming,
-            local_peer: endpoint.ip().is_loopback()
-                || matches!(endpoint.ip(), std::net::IpAddr::V4(address) if address.is_private()),
-            disconnected_gracefully: false,
-            seeder: false,
-            first_contact_time: now,
-            connection_type: ConnectionType::Tcp,
-            peer_allowed_fast: HashSet::new(),
-            am_allowed_fast: HashSet::new(),
-            session_resource: None,
-            send_buffer: SendBuffer::new(),
-            last_keepalive_sent: now,
-            last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-            stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
-            pending_pex_peers: Vec::new(),
-            pex_enabled: true,
-            upload_state: None,
-            upload_progress: None,
-            actor_startup: None,
-        }
+        Self::from_incoming_transport(InnerConnection::Tcp(conn), endpoint, peer_id)
     }
 
     /// Create a stub connection for unit testing.
@@ -368,7 +219,7 @@ impl BtPeerConn {
 
         Self {
             actor_id: super::PeerActorId::allocate(),
-            inner: InnerConnection::Plain(peer_conn),
+            inner: InnerConnection::Tcp(peer_conn),
             ip_addr: "127.0.0.1".to_string(),
             port: 0,
             peer_id: Some(*info_hash),
@@ -397,35 +248,8 @@ impl BtPeerConn {
         }
     }
 
-    /// Connect via uTP using the task's peer identity, timeout, and shared
-    /// socket when one is available.
-    pub async fn connect_utp_with_options(
-        addr: std::net::SocketAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        options: UtpConnectionOptions,
-    ) -> Result<Self> {
-        Self::connect_utp_with_policy(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            options,
-            &OutboundNetworkPolicy::direct(),
-        )
-        .await
-    }
-
+    /// Connect via uTP using the selected outbound network policy.
     pub async fn connect_utp_with_policy(
-        addr: std::net::SocketAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        options: UtpConnectionOptions,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<Self> {
-        Self::connect_utp_with_hashes(addr, info_hash_v1, info_hash_v2, options, policy).await
-    }
-
-    async fn connect_utp_with_hashes(
         addr: std::net::SocketAddr,
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
@@ -459,36 +283,11 @@ impl BtPeerConn {
                 .await?
             }
         };
-        let now = Instant::now();
-
-        Ok(Self {
-            actor_id: super::PeerActorId::allocate(),
-            inner: InnerConnection::Utp(utp_conn),
-            ip_addr: addr.ip().to_string(),
-            port: addr.port(),
-            peer_id: None,
-            remote_client: Arc::new(std::sync::RwLock::new(None)),
-            incoming: false,
-            source: crate::request::request_group::BtPeerSource::Unknown,
-            local_peer: false,
-            disconnected_gracefully: false,
-            seeder: false,
-            first_contact_time: now,
-            connection_type: ConnectionType::Utp,
-            peer_allowed_fast: HashSet::new(),
-            am_allowed_fast: HashSet::new(),
-            session_resource: None,
-            send_buffer: SendBuffer::new(),
-            last_keepalive_sent: now,
-            last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-            stats: PeerStats::new([0u8; 20], addr),
-            pending_pex_peers: Vec::new(),
-            pex_enabled: true,
-            upload_state: None,
-            upload_progress: None,
-            actor_startup: None,
-        })
+        Ok(Self::from_outgoing_transport(
+            InnerConnection::Utp(utp_conn),
+            addr.ip().to_string(),
+            addr,
+            ConnectionType::Utp,
+        ))
     }
 }

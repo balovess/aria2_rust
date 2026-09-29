@@ -1509,11 +1509,13 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
+        let mut piece_provider = InMemoryPieceProvider::new(16, 2);
+        piece_provider.set_piece_data(0, vec![0xA5; 16]);
         connection.configure_upload_with_auto_unchoke(
             &BtSeedingConfig::default(),
             crate::rate_limiter::RateLimiter::unlimited(),
-            1,
+            2,
             16,
             false,
         );
@@ -1528,7 +1530,7 @@ mod tests {
         let actor_id = connection.actor_id;
         let (command_tx, command_rx) = PeerActorControl::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
-        let provider = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let provider = Arc::new(piece_provider);
         let worker = tokio::spawn(async move {
             run_peer_actor(
                 actor_id,
@@ -1545,7 +1547,11 @@ mod tests {
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
         let _extension_handshake = read_message_while_actor_runs(&mut remote).await;
-        let _availability = read_message_while_actor_runs(&mut remote).await;
+        assert_eq!(
+            read_message_while_actor_runs(&mut remote).await,
+            BtMessage::Bitfield { data: vec![0b1000_0000] },
+            "outbound actor startup must advertise only verified local pieces"
+        );
         let allowed_fast = timeout(Duration::from_secs(1), remote.read_message()).await;
         assert!(
             allowed_fast.is_ok(),
@@ -1568,7 +1574,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], true, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         connection.configure_upload_with_auto_unchoke(
             &BtSeedingConfig::default(),
             crate::rate_limiter::RateLimiter::unlimited(),
@@ -1633,7 +1639,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         let actor_id = connection.actor_id;
         let (command_tx, command_rx) = PeerActorControl::channel(8);
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -1703,7 +1709,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         connection.allocate_session_resource(16 * 1024, 8, 8 * 16 * 1024);
         let actor_id = connection.actor_id;
         let (command_tx, command_rx) = PeerActorControl::channel(8);
@@ -1769,7 +1775,7 @@ mod tests {
             .unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         connection.allocate_session_resource(16, 8, 128);
         let actor_id = connection.actor_id;
         let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 8));
@@ -1862,7 +1868,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         connection.allocate_session_resource(16 * 1024, 8, 8 * 16 * 1024);
         let actor_id = connection.actor_id;
         let (command_tx, command_rx) = PeerActorControl::channel(8);
@@ -1950,7 +1956,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         let actor_id = connection.actor_id;
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut actor = PeerActorTask::spawn_owned(
@@ -2021,7 +2027,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         let actor_id = connection.actor_id;
         let (command_tx, command_rx) = PeerActorControl::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
@@ -2153,7 +2159,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         connection.configure_upload_with_auto_unchoke(
             &BtSeedingConfig::default(),
             crate::rate_limiter::RateLimiter::unlimited(),
@@ -2248,7 +2254,7 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
-        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
         let limiter = crate::rate_limiter::RateLimiter::new(
             &crate::rate_limiter::RateLimiterConfig::new(None, Some(1)).with_burst(None, Some(0)),
         );

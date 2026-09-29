@@ -14,7 +14,7 @@ use super::storage::{DefaultPeerStorage, PeerEntry};
 
 /// A successfully admitted incoming peer.
 pub struct IncomingPeer {
-    pub connection: aria2_protocol::bittorrent::peer::incoming::IncomingConnection,
+    pub connection: aria2_protocol::bittorrent::peer::connection::PeerConnection,
     pub endpoint: SocketAddr,
 }
 
@@ -452,7 +452,7 @@ mod tests {
             .unwrap()
             .unwrap();
         first.await.unwrap();
-        assert_eq!(incoming_a.connection.remote_peer_id(), Some([3; 20]));
+        assert_eq!(incoming_a.connection.remote_peer_id(), Some(&[3; 20]));
 
         let second = tokio::spawn(connect_and_handshake(port, hash_b, [4; 20]));
         let incoming_b = tokio::time::timeout(std::time::Duration::from_secs(2), rx_b.recv())
@@ -460,7 +460,7 @@ mod tests {
             .unwrap()
             .unwrap();
         second.await.unwrap();
-        assert_eq!(incoming_b.connection.remote_peer_id(), Some([4; 20]));
+        assert_eq!(incoming_b.connection.remote_peer_id(), Some(&[4; 20]));
         assert!(rx_a.try_recv().is_err());
 
         drop(route_a);
@@ -579,7 +579,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(incoming.connection.remote_peer_id(), Some([9; 20]));
+        assert_eq!(incoming.connection.remote_peer_id(), Some(&[9; 20]));
     }
 
     #[tokio::test]

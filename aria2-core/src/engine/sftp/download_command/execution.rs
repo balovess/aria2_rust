@@ -1,32 +1,30 @@
 //! SFTP download execution logic.
 //!
-//! Implements the `Command` trait for `SftpDownloadCommand`, orchestrating
-//! the full download lifecycle: SSH connect, SFTP session init, stat remote
-//! file, chunked read/write transfer, and cleanup/finalize.
+//! Executes one SFTP attempt: SSH connect, SFTP session init, remote file
+//! inspection, chunked reads, and cleanup/finalize. Retry and command lifecycle
+//! behavior lives in `command.rs`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
 use crate::checksum::checksum::Checksum;
 use crate::constants;
-use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::{ActiveConnectionGuard, GroupId};
+use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use aria2_protocol::sftp::connection::{SshConnection, SshError};
-use aria2_protocol::sftp::file_ops::{FileOpError, OpenFlags, SftpFileOps};
+use aria2_protocol::sftp::file_ops::{OpenFlags, SftpFileOps};
 use aria2_protocol::sftp::session::SftpSession;
 
 use super::types::SftpDownloadCommand;
 
 impl SftpDownloadCommand {
-    fn check_cancelled(&self) -> Result<()> {
+    pub(super) fn check_cancelled(&self) -> Result<()> {
         let group = self.group.recover();
         if group.is_removed() {
             Err(Aria2Error::DownloadFailed(
@@ -46,7 +44,7 @@ impl SftpDownloadCommand {
     /// This is the main entry point called by the download engine. It orchestrates
     /// the entire download lifecycle from connection establishment through data
     /// transfer to cleanup.
-    async fn execute_once(&mut self) -> Result<()> {
+    pub(super) async fn execute_once(&mut self) -> Result<()> {
         let connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
         connection_guard.set(1);
         // -----------------------------------------------------------------
@@ -145,8 +143,7 @@ impl SftpDownloadCommand {
             Ok(attrs) => attrs,
             Err(e) => {
                 let _ = conn.disconnect().await;
-                let err = FileOpError::from(e);
-                return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
+                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
             }
         };
 
@@ -262,8 +259,7 @@ impl SftpDownloadCommand {
             Ok(f) => f,
             Err(e) => {
                 let _ = conn.disconnect().await;
-                let err = FileOpError::from(e);
-                return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
+                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
             }
         };
 
@@ -373,8 +369,7 @@ impl SftpDownloadCommand {
                     let _ = remote_file.close().await;
                     self.finalize_partial_writer(&mut writer).await;
                     let _ = conn.disconnect().await;
-                    let err = FileOpError::from(e);
-                    return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
+                    return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
                 }
                 },
                 _ = &mut lifecycle_changed => {
@@ -546,115 +541,5 @@ impl SftpDownloadCommand {
         );
 
         Ok(())
-    }
-}
-
-#[async_trait]
-impl Command for SftpDownloadCommand {
-    async fn execute(&mut self) -> Result<()> {
-        let mut attempts = 0u32;
-        loop {
-            let result = self.execute_once().await;
-            let error = match result {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-            let error = match error {
-                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-                | Aria2Error::Fatal(FatalError::FileNotFound { .. }) => {
-                    self.group.recover().file_not_found_error()
-                }
-                error => error,
-            };
-            let should_retry = self.should_retry_error(attempts, &error);
-            if !should_retry {
-                return Err(error);
-            }
-
-            attempts = attempts.saturating_add(1);
-            let wait = self.retry_policy.compute_wait(attempts).unwrap_or_default();
-            self.wait_for_retry(wait).await?;
-            self.completed_bytes = 0;
-        }
-    }
-
-    /// Return the current status of this command.
-    fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 {
-            CommandStatus::Running
-        } else {
-            CommandStatus::Pending
-        }
-    }
-
-    fn gid(&self) -> GroupId {
-        self.group.recover().gid()
-    }
-
-    fn request_group(
-        &self,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
-    {
-        Some(std::sync::Arc::clone(&self.group))
-    }
-
-    /// Return the timeout for this command.
-    fn timeout(&self) -> Option<Duration> {
-        self.group.recover().timeout()
-    }
-
-    async fn shutdown(&mut self) {
-        self.flush_checkpoint().await;
-    }
-}
-
-impl SftpDownloadCommand {
-    /// Apply the shared total-attempt policy to SFTP failures.
-    ///
-    /// Remote not-found responses use the separate `max-file-not-found`
-    /// counter. Connection, timeout, and other transient transport failures
-    /// use the same retry classification as the HTTP and FTP commands.
-    pub(super) fn should_retry_error(&self, attempts: u32, error: &Aria2Error) -> bool {
-        match error {
-            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
-                self.retry_policy
-                    .can_retry_after(attempts.saturating_add(1))
-                    && self.group.recover().can_retry_file_not_found()
-            }
-            _ => self.retry_policy.should_retry(attempts, error),
-        }
-    }
-
-    /// Wait between retry attempts while still honoring RequestGroup controls.
-    /// A plain sleep would delay pause/remove handling for the full configured
-    /// retry interval, which can be several minutes.
-    pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        self.check_cancelled()?;
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = &mut notified => self.check_cancelled(),
-        }
-    }
-
-    async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
-        let _ = writer.finalize().await;
-        self.flush_checkpoint().await;
-    }
-
-    async fn flush_checkpoint(&mut self) {
-        if let Some(checkpoint) = self.checkpoint.as_mut() {
-            let _ = self.group.recover().take_save_control_file_request();
-            checkpoint.update(self.completed_bytes, true).await;
-        }
-    }
-
-    async fn complete_checkpoint(&mut self) {
-        if let Some(checkpoint) = self.checkpoint.take() {
-            checkpoint.complete().await;
-        }
     }
 }

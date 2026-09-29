@@ -14,7 +14,7 @@ impl crate::config::OptionRegistry {
             // must remain distinguishable from an omitted option because it
             // explicitly disables the seed-time criterion.
             default_value: OptionValue::None,
-            description: "Seeding time in minutes (0=infinite)".into(),
+            description: "Seeding time in minutes (0 disables seeding)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 use aria2_protocol::bittorrent::extension::ut_metadata_tracker::UTMetadataRequestTracker;
 use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
+use aria2_protocol::bittorrent::message::types::BtMessage;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 use aria2_protocol::bittorrent::peer::id;
 
@@ -319,12 +320,9 @@ impl MetadataExchangeSession {
         let hs_payload = local_hs.to_bytes();
         let hs_encoded = serialize_extended(0, hs_payload);
 
-        conn.stream_write(&hs_encoded)
-            .await
-            .map_err(|e| MetadataExchangeError::IoError(format!("stream_write failed: {}", e)))?;
-        conn.stream_flush()
-            .await
-            .map_err(|e| MetadataExchangeError::IoError(format!("stream_flush failed: {}", e)))?;
+        conn.send_serialized(&hs_encoded).await.map_err(|e| {
+            MetadataExchangeError::IoError(format!("send extension handshake failed: {e}"))
+        })?;
 
         debug!("Extension handshake sent to {}", peer_addr);
 
@@ -430,11 +428,8 @@ impl MetadataExchangeSession {
                 let req_msg = UtMetadataMessage::Request { piece: piece_idx };
                 let encoded = serialize_extended(metadata_ext_id, req_msg.to_payload());
 
-                conn.stream_write(&encoded).await.map_err(|e| {
-                    MetadataExchangeError::IoError(format!("stream_write failed: {}", e))
-                })?;
-                conn.stream_flush().await.map_err(|e| {
-                    MetadataExchangeError::IoError(format!("stream_flush failed: {}", e))
+                conn.send_serialized(&encoded).await.map_err(|e| {
+                    MetadataExchangeError::IoError(format!("send metadata request failed: {e}"))
                 })?;
 
                 tracker.add(piece_idx);
@@ -534,15 +529,17 @@ impl MetadataExchangeSession {
         conn: &mut PeerConnection,
     ) -> Result<Vec<u8>, MetadataExchangeError> {
         loop {
-            let payload = self.read_message_frame(conn, "extension").await?;
-            if payload.is_empty() || payload[0] != 20 {
-                continue;
+            match conn.read_message().await.map_err(|error| {
+                MetadataExchangeError::IoError(format!("Read extension message failed: {error}"))
+            })? {
+                Some(BtMessage::Extended { ext_id: 0, payload }) => return Ok(payload),
+                Some(_) => continue,
+                None => {
+                    return Err(MetadataExchangeError::IoError(
+                        "Peer closed before extension handshake".to_string(),
+                    ));
+                }
             }
-            if payload.len() < 2 || payload[1] != 0 {
-                continue;
-            }
-
-            return Ok(payload[2..].to_vec());
         }
     }
 
@@ -552,45 +549,24 @@ impl MetadataExchangeSession {
         metadata_ext_id: u8,
     ) -> Result<UtMetadataMessage, MetadataExchangeError> {
         loop {
-            let payload = self.read_message_frame(conn, "ut_metadata").await?;
-            if payload.is_empty() || payload[0] != 20 {
-                continue;
-            }
-            if payload.len() < 2 || payload[1] != metadata_ext_id {
-                continue;
-            }
-
-            return UtMetadataMessage::from_payload(&payload[2..]).map_err(|e| {
-                MetadataExchangeError::BencodeDecodeFailed {
-                    detail: format!("ut_metadata decode failed: {}", e),
+            match conn.read_message().await.map_err(|error| {
+                MetadataExchangeError::IoError(format!("Read ut_metadata message failed: {error}"))
+            })? {
+                Some(BtMessage::Extended { ext_id, payload }) if ext_id == metadata_ext_id => {
+                    return UtMetadataMessage::from_payload(&payload).map_err(|error| {
+                        MetadataExchangeError::BencodeDecodeFailed {
+                            detail: format!("ut_metadata decode failed: {error}"),
+                        }
+                    });
                 }
-            });
+                Some(_) => continue,
+                None => {
+                    return Err(MetadataExchangeError::IoError(
+                        "Peer closed before ut_metadata response".to_string(),
+                    ));
+                }
+            }
         }
-    }
-
-    async fn read_message_frame(
-        &self,
-        conn: &mut PeerConnection,
-        message_name: &str,
-    ) -> Result<Vec<u8>, MetadataExchangeError> {
-        let mut len_buf = [0u8; 4];
-        conn.stream_read_exact(&mut len_buf).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("Read {} length failed: {}", message_name, e))
-        })?;
-
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len > 10 * 1024 * 1024 {
-            return Err(MetadataExchangeError::BencodeDecodeFailed {
-                detail: format!("Invalid {} message length", message_name),
-            });
-        }
-
-        let mut payload = vec![0u8; msg_len];
-        conn.stream_read_exact(&mut payload).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("Read {} body failed: {}", message_name, e))
-        })?;
-
-        Ok(payload)
     }
 }
 

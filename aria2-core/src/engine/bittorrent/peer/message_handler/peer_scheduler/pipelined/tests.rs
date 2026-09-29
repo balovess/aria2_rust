@@ -97,13 +97,14 @@ async fn active_download_actor_serves_upload_request_on_same_peer_connection() {
     });
 
     let peer_addr = PeerAddr::new("127.0.0.1", address.port());
-    let mut connection = BtPeerConn::connect_plain_with_options(
+    let mut connection = BtPeerConn::connect_plain_with_policy(
         &peer_addr,
         &info_hash,
         None,
         &local_peer_id,
         Duration::from_secs(5),
         false,
+        &crate::network::OutboundNetworkPolicy::direct(),
     )
     .await
     .unwrap();
@@ -236,13 +237,14 @@ async fn swarm_actor_downloads_consecutive_pieces_without_restarting_peer_io() {
         let _ = stream.read(&mut closed).await;
     });
 
-    let mut connection = BtPeerConn::connect_plain_with_options(
+    let mut connection = BtPeerConn::connect_plain_with_policy(
         &PeerAddr::new("127.0.0.1", address.port()),
         &info_hash,
         None,
         &local_peer_id,
         Duration::from_secs(5),
         false,
+        &crate::network::OutboundNetworkPolicy::direct(),
     )
     .await
     .unwrap();
@@ -290,13 +292,22 @@ async fn swarm_actor_downloads_consecutive_pieces_without_restarting_peer_io() {
     remote.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn normal_piece_retry_does_not_add_a_fixed_batch_delay() {
     let mut swarm = crate::engine::bittorrent::peer::message_handler::PeerSwarm::new(1);
 
     let result = tokio::time::timeout(
         Duration::from_millis(80),
-        download_piece_blocks(&mut swarm, 0, 16, 1, None, Duration::ZERO, 2, None),
+        download_piece_blocks(
+            &mut swarm,
+            0,
+            16,
+            1,
+            None,
+            Duration::from_millis(1),
+            2,
+            None,
+        ),
     )
     .await
     .expect("normal piece retries should not wait an unrelated fixed interval");
@@ -305,7 +316,7 @@ async fn normal_piece_retry_does_not_add_a_fixed_batch_delay() {
     swarm.shutdown_all().await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn endgame_piece_retry_does_not_add_a_fixed_batch_delay() {
     let mut swarm = crate::engine::bittorrent::peer::message_handler::PeerSwarm::new(1);
     let mut endgame = EndgameState::new();
@@ -320,7 +331,7 @@ async fn endgame_piece_retry_does_not_add_a_fixed_batch_delay() {
             1,
             &mut endgame,
             None,
-            Duration::ZERO,
+            Duration::from_millis(1),
             2,
             None,
         ),
@@ -381,13 +392,14 @@ async fn swarm_actor_endgame_uses_the_same_peer_across_piece_generations() {
         let _ = stream.read(&mut closed).await;
     });
 
-    let mut connection = BtPeerConn::connect_plain_with_options(
+    let mut connection = BtPeerConn::connect_plain_with_policy(
         &PeerAddr::new("127.0.0.1", address.port()),
         &info_hash,
         None,
         &local_peer_id,
         Duration::from_secs(5),
         false,
+        &crate::network::OutboundNetworkPolicy::direct(),
     )
     .await
     .unwrap();
@@ -477,13 +489,14 @@ async fn active_download_updates_choke_peer_stats_before_piece_completion() {
         let _ = hold_remote.await;
     });
 
-    let mut connection = BtPeerConn::connect_plain_with_options(
+    let mut connection = BtPeerConn::connect_plain_with_policy(
         &PeerAddr::new("127.0.0.1", address.port()),
         &info_hash,
         None,
         &local_peer_id,
         Duration::from_secs(5),
         false,
+        &crate::network::OutboundNetworkPolicy::direct(),
     )
     .await
     .unwrap();
@@ -550,13 +563,14 @@ async fn active_download_applies_choke_rotation_deadline_without_peer_messages()
         vec![1]
     });
 
-    let mut connection = BtPeerConn::connect_plain_with_options(
+    let mut connection = BtPeerConn::connect_plain_with_policy(
         &PeerAddr::new("127.0.0.1", address.port()),
         &info_hash,
         None,
         &local_peer_id,
         Duration::from_secs(5),
         false,
+        &crate::network::OutboundNetworkPolicy::direct(),
     )
     .await
     .unwrap();
@@ -632,13 +646,14 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
         vec![1]
     });
 
-    let mut connection = BtPeerConn::connect_plain_with_options(
+    let mut connection = BtPeerConn::connect_plain_with_policy(
         &PeerAddr::new("127.0.0.1", address.port()),
         &info_hash,
         None,
         &local_peer_id,
         Duration::from_secs(5),
         false,
+        &crate::network::OutboundNetworkPolicy::direct(),
     )
     .await
     .unwrap();
@@ -755,13 +770,14 @@ async fn swarm_endgame_actors_duplicate_requests_and_cancel_loser() {
     let mut actor_ids = Vec::new();
     for address in addresses {
         let peer_addr = PeerAddr::new("127.0.0.1", address.port());
-        let mut connection = BtPeerConn::connect_plain_with_options(
+        let mut connection = BtPeerConn::connect_plain_with_policy(
             &peer_addr,
             &info_hash,
             None,
             &local_peer_id,
             Duration::from_secs(5),
             false,
+            &crate::network::OutboundNetworkPolicy::direct(),
         )
         .await
         .unwrap();

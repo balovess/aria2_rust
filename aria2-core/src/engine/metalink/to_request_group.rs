@@ -17,7 +17,6 @@
 //! | Rust | C++ |
 //! |---|---|
 //! | `MetalinkToRequestGroup` | `Metalink2RequestGroup` |
-//! | `generate_from_file()` | `generate(groups, metalinkFile, option, baseUri)` |
 //! | `generate_from_bytes()` | `generate(groups, binaryStream, option, baseUri)` |
 //! | `create_request_groups()` | `createRequestGroup(groups, entries, option)` |
 
@@ -25,15 +24,27 @@ use tracing::{debug, info};
 
 use crate::engine::metalink::download_command::MetalinkDownloadCommand;
 use crate::error::{Aria2Error, Result};
-use crate::request::request_group::DownloadOptions;
+use crate::request::request_group::{DownloadOptions, RequestGroup};
 use aria2_protocol::metalink::parser::{
     MetalinkDocument, MetalinkFile, group_entry_by_metaurl_name,
 };
 use aria2_protocol::metalink::resource::LOWEST_PRIORITY;
+use std::sync::{Arc, RwLock};
+
+#[cfg(feature = "bittorrent")]
+use crate::engine::metalink::request_graph::MetalinkRequestGraph;
 
 mod groups;
 #[cfg(test)]
 mod tests;
+
+/// Request groups produced from one parsed Metalink document.
+pub struct MetalinkGroupExpansion {
+    pub resource_groups: Vec<Arc<RwLock<RequestGroup>>>,
+    #[cfg(feature = "bittorrent")]
+    pub torrent_graphs: Vec<MetalinkRequestGraph>,
+}
+
 pub struct MetalinkToRequestGroup {
     /// Optional base URI for resolving relative URLs in the Metalink.
     base_uri: Option<String>,
@@ -261,21 +272,6 @@ impl MetalinkToRequestGroup {
 
         files.retain(|(_, file)| !file.urls.is_empty() || !file.meta_urls.is_empty());
         Ok(files)
-    }
-
-    /// Generate download commands from a Metalink file on disk.
-    ///
-    /// Reads the file, parses it, and creates one `MetalinkDownloadCommand`
-    /// per file entry (or per metaurl group).
-    ///
-    /// Mirrors C++ `Metalink2RequestGroup::generate(groups, metalinkFile, option, baseUri)`.
-    pub fn generate_from_file(
-        &self,
-        path: &std::path::Path,
-        options: &DownloadOptions,
-    ) -> Result<Vec<MetalinkDownloadCommand>> {
-        let data = std::fs::read(path).map_err(|e| Aria2Error::Io(e.to_string()))?;
-        self.generate_from_bytes(&data, options)
     }
 
     pub fn generate_from_bytes(

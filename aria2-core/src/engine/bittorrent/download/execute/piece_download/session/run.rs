@@ -15,6 +15,7 @@ use crate::request::request_group::{
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::{debug, info, warn};
 
+use super::peer_dials::{PeerDialConfig, PeerDialQueue};
 use super::{PieceDownloadSession, PieceLoopAction};
 
 const MAX_WEB_SEED_PIECES_IN_FLIGHT: usize = 4;
@@ -75,6 +76,7 @@ async fn wait_for_uri_generation(
 
 enum NoPeerWaitEvent {
     Peer(super::super::peer_events::PeerWaitEvent),
+    PeerDial(Option<std::result::Result<Vec<BtPeerConn>, tokio::task::JoinError>>),
     WebSeed(WebSeedTaskCompletion),
     UriChanged,
 }
@@ -119,6 +121,15 @@ impl PieceDownloadSession<'_> {
     }
 
     pub(super) async fn run(mut self) -> Result<()> {
+        let mut peer_dials = PeerDialQueue::default();
+        let peer_dial_config = PeerDialConfig::new(
+            self.command,
+            self.meta.network_info_hash(),
+            self.meta.info_hash_v2,
+            self.num_pieces,
+            self.piece_length,
+            self.total_size,
+        );
         let mut web_seed_tasks = tokio::task::JoinSet::new();
         let mut active_web_seed_pieces = std::collections::HashSet::new();
         let mut web_seed_retries = WebSeedRetries::default();
@@ -135,6 +146,10 @@ impl PieceDownloadSession<'_> {
         self.announce_available_pieces().await;
         self.apply_upload_choke_round();
         loop {
+            if let Some(result) = peer_dials.try_join_next() {
+                self.handle_peer_dial_batch_result(result).await;
+            }
+            self.start_next_peer_dial_batch(&mut peer_dials, &peer_dial_config);
             self.refresh_upload_stats();
             if !self.swarm.is_empty()
                 && self
@@ -220,14 +235,12 @@ impl PieceDownloadSession<'_> {
                 for peer in &tracker_peers {
                     self.command.add_pex_peer(peer.clone());
                 }
-                let connected = self
-                    .connect_to_discovered_swarm_peers(&tracker_peers, BtPeerSource::Tracker)
-                    .await;
-                if connected > 0 {
-                    self.announce_available_pieces().await;
-                    let group = self.command.group.recover();
-                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
-                }
+                self.queue_discovered_swarm_peers(
+                    &tracker_peers,
+                    BtPeerSource::Tracker,
+                    &mut peer_dials,
+                    &peer_dial_config,
+                );
             }
 
             let current_uri_generation = self.command.group.recover().uri_generation();
@@ -313,15 +326,12 @@ impl PieceDownloadSession<'_> {
                     all_new_pex_peers.len()
                 );
                 // Attempt to connect to PEX-discovered peers
-                let connected = self
-                    .connect_to_discovered_swarm_peers(&all_new_pex_peers, BtPeerSource::Pex)
-                    .await;
-                if connected > 0 {
-                    self.announce_available_pieces().await;
-                    info!("[PEX] Successfully connected to {} new peers", connected);
-                    let group = self.command.group.recover();
-                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
-                }
+                self.queue_discovered_swarm_peers(
+                    &all_new_pex_peers,
+                    BtPeerSource::Pex,
+                    &mut peer_dials,
+                    &peer_dial_config,
+                );
             }
 
             // The tracker actor reads this live count when its announce
@@ -354,15 +364,12 @@ impl PieceDownloadSession<'_> {
                     discovered = dht_peers.len(),
                     "[BT] Periodic DHT lookup found new peers"
                 );
-                let connected = self
-                    .connect_to_discovered_swarm_peers(&dht_peers, BtPeerSource::Dht)
-                    .await;
-                if connected > 0 {
-                    self.announce_available_pieces().await;
-                    info!("[BT] Connected to {} DHT-discovered peers", connected);
-                    let group = self.command.group.recover();
-                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
-                }
+                self.queue_discovered_swarm_peers(
+                    &dht_peers,
+                    BtPeerSource::Dht,
+                    &mut peer_dials,
+                    &peer_dial_config,
+                );
             }
             if self
                 .command
@@ -396,6 +403,9 @@ impl PieceDownloadSession<'_> {
                 let peer_event = self.command.wait_for_swarm_peer_event(self.swarm, deadline);
                 let event = tokio::select! {
                     event = peer_event => NoPeerWaitEvent::Peer(event),
+                    joined = peer_dials.join_next(), if peer_dials.has_active_batch() => {
+                        NoPeerWaitEvent::PeerDial(joined)
+                    }
                     joined = web_seed_tasks.join_next(), if !web_seed_tasks.is_empty() => {
                         NoPeerWaitEvent::WebSeed(joined)
                     }
@@ -423,6 +433,12 @@ impl PieceDownloadSession<'_> {
                         }
                         continue;
                     }
+                    NoPeerWaitEvent::PeerDial(Some(result)) => {
+                        self.handle_peer_dial_batch_result(result).await;
+                        self.start_next_peer_dial_batch(&mut peer_dials, &peer_dial_config);
+                        continue;
+                    }
+                    NoPeerWaitEvent::PeerDial(None) => continue,
                     NoPeerWaitEvent::WebSeed(None) | NoPeerWaitEvent::UriChanged => continue,
                     NoPeerWaitEvent::Peer(event) => event,
                 };
@@ -467,8 +483,14 @@ impl PieceDownloadSession<'_> {
                 Some(idx) => idx,
                 None => {
                     if !web_seed_tasks.is_empty() {
-                        match web_seed_tasks.join_next().await {
-                            Some(Ok((piece_index, result))) => {
+                        let event = tokio::select! {
+                            joined = web_seed_tasks.join_next() => NoPeerWaitEvent::WebSeed(joined),
+                            joined = peer_dials.join_next(), if peer_dials.has_active_batch() => {
+                                NoPeerWaitEvent::PeerDial(joined)
+                            }
+                        };
+                        match event {
+                            NoPeerWaitEvent::WebSeed(Some(Ok((piece_index, result)))) => {
                                 active_web_seed_pieces.remove(&piece_index);
                                 if self.complete_web_seed_piece(piece_index, result).await? {
                                     self.refresh_download_progress();
@@ -479,14 +501,21 @@ impl PieceDownloadSession<'_> {
                                     );
                                 }
                             }
-                            Some(Err(error)) => {
+                            NoPeerWaitEvent::WebSeed(Some(Err(error))) => {
                                 warn!(%error, "WebSeed worker terminated unexpectedly");
                                 web_seed_tasks.abort_all();
                                 for piece_index in active_web_seed_pieces.drain() {
                                     self.piece_picker.mark_reserved(piece_index, false);
                                 }
                             }
-                            None => {}
+                            NoPeerWaitEvent::WebSeed(None) => {}
+                            NoPeerWaitEvent::PeerDial(Some(result)) => {
+                                self.handle_peer_dial_batch_result(result).await;
+                                self.start_next_peer_dial_batch(&mut peer_dials, &peer_dial_config);
+                            }
+                            NoPeerWaitEvent::PeerDial(None)
+                            | NoPeerWaitEvent::Peer(_)
+                            | NoPeerWaitEvent::UriChanged => {}
                         }
                         continue;
                     }
@@ -512,10 +541,23 @@ impl PieceDownloadSession<'_> {
                             protocol_deadline.min(choke_deadline)
                         })
                         .min(self.next_snub_check_deadline());
-                    let event = self
-                        .command
-                        .wait_for_swarm_peer_event(self.swarm, deadline)
-                        .await;
+                    let peer_event = self.command.wait_for_swarm_peer_event(self.swarm, deadline);
+                    let event = tokio::select! {
+                        event = peer_event => NoPeerWaitEvent::Peer(event),
+                        joined = peer_dials.join_next(), if peer_dials.has_active_batch() => {
+                            NoPeerWaitEvent::PeerDial(joined)
+                        }
+                    };
+                    let event = match event {
+                        NoPeerWaitEvent::PeerDial(Some(result)) => {
+                            self.handle_peer_dial_batch_result(result).await;
+                            self.start_next_peer_dial_batch(&mut peer_dials, &peer_dial_config);
+                            continue;
+                        }
+                        NoPeerWaitEvent::PeerDial(None) => continue,
+                        NoPeerWaitEvent::Peer(event) => event,
+                        NoPeerWaitEvent::WebSeed(_) | NoPeerWaitEvent::UriChanged => continue,
+                    };
                     let actor_interest_changed = match &event {
                         super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
                             self.apply_swarm_peer_event(actor_event)
@@ -897,10 +939,12 @@ impl PieceDownloadSession<'_> {
 }
 
 impl PieceDownloadSession<'_> {
-    async fn connect_to_discovered_swarm_peers(
+    fn queue_discovered_swarm_peers(
         &mut self,
         peers: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         source: BtPeerSource,
+        peer_dials: &mut PeerDialQueue,
+        dial_config: &PeerDialConfig,
     ) -> usize {
         let active_peers = self
             .swarm
@@ -908,26 +952,58 @@ impl PieceDownloadSession<'_> {
             .filter(|actor| !actor.dead)
             .map(|actor| (actor.endpoint.ip().to_string(), actor.endpoint.port()))
             .collect::<std::collections::HashSet<_>>();
-        let candidates = self
+        let max_new_connections = self
             .command
             .peer_coordinator
-            .select_candidates(peers, &active_peers);
+            .available_slots(active_peers.len());
+        if max_new_connections == 0 {
+            return 0;
+        }
+        let candidates =
+            self.command
+                .peer_coordinator
+                .select_candidates(peers, &active_peers, |ip| {
+                    self.command.is_peer_temporarily_rejected(ip)
+                });
         if candidates.is_empty() {
             return 0;
         }
-        let info_hash = self.meta.network_info_hash();
-        let connections = self
-            .command
-            .connect_to_discovered_peers(
-                &candidates,
-                source,
-                &info_hash,
-                self.num_pieces,
-                self.piece_length,
-                self.total_size,
-            )
-            .await;
-        self.admit_connected_peers(connections)
+        let queued = peer_dials.enqueue(candidates, source);
+        self.start_next_peer_dial_batch(peer_dials, dial_config);
+        queued
+    }
+
+    fn start_next_peer_dial_batch(
+        &self,
+        peer_dials: &mut PeerDialQueue,
+        dial_config: &PeerDialConfig,
+    ) {
+        let active_count = self.swarm.iter().filter(|actor| !actor.dead).count();
+        let available_slots = self.command.peer_coordinator.available_slots(active_count);
+        peer_dials.start_next(available_slots, dial_config);
+    }
+
+    async fn handle_peer_dial_batch_result(
+        &mut self,
+        result: std::result::Result<Vec<BtPeerConn>, tokio::task::JoinError>,
+    ) {
+        let mut connections = match result {
+            Ok(connections) => connections,
+            Err(error) => {
+                warn!(%error, "Peer handshake batch task failed");
+                return;
+            }
+        };
+        for connection in &mut connections {
+            self.command.apply_peer_exchange_policy(connection);
+        }
+        let admitted = self.admit_connected_peers(connections);
+        if admitted > 0 {
+            self.announce_available_pieces().await;
+            let group = self.command.group.recover();
+            super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
+            info!(admitted, "Admitted discovered peers into the active Swarm");
+        }
     }
 
     pub(super) fn apply_upload_choke_round(&mut self) {

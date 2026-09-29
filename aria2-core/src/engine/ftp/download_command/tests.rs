@@ -3,13 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::control::{
-    RawFtpControl, parse_epsv_response, parse_ftp_size_response, parse_pasv_response,
-    urlencoding_decode,
-};
+use super::control::{RawFtpControl, parse_ftp_size_response};
 use super::types::FtpDownloadCommand;
 use crate::engine::command::Command;
 use crate::error::{Aria2Error, RecoverableError};
+use crate::ftp::connection::{
+    parse_epsv_response, parse_pasv_response, percent_decode as urlencoding_decode,
+};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -325,53 +325,6 @@ fn test_parse_ftp_size_response_rejects_values_above_signed_offset_limit() {
         Aria2Error::Recoverable(RecoverableError::FtpProtocolError { .. })
     ));
     assert!(error.to_string().contains("too large"));
-}
-
-#[test]
-fn test_classify_ftp_error_transient() {
-    // These should be classified as transient/recoverable
-    let transient_codes = [421u16, 425, 426, 450, 451, 452];
-    for code in transient_codes {
-        assert!(
-            (400..=499).contains(&code),
-            "Code {} should be in transient range",
-            code
-        );
-    }
-}
-
-#[test]
-fn test_classify_ftp_error_permanent() {
-    // These should be classified as permanent/fatal
-    let permanent_codes = [500u16, 501, 502, 503, 504, 530, 550, 553];
-    for code in permanent_codes {
-        assert!(
-            (500..=599).contains(&code),
-            "Code {} should be in permanent range",
-            code
-        );
-    }
-}
-
-#[test]
-fn test_classify_ftp_not_found_uses_resource_result() {
-    let command = FtpDownloadCommand::new(
-        GroupId::new(103),
-        "ftp://example.com/file.txt",
-        &DownloadOptions::default(),
-        None,
-        None,
-    )
-    .unwrap();
-
-    assert!(matches!(
-        command.classify_ftp_error(550, "File unavailable"),
-        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-    ));
-    assert!(matches!(
-        command.classify_ftp_error(450, "Busy"),
-        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
-    ));
 }
 
 #[test]

@@ -4,7 +4,7 @@
 pub(crate) mod tests {
     use std::net::SocketAddr;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::engine::bittorrent::peer::stats::{BAD_DATA_THRESHOLD, PeerStats};
 
@@ -38,6 +38,31 @@ pub(crate) mod tests {
 
         // Peer ID preserved
         assert_eq!(stats.peer_id, [0x42; 20]);
+    }
+
+    #[test]
+    fn recent_peer_rates_expire_after_the_ten_second_window() {
+        let start = Instant::now();
+        let mut stats = make_test_peer();
+        stats.record_download_rate_at(1024, start);
+        stats.record_upload_rate_at(512, start);
+
+        assert_eq!(
+            stats.recent_download_speed_at(start + Duration::from_secs(1)),
+            1024
+        );
+        assert_eq!(
+            stats.recent_upload_speed_at(start + Duration::from_secs(1)),
+            512
+        );
+        assert_eq!(
+            stats.recent_download_speed_at(start + Duration::from_secs(11)),
+            0
+        );
+        assert_eq!(
+            stats.recent_upload_speed_at(start + Duration::from_secs(11)),
+            0
+        );
     }
 
     #[test]

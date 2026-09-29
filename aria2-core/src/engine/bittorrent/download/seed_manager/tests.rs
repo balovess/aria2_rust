@@ -1,7 +1,6 @@
 use super::*;
 use crate::engine::bittorrent::peer::message_handler::PeerCommand;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
-use aria2_protocol::bittorrent::peer::incoming::IncomingConnection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -17,10 +16,12 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
         peers.push(tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                if let Ok(connection) =
-                    PeerConnection::from_incoming_stream(stream, &info_hash, &remote_peer_id).await
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
                 {
-                    return connection;
+                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
+                        return connection;
+                    }
                 }
             }
         }));
@@ -76,7 +77,8 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
     .with_peer_storage(Arc::clone(&peer_storage))
     .with_peer_discovery(discovery);
 
-    manager.store_tracker_peers(vec![(endpoints[0].ip().to_string(), endpoints[0].port())]);
+    let tracker_peer = (endpoints[0].ip().to_string(), endpoints[0].port());
+    manager.store_tracker_peers(vec![tracker_peer.clone(), tracker_peer]);
     manager.apply_peer_event(
         crate::engine::bittorrent::peer::message_handler::PeerEvent::PexPeers {
             peers: vec![aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
@@ -188,12 +190,12 @@ async fn slow_tracker_announce_does_not_block_seeding_peer_events() {
     let (server_stream, endpoint) = peer_listener.accept().await.unwrap();
     incoming_sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(PeerConnection::from_stream_with_peer(
+            connection: PeerConnection::from_stream_with_peer(
                 server_stream,
                 [0x83; 20],
                 false,
                 false,
-            ))),
+            ),
             endpoint,
         })
         .await
@@ -289,12 +291,12 @@ async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
     let (server_stream, endpoint) = listener.accept().await.unwrap();
     incoming_sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(PeerConnection::from_stream_with_peer(
+            connection: PeerConnection::from_stream_with_peer(
                 server_stream,
                 [0x87; 20],
                 false,
                 false,
-            ))),
+            ),
             endpoint,
         })
         .await
@@ -366,11 +368,10 @@ async fn seeding_manager_adopts_the_existing_torrent_peer_actor() {
     let address = listener.local_addr().unwrap();
     let client_task = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (server, endpoint) = listener.accept().await.unwrap();
-    let mut connection =
-        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
-            PeerConnection::from_stream_with_peer(server, [2u8; 20], false, false),
-            endpoint,
-        );
+    let mut connection = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+        PeerConnection::from_stream_with_peer(server, [2u8; 20], false, false),
+        endpoint,
+    );
     connection.allocate_session_resource(16, 1, 16);
     connection.configure_upload_with_auto_unchoke(
         &BtSeedingConfig::default(),
@@ -443,7 +444,7 @@ async fn seeding_manager_actorizes_pending_connections_when_swarm_is_already_pop
     let address = listener.local_addr().unwrap();
     let existing_client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (existing_stream, existing_endpoint) = listener.accept().await.unwrap();
-    let existing = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
+    let existing = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
         PeerConnection::from_stream_with_peer(existing_stream, [2u8; 20], false, false),
         existing_endpoint,
     );
@@ -457,7 +458,7 @@ async fn seeding_manager_actorizes_pending_connections_when_swarm_is_already_pop
     let pending_client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (pending_stream, pending_endpoint) = listener.accept().await.unwrap();
     manager.pending_connections.push(
-        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
+        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(pending_stream, [3u8; 20], false, false),
             pending_endpoint,
         ),
@@ -495,11 +496,10 @@ async fn manager_with_dead_seed_peer(
     let address = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (server, endpoint) = listener.accept().await.unwrap();
-    let mut connection =
-        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
-            PeerConnection::from_stream_with_peer(server, [2u8; 20], false, false),
-            endpoint,
-        );
+    let mut connection = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+        PeerConnection::from_stream_with_peer(server, [2u8; 20], false, false),
+        endpoint,
+    );
     let actor_id = connection.actor_id;
     connection.stats.am_choking = am_choking;
     connection.stats.peer_interested = peer_interested;
@@ -533,12 +533,12 @@ async fn peer_registry_reindexes_surviving_actor_after_dead_peer_removal() {
     let (first_stream, first_endpoint) = listener.accept().await.unwrap();
     let (second_stream, second_endpoint) = listener.accept().await.unwrap();
     let first_connection =
-        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
+        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(first_stream, [2u8; 20], false, false),
             first_endpoint,
         );
     let second_connection =
-        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
+        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(second_stream, [3u8; 20], false, false),
             second_endpoint,
         );
@@ -617,7 +617,7 @@ async fn incoming_peer_with_existing_swarm_identity_is_rejected() {
 
     let existing_client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (existing_stream, existing_endpoint) = listener.accept().await.unwrap();
-    let existing = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
+    let existing = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
         PeerConnection::from_stream_with_peer(existing_stream, [2u8; 20], false, false),
         existing_endpoint,
     );
@@ -633,7 +633,7 @@ async fn incoming_peer_with_existing_swarm_identity_is_rejected() {
     let incoming = PeerConnection::from_stream_with_peer(incoming_stream, [2u8; 20], false, false);
     incoming_sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(incoming)),
+            connection: incoming,
             endpoint: incoming_endpoint,
         })
         .await
@@ -679,8 +679,12 @@ async fn seed_manager_applies_outstanding_upload_queue_snapshot() {
     let mut snapshot = manager.swarm.actor(actor_id).unwrap().stats.clone();
     snapshot.outstanding_upload_count = 3;
     snapshot.downloaded_bytes = 47;
-    snapshot.download_speed = 12.5;
+    snapshot.upload_speed = 80_000_000.0;
+    snapshot.download_speed = 120_000_000.0;
     snapshot.avg_download_speed = 7;
+    let sample_time = Instant::now() - std::time::Duration::from_secs(1);
+    snapshot.record_upload_rate_at(8 * 1024, sample_time);
+    snapshot.record_download_rate_at(16 * 1024, sample_time);
 
     manager.apply_peer_event(
         crate::engine::bittorrent::peer::message_handler::PeerEvent::UploadQueueChanged {
@@ -707,7 +711,8 @@ async fn seed_manager_applies_outstanding_upload_queue_snapshot() {
     );
     assert_eq!(peer_snapshot.bitfield, Some(vec![0xa0, 0x40]));
     assert_eq!(peer_snapshot.downloaded_bytes, 47);
-    assert_eq!(peer_snapshot.download_speed, 12.5);
+    assert!((7_000.0..9_000.0).contains(&peer_snapshot.upload_speed));
+    assert!((14_000.0..18_000.0).contains(&peer_snapshot.download_speed));
     assert_eq!(peer_snapshot.avg_download_speed, 7);
     manager.apply_peer_event(
         crate::engine::bittorrent::peer::message_handler::PeerEvent::PeerChokingChanged {
@@ -752,7 +757,7 @@ async fn seeding_accepts_a_peer_after_download_has_no_initial_peers() {
         PeerConnection::from_stream_with_peer(server_stream, [2u8; 20], false, false);
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(peer_connection)),
+            connection: peer_connection,
             endpoint,
         })
         .await
@@ -804,7 +809,7 @@ async fn cancelled_seeding_loop_future_preserves_incoming_peer_and_actor_channel
         PeerConnection::from_stream_with_peer(server_stream, [2u8; 20], false, false);
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(peer_connection)),
+            connection: peer_connection,
             endpoint,
         })
         .await
@@ -889,12 +894,15 @@ async fn incoming_seed_peer_receives_piece_availability_before_interested() {
 
     let (server_stream, endpoint) = listener.accept().await.unwrap();
     let connection =
-        PeerConnection::from_incoming_stream(server_stream, &info_hash, &local_peer_id)
+        aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+            .await
+            .unwrap()
+            .complete(local_peer_id, None, false)
             .await
             .unwrap();
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(connection)),
+            connection,
             endpoint,
         })
         .await
@@ -959,7 +967,7 @@ async fn incoming_seed_peer_is_not_kept_as_a_raw_connection_when_swarm_is_closed
     let connection = PeerConnection::from_stream_with_peer(server, [0x62u8; 20], false, false);
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: IncomingConnection::Plain(Box::new(connection)),
+            connection,
             endpoint,
         })
         .await
@@ -990,7 +998,7 @@ async fn initial_seed_peer_is_not_kept_raw_when_actor_startup_is_closed() {
     let address = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (server, endpoint) = listener.accept().await.unwrap();
-    let connection = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
+    let connection = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
         PeerConnection::from_stream_with_peer(server, [0x72u8; 20], false, false),
         endpoint,
     );

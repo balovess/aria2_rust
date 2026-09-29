@@ -3,11 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tracing::{debug, info};
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use aria2_protocol::ftp::connection::control_io::{FtpControlWriteError, write_control_command};
 use aria2_protocol::ftp::tls::{self as tls, FtpControlStream, FtpDataStream, FtpsConfig};
 
 use crate::ftp::connection::{
@@ -97,20 +98,20 @@ impl RawFtpControl {
     /// Send a command to the FTP server.
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
         debug!("FTP CMD: {}", cmd.trim());
-        self.reader
-            .get_mut()
-            .write_all(format!("{}\r\n", cmd).as_bytes())
+        write_control_command(self.reader.get_mut(), cmd)
             .await
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP write command failed: {}", e),
-                })
+            .map_err(|error| {
+                let message = match error {
+                    FtpControlWriteError::Command(error)
+                    | FtpControlWriteError::Terminator(error) => {
+                        format!("FTP write command failed: {}", error)
+                    }
+                    FtpControlWriteError::Flush(error) => {
+                        format!("FTP flush failed: {}", error)
+                    }
+                };
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message })
             })?;
-        self.reader.get_mut().flush().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("FTP flush failed: {}", e),
-            })
-        })?;
         Ok(())
     }
 

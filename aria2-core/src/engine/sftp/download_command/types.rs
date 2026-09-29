@@ -470,6 +470,11 @@ impl SftpDownloadCommand {
                     message: err.to_string(),
                 })
             }
+            FileOpError::Session { source, .. } if source.is_network() => {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: err.to_string(),
+                })
+            }
             _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("SFTP file op error: {}", err),
             }),

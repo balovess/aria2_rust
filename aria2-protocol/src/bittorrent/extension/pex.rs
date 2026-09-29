@@ -190,7 +190,7 @@ impl PexHandler {
 
     /// Encrypt outgoing PEX payload using MSE stream cipher (RC4)
     ///
-    /// Uses the existing MseCryptoState from encrypted_connection.rs to encrypt
+    /// Uses the existing MseCryptoState from the peer MSE module to encrypt
     /// PEX messages when MSE negotiation has been completed with a peer.
     ///
     /// # Arguments

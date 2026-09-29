@@ -209,3 +209,33 @@ impl PieceDataProvider for FileBackedPieceProvider {
         self.piece_length
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_provider_availability_tracks_verified_shared_bitfield() {
+        let shared_pieces = std::sync::Arc::new(std::sync::RwLock::new(vec![0]));
+        let provider = FileBackedPieceProvider::with_shared_bitfield(
+            std::path::PathBuf::new(),
+            16,
+            3,
+            None,
+            std::sync::Arc::clone(&shared_pieces),
+        );
+
+        assert!(!provider.has_piece(0));
+        assert!(!provider.has_piece(1));
+        assert!(!provider.has_piece(2));
+
+        *shared_pieces
+            .write()
+            .expect("write verified-piece bitfield") = vec![0b1010_0000];
+
+        assert!(provider.has_piece(0));
+        assert!(!provider.has_piece(1));
+        assert!(provider.has_piece(2));
+        assert!(!provider.has_piece(3));
+    }
+}

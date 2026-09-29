@@ -1,6 +1,6 @@
 //! Main BitTorrent peer connection struct.
 //!
-//! [`BtPeerConn`] composes an inner connection (plain/encrypted/uTP),
+//! [`BtPeerConn`] composes an inner connection (TCP/uTP),
 //! a send buffer, session resource, keep-alive management, and peer statistics.
 //!
 //! This module is split into focused sub-modules:
@@ -10,7 +10,7 @@
 //! - [`messages`] — protocol message senders, message reading, write helpers
 
 mod connect;
-pub use connect::{MseConnectionOptions, UtpConnectionOptions};
+pub use connect::UtpConnectionOptions;
 mod keepalive;
 mod messages;
 mod session;
@@ -38,13 +38,12 @@ pub(super) const KEEPALIVE_INTERVAL_SECS: u64 = 120;
 pub(super) const PEER_TIMEOUT_SECS: u64 = 180;
 
 // ---------------------------------------------------------------------------
-// InnerConnection — plain / encrypted / uTP
+// InnerConnection — TCP / uTP
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum InnerConnection {
-    Plain(aria2_protocol::bittorrent::peer::connection::PeerConnection),
-    Encrypted(aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection),
+    Tcp(aria2_protocol::bittorrent::peer::connection::PeerConnection),
     Utp(UtpPeerConnection),
 }
 
@@ -70,8 +69,7 @@ impl PeerActorId {
 // BtPeerConn
 // ---------------------------------------------------------------------------
 
-/// Peer connection abstraction that supports both plain and encrypted (MSE)
-/// connections as well as uTP.
+/// Peer connection abstraction that supports TCP (plain or MSE) and uTP.
 ///
 /// This mirrors the original aria2 C++ architecture where connection management
 /// is separated from the download command logic (see BtRuntime in original).
@@ -439,8 +437,7 @@ impl BtPeerConn {
     /// Returns the remote peer ID learned during the protocol handshake.
     pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
         match &self.inner {
-            InnerConnection::Plain(conn) => conn.remote_peer_id().copied(),
-            InnerConnection::Encrypted(conn) => conn.remote_peer_id().copied(),
+            InnerConnection::Tcp(conn) => conn.remote_peer_id().copied(),
             InnerConnection::Utp(conn) => conn.remote_peer_id(),
         }
     }
@@ -448,8 +445,7 @@ impl BtPeerConn {
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
     pub fn remote_supports_dht(&self) -> bool {
         match &self.inner {
-            InnerConnection::Plain(conn) => conn.remote_supports_dht(),
-            InnerConnection::Encrypted(conn) => conn.remote_supports_dht(),
+            InnerConnection::Tcp(conn) => conn.remote_supports_dht(),
             InnerConnection::Utp(conn) => conn.remote_supports_dht(),
         }
     }
@@ -457,8 +453,7 @@ impl BtPeerConn {
     /// Whether the remote BitTorrent handshake advertised BEP 6 support.
     pub fn remote_supports_fast_extension(&self) -> bool {
         match &self.inner {
-            InnerConnection::Plain(conn) => conn.remote_supports_fast_extension(),
-            InnerConnection::Encrypted(conn) => conn.remote_supports_fast_extension(),
+            InnerConnection::Tcp(conn) => conn.remote_supports_fast_extension(),
             InnerConnection::Utp(conn) => conn.remote_supports_fast_extension(),
         }
     }
@@ -474,7 +469,7 @@ impl BtPeerConn {
     pub fn remote_endpoint(&self) -> Option<std::net::SocketAddr> {
         match &self.inner {
             InnerConnection::Utp(conn) => conn.remote_addr(),
-            InnerConnection::Plain(_) | InnerConnection::Encrypted(_) => self
+            InnerConnection::Tcp(_) => self
                 .ip_addr
                 .parse::<std::net::IpAddr>()
                 .ok()

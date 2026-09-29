@@ -422,17 +422,12 @@ impl Aria2RustSession {
         let options = self.merged_options(overrides)?;
         let converter = MetalinkToRequestGroup::new();
         let mut gids = std::iter::from_fn(|| Some(self.request_man.next_available_gid()));
-        let resource_groups = converter
-            .create_resource_groups_from_bytes(&data, &options, &mut gids)
+        let expansion = converter
+            .create_groups_from_bytes(&data, &options, &mut gids)
             .map_err(|error| error.to_string())?;
-
+        let resource_groups = expansion.resource_groups;
         #[cfg(feature = "bittorrent")]
-        let graphs = {
-            let mut graph_gids = std::iter::from_fn(|| Some(self.request_man.next_available_gid()));
-            converter
-                .create_torrent_graphs_from_bytes(&data, &options, &mut graph_gids)
-                .map_err(|error| error.to_string())?
-        };
+        let graphs = expansion.torrent_graphs;
 
         #[cfg(feature = "bittorrent")]
         let required_gids = resource_groups.len() + graphs.len().saturating_mul(2);

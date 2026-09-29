@@ -4,11 +4,14 @@ use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use crate::engine::bittorrent::download::command::{BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY};
+use crate::engine::bittorrent::download::command::BtDownloadCommand;
 use crate::engine::bittorrent::tracker::communication::TrackerAnnouncer;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::http::client_identity::ClientTlsConfig;
+use crate::request::request_group::BtPeerSource;
 use crate::util::rwlock_ext::RwLockRecover;
+
+use super::super::types::DiscoveredPeer;
 
 pub(super) fn filter_tracker_tiers(
     tiers: Vec<Vec<String>>,
@@ -67,6 +70,7 @@ impl BtDownloadCommand {
     ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
         self.discover_peers_with_events(meta, total_size, info_hash_raw, None)
             .await
+            .map(|peers| peers.into_iter().map(|peer| peer.address).collect())
     }
 
     pub(in crate::engine::bittorrent::download::execute) async fn discover_peers_with_events(
@@ -77,7 +81,7 @@ impl BtDownloadCommand {
         peer_event_tx: Option<
             tokio::sync::mpsc::Sender<crate::engine::bittorrent::peer::message_handler::PeerEvent>,
         >,
-    ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
+    ) -> Result<Vec<DiscoveredPeer>> {
         // Initialize the unified TrackerAnnouncer from the torrent's announce list.
         // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
         // state machine that properly routes HTTP, WebSocket, and UDP based on
@@ -122,30 +126,6 @@ impl BtDownloadCommand {
             ClientTlsConfig::from_download_options(group.options())
         };
         let public_tracker_catalog = self.public_trackers.clone();
-        let mut public_tracker_urls = HashSet::new();
-        if enable_public_trackers && let Some(catalog) = public_tracker_catalog.as_ref() {
-            let public_entries = catalog.available_snapshot().await;
-            let existing_urls: HashSet<String> = tracker_tiers
-                .iter()
-                .flat_map(|tier| tier.iter().cloned())
-                .collect();
-            let public_urls: Vec<String> = public_entries
-                .iter()
-                .map(|entry| entry.url.clone())
-                .filter(|url| {
-                    !existing_urls.contains(url)
-                        && !excluded_trackers
-                            .iter()
-                            .any(|excluded| excluded == "*" || excluded == url)
-                })
-                .take(MAX_PUBLIC_TRACKERS_TO_TRY)
-                .collect();
-            for url in public_urls {
-                public_tracker_urls.insert(url.clone());
-                tracker_tiers.push(vec![url]);
-            }
-        }
-
         tracker_tiers = super::super::deduplicate_tracker_tiers(tracker_tiers);
         let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
         announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
@@ -159,8 +139,8 @@ impl BtDownloadCommand {
         announcer.set_stopped_timeout(Duration::from_secs(tracker_stopped_timeout));
         announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
         announcer.set_announce_options(force_encryption, external_ip);
-        if let Some(catalog) = public_tracker_catalog {
-            announcer.set_public_tracker_catalog(catalog, public_tracker_urls);
+        if enable_public_trackers && let Some(catalog) = public_tracker_catalog {
+            announcer.set_public_tracker_catalog(catalog, HashSet::new());
         }
 
         // The listener is created before discovery so incoming peers can join
@@ -184,11 +164,14 @@ impl BtDownloadCommand {
             .await;
         self.tracker_actor = Some(tracker_actor);
 
-        let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
-            peer_addrs
-                .into_iter()
-                .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
-                .collect();
+        let mut peers: Vec<DiscoveredPeer> = peer_addrs
+            .into_iter()
+            .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
+            .map(|address| DiscoveredPeer {
+                address,
+                source: BtPeerSource::Tracker,
+            })
+            .collect();
 
         // Register before reading the peer registry and send one announce
         // immediately. The registration must not depend on another peer
@@ -225,23 +208,26 @@ impl BtDownloadCommand {
 
             let lpd_peers = lpd.get_peers_for(&info_hash_hex).await;
             if !lpd_peers.is_empty() {
-                let before = peer_addrs.len();
+                let before = peers.len();
                 for lpd_peer in &lpd_peers {
-                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                    let address = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
                         &lpd_peer.addr.to_string(),
                         lpd_peer.port,
                     );
-                    if !self.is_peer_temporarily_rejected(&paddr.ip)
-                        && !peer_addrs
-                            .iter()
-                            .any(|peer| peer.ip == paddr.ip && peer.port == paddr.port)
+                    if !self.is_peer_temporarily_rejected(&address.ip)
+                        && !peers.iter().any(|peer| {
+                            peer.address.ip == address.ip && peer.address.port == address.port
+                        })
                     {
-                        peer_addrs.push(paddr);
+                        peers.push(DiscoveredPeer {
+                            address,
+                            source: BtPeerSource::Lpd,
+                        });
                     }
                 }
                 info!(
                     lpd_count = lpd_peers.len(),
-                    total_added = peer_addrs.len() - before,
+                    total_added = peers.len() - before,
                     "LPD discovered local peers"
                 );
             } else {
@@ -249,7 +235,7 @@ impl BtDownloadCommand {
             }
         }
 
-        if peer_addrs.is_empty() {
+        if peers.is_empty() {
             tracing::error!("[BT] ERROR: No peers from tracker");
         }
 
@@ -310,6 +296,6 @@ impl BtDownloadCommand {
             info!("[BT] Private torrent: LPD disabled (BEP 0027)");
         }
 
-        Ok(peer_addrs)
+        Ok(peers)
     }
 }

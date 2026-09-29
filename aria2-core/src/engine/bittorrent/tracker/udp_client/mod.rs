@@ -1,27 +1,24 @@
 mod connection;
-mod protocol;
+mod request;
 mod scrape;
 #[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::network::OutboundNetworkPolicy;
 
 pub(crate) use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
 
-pub(crate) use protocol::UdpTrackerRequest;
+pub(crate) use request::UdpTrackerRequest;
+pub use request::{UdpAnnounceParams, UdpError};
 
 pub use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::AnnounceResponse;
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
 
-pub(crate) const REQUEST_TIMEOUT_SECS: u64 = 15;
 pub(crate) const MAX_RETRIES: u32 = 3;
 
 pub(crate) struct ConnectionState {
@@ -30,7 +27,7 @@ pub(crate) struct ConnectionState {
 }
 
 pub struct UdpTrackerClient {
-    pub(crate) socket: Arc<tokio::net::UdpSocket>,
+    pub(crate) socket: tokio::net::UdpSocket,
     pub(crate) conn_cache: HashMap<SocketAddr, ConnectionState>,
     pub(crate) pending: VecDeque<UdpTrackerRequest>,
     pub(crate) inflight: VecDeque<UdpTrackerRequest>,
@@ -40,10 +37,6 @@ pub struct UdpTrackerClient {
 }
 
 impl UdpTrackerClient {
-    pub async fn new(bind_port: u16) -> Result<Self, String> {
-        Self::new_with_policy(bind_port, &OutboundNetworkPolicy::direct()).await
-    }
-
     pub async fn new_with_policy(
         bind_port: u16,
         policy: &OutboundNetworkPolicy,
@@ -59,7 +52,7 @@ impl UdpTrackerClient {
         info!("UdpTrackerClient bound to {}", addr);
 
         Ok(Self {
-            socket: Arc::new(socket),
+            socket,
             conn_cache: HashMap::new(),
             pending: VecDeque::new(),
             inflight: VecDeque::new(),
@@ -85,7 +78,7 @@ impl UdpTrackerClient {
         info!(%addr, ipv6, "UdpTrackerClient bound to requested address family");
 
         Ok(Self {
-            socket: Arc::new(socket),
+            socket,
             conn_cache: HashMap::new(),
             pending: VecDeque::new(),
             inflight: VecDeque::new(),
@@ -96,7 +89,7 @@ impl UdpTrackerClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn add_announce(
+    pub(crate) fn add_announce(
         &mut self,
         addr: &SocketAddr,
         info_hash: &[u8; 20],
@@ -113,33 +106,6 @@ impl UdpTrackerClient {
         );
         self.pending.push_back(req);
         tracing::debug!("Added announce request for {}", addr);
-    }
-
-    pub fn no_pending(&self) -> bool {
-        self.pending.is_empty() && self.inflight.is_empty() && self.waiting_for_conn.is_empty()
-    }
-
-    pub fn completed_requests(&self) -> Vec<&AnnounceResponse> {
-        self.pending
-            .iter()
-            .filter_map(|r| r.reply.as_ref())
-            .collect()
-    }
-
-    /// Return the first terminal error for a completed announce request.
-    pub fn completed_announce_error(
-        &self,
-    ) -> Option<aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError> {
-        self.pending
-            .iter()
-            .filter(|request| request.scrape_info_hashes.is_empty())
-            .find_map(|request| request.error.filter(|error| *error != UdpError::Success))
-    }
-
-    pub fn clear_completed_requests(&mut self) {
-        self.pending.retain(|request| {
-            request.reply.is_none() && request.scrape_results.is_none() && request.error.is_none()
-        });
     }
 
     pub(crate) fn next_txn(&mut self) -> u32 {
@@ -160,19 +126,25 @@ impl UdpTrackerClient {
     }
 }
 
-pub type SharedUdpClient = Arc<Mutex<UdpTrackerClient>>;
+const DEFAULT_UDP_TRACKER_PORT: u16 = 6881;
 
-impl UdpTrackerClient {
-    pub async fn create_shared(bind_port: u16) -> Result<SharedUdpClient, String> {
-        let client = Self::new(bind_port).await?;
-        Ok(Arc::new(Mutex::new(client)))
+pub(crate) async fn resolve_udp_tracker_addr(
+    url: &str,
+    policy: &OutboundNetworkPolicy,
+) -> Result<SocketAddr, String> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| format!("invalid UDP tracker URL {url}: {error}"))?;
+    if parsed.scheme() != "udp" {
+        return Err(format!("invalid UDP tracker URL: {url}"));
     }
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| format!("missing UDP tracker host: {url}"))?;
+    let port = parsed.port().unwrap_or(DEFAULT_UDP_TRACKER_PORT);
 
-    pub async fn create_shared_with_policy(
-        bind_port: u16,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<SharedUdpClient, String> {
-        let client = Self::new_with_policy(bind_port, policy).await?;
-        Ok(Arc::new(Mutex::new(client)))
-    }
+    policy
+        .resolve_udp_host(&host, port)
+        .await
+        .map_err(|error| format!("failed to resolve UDP tracker {url}: {error}"))
 }

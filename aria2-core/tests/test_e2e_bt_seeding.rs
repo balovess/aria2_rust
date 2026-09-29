@@ -198,13 +198,12 @@ async fn test_bt_download_to_seed_upload_and_ratio_exit_over_tcp() {
 
     let (server_stream, _) = listener.accept().await.unwrap();
     let connection =
-        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
-            server_stream,
-            &info_hash,
-            &local_peer_id,
-        )
-        .await
-        .unwrap();
+        aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+            .await
+            .unwrap()
+            .complete(local_peer_id, None, false)
+            .await
+            .unwrap();
 
     let mut manager = BtSeedManager::new(
         vec![connection],
@@ -302,13 +301,12 @@ async fn test_bt_seeder_does_not_send_short_piece_for_oversized_request() {
 
     let (server_stream, _) = listener.accept().await.unwrap();
     let connection =
-        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
-            server_stream,
-            &info_hash,
-            &local_peer_id,
-        )
-        .await
-        .unwrap();
+        aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+            .await
+            .unwrap()
+            .complete(local_peer_id, None, false)
+            .await
+            .unwrap();
 
     let mut manager = BtSeedManager::new_with_cancel_token(
         info_hash,

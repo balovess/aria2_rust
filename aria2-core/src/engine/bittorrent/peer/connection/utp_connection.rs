@@ -59,29 +59,6 @@ impl UtpPeerConnection {
         }
     }
 
-    /// Connect and complete the BitTorrent handshake over uTP.
-    pub async fn connect_with_options(
-        addr: std::net::SocketAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: Option<&[u8; 32]>,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_with_policy(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            local_peer_id,
-            timeout,
-            listen_port,
-            dht_enabled,
-            &OutboundNetworkPolicy::direct(),
-        )
-        .await
-    }
-
     /// Connect using a source-bound uTP socket when no shared socket exists.
     #[allow(clippy::too_many_arguments)]
     pub async fn connect_with_policy(

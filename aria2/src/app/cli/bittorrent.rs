@@ -9,7 +9,7 @@ use clap::Args;
 #[derive(Args, Debug)]
 #[command(next_help_heading = "BitTorrent options")]
 pub struct BitTorrentArgs {
-    /// Seeding time in minutes (0=infinite)
+    /// Seeding time in minutes (0 disables seeding)
     #[arg(short = 'G', long = "seed-time")]
     pub seed_time: Option<f64>,
 

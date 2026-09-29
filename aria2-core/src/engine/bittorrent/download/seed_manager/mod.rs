@@ -332,6 +332,7 @@ impl BtSeedManager {
     }
 
     fn peer_snapshots(&self) -> Vec<BtPeerSnapshot> {
+        let now = Instant::now();
         let mut snapshots = self
             .pending_connections
             .iter()
@@ -350,7 +351,7 @@ impl BtSeedManager {
                     bitfield: None,
                     uploaded_bytes: session.stats.uploaded_bytes,
                     downloaded_bytes: 0,
-                    upload_speed: session.stats.upload_speed,
+                    upload_speed: session.stats.recent_upload_speed_at(now) as f64,
                     download_speed: 0.0,
                     avg_upload_speed: session.stats.avg_upload_speed,
                     avg_download_speed: 0,
@@ -388,8 +389,8 @@ impl BtSeedManager {
                 bitfield: actor.has_bitfield.then(|| actor.bitfield.clone()),
                 uploaded_bytes: stats.uploaded_bytes,
                 downloaded_bytes: stats.downloaded_bytes,
-                upload_speed: stats.upload_speed,
-                download_speed: stats.download_speed,
+                upload_speed: stats.recent_upload_speed_at(now) as f64,
+                download_speed: stats.recent_download_speed_at(now) as f64,
                 avg_upload_speed: stats.avg_upload_speed,
                 avg_download_speed: stats.avg_download_speed,
                 am_choking: stats.am_choking,

@@ -321,16 +321,16 @@ aria2-rust/
 │   ├── src/main.rs        #   Entry point
 │   ├── src/app.rs         #   App runtime (ConfigManager + Engine)
 │   └── examples/          #   Usage examples
-├── aria2-core/             # Core library (~7,000 lines)
-│   ├── src/engine/        #   Download engine (12 command implementations)
-│   │   ├── process_wait.rs # Native process-exit events with fallback watcher
-│   │   ├── download_engine.rs # Event loop with command queue
-│   │   ├── download_command.rs # HTTP/HTTPS downloader
-│   │   ├── ftp_download_command.rs # FTP/SFTP downloader
-│   │   ├── bt_download_command/ # BitTorrent command and constructor modules
-│   │   ├── magnet_download_command.rs # Magnet link downloader
-│   │   ├── metalink_download_command.rs # Metalink downloader
-│   │   └── concurrent_download_command.rs # Multi-segment downloader
+├── aria2-core/             # Download engine and shared application policies
+│   ├── src/engine/
+│   │   ├── http/          # HTTP/HTTPS command, probing, and transfer pipeline
+│   │   ├── ftp/           # FTP/FTPS task command and transfer lifecycle
+│   │   ├── sftp/          # SFTP task command and transfer lifecycle
+│   │   ├── bittorrent/    # Torrent, peer, and magnet commands
+│   │   ├── metalink/      # Metadata expansion into payload requests
+│   │   ├── task_spawner.rs # Selects a protocol command for each request
+│   │   ├── command.rs     # Shared command interface
+│   │   └── engine_loop/   # Command scheduling and completion lifecycle
 │   ├── src/config/        #   Typed configuration registry and parser
 │   │   ├── option.rs     #     OptionType/Value/Def/Registry
 │   │   ├── parser.rs     #     Multi-source parser (CLI/file/env/defaults)
@@ -358,19 +358,14 @@ aria2-rust/
 │   │   └── save_session_command.rs # Save on exit
 │   ├── src/rate_limiter.rs # Token bucket rate limiting
 │   └── src/ui.rs           #   Progress bar & status panel
-├── aria2-protocol/         # Protocol stack (~5,000 lines)
-│   ├── src/http/           #   HTTP/HTTPS client (auth/proxy/cookies/compression)
-│   ├── src/ftp/            #   FTP/SFTP client (anonymous+auth, passive mode)
-│   ├── src/bittorrent/     #   Full BT stack
-│   │   ├── bencode/ # BEP3 bencode codec
-│   │   ├── torrent/ # .torrent parsing
-│   │   ├── magnet.rs # Magnet link parsing
-│   │   ├── dht/ # KRPC + routing table + bootstrap
-│   │   ├── tracker/ # UDP/HTTP tracker
-│   │   ├── peer/ # Peer connection + handshake
-│   │   ├── extension/ # MSE/PEX/ut_metadata
-│   │   └── piece/ # Piece manager + picker
-│   └── src/metalink/      #   Metalink V3/V4 parser
+├── aria2-protocol/         # Reusable protocol implementations
+│   └── src/
+│       ├── http/          # HTTP/HTTPS client primitives
+│       ├── ftp/           # FTP/FTPS control, data, and TLS primitives
+│       ├── sftp/          # SSH/SFTP connection, packets, sessions, and files
+│       ├── bittorrent/    # Bencode, torrent, peer, DHT, and tracker protocols
+│       ├── metalink/      # Metalink V3/V4 parsing
+│       └── identity.rs    # Shared TLS identity setup
 ├── aria2-rpc/              # RPC server (~1,000 lines)
 │   ├── src/json_rpc.rs     #   JSON-RPC 2.0 codec
 │   ├── src/xml_rpc.rs      #   XML-RPC codec

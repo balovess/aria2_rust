@@ -363,7 +363,7 @@ impl FtpDownloadCommand {
                 active_listener.expect("active listener is present when passive mode is disabled");
             tokio::time::timeout(
                 Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
-                listener.accept(),
+                listener.accept_with_peer(),
             )
             .await
             .map_err(|_| {

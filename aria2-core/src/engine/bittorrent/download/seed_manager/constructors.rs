@@ -284,5 +284,5 @@ fn wrap_peer_connection(
     let endpoint = connection
         .remote_addr()
         .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
-    BtPeerConn::from_incoming_plain(connection, endpoint)
+    BtPeerConn::from_incoming_tcp(connection, endpoint)
 }

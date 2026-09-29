@@ -273,9 +273,14 @@ fn test_verify_pieces() {
 #[test]
 fn test_create_multi_file_returns_all_files() {
     let options = DownloadOptions::default();
-    let commands =
-        MetalinkDownloadCommand::create_multi_file(&make_multi_file_xml(), &options, None, 100)
-            .unwrap();
+    let commands = MetalinkDownloadCommand::create_multi_file(
+        &make_multi_file_xml(),
+        &options,
+        None,
+        None,
+        100,
+    )
+    .unwrap();
 
     assert_eq!(commands.len(), 2, "Should create 2 commands for 2 files");
     assert_eq!(commands[0].file_index, 0);
@@ -301,9 +306,14 @@ fn test_create_multi_file_returns_all_files() {
 #[test]
 fn test_create_multi_file_assigns_incrementing_gids() {
     let options = DownloadOptions::default();
-    let commands =
-        MetalinkDownloadCommand::create_multi_file(&make_multi_file_xml(), &options, None, 200)
-            .unwrap();
+    let commands = MetalinkDownloadCommand::create_multi_file(
+        &make_multi_file_xml(),
+        &options,
+        None,
+        None,
+        200,
+    )
+    .unwrap();
 
     let g0 = commands[0].command.group.read().unwrap();
     let g1 = commands[1].command.group.read().unwrap();
@@ -320,7 +330,7 @@ fn test_create_multi_file_keeps_torrent_metaurl_only_files() {
   </file>
 </metalink>"#;
     let result =
-        MetalinkDownloadCommand::create_multi_file(xml, &DownloadOptions::default(), None, 1)
+        MetalinkDownloadCommand::create_multi_file(xml, &DownloadOptions::default(), None, None, 1)
             .unwrap();
 
     assert_eq!(result.len(), 1);
@@ -344,7 +354,8 @@ fn test_create_multi_file_skips_files_without_urls() {
 
     let options = DownloadOptions::default();
     let commands =
-        MetalinkDownloadCommand::create_multi_file(xml.as_bytes(), &options, None, 1).unwrap();
+        MetalinkDownloadCommand::create_multi_file(xml.as_bytes(), &options, None, None, 1)
+            .unwrap();
 
     assert_eq!(commands.len(), 1, "Should skip file with no URLs");
     assert_eq!(commands[0].file_index, 0);
@@ -357,6 +368,7 @@ fn test_output_path_accessor() {
         &make_multi_file_xml(),
         &options,
         Some("/tmp"),
+        None,
         1,
     )
     .unwrap();

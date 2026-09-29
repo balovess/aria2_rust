@@ -21,13 +21,12 @@
 use std::sync::Arc;
 use tracing::info;
 
-use crate::engine::metalink::download_command::MetalinkDownloadCommand;
 use crate::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use crate::engine::post_download_handler::{
     CompletedDownloadInfo, PostDownloadHandler, path_has_extension,
 };
-use crate::error::{Aria2Error, Result};
-use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
+use crate::error::Aria2Error;
+use crate::request::request_group::{FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Known Metalink MIME content types.
@@ -77,7 +76,7 @@ impl MetalinkPostDownloadHandler {
     /// document that should be handled by this post-download handler.
     ///
     /// Mirrors C++ `ContentTypeRequestGroupCriteria::matchRequest()`.
-    pub fn can_handle_static(content_type: Option<&str>, file_path: Option<&str>) -> bool {
+    fn can_handle_static(content_type: Option<&str>, file_path: Option<&str>) -> bool {
         // Check Content-Type header
         if let Some(ct) = content_type {
             let ct_lower = ct.to_lowercase();
@@ -111,67 +110,6 @@ impl MetalinkPostDownloadHandler {
             || source_uri.is_some_and(|uri| path_has_extension(uri, METALINK_EXTENSIONS))
     }
 
-    /// Parse the downloaded Metalink file and generate download commands
-    /// for each file entry.
-    ///
-    /// Mirrors C++ `MetalinkPostDownloadHandler::getNextRequestGroups()`.
-    ///
-    /// # Arguments
-    /// * `metalink_data` - The raw Metalink XML file content
-    /// * `base_uri` - Optional base URI for resolving relative URLs
-    /// * `options` - Download options for the generated commands
-    ///
-    /// # Returns
-    /// A vector of `MetalinkDownloadCommand`, one per file in the Metalink.
-    pub fn get_next_request_groups(
-        &self,
-        metalink_data: &[u8],
-        base_uri: Option<&str>,
-        options: &DownloadOptions,
-    ) -> Result<Vec<MetalinkDownloadCommand>> {
-        use aria2_protocol::metalink::parser::MetalinkDocument;
-
-        // Quick sanity check: must look like XML
-        let trimmed = metalink_data
-            .iter()
-            .skip_while(|&&b| b.is_ascii_whitespace())
-            .take(5)
-            .copied()
-            .collect::<Vec<u8>>();
-        if !trimmed.starts_with(b"<?xml") && !trimmed.starts_with(b"<met") {
-            return Err(Aria2Error::Parse(
-                "Downloaded content does not appear to be a Metalink document".to_string(),
-            ));
-        }
-
-        let doc =
-            MetalinkDocument::parse(metalink_data, None).map_err(Aria2Error::MetalinkParse)?;
-
-        if doc.files.is_empty() {
-            tracing::info!("Metalink document contains no downloadable files");
-            return Ok(Vec::new());
-        }
-
-        tracing::info!(
-            version = %doc.version.as_str(),
-            files = doc.files.len(),
-            "Metalink post-download handler: creating request groups"
-        );
-
-        let mut converter = MetalinkToRequestGroup::new();
-        if let Some(base_uri) = base_uri {
-            converter = converter.with_base_uri(base_uri);
-        }
-        let commands = converter.generate_from_bytes(metalink_data, options)?;
-
-        tracing::info!(
-            count = commands.len(),
-            "Metalink post-download handler: generated download commands"
-        );
-
-        Ok(commands)
-    }
-
     /// Read the Metalink data from the completed download.
     ///
     /// C++: `diskAdaptor->openExistingFile()` then `util::toString(diskAdaptor)`.
@@ -191,16 +129,6 @@ impl MetalinkPostDownloadHandler {
                 Aria2Error::Io(format!("Failed to read Metalink file '{}': {}", path, e))
             })
         }
-    }
-
-    /// Return the list of Metalink content types.
-    pub fn content_types() -> &'static [&'static str] {
-        METALINK_CONTENT_TYPES
-    }
-
-    /// Return the list of Metalink file extensions.
-    pub fn extensions() -> &'static [&'static str] {
-        METALINK_EXTENSIONS
     }
 }
 
@@ -260,25 +188,18 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
             converter = converter.with_base_uri(base_uri);
         }
         let mut gids = std::iter::from_fn(|| Some(allocate_gid()));
-        let child_groups = converter.create_resource_groups_from_bytes(
-            &metalink_data,
-            &child_options,
-            &mut gids,
-        )?;
+        let expansion =
+            converter.create_groups_from_bytes(&metalink_data, &child_options, &mut gids)?;
+        #[cfg(feature = "bittorrent")]
+        let mut child_groups = expansion.resource_groups;
+        #[cfg(not(feature = "bittorrent"))]
+        let child_groups = expansion.resource_groups;
 
-        #[cfg(all(feature = "metalink", feature = "bittorrent"))]
-        let child_groups = {
-            let mut child_groups = child_groups;
-            for graph in converter.create_torrent_graphs_from_bytes(
-                &metalink_data,
-                &child_options,
-                &mut gids,
-            )? {
-                child_groups.push(graph.metadata);
-                child_groups.push(graph.payload);
-            }
-            child_groups
-        };
+        #[cfg(feature = "bittorrent")]
+        for graph in expansion.torrent_graphs {
+            child_groups.push(graph.metadata);
+            child_groups.push(graph.payload);
+        }
 
         for group in &child_groups {
             // If pause requested (PREF_PAUSE_METADATA), mark the child group.
@@ -305,6 +226,7 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request_group::DownloadOptions;
 
     #[test]
     fn test_can_handle_content_type() {

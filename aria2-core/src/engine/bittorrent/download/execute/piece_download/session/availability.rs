@@ -44,7 +44,7 @@ mod tests {
             .await
             .unwrap();
         let (local, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local, [0; 20], false, true),
             endpoint,
         );

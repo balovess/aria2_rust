@@ -15,6 +15,7 @@
 //! announce, then routes to the correct backend based on URL scheme.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
@@ -22,13 +23,13 @@ use tracing::{debug, info, warn};
 
 use super::bt_announce::{BtAnnounce, is_udp_tracker};
 use super::types::AnnounceEvent;
-use crate::engine::bittorrent::tracker::udp_client::SharedUdpClient;
-use crate::engine::bittorrent::tracker::udp_manager::UdpTrackerManager;
+use crate::engine::bittorrent::tracker::udp_client::{
+    UdpAnnounceParams, UdpError, UdpTrackerClient, resolve_udp_tracker_addr,
+};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerFailureKind};
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
 
 /// Result of a tracker announce operation (HTTP, WebSocket, or UDP).
 #[derive(Debug, Clone)]
@@ -180,7 +181,7 @@ impl TrackerRuntimeSnapshot {
 /// - Uses `BtAnnounce::adjust_announce_list()` to determine event and timing
 /// - Routes HTTP URLs through the existing HTTP announce path
 /// - Routes `ws://` and `wss://` URLs through the WebSocket tracker path
-/// - Routes UDP URLs through `UdpTrackerManager`
+/// - Routes UDP URLs through the policy-bound `UdpTrackerClient`
 /// - Processes responses through `BtAnnounce::process_*_response()`
 /// - Tracks announce success/failure for tier rotation
 pub struct TrackerAnnouncer {
@@ -188,10 +189,10 @@ pub struct TrackerAnnouncer {
     announce: BtAnnounce,
     /// Prevent duplicate stopped events after a successful announce.
     stopped_sent: bool,
-    /// UDP tracker manager (created lazily when first UDP URL is seen).
-    udp_manager: Option<UdpTrackerManager>,
-    /// Shared UDP client for the UDP tracker manager.
-    udp_client: Option<SharedUdpClient>,
+    /// UDP tracker client (created lazily for the selected address family).
+    udp_client: Option<UdpTrackerClient>,
+    /// Resolved endpoint for the currently selected UDP tracker URL.
+    udp_tracker_endpoint: Option<(String, SocketAddr)>,
     /// Address family used by the current UDP tracker client.
     udp_family_ipv6: Option<bool>,
     /// URL selected for the most recent announce attempt, including failures.
@@ -217,6 +218,9 @@ pub struct TrackerAnnouncer {
     tracker_timeout_secs: u64,
     /// Per-download tracker connection timeout.
     tracker_connect_timeout_secs: u64,
+    user_defined_interval: Duration,
+    force_encryption: bool,
+    external_ip: Option<String>,
     /// Total shutdown budget for all stopped announce attempts.
     stopped_timeout: Duration,
     /// Optional registry-visible mirror of the live announcer state.
@@ -231,8 +235,8 @@ impl TrackerAnnouncer {
         Self {
             announce: BtAnnounce::new(announce_list, announce),
             stopped_sent: false,
-            udp_manager: None,
             udp_client: None,
+            udp_tracker_endpoint: None,
             udp_family_ipv6: None,
             last_attempt_tracker_url: None,
             public_tracker_catalog: None,
@@ -245,31 +249,9 @@ impl TrackerAnnouncer {
             websocket_options: DownloadOptions::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
-            stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
-            runtime_state: None,
-            tracker_states: HashMap::new(),
-        }
-    }
-
-    /// Create from an existing `BtAnnounce` and optional shared UDP client.
-    pub fn with_udp_client(announce: BtAnnounce, udp_client: Option<SharedUdpClient>) -> Self {
-        Self {
-            announce,
-            stopped_sent: false,
-            udp_manager: None,
-            udp_client,
-            udp_family_ipv6: None,
-            last_attempt_tracker_url: None,
-            public_tracker_catalog: None,
-            public_tracker_urls: HashSet::new(),
-            excluded_tracker_urls: Vec::new(),
-            last_failure_kind: None,
-            http_tls: ClientTlsConfig::default(),
-            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
-            http_clients: HashMap::new(),
-            websocket_options: DownloadOptions::default(),
-            tracker_timeout_secs: 60,
-            tracker_connect_timeout_secs: 60,
+            user_defined_interval: Duration::ZERO,
+            force_encryption: false,
+            external_ip: None,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
             runtime_state: None,
             tracker_states: HashMap::new(),
@@ -280,6 +262,12 @@ impl TrackerAnnouncer {
     pub fn set_runtime_snapshot(&mut self, state: SharedTrackerRuntime) {
         self.runtime_state = Some(state);
         self.publish_runtime_snapshot();
+    }
+
+    /// Return the actor-owned snapshot destination for live torrent-wide
+    /// tracker aggregation.
+    pub(crate) fn shared_runtime_snapshot(&self) -> Option<SharedTrackerRuntime> {
+        self.runtime_state.clone()
     }
 
     /// Return the complete live tracker state for RPC or diagnostics.
@@ -411,13 +399,8 @@ impl TrackerAnnouncer {
         };
         let snapshot = self.runtime_snapshot();
         if let Ok(mut current) = state.write() {
-            *current = snapshot;
+            merge_tracker_runtime_snapshot(&mut current, snapshot);
         }
-    }
-
-    /// Set the shared UDP client for UDP tracker announces.
-    pub fn set_udp_client(&mut self, client: SharedUdpClient) {
-        self.udp_client = Some(client);
     }
 
     /// Apply the existing aria2-compatible TLS options to HTTP tracker calls.
@@ -450,11 +433,14 @@ impl TrackerAnnouncer {
 
     /// Apply the user-defined announce interval from `bt-tracker-interval`.
     pub fn set_user_defined_interval(&mut self, interval: Duration) {
+        self.user_defined_interval = interval;
         self.announce.set_user_defined_interval(interval);
     }
 
     /// Apply the announce encryption and external-IP options.
     pub fn set_announce_options(&mut self, force_encryption: bool, external_ip: Option<String>) {
+        self.force_encryption = force_encryption;
+        self.external_ip.clone_from(&external_ip);
         self.announce.set_force_encryption(force_encryption);
         self.announce.set_external_ip(external_ip);
     }
@@ -494,6 +480,80 @@ impl TrackerAnnouncer {
         self.public_tracker_urls = public_tracker_urls;
     }
 
+    /// Return up to `limit` public catalog URLs that are not already in the
+    /// torrent's own announce list or excluded by this download's options.
+    pub async fn public_tracker_urls(&self, limit: usize) -> Vec<String> {
+        let Some(catalog) = self.public_tracker_catalog.as_ref() else {
+            return Vec::new();
+        };
+        let torrent_urls = &self.announce.announce_list();
+        catalog
+            .snapshot()
+            .await
+            .iter()
+            .map(|entry| entry.url.clone())
+            .filter(|url| {
+                !torrent_urls.contains_url(url)
+                    && !self
+                        .excluded_tracker_urls
+                        .iter()
+                        .any(|excluded| excluded == "*" || excluded == url)
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// Return currently available public URLs not already active in this
+    /// torrent. The caller owns the bounded fan-out policy.
+    pub async fn available_public_tracker_urls(
+        &self,
+        active_urls: &HashSet<String>,
+        limit: usize,
+    ) -> Vec<String> {
+        let Some(catalog) = self.public_tracker_catalog.as_ref() else {
+            return Vec::new();
+        };
+        let torrent_urls = &self.announce.announce_list();
+        catalog
+            .available_snapshot()
+            .await
+            .iter()
+            .map(|entry| entry.url.clone())
+            .filter(|url| {
+                !active_urls.contains(url)
+                    && !torrent_urls.contains_url(url)
+                    && !self
+                        .excluded_tracker_urls
+                        .iter()
+                        .any(|excluded| excluded == "*" || excluded == url)
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// Construct an independently timed announcer for one public URL while
+    /// preserving this download's transport, privacy, and announce settings.
+    pub fn fork_public_tracker(&self, url: &str) -> Self {
+        let mut fork = Self::new(&[vec![url.to_owned()]], &None);
+        fork.http_tls.clone_from(&self.http_tls);
+        fork.outbound_network_policy = Arc::clone(&self.outbound_network_policy);
+        fork.websocket_options.clone_from(&self.websocket_options);
+        fork.tracker_timeout_secs = self.tracker_timeout_secs;
+        fork.tracker_connect_timeout_secs = self.tracker_connect_timeout_secs;
+        fork.stopped_timeout = self.stopped_timeout;
+        fork.excluded_tracker_urls
+            .clone_from(&self.excluded_tracker_urls);
+        fork.set_user_defined_interval(self.user_defined_interval);
+        fork.set_announce_options(self.force_encryption, self.external_ip.clone());
+        fork.set_tcp_port(self.tcp_port());
+        if let Some(catalog) = self.public_tracker_catalog.as_ref() {
+            fork.set_public_tracker_catalog(Arc::clone(catalog), HashSet::from([url.to_owned()]));
+        }
+        fork.runtime_state.clone_from(&self.runtime_state);
+        fork.publish_runtime_snapshot();
+        fork
+    }
+
     pub(crate) fn subscribe_public_tracker_updates(
         &self,
     ) -> Option<tokio::sync::watch::Receiver<u64>> {
@@ -505,46 +565,6 @@ impl TrackerAnnouncer {
     /// Apply the download's tracker exclusion policy to future catalog merges.
     pub fn set_excluded_tracker_urls(&mut self, excluded: Vec<String>) {
         self.excluded_tracker_urls = excluded;
-    }
-
-    /// Merge newly available public trackers into this running download.
-    ///
-    /// The announce list owns the ordering rule: torrent and explicit user
-    /// trackers remain ahead of public trackers, and duplicate URLs are
-    /// ignored. The limit is per download, so a refresh cannot grow an
-    /// announce list without bound.
-    pub async fn sync_public_trackers(&mut self, max_trackers: usize) -> usize {
-        if self.public_tracker_urls.len() >= max_trackers {
-            return 0;
-        }
-        let Some(catalog) = self.public_tracker_catalog.as_ref().cloned() else {
-            return 0;
-        };
-        let available = catalog.available_snapshot().await;
-        let remaining = max_trackers - self.public_tracker_urls.len();
-        let mut tiers = Vec::with_capacity(remaining);
-        for entry in available.iter() {
-            if self
-                .excluded_tracker_urls
-                .iter()
-                .any(|excluded| excluded == "*" || excluded == &entry.url)
-                || self.public_tracker_urls.contains(&entry.url)
-                || self.announce.announce_list().contains_url(&entry.url)
-            {
-                continue;
-            }
-            tiers.push(vec![entry.url.clone()]);
-            if tiers.len() == remaining {
-                break;
-            }
-        }
-        let added = self.announce.append_tracker_tiers(&tiers);
-        let added_count = added.len();
-        self.public_tracker_urls.extend(added);
-        if added_count > 0 {
-            self.publish_runtime_snapshot();
-        }
-        added_count
     }
 
     /// Execute a tracker announce, dispatching to HTTP or UDP as appropriate.
@@ -625,6 +645,29 @@ impl TrackerAnnouncer {
             }
         }
         result
+    }
+
+    /// Release the state of an announce future cancelled by its owner.
+    ///
+    /// The normal announce path clears this state when a response or failure
+    /// is processed. Actor shutdown can drop an in-flight future, so it must
+    /// explicitly clear both protocol and RPC in-flight accounting first.
+    pub fn cancel_pending_announce(&mut self) -> bool {
+        let Some(tracker_url) = self.last_attempt_tracker_url.clone() else {
+            return false;
+        };
+        if !self
+            .tracker_states
+            .get(&tracker_url)
+            .is_some_and(|state| state.in_flight)
+        {
+            return false;
+        }
+
+        self.announce.announce_cancelled();
+        self.tracker_attempt_finished(&tracker_url, false);
+        self.publish_runtime_snapshot();
+        true
     }
 
     /// Execute a WebSocket tracker announce using the same lifecycle state
@@ -708,127 +751,92 @@ impl TrackerAnnouncer {
         downloaded: u64,
         left: u64,
         uploaded: u64,
-        tracker_url: &str, // must be &str for lifetime flexibility
+        tracker_url: &str,
     ) -> Option<AnnounceResult> {
         let event = self.announce.announce_list().get_event();
         let udp_event = self.announce.current_udp_event();
-        let numwant = self.announce.numwant();
-        let tracker_url_changed = self
-            .udp_manager
+        let tracker_addr = if let Some((_, addr)) = self
+            .udp_tracker_endpoint
             .as_ref()
-            .is_none_or(|manager| !manager.uses_tracker_url(tracker_url));
-        let tracker_ipv6 = if tracker_url_changed {
-            UdpTrackerManager::tracker_url_is_ipv6_with_policy(
-                tracker_url,
+            .filter(|(url, _)| url == tracker_url)
+        {
+            *addr
+        } else {
+            match resolve_udp_tracker_addr(tracker_url, &self.outbound_network_policy).await {
+                Ok(addr) => {
+                    self.udp_tracker_endpoint = Some((tracker_url.to_owned(), addr));
+                    addr
+                }
+                Err(error) => {
+                    warn!(tracker = %tracker_url, %error, "Failed to resolve UDP tracker using the outbound network policy");
+                    self.last_failure_kind = Some(TrackerFailureKind::Network);
+                    self.announce.announce_failure();
+                    return None;
+                }
+            }
+        };
+        let tracker_ipv6 = tracker_addr.is_ipv6();
+
+        if self.udp_client.is_none() || self.udp_family_ipv6 != Some(tracker_ipv6) {
+            match UdpTrackerClient::new_with_policy_for_family(
+                0,
                 &self.outbound_network_policy,
+                tracker_ipv6,
             )
             .await
-            .or_else(|| UdpTrackerManager::tracker_url_is_ipv6(tracker_url))
-            .unwrap_or(false)
-        } else {
-            self.udp_family_ipv6.unwrap_or(false)
-        };
-        let needs_new_client =
-            self.udp_manager.is_none() || self.udp_family_ipv6 != Some(tracker_ipv6);
-        if needs_new_client {
-            let shared = if let Some(client) = self.udp_client.take() {
-                let matches_family = client
-                    .lock()
-                    .await
-                    .socket
-                    .local_addr()
-                    .map(|addr| addr.ip().is_ipv6() == tracker_ipv6)
-                    .unwrap_or(false);
-                matches_family.then_some(client)
-            } else {
-                None
-            };
-
-            let shared = match shared {
-                Some(client) => client,
-                None => match crate::engine::bittorrent::tracker::udp_client::UdpTrackerClient::new_with_policy_for_family(
-                    0,
-                    &self.outbound_network_policy,
-                    tracker_ipv6,
-                )
-                .await
-                {
-                    Ok(client) => Arc::new(tokio::sync::Mutex::new(client)),
-                    Err(e) => {
-                        warn!("[BT] Failed to create UDP tracker client: {}", e);
-                        self.last_failure_kind = Some(TrackerFailureKind::Network);
-                        self.announce.announce_failure();
-                        return None;
-                    }
-                },
-            };
-
-            self.udp_client = Some(Arc::clone(&shared));
-            self.udp_manager = Some(
-                UdpTrackerManager::new_with_policy(
-                    shared,
-                    Arc::clone(&self.outbound_network_policy),
-                )
-                .await,
-            );
+            {
+                Ok(client) => self.udp_client = Some(client),
+                Err(error) => {
+                    warn!(%error, "Failed to create UDP tracker client");
+                    self.last_failure_kind = Some(TrackerFailureKind::Network);
+                    self.announce.announce_failure();
+                    return None;
+                }
+            }
             self.udp_family_ipv6 = Some(tracker_ipv6);
         }
 
-        {
-            let mgr = self.udp_manager.as_mut()?;
-            mgr.set_request_timeout(Duration::from_secs(self.tracker_timeout_secs));
-
-            // The state machine selects one URL per attempt. Keep the UDP manager
-            // scoped to that URL so responses cannot be attributed to a different
-            // public tracker accumulated by an earlier attempt.
-            mgr.use_tracker_url(tracker_url).await;
-        }
-
-        // Signal announce start
         self.announce.announce_start();
         self.publish_runtime_snapshot();
-
-        // The event and numwant were captured before network I/O so the
-        // request and result describe the same state-machine transition.
 
         debug!(
             "[BT] Announcing to UDP tracker {} (event={:?}, udp_event={})",
             tracker_url, event, udp_event
         );
 
-        let responses = self
-            .udp_manager
+        let response = match self
+            .udp_client
             .as_mut()?
             .announce(
-                info_hash,
-                peer_id,
-                downloaded as i64,
-                left as i64,
-                uploaded as i64,
-                udp_event,
-                numwant as i32,
+                UdpAnnounceParams {
+                    tracker_addr,
+                    info_hash,
+                    peer_id,
+                    downloaded: downloaded as i64,
+                    left: left as i64,
+                    uploaded: uploaded as i64,
+                    event: udp_event,
+                    num_want: self.announce.numwant() as i32,
+                },
+                Duration::from_secs(self.tracker_timeout_secs),
             )
-            .await;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(tracker = %tracker_url, %error, "UDP tracker announce failed");
+                self.last_failure_kind = Some(match error {
+                    UdpError::TrackerError => TrackerFailureKind::TrackerRejected,
+                    UdpError::MalformedResponse => TrackerFailureKind::MalformedResponse,
+                    UdpError::Network => TrackerFailureKind::Network,
+                    UdpError::Timeout => TrackerFailureKind::Timeout,
+                });
+                self.announce.announce_failure();
+                return None;
+            }
+        };
 
-        if responses.is_empty() {
-            warn!("[BT] UDP tracker {} returned no response", tracker_url);
-            let last_error = self.udp_manager.as_mut()?.last_announce_error().await;
-            self.last_failure_kind = Some(match last_error {
-                Some(UdpError::TrackerError) => TrackerFailureKind::TrackerRejected,
-                Some(UdpError::MalformedResponse) => TrackerFailureKind::MalformedResponse,
-                Some(UdpError::Network) => TrackerFailureKind::Network,
-                Some(UdpError::Timeout) | None => TrackerFailureKind::Timeout,
-                Some(UdpError::Success | UdpError::Shutdown) => {
-                    TrackerFailureKind::MalformedResponse
-                }
-            });
-            self.announce.announce_failure();
-            return None;
-        }
-
-        // Process the first response through the state machine
-        let response = &responses[0];
-        let peers = self.announce.process_udp_announce_response(response);
+        let mut peers = self.announce.process_udp_announce_response(&response);
         self.update_tracker_stats(
             tracker_url,
             response.interval as u64,
@@ -838,21 +846,11 @@ impl TrackerAnnouncer {
             None,
         );
         self.announce.announce_success();
-
-        // Collect additional peers from subsequent responses
-        let mut all_peers = peers;
-        if responses.len() > 1 {
-            for resp in &responses[1..] {
-                all_peers.extend_from_slice(&resp.peers);
-            }
-        }
-
-        // Deduplicate peers
-        all_peers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        all_peers.dedup();
+        peers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        peers.dedup();
 
         Some(AnnounceResult {
-            peers: all_peers,
+            peers,
             interval: self.announce.interval(),
             seeders: self.announce.complete(),
             leechers: self.announce.incomplete(),
@@ -860,7 +858,6 @@ impl TrackerAnnouncer {
             tracker_url: tracker_url.to_string(),
         })
     }
-
     /// Execute an HTTP tracker announce.
     #[allow(clippy::too_many_arguments)]
     async fn announce_http(
@@ -1199,6 +1196,91 @@ impl TrackerAnnouncer {
     }
 }
 
+fn merge_tracker_runtime_snapshot(
+    current: &mut TrackerRuntimeSnapshot,
+    mut update: TrackerRuntimeSnapshot,
+) {
+    if current.trackers.is_empty() && current.tracker_tiers.is_empty() {
+        *current = update;
+        return;
+    }
+
+    let mut known = current
+        .tracker_tiers
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<HashSet<_>>();
+    for tier in &update.tracker_tiers {
+        let added = tier
+            .iter()
+            .filter(|uri| known.insert((*uri).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !added.is_empty() {
+            current.tracker_tiers.push(added);
+        }
+    }
+
+    for tracker in &mut update.trackers {
+        if let Some(existing) = current
+            .trackers
+            .iter_mut()
+            .find(|existing| existing.uri == tracker.uri)
+        {
+            tracker.tier = existing.tier;
+            *existing = tracker.clone();
+            continue;
+        }
+
+        let tier = current
+            .tracker_tiers
+            .iter()
+            .position(|tier| tier.iter().any(|uri| uri == &tracker.uri))
+            .map_or_else(
+                || {
+                    current.tracker_tiers.push(vec![tracker.uri.clone()]);
+                    current.tracker_tiers.len()
+                },
+                |index| index + 1,
+            );
+        tracker.tier = tier;
+        current.trackers.push(tracker.clone());
+    }
+
+    let update_has_last_attempt = update.last_attempt_url.is_some();
+    current.current_url = update.current_url.or_else(|| current.current_url.take());
+    current.last_attempt_url = update
+        .last_attempt_url
+        .or_else(|| current.last_attempt_url.take());
+    current.announce_ready = current
+        .trackers
+        .iter()
+        .any(|tracker| tracker.announce_ready);
+    current.all_failed =
+        !current.trackers.is_empty() && current.trackers.iter().all(|tracker| tracker.all_failed);
+    current.in_flight = current.trackers.iter().fold(0u32, |total, tracker| {
+        total.saturating_add(tracker.in_flight)
+    });
+    if update.interval_secs > 0 {
+        current.interval_secs = update.interval_secs;
+    }
+    if update.min_interval_secs > 0 {
+        current.min_interval_secs = update.min_interval_secs;
+    }
+    current.seeders = update.seeders.or(current.seeders);
+    current.leechers = update.leechers.or(current.leechers);
+    if !update.tracker_id.is_empty() {
+        current.tracker_id = update.tracker_id;
+    }
+    current.seconds_since_last_success = update
+        .seconds_since_last_success
+        .or(current.seconds_since_last_success);
+    if update_has_last_attempt {
+        current.last_failure_kind = update.last_failure_kind;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1261,6 +1343,33 @@ mod tests {
         assert!(!snapshot.trackers[0].all_failed);
         assert_eq!(snapshot.trackers[1].seeders, None);
         assert!(snapshot.trackers[1].all_failed);
+    }
+
+    #[test]
+    fn independent_announcers_merge_live_in_flight_state_without_overwriting() {
+        let primary_url = "http://tracker.example.com/primary".to_string();
+        let public_url = "http://tracker.example.com/public".to_string();
+        let shared = Arc::new(std::sync::RwLock::new(TrackerRuntimeSnapshot::default()));
+        let mut primary = TrackerAnnouncer::new(&[vec![primary_url.clone()]], &None);
+        primary.set_runtime_snapshot(Arc::clone(&shared));
+        primary.last_attempt_tracker_url = Some(primary_url.clone());
+        primary.tracker_attempt_started(&primary_url);
+        primary.publish_runtime_snapshot();
+
+        let mut public = primary.fork_public_tracker(&public_url);
+        public.last_attempt_tracker_url = Some(public_url.clone());
+        public.tracker_attempt_started(&public_url);
+        public.publish_runtime_snapshot();
+
+        let snapshot = shared.read().expect("tracker runtime snapshot lock");
+        assert_eq!(snapshot.trackers.len(), 2);
+        assert_eq!(snapshot.in_flight, 2);
+        assert!(
+            snapshot
+                .trackers
+                .iter()
+                .all(|tracker| tracker.status == "announcing")
+        );
     }
 
     #[test]
@@ -1608,7 +1717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refreshed_public_trackers_are_appended_after_torrent_trackers() {
+    async fn public_trackers_are_selected_separately_from_torrent_failover_tiers() {
         let catalog = Arc::new(PublicTrackerList::new());
         let existing_torrent_tracker = catalog
             .snapshot()
@@ -1620,9 +1729,9 @@ mod tests {
         let mut announcer = TrackerAnnouncer::new(&[vec![existing_torrent_tracker.clone()]], &None);
         announcer.set_public_tracker_catalog(catalog, HashSet::new());
 
-        let added = announcer.sync_public_trackers(3).await;
-
-        assert_eq!(added, 3);
+        let selected = announcer.public_tracker_urls(3).await;
+        assert_eq!(selected.len(), 3);
+        assert!(!selected.contains(&existing_torrent_tracker));
         assert_eq!(
             announcer
                 .announce
@@ -1631,7 +1740,19 @@ mod tests {
                 .map(String::as_str),
             Some(existing_torrent_tracker.as_str())
         );
-        assert_eq!(announcer.announce.announce_list().tier_count(), 4);
+        assert_eq!(announcer.announce.announce_list().tier_count(), 1);
+
+        let available = announcer
+            .available_public_tracker_urls(&HashSet::from([selected[0].clone()]), 3)
+            .await;
+        assert_eq!(available.len(), 3);
+        assert!(!available.contains(&selected[0]));
+
+        let fork = announcer.fork_public_tracker(&selected[0]);
+        assert_eq!(
+            fork.runtime_snapshot().tracker_tiers,
+            vec![vec![selected[0].clone()]]
+        );
     }
 
     #[tokio::test]
@@ -1641,7 +1762,13 @@ mod tests {
         announcer.set_public_tracker_catalog(catalog, HashSet::new());
         announcer.set_excluded_tracker_urls(vec!["*".to_string()]);
 
-        assert_eq!(announcer.sync_public_trackers(3).await, 0);
+        assert!(announcer.public_tracker_urls(3).await.is_empty());
+        assert!(
+            announcer
+                .available_public_tracker_urls(&HashSet::new(), 3)
+                .await
+                .is_empty()
+        );
         assert_eq!(announcer.announce.announce_list().tier_count(), 0);
     }
 

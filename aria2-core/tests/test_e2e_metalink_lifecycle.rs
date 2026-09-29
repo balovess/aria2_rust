@@ -166,8 +166,9 @@ async fn metalink_engine_promotes_torrent_payload_and_preserves_mapping() {
 
     let mut gids = [GroupId::new(900), GroupId::new(901)].into_iter();
     let mut graphs = MetalinkToRequestGroup::new()
-        .create_torrent_graphs_from_bytes(&document, &options, &mut gids)
-        .unwrap();
+        .create_groups_from_bytes(&document, &options, &mut gids)
+        .unwrap()
+        .torrent_graphs;
     assert_eq!(graphs.len(), 1);
     let graph = graphs.pop().unwrap();
     let metadata = Arc::clone(&graph.metadata);
@@ -359,8 +360,9 @@ async fn metalink_engine_force_halt_preserves_resume_state() {
 
     let mut gids = [GroupId::new(703)].into_iter();
     let mut groups = MetalinkToRequestGroup::new()
-        .create_resource_groups_from_bytes(&document, &options, &mut gids)
-        .unwrap();
+        .create_groups_from_bytes(&document, &options, &mut gids)
+        .unwrap()
+        .resource_groups;
     assert_eq!(groups.len(), 1);
     let group = groups.pop().unwrap();
     let group_man = Arc::new(RequestGroupMan::new());

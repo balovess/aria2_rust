@@ -21,7 +21,7 @@ pub mod tests;
 pub mod types;
 pub mod uri_ops;
 
-// Re-export public API to preserve the original import paths.
+// Expose the file-entry interface at its owning module boundary.
 pub use entry::FileEntry;
 pub use helpers::{
     count_requested_file_entry, get_first_requested_file_entry,

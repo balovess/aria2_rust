@@ -1,18 +1,72 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use super::protocol::UdpTrackerRequest;
-use super::{ConnectionState, MAX_RETRIES, REQUEST_TIMEOUT_SECS, UdpTrackerClient};
+use super::request::UdpTrackerRequest;
+use super::{
+    AnnounceResponse, ConnectionState, MAX_RETRIES, UdpAnnounceParams, UdpError, UdpTrackerClient,
+};
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    ConnectResponse, UdpAction, UdpError, UdpEvent, UdpState, build_announce_request,
-    build_connect_request, parse_announce_response, parse_connect_response, parse_scrape_response,
+    ConnectResponse, UdpAction, UdpEvent, build_announce_request, build_connect_request,
+    parse_announce_response, parse_connect_response, parse_scrape_response,
 };
 
 impl UdpTrackerClient {
-    pub async fn process_one(&mut self) -> bool {
+    pub async fn announce(
+        &mut self,
+        params: UdpAnnounceParams<'_>,
+        timeout: Duration,
+    ) -> Result<AnnounceResponse, UdpError> {
+        let port = self
+            .socket
+            .local_addr()
+            .map_err(|_| UdpError::Network)?
+            .port();
+        self.add_announce(
+            &params.tracker_addr,
+            params.info_hash,
+            params.peer_id,
+            params.downloaded,
+            params.left,
+            params.uploaded,
+            params.event,
+            params.num_want,
+            port,
+        );
+
+        loop {
+            if let Some(index) = self.pending.iter().position(|request| {
+                !request.is_connect
+                    && request.remote_addr == params.tracker_addr
+                    && request.info_hash == *params.info_hash
+                    && (request.reply.is_some() || request.error.is_some())
+            }) {
+                let request = self
+                    .pending
+                    .remove(index)
+                    .expect("completed UDP tracker request index is valid");
+                if let Some(response) = request.reply {
+                    return Ok(response);
+                }
+                return Err(request.error.unwrap_or(UdpError::MalformedResponse));
+            }
+
+            let processed = self.process_one().await;
+            if self.has_inflight() {
+                if !self.receive_next_with_timeout(timeout).await {
+                    self.handle_timeouts_with_timeout(timeout).await;
+                }
+                continue;
+            }
+            if !processed {
+                return Err(UdpError::Network);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(crate) async fn process_one(&mut self) -> bool {
         loop {
             if self.pending.is_empty() && self.waiting_for_conn.is_empty() {
                 return false;
@@ -34,7 +88,6 @@ impl UdpTrackerClient {
                     if conn.updated_at.elapsed().as_secs()
                         < aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_TIMEOUT_SECS
                     {
-                        // Route to appropriate send method based on request type
                         if !req.scrape_info_hashes.is_empty() {
                             return self.send_scrape(&mut req, conn.id).await;
                         }
@@ -73,7 +126,6 @@ impl UdpTrackerClient {
         let txn_id = self.next_txn();
         req.txn_id = txn_id;
         req.dispatched_at = Some(std::time::Instant::now());
-        req.state = UdpState::Pending;
 
         let payload = build_announce_request(
             conn_id,
@@ -116,22 +168,24 @@ impl UdpTrackerClient {
             Err(e) => {
                 warn!("Send ANNOUNCE to {} failed: {}", req.remote_addr, e);
                 req.fail_count += 1;
-                req.error = Some(UdpError::Network);
-                if req.fail_count < MAX_RETRIES {
-                    self.pending.push_front(std::mem::replace(
-                        req,
-                        UdpTrackerRequest::new(
-                            req.remote_addr,
-                            req.info_hash,
-                            req.peer_id,
-                            req.downloaded,
-                            req.left,
-                            req.uploaded,
-                            req.event,
-                            req.num_want,
-                            req.port,
-                        ),
-                    ));
+                let retry = req.fail_count < MAX_RETRIES;
+                req.error = (!retry).then_some(UdpError::Network);
+                let replacement = UdpTrackerRequest::new(
+                    req.remote_addr,
+                    req.info_hash,
+                    req.peer_id,
+                    req.downloaded,
+                    req.left,
+                    req.uploaded,
+                    req.event,
+                    req.num_want,
+                    req.port,
+                );
+                let completed_or_retry = std::mem::replace(req, replacement);
+                if retry {
+                    self.pending.push_front(completed_or_retry);
+                } else {
+                    self.pending.push_back(completed_or_retry);
                 }
                 true
             }
@@ -150,7 +204,6 @@ impl UdpTrackerClient {
         let payload = build_connect_request(txn_id);
         req.txn_id = txn_id;
         req.dispatched_at = Some(std::time::Instant::now());
-        req.state = UdpState::Pending;
 
         match self.socket.send_to(&payload, req.remote_addr).await {
             Ok(len) => {
@@ -196,7 +249,7 @@ impl UdpTrackerClient {
         }
     }
 
-    pub async fn handle_response(&mut self, data: &[u8], from: &SocketAddr) {
+    pub(crate) async fn handle_response(&mut self, data: &[u8], from: &SocketAddr) {
         if data.len() < 4 {
             warn!("Short response from {}: {} bytes", from, data.len());
             return;
@@ -268,8 +321,7 @@ impl UdpTrackerClient {
                             resp.interval
                         );
                         req.reply = Some(resp);
-                        req.state = UdpState::Complete;
-                        req.error = Some(UdpError::Success);
+                        req.error = None;
                     }
                     Err(e) => {
                         warn!("Parse ANNOUNCE response from {} failed: {}", from, e);
@@ -300,25 +352,18 @@ impl UdpTrackerClient {
                         from,
                         results.len()
                     );
-                    for result in &results {
-                        debug!(
-                            "  seeders={} leechers={} completed={}",
-                            result.seeders, result.leechers, result.completed
-                        );
-                    }
                     req.scrape_results = Some(results);
-                    req.state = UdpState::Complete;
-                    req.error = Some(UdpError::Success);
+                    req.error = None;
                     self.pending.push_back(req);
                 }
                 Err(e) => {
                     warn!("Parse SCRAPE response from {} failed: {}", from, e);
-                    req.error = Some(UdpError::TrackerError);
+                    req.error = Some(UdpError::MalformedResponse);
                     self.pending.push_back(req);
                 }
             },
             _ => {
-                warn!("Unknown action {} from {}", action_val, from);
+                warn!("Unexpected tracker action {} from {}", action_val, from);
                 if req.is_connect {
                     self.fail_connection_requests(*from, UdpError::MalformedResponse);
                 } else {
@@ -329,12 +374,7 @@ impl UdpTrackerClient {
         }
     }
 
-    pub async fn handle_timeouts(&mut self) {
-        self.handle_timeouts_with_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .await;
-    }
-
-    pub async fn handle_timeouts_with_timeout(&mut self, timeout: Duration) {
+    pub(crate) async fn handle_timeouts_with_timeout(&mut self, timeout: Duration) {
         let now = std::time::Instant::now();
         let expired: Vec<usize> = self
             .inflight
@@ -382,7 +422,6 @@ impl UdpTrackerClient {
                 } else {
                     warn!("Max retries exceeded for txn_id={}", req.txn_id);
                     req.error = Some(UdpError::Timeout);
-                    req.state = UdpState::Complete;
                     self.pending.push_back(req);
                 }
             }
@@ -426,7 +465,6 @@ impl UdpTrackerClient {
         while let Some(mut request) = waiting.pop_front() {
             if request.remote_addr == addr {
                 request.error = Some(error);
-                request.state = UdpState::Complete;
                 self.pending.push_back(request);
             } else {
                 self.waiting_for_conn.push_back(request);
@@ -437,13 +475,8 @@ impl UdpTrackerClient {
         while let Some(mut request) = pending.pop_front() {
             if request.remote_addr == addr && !request.is_connect && request.error.is_none() {
                 request.error = Some(error);
-                request.state = UdpState::Complete;
             }
             self.pending.push_back(request);
         }
-    }
-
-    pub fn socket(&self) -> Arc<tokio::net::UdpSocket> {
-        Arc::clone(&self.socket)
     }
 }

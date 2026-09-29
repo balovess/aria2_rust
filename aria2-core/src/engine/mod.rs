@@ -18,11 +18,6 @@ pub mod halt_watchers;
 #[cfg(feature = "bittorrent")]
 pub mod hook_manager;
 pub mod http;
-// Preserve the previously public HTTP module paths while keeping their
-// implementations under the protocol-owned `engine::http` directory.
-pub use http::download_command;
-pub use http::segment_downloader as http_segment_downloader;
-pub use http::sequential_download;
 #[cfg(feature = "metalink")]
 pub mod metalink;
 pub mod mirror_coordinator;

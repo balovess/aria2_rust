@@ -128,7 +128,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_task = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0x61; 20], false, false),
             endpoint,
         );
@@ -193,13 +193,14 @@ mod tests {
                 .unwrap();
             stream
         });
-        let mut connection = BtPeerConn::connect_plain_with_options(
+        let mut connection = BtPeerConn::connect_plain_with_policy(
             &PeerAddr::new("127.0.0.1", address.port()),
             &info_hash,
             None,
             &[0x53; 20],
             Duration::from_secs(5),
             false,
+            &crate::network::OutboundNetworkPolicy::direct(),
         )
         .await
         .unwrap();

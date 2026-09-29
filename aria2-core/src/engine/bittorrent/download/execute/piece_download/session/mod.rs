@@ -17,6 +17,7 @@ use crate::engine::bittorrent::download::execute::peer_session::TorrentSession;
 
 mod availability;
 mod initialization;
+pub(in crate::engine::bittorrent::download::execute) mod peer_dials;
 mod piece;
 mod run;
 
@@ -80,7 +81,7 @@ impl BtDownloadCommand {
         }
         let session = PieceDownloadSession::new(
             self,
-            std::mem::take(&mut torrent_session.initial_peer_addrs),
+            std::mem::take(&mut torrent_session.initial_peers),
             torrent_session.network_info_hash,
             &mut torrent_session.swarm,
             Arc::clone(&torrent_session.upload_counter),

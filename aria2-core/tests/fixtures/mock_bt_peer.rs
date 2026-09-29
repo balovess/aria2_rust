@@ -7,13 +7,14 @@ pub struct MockBtPeerServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     requested_pieces: std::sync::Arc<tokio::sync::Mutex<Vec<u32>>>,
     accepted_peers: std::sync::Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
+    completed_handshakes: tokio::sync::watch::Sender<usize>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct MockBtPeerBehavior {
     piece_response_delay: Option<std::time::Duration>,
     strict_availability: bool,
-    pex_peer: Option<SocketAddr>,
+    pex_peers: Vec<SocketAddr>,
     stay_choked: bool,
 }
 
@@ -35,7 +36,8 @@ impl MockBtPeerServer {
     }
 
     pub async fn start_staying_choked(info_hash: [u8; 20], piece_data: Vec<Vec<u8>>) -> Self {
-        Self::start_with_policy_and_pex(info_hash, piece_data, None, None, false, None, true).await
+        Self::start_with_policy_and_pex(info_hash, piece_data, None, None, false, Vec::new(), true)
+            .await
     }
 
     pub async fn start_with_response_delay(
@@ -58,8 +60,43 @@ impl MockBtPeerServer {
             None,
             Some(piece_response_delay),
             false,
-            Some(discovered_peer),
+            vec![discovered_peer],
             false,
+        )
+        .await
+    }
+
+    pub async fn start_advertising_pex_peers(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        discovered_peers: Vec<SocketAddr>,
+        piece_response_delay: std::time::Duration,
+    ) -> Self {
+        Self::start_with_policy_and_pex(
+            info_hash,
+            piece_data,
+            None,
+            Some(piece_response_delay),
+            false,
+            discovered_peers,
+            false,
+        )
+        .await
+    }
+
+    pub async fn start_staying_choked_advertising_pex_peers(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        discovered_peers: Vec<SocketAddr>,
+    ) -> Self {
+        Self::start_with_policy_and_pex(
+            info_hash,
+            piece_data,
+            None,
+            None,
+            false,
+            discovered_peers,
+            true,
         )
         .await
     }
@@ -70,6 +107,7 @@ impl MockBtPeerServer {
             .expect("Failed to bind failing mock peer port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let (completed_handshakes, _) = tokio::sync::watch::channel(0);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -85,6 +123,7 @@ impl MockBtPeerServer {
             shutdown: Some(shutdown_tx),
             requested_pieces: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
             accepted_peers: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            completed_handshakes,
         }
     }
 
@@ -125,7 +164,7 @@ impl MockBtPeerServer {
             torrent_metadata,
             piece_response_delay,
             strict_availability,
-            None,
+            Vec::new(),
             false,
         )
         .await
@@ -137,7 +176,7 @@ impl MockBtPeerServer {
         torrent_metadata: Option<Vec<u8>>,
         piece_response_delay: Option<std::time::Duration>,
         strict_availability: bool,
-        pex_peer: Option<SocketAddr>,
+        pex_peers: Vec<SocketAddr>,
         stay_choked: bool,
     ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -150,6 +189,8 @@ impl MockBtPeerServer {
         let requested_pieces_for_task = std::sync::Arc::clone(&requested_pieces);
         let accepted_peers = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let accepted_peers_for_task = std::sync::Arc::clone(&accepted_peers);
+        let (completed_handshakes, _) = tokio::sync::watch::channel(0usize);
+        let completed_handshakes_for_task = completed_handshakes.clone();
 
         tokio::spawn(async move {
             loop {
@@ -161,7 +202,9 @@ impl MockBtPeerServer {
                                 let ih = info_hash;
                                 let pd = piece_data.clone();
                                 let md = torrent_metadata.clone();
+                                let peer_exchange_peers = pex_peers.clone();
                                 let requests = std::sync::Arc::clone(&requested_pieces_for_task);
+                                let completed_handshakes = completed_handshakes_for_task.clone();
                                 tokio::spawn(async move {
                                     Self::handle_peer(
                                         &mut stream,
@@ -172,9 +215,10 @@ impl MockBtPeerServer {
                                         MockBtPeerBehavior {
                                             piece_response_delay,
                                             strict_availability,
-                                            pex_peer,
+                                            pex_peers: peer_exchange_peers,
                                             stay_choked,
                                         },
+                                        completed_handshakes,
                                     )
                                     .await;
                                 });
@@ -192,6 +236,7 @@ impl MockBtPeerServer {
             shutdown: Some(shutdown_tx),
             requested_pieces,
             accepted_peers,
+            completed_handshakes,
         }
     }
 
@@ -207,6 +252,22 @@ impl MockBtPeerServer {
         self.accepted_peers.lock().await.clone()
     }
 
+    pub async fn wait_for_handshakes(&self, count: usize, timeout: std::time::Duration) -> bool {
+        let mut completed = self.completed_handshakes.subscribe();
+        tokio::time::timeout(timeout, async {
+            loop {
+                if *completed.borrow_and_update() >= count {
+                    return;
+                }
+                if completed.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     async fn handle_peer(
         stream: &mut tokio::net::TcpStream,
         expected_info_hash: &[u8; 20],
@@ -214,11 +275,12 @@ impl MockBtPeerServer {
         torrent_metadata: Option<&[u8]>,
         requested_pieces: std::sync::Arc<tokio::sync::Mutex<Vec<u32>>>,
         behavior: MockBtPeerBehavior,
+        completed_handshakes: tokio::sync::watch::Sender<usize>,
     ) {
         let MockBtPeerBehavior {
             piece_response_delay,
             strict_availability,
-            pex_peer,
+            pex_peers,
             stay_choked,
         } = behavior;
         const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
@@ -247,8 +309,11 @@ impl MockBtPeerServer {
         response_hs[28..48].copy_from_slice(expected_info_hash);
         response_hs[48..68].copy_from_slice(&peer_id);
 
-        stream.write_all(&response_hs).await.ok();
+        if stream.write_all(&response_hs).await.is_err() {
+            return;
+        }
         stream.flush().await.ok();
+        completed_handshakes.send_modify(|count| *count += 1);
 
         let num_pieces = piece_data.len() as u32;
         let bf_len = num_pieces.div_ceil(8) as usize;
@@ -343,11 +408,7 @@ impl MockBtPeerServer {
                     }
                 }
                 Some(20) => {
-                    if !pex_sent
-                        && payload.get(1) == Some(&0)
-                        && let Some(discovered_peer) = pex_peer
-                        && let std::net::IpAddr::V4(ip) = discovered_peer.ip()
-                    {
+                    if !pex_sent && payload.get(1) == Some(&0) && !pex_peers.is_empty() {
                         use aria2_protocol::bittorrent::message::extension::{
                             CompactPeerV4, ExtensionHandshake, UtPexMessage,
                         };
@@ -357,13 +418,18 @@ impl MockBtPeerServer {
                         let handshake = build_extended_message(0, &extension_handshake.to_bytes());
 
                         let mut pex = UtPexMessage::new();
-                        let mut compact = [0u8; 6];
-                        compact[..4].copy_from_slice(&ip.octets());
-                        compact[4..].copy_from_slice(&discovered_peer.port().to_be_bytes());
-                        let pex_message = {
-                            pex.added.push(CompactPeerV4(compact));
-                            build_extended_message(17, &pex.to_payload())
-                        };
+                        for discovered_peer in &pex_peers {
+                            if let std::net::IpAddr::V4(ip) = discovered_peer.ip() {
+                                let mut compact = [0u8; 6];
+                                compact[..4].copy_from_slice(&ip.octets());
+                                compact[4..].copy_from_slice(&discovered_peer.port().to_be_bytes());
+                                pex.added.push(CompactPeerV4(compact));
+                            }
+                        }
+                        if pex.added.is_empty() {
+                            continue;
+                        }
+                        let pex_message = { build_extended_message(17, &pex.to_payload()) };
 
                         if stream.write_all(&handshake).await.is_err()
                             || stream.write_all(&pex_message).await.is_err()

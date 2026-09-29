@@ -7,13 +7,12 @@ use tracing::{debug, info, warn};
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::{
-    active_data_bind_addr, cwd_targets, parse_mdtm_timestamp, parse_pwd_response,
-    split_decoded_remote_path,
+    active_data_bind_addr, cwd_targets, parse_epsv_response, parse_mdtm_timestamp,
+    parse_pasv_response, parse_pwd_response, split_decoded_remote_path,
 };
+use aria2_protocol::ftp::connection::FtpActiveDataListener;
 
 pub(super) use super::connection::RawFtpControl;
-pub(crate) use crate::ftp::connection::percent_decode as urlencoding_decode;
-pub(super) use crate::ftp::connection::{parse_epsv_response, parse_pasv_response};
 
 impl RawFtpControl {
     /// Authenticate with USER/PASS commands
@@ -250,7 +249,7 @@ impl RawFtpControl {
     }
 
     /// Create an active-mode listener and advertise it with EPRT/PORT.
-    pub(super) async fn enter_active_mode(&mut self) -> Result<tokio::net::TcpListener> {
+    pub(super) async fn enter_active_mode(&mut self) -> Result<FtpActiveDataListener> {
         let local_addr = self
             .reader
             .get_ref()
@@ -261,12 +260,10 @@ impl RawFtpControl {
         let listener = tokio::net::TcpListener::bind(active_data_bind_addr(local_addr))
             .await
             .map_err(|e| Aria2Error::Network(format!("FTP active listener bind failed: {}", e)))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| {
-                Aria2Error::Network(format!("FTP active listener address unavailable: {}", e))
-            })?
-            .port();
+        let listener_addr = listener.local_addr().map_err(|e| {
+            Aria2Error::Network(format!("FTP active listener address unavailable: {}", e))
+        })?;
+        let port = listener_addr.port();
         let ip = local_addr.ip();
         let eprt = format!(
             "EPRT |{}|{}|{}|",
@@ -306,7 +303,7 @@ impl RawFtpControl {
                 ));
             }
         }
-        Ok(listener)
+        Ok(FtpActiveDataListener::new(listener, listener_addr))
     }
 
     /// Initiate file retrieval (RETR command)

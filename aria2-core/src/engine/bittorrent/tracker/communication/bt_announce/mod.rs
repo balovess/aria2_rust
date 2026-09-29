@@ -7,9 +7,8 @@
 //!
 //! The [`BtAnnounce`] state machine supplies lifecycle state for HTTP,
 //! WebSocket, and UDP tracker URLs.
-//! When a `udp://` URL is encountered, the announce should be routed through
-//! [`crate::engine::bittorrent::tracker::udp_manager::UdpTrackerManager`] instead of the
-//! HTTP path. The helper [`is_udp_tracker`] can be used to detect UDP URLs.
+//! `TrackerAnnouncer` routes `udp://` URLs to the policy-bound UDP client.
+//! The helper [`is_udp_tracker`] detects UDP URLs.
 
 #![allow(clippy::empty_line_after_doc_comments)]
 
@@ -343,6 +342,12 @@ impl BtAnnounce {
         self.announce_list.announce_failure();
     }
 
+    /// Clear an in-flight request that was cancelled before its response was
+    /// processed, without treating an intentional shutdown as tracker failure.
+    pub fn announce_cancelled(&mut self) {
+        self.trackers = self.trackers.saturating_sub(1);
+    }
+
     /// Apply tracker timing and swarm statistics from a successful response.
     ///
     /// This is shared by tracker transports whose response is not represented
@@ -540,7 +545,7 @@ impl BtAnnounce {
     /// Returns `true` if the current tracker URL is a UDP tracker.
     ///
     /// Call this after `adjust_announce_list()` to determine whether
-    /// to route the announce through `UdpTrackerManager` or the HTTP path.
+    /// to route the announce through the UDP client or HTTP path.
     ///
     /// # C++ Reference
     ///
@@ -556,7 +561,7 @@ impl BtAnnounce {
     /// Convert the current announce event to a UDP tracker event.
     ///
     /// Maps the tracker state machine event to the appropriate UDP protocol
-    /// event for use with `UdpTrackerManager::announce()`.
+    /// event for use with `UdpTrackerClient::announce()`.
     ///
     /// # C++ Reference
     ///

@@ -29,6 +29,7 @@ use crate::error::Result;
 use crate::network::OutboundNetworkPolicy;
 use tracing::{debug, info};
 
+/// Maximum time to wait for additional peers after the first successful connection.
 pub(crate) const PEER_CONNECT_SETTLE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// BT Peer Interaction Manager
@@ -111,7 +112,9 @@ impl BtPeerInteraction {
             match result {
                 Ok(conn) => {
                     active_connections.push(conn);
-                    settle_deadline = Some(tokio::time::Instant::now() + PEER_CONNECT_SETTLE_TIME);
+                    settle_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + PEER_CONNECT_SETTLE_TIME
+                    });
                 }
                 Err(e) => {
                     debug!(
@@ -231,7 +234,7 @@ impl BtPeerInteraction {
                 addr,
                 info_hash_raw,
                 connection_options.hybrid_info_hash_v2.as_ref(),
-                crate::engine::bittorrent::peer::connection::MseConnectionOptions {
+                aria2_protocol::bittorrent::peer::mse::MseConnectionOptions {
                     force_encryption: connection_options.crypto.force_encryption,
                     prefer_encryption: connection_options.crypto.prefer_encryption,
                     local_peer_id: connection_options.local_peer_id,
@@ -247,7 +250,7 @@ impl BtPeerInteraction {
                 addr,
                 info_hash_raw,
                 connection_options.hybrid_info_hash_v2.as_ref(),
-                crate::engine::bittorrent::peer::connection::MseConnectionOptions {
+                aria2_protocol::bittorrent::peer::mse::MseConnectionOptions {
                     force_encryption: connection_options.crypto.force_encryption,
                     prefer_encryption: connection_options.crypto.prefer_encryption,
                     local_peer_id: connection_options.local_peer_id,
@@ -281,7 +284,7 @@ impl BtPeerInteraction {
 mod tests {
     use super::{BtPeerConnectionOptions, BtPeerCryptoPolicy, BtPeerInteraction};
     use crate::network::OutboundNetworkPolicy;
-    use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
+    use aria2_protocol::bittorrent::peer::connection::PeerAddr;
     use std::time::Duration;
 
     #[tokio::test]
@@ -293,10 +296,12 @@ mod tests {
         let good_server = tokio::spawn(async move {
             loop {
                 let (stream, _) = good_listener.accept().await.unwrap();
-                if let Ok(connection) =
-                    PeerConnection::from_incoming_stream(stream, &info_hash, &remote_peer_id).await
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
                 {
-                    return connection;
+                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
+                        return connection;
+                    }
                 }
             }
         });
@@ -354,6 +359,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn later_peer_success_does_not_extend_the_settle_deadline() {
+        let info_hash = [7; 20];
+        let remote_peer_id = [8; 20];
+        let first_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first_listener.local_addr().unwrap();
+        let first_server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = first_listener.accept().await.unwrap();
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                {
+                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
+                        return connection;
+                    }
+                }
+            }
+        });
+
+        let delayed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let delayed_addr = delayed_listener.local_addr().unwrap();
+        let delayed_server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = delayed_listener.accept().await.unwrap();
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                {
+                    if let Ok(connection) = incoming.complete([10; 20], None, false).await {
+                        return connection;
+                    }
+                }
+                // The first connection is the MSE probe. Delay accepting the
+                // plaintext retry so this peer becomes ready well inside the
+                // first peer's one-second settle window.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+        });
+
+        let pending_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pending_addr = pending_listener.local_addr().unwrap();
+        let pending_server = tokio::spawn(async move {
+            while let Ok((stream, _)) = pending_listener.accept().await {
+                tokio::spawn(async move {
+                    let _stream = stream;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                });
+            }
+        });
+
+        let options = BtPeerConnectionOptions {
+            crypto: BtPeerCryptoPolicy::default(),
+            connection_timeout: Duration::from_secs(2),
+            keep_alive_interval: Duration::from_secs(120),
+            peer_timeout: Duration::from_secs(60),
+            local_peer_id: [9; 20],
+            peer_agent: "aria2-rust-test".to_string(),
+            enable_utp: false,
+            utp_listen_port: None,
+            dht_enabled: false,
+            listen_port: None,
+            hybrid_info_hash_v2: None,
+        };
+        let peers = [
+            PeerAddr::new(&first_addr.ip().to_string(), first_addr.port()),
+            PeerAddr::new(&delayed_addr.ip().to_string(), delayed_addr.port()),
+            PeerAddr::new(&pending_addr.ip().to_string(), pending_addr.port()),
+        ];
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(1250),
+            BtPeerInteraction::connect_to_peers(
+                &peers,
+                &info_hash,
+                1,
+                16 * 1024,
+                3,
+                &options,
+                None,
+                &OutboundNetworkPolicy::direct(),
+            ),
+        )
+        .await
+        .expect("a later success must not renew the first peer's settle deadline")
+        .unwrap();
+
+        assert_eq!(result.connections.len(), 2);
+        drop(result);
+        first_server.abort();
+        delayed_server.abort();
+        pending_server.abort();
+    }
+
+    #[tokio::test]
     async fn ipv6_peer_with_utp_enabled_falls_back_to_tcp() {
         let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
         let endpoint = listener.local_addr().unwrap();
@@ -362,10 +459,12 @@ mod tests {
         let server = tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                if let Ok(connection) =
-                    PeerConnection::from_incoming_stream(stream, &info_hash, &remote_peer_id).await
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
                 {
-                    return connection;
+                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
+                        return connection;
+                    }
                 }
             }
         });

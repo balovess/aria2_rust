@@ -11,10 +11,14 @@ mod support;
 #[path = "../../../aria2-core/tests/fixtures/mock_tracker.rs"]
 mod mock_tracker;
 
-use aria2_core::engine::bittorrent::registry::{BtObject, BtRegistry};
 use aria2_core::engine::bittorrent::download::seed_manager::{BtSeedManager, SeedExitCondition};
-use aria2_core::engine::bittorrent::tracker::communication::{BtAnnounce, TrackerAnnouncer, TrackerRuntimeSnapshot};
-use aria2_core::engine::bittorrent::peer::upload_session::{BtSeedingConfig, InMemoryPieceProvider};
+use aria2_core::engine::bittorrent::peer::upload_session::{
+    BtSeedingConfig, InMemoryPieceProvider,
+};
+use aria2_core::engine::bittorrent::registry::{BtObject, BtRegistry};
+use aria2_core::engine::bittorrent::tracker::communication::{
+    BtAnnounce, TrackerAnnouncer, TrackerRuntimeInfo, TrackerRuntimeSnapshot,
+};
 use aria2_core::request::request_group::{BtPeerSnapshot, BtPeerSource};
 use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig, DhtEngineState};
 use aria2_protocol::bittorrent::message::handshake::Handshake;
@@ -128,12 +132,11 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         assert_eq!(&payload[9..], leecher_piece.as_slice());
     });
     let (server_stream, leecher_addr) = listener.accept().await.unwrap();
-    let peer_connection =
-        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
-            server_stream,
-            &info_hash,
-            &seeder_peer_id,
-        )
+    let incoming = aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+        .await
+        .expect("the seeder should parse the real leecher handshake");
+    let peer_connection = incoming
+        .complete(seeder_peer_id, None, false)
         .await
         .expect("the seeder should complete the real leecher handshake");
     assert_eq!(peer_connection.remote_peer_id(), Some(&leecher_peer_id));
@@ -288,6 +291,61 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(trackers[0]["leechers"], 1);
     assert_eq!(trackers[0]["downloaded"], serde_json::Value::Null);
     assert!(trackers[0]["snapshotAtUnixMillis"].as_str().is_some());
+
+    {
+        let mut snapshot = tracker_runtime.write().unwrap();
+        let tracker = snapshot
+            .trackers
+            .iter_mut()
+            .find(|tracker| tracker.uri == tracker_url)
+            .expect("runtime snapshot contains the announced tracker");
+        tracker.seconds_since_last_success = Some(0);
+        tracker.last_success_at_unix_millis = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                - 120_000,
+        );
+        let public_url = "http://public-tracker.example/announce".to_string();
+        let dynamic_url = "http://dynamic-tracker.example/announce".to_string();
+        snapshot.tracker_tiers.push(vec![public_url.clone()]);
+        snapshot.tracker_tiers.push(vec![dynamic_url.clone()]);
+        snapshot.trackers.push(TrackerRuntimeInfo {
+            uri: public_url.clone(),
+            tier: 2,
+            status: "succeeded".to_string(),
+            ..TrackerRuntimeInfo::default()
+        });
+        snapshot.trackers.push(TrackerRuntimeInfo {
+            uri: dynamic_url.clone(),
+            tier: 3,
+            status: "idle".to_string(),
+            ..TrackerRuntimeInfo::default()
+        });
+    }
+    let elapsed_trackers_resp = engine
+        .handle_request(&make_request("aria2.getTrackers", serde_json::json!([gid])))
+        .await;
+    assert_success(&elapsed_trackers_resp);
+    let elapsed_trackers = elapsed_trackers_resp.result.unwrap();
+    assert_eq!(elapsed_trackers.as_array().unwrap().len(), 3);
+    assert!(
+        elapsed_trackers[0]["secondsSinceLastSuccess"]
+            .as_u64()
+            .is_some_and(|seconds| seconds >= 120),
+        "getTrackers must calculate elapsed time at query time instead of returning a frozen snapshot age: {elapsed_trackers}"
+    );
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://public-tracker.example/announce"
+            && tracker["tier"] == 2
+            && tracker["status"] == "succeeded"
+    }));
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://dynamic-tracker.example/announce"
+            && tracker["tier"] == 3
+            && tracker["status"] == "idle"
+    }));
 
     let dht_resp = engine
         .handle_request(&make_request("aria2.getDhtStatus", serde_json::json!([])))

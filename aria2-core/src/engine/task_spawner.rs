@@ -179,7 +179,7 @@ async fn create_command_for_group(
     #[cfg(feature = "metalink")]
     if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
         let base_uri = group.recover().metalink_base_uri();
-        let mut command = crate::engine::metalink::download_command::MetalinkDownloadCommand::new_with_group_source_policy(
+        let mut command = crate::engine::metalink::download_command::MetalinkDownloadCommand::new_with_group_source(
             Arc::clone(&group),
             &metalink_data,
             file_index,
@@ -267,7 +267,6 @@ async fn create_command_for_uri(
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
         cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
-        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }

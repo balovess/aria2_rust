@@ -1,20 +1,27 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{UdpAction, UdpError};
+use super::UdpError;
+use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpAction;
 
 use super::*;
 
+async fn new_direct_client(bind_port: u16) -> Result<UdpTrackerClient, String> {
+    UdpTrackerClient::new_with_policy(bind_port, &crate::network::OutboundNetworkPolicy::direct())
+        .await
+}
+
 #[tokio::test]
 async fn test_client_creation() {
-    let client = UdpTrackerClient::new(0).await;
+    let client = new_direct_client(0).await;
     assert!(
         client.is_ok(),
         "UDP client creation should succeed with port 0"
     );
     let c = client.unwrap();
-    assert!(c.no_pending());
-    assert!(c.completed_requests().is_empty());
+    assert!(c.pending.is_empty());
+    assert!(c.inflight.is_empty());
+    assert!(c.waiting_for_conn.is_empty());
 }
 
 #[tokio::test]
@@ -50,32 +57,26 @@ async fn policy_udp_client_binds_the_requested_dual_stack_family() {
 
 #[tokio::test]
 async fn test_add_announce_request() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let ih = [0xABu8; 20];
     let pid = [0xCDu8; 20];
 
-    client
-        .add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881)
-        .await;
+    client.add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881);
     assert_eq!(client.pending.len(), 1);
 
-    client
-        .add_announce(&addr, &ih, &pid, 500, 500, 0, UdpEvent::None, -1, 6881)
-        .await;
+    client.add_announce(&addr, &ih, &pid, 500, 500, 0, UdpEvent::None, -1, 6881);
     assert_eq!(client.pending.len(), 2);
 }
 
 #[tokio::test]
 async fn test_process_one_needs_connection() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let ih = [0x12u8; 20];
     let pid = [0x34u8; 20];
 
-    client
-        .add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881)
-        .await;
+    client.add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881);
     let processed = client.process_one().await;
     assert!(processed, "Should have processed the connect step");
     assert!(
@@ -86,22 +87,22 @@ async fn test_process_one_needs_connection() {
 
 #[tokio::test]
 async fn test_no_pending_returns_false_when_empty() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
-    assert!(client.no_pending());
+    let mut client = new_direct_client(0).await.unwrap();
+    assert!(client.pending.is_empty());
+    assert!(client.inflight.is_empty());
+    assert!(client.waiting_for_conn.is_empty());
     let processed = client.process_one().await;
     assert!(!processed, "process_one should return false when empty");
 }
 
 #[tokio::test]
 async fn test_handle_connect_response() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let ih = [0x11u8; 20];
     let pid = [0x22u8; 20];
 
-    client
-        .add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881)
-        .await;
+    client.add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881);
     client.process_one().await;
 
     let mut resp_data = vec![0u8; 16];
@@ -119,7 +120,7 @@ async fn test_handle_connect_response() {
 
 #[tokio::test]
 async fn test_handle_announce_response_with_peers() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
 
     let ih = [0x33u8; 20];
@@ -143,7 +144,11 @@ async fn test_handle_announce_response_with_peers() {
 
     client.handle_response(&resp_data, &addr).await;
 
-    let completed = client.completed_requests();
+    let completed: Vec<_> = client
+        .pending
+        .iter()
+        .filter_map(|request| request.reply.as_ref())
+        .collect();
     assert!(
         !completed.is_empty(),
         "Should have at least one completed announce"
@@ -159,14 +164,12 @@ async fn test_handle_announce_response_with_peers() {
 
 #[tokio::test]
 async fn test_handle_error_response() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let ih = [0x55u8; 20];
     let pid = [0x66u8; 20];
 
-    client
-        .add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881)
-        .await;
+    client.add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881);
     client.process_one().await;
 
     let txn_id = client.inflight.front().map(|r| r.txn_id).unwrap_or(0);
@@ -181,32 +184,34 @@ async fn test_handle_error_response() {
         "Error should not create cache entry"
     );
     assert_eq!(
-        client.completed_announce_error(),
+        client.pending.iter().find_map(|request| request.error),
         Some(UdpError::TrackerError)
     );
 }
 
 #[tokio::test]
 async fn test_timeout_cleaning() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let ih = [0x77u8; 20];
     let pid = [0x88u8; 20];
 
-    client
-        .add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881)
-        .await;
+    client.add_announce(&addr, &ih, &pid, 0, 1000, 0, UdpEvent::Started, 50, 6881);
     client.process_one().await;
     assert_eq!(client.inflight.len(), 1);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    client.handle_timeouts().await;
+    client
+        .handle_timeouts_with_timeout(Duration::from_secs(15))
+        .await;
     assert_eq!(client.inflight.len(), 1, "Not yet timed out");
 
     for req in &mut client.inflight {
-        req.dispatched_at = Some(Instant::now() - Duration::from_secs(REQUEST_TIMEOUT_SECS + 1));
+        req.dispatched_at = Some(Instant::now() - Duration::from_secs(16));
     }
-    client.handle_timeouts().await;
+    client
+        .handle_timeouts_with_timeout(Duration::from_secs(15))
+        .await;
     assert!(
         client.inflight.is_empty()
             || !client.pending.is_empty()
@@ -219,13 +224,15 @@ async fn test_timeout_cleaning() {
             .pending
             .pop_front()
             .expect("timeout retry should be queued");
-        req.dispatched_at = Some(Instant::now() - Duration::from_secs(REQUEST_TIMEOUT_SECS + 1));
+        req.dispatched_at = Some(Instant::now() - Duration::from_secs(16));
         client.inflight.push_back(req);
-        client.handle_timeouts().await;
+        client
+            .handle_timeouts_with_timeout(Duration::from_secs(15))
+            .await;
     }
 
     assert_eq!(
-        client.completed_announce_error(),
+        client.pending.iter().find_map(|request| request.error),
         Some(UdpError::Timeout),
         "exhausted UDP retries should retain a timeout classification"
     );
@@ -233,7 +240,7 @@ async fn test_timeout_cleaning() {
 
 #[tokio::test]
 async fn test_txn_id_generation() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let mut txn_ids = Vec::new();
     for _ in 0..5 {
         txn_ids.push(client.next_txn());
@@ -247,21 +254,15 @@ async fn test_txn_id_generation() {
     );
 }
 
-#[tokio::test]
-async fn test_shared_client_creation() {
-    let shared = UdpTrackerClient::create_shared(0).await;
-    assert!(shared.is_ok(), "Shared client creation should succeed");
-}
-
 // --- Scrape tests ---
 
 #[tokio::test]
 async fn test_add_scrape_request() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let hashes = [[0xAAu8; 20], [0xBBu8; 20], [0xCCu8; 20]];
 
-    client.add_scrape(&addr, &hashes).await;
+    client.add_scrape(&addr, &hashes);
     assert_eq!(client.pending.len(), 1);
 
     let req = &client.pending[0];
@@ -272,7 +273,7 @@ async fn test_add_scrape_request() {
 
 #[tokio::test]
 async fn test_handle_scrape_response_single_hash() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let hashes = [[0x11u8; 20]];
 
@@ -295,17 +296,16 @@ async fn test_handle_scrape_response_single_hash() {
 
     client.handle_response(&resp_data, &addr).await;
 
-    let scrape_results = client.completed_scrape_results();
+    let scrape_results = client.pending[0].scrape_results.as_ref().unwrap();
     assert_eq!(scrape_results.len(), 1);
-    assert_eq!(scrape_results[0].len(), 1);
-    assert_eq!(scrape_results[0][0].seeders, 42);
-    assert_eq!(scrape_results[0][0].leechers, 10);
-    assert_eq!(scrape_results[0][0].completed, 999);
+    assert_eq!(scrape_results[0].seeders, 42);
+    assert_eq!(scrape_results[0].leechers, 10);
+    assert_eq!(scrape_results[0].completed, 999);
 }
 
 #[tokio::test]
 async fn test_handle_scrape_response_multi_hash() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
     let hashes = [[0x22u8; 20], [0x33u8; 20]];
 
@@ -332,16 +332,15 @@ async fn test_handle_scrape_response_multi_hash() {
 
     client.handle_response(&resp_data, &addr).await;
 
-    let scrape_results = client.completed_scrape_results();
-    assert_eq!(scrape_results.len(), 1);
-    assert_eq!(scrape_results[0].len(), 2);
-    assert_eq!(scrape_results[0][0].seeders, 100);
-    assert_eq!(scrape_results[0][1].seeders, 5);
+    let scrape_results = client.pending[0].scrape_results.as_ref().unwrap();
+    assert_eq!(scrape_results.len(), 2);
+    assert_eq!(scrape_results[0].seeders, 100);
+    assert_eq!(scrape_results[1].seeders, 5);
 }
 
 #[tokio::test]
 async fn test_scrape_error_action_returns_error() {
-    let mut client = UdpTrackerClient::new(0).await.unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
 
     let txn_id = client.next_txn();
@@ -361,10 +360,10 @@ async fn test_scrape_error_action_returns_error() {
 
     client.handle_response(&err_data, &addr).await;
 
-    // Should not have successful scrape results
-    let scrape_results = client.completed_scrape_results();
+    // The error must not be reported as a successful scrape.
+    let scrape_results = client.pending[0].scrape_results.as_ref();
     assert!(
-        scrape_results.is_empty(),
+        scrape_results.is_none(),
         "Error response should not produce scrape results"
     );
 }

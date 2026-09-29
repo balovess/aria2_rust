@@ -165,6 +165,118 @@ async fn configured_bootstrap_endpoints_are_all_seeded() {
 }
 
 #[tokio::test]
+async fn configured_bootstrap_endpoint_retries_a_dropped_initial_ping() {
+    const NODE_ID: [u8; 20] = [0xD4; 20];
+    const INFO_HASH: [u8; 20] = [0xE5; 20];
+
+    let responder = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("local bootstrap responder should bind"),
+    );
+    let responder_addr = responder.local_addr().expect("responder address");
+    let shutdown = CancellationToken::new();
+    let responder_shutdown = shutdown.clone();
+    let (retry_tx, retry_rx) = tokio::sync::oneshot::channel();
+    let responder_task = tokio::spawn(async move {
+        let mut retry_tx = Some(retry_tx);
+        let mut ping_attempts = 0usize;
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let received = tokio::select! {
+                _ = responder_shutdown.cancelled() => break,
+                received = responder.recv_from(&mut buf) => received,
+            };
+            let (len, from) = received.expect("bootstrap datagram should be received");
+            let query = DhtMessage::decode(&buf[..len]).expect("bootstrap query should decode");
+            let method = query.q.as_ref().map(|method| method.0.as_str());
+            let response = match method {
+                Some("ping") => {
+                    ping_attempts += 1;
+                    if ping_attempts == 1 {
+                        continue;
+                    }
+                    if let Some(retry_tx) = retry_tx.take() {
+                        let _ = retry_tx.send(ping_attempts);
+                    }
+                    DhtMessageBuilder::ping_response(&query.t, &NODE_ID)
+                }
+                Some("find_node") if ping_attempts >= 2 => {
+                    DhtMessageBuilder::find_node_response(&query.t, &NODE_ID, &[])
+                }
+                Some("get_peers") if ping_attempts >= 2 => {
+                    DhtMessageBuilder::get_peers_response_with_peers(
+                        &query.t,
+                        &NODE_ID,
+                        b"fixture-token",
+                        &[],
+                    )
+                }
+                _ => continue,
+            };
+            let encoded = response.encode().expect("bootstrap response should encode");
+            responder
+                .send_to(&encoded, from)
+                .await
+                .expect("bootstrap response should be sent");
+        }
+    });
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        port: 0,
+        listen_addr: Some("127.0.0.1".parse().expect("IPv4 loopback")),
+        bootstrap_nodes: vec![responder_addr],
+        query_timeout: Duration::from_millis(100),
+        bootstrap_timeout: Duration::from_secs(2),
+        ..DhtEngineConfig::default()
+    })
+    .await
+    .expect("DHT engine should start with a local bootstrap node");
+
+    engine
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .expect("bootstrap setup should become ready");
+    let retry_attempts = tokio::time::timeout(Duration::from_secs(1), retry_rx)
+        .await
+        .ok()
+        .and_then(Result::ok);
+    let lookup_result = if retry_attempts.is_some() {
+        Some(tokio::time::timeout(Duration::from_secs(1), engine.find_peers(&INFO_HASH)).await)
+    } else {
+        None
+    };
+    let stats = engine.stats().await;
+
+    engine.shutdown_async().await;
+    shutdown.cancel();
+    responder_task
+        .await
+        .expect("local bootstrap responder should stop");
+
+    assert!(
+        retry_attempts.is_some(),
+        "bootstrap must issue a retry after the first ping is dropped"
+    );
+    assert_eq!(
+        retry_attempts.expect("retry attempt count should be sent"),
+        2,
+        "the fixture should answer exactly the second ping"
+    );
+    let lookup = lookup_result
+        .expect("lookup should be started after the retry")
+        .expect("lookup should finish after bootstrap retry")
+        .expect("lookup should contact the responsive bootstrap node");
+    assert!(lookup.nodes_contacted > 0);
+    assert!(stats.good_nodes > 0, "the responsive node should be good");
+    assert_eq!(
+        stats.total_nodes, 1,
+        "the verified response ID should replace its bootstrap placeholder"
+    );
+}
+
+#[tokio::test]
 async fn test_dht_engine_state_subscription_is_event_driven() {
     let engine = DhtEngine::start(DhtEngineConfig::local())
         .await
@@ -351,7 +463,6 @@ async fn test_bep51_udp_roundtrip_uses_peer_store_samples() {
 async fn test_public_dht_find_peers_interoperability() {
     let engine = DhtEngine::start(DhtEngineConfig {
         port: 0,
-        query_timeout: Duration::from_secs(3),
         bootstrap_timeout: Duration::from_secs(15),
         ..DhtEngineConfig::default()
     })

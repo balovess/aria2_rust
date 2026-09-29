@@ -1,5 +1,5 @@
-//! Protocol message senders, message reading, connection state queries,
-//! and low-level write helpers for [`BtPeerConn`].
+//! Protocol message senders, message reading, and connection state queries for
+//! [`BtPeerConn`].
 
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use aria2_protocol::bittorrent::message::types::BtMessage;
@@ -9,14 +9,7 @@ use super::{BtPeerConn, InnerConnection};
 impl BtPeerConn {
     pub(crate) async fn send_bt_message(&mut self, message: &BtMessage) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(connection) => {
-                connection.send_message(message).await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: e,
-                    })
-                })
-            }
-            InnerConnection::Encrypted(connection) => {
+            InnerConnection::Tcp(connection) => {
                 connection.send_message(message).await.map_err(|e| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                         message: e,
@@ -81,10 +74,7 @@ impl BtPeerConn {
 
     pub async fn send_unchoke(&mut self) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_unchoke().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_unchoke().await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_unchoke().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -98,10 +88,7 @@ impl BtPeerConn {
 
     pub async fn send_choke(&mut self) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_choke().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_choke().await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_choke().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -115,10 +102,7 @@ impl BtPeerConn {
 
     pub async fn send_interested(&mut self) -> Result<()> {
         let result = match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_interested().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_interested().await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -135,10 +119,7 @@ impl BtPeerConn {
 
     pub async fn send_not_interested(&mut self) -> Result<()> {
         let result = match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_not_interested().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_not_interested().await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_not_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -156,15 +137,7 @@ impl BtPeerConn {
     /// Send the BEP 5 DHT port message.
     pub async fn send_port(&mut self, port: u16) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c
-                .send_message(&aria2_protocol::bittorrent::message::types::BtMessage::Port { port })
-                .await
-                .map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: e,
-                    })
-                }),
-            InnerConnection::Encrypted(c) => c
+            InnerConnection::Tcp(c) => c
                 .send_message(&aria2_protocol::bittorrent::message::types::BtMessage::Port { port })
                 .await
                 .map_err(|e| {
@@ -182,10 +155,7 @@ impl BtPeerConn {
 
     pub async fn send_have(&mut self, piece_index: u32) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_have(piece_index).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_have(piece_index).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_have(piece_index).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -203,10 +173,7 @@ impl BtPeerConn {
     /// perform their required per-connection encryption copy.
     pub async fn send_have_frame(&mut self, frame: &[u8]) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_serialized(frame).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_serialized(frame).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_serialized(frame).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => c.send_message(frame).await,
@@ -218,10 +185,7 @@ impl BtPeerConn {
         req: aria2_protocol::bittorrent::message::types::PieceBlockRequest,
     ) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_request(req).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_request(req).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_request(req).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -240,10 +204,7 @@ impl BtPeerConn {
         req: &aria2_protocol::bittorrent::message::types::PieceBlockRequest,
     ) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_cancel(req).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_cancel(req).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_cancel(req).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -259,10 +220,7 @@ impl BtPeerConn {
 
     pub async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_bitfield(bitfield).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_bitfield(bitfield).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_bitfield(bitfield).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
@@ -281,10 +239,7 @@ impl BtPeerConn {
         use aria2_protocol::bittorrent::message::types::BtMessage;
         let msg = BtMessage::HaveAll;
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_message(&msg).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_message(&msg).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_message(&msg).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => c.send_message(&serialize(&msg)).await,
@@ -298,10 +253,7 @@ impl BtPeerConn {
         use aria2_protocol::bittorrent::message::types::BtMessage;
         let msg = BtMessage::HaveNone;
         match &mut self.inner {
-            InnerConnection::Plain(c) => c.send_message(&msg).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.send_message(&msg).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_message(&msg).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => c.send_message(&serialize(&msg)).await,
@@ -325,12 +277,7 @@ impl BtPeerConn {
     ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
         let result = match tokio::time::timeout(self.peer_timeout, async {
             match &mut self.inner {
-                InnerConnection::Plain(c) => c.read_message().await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: e,
-                    })
-                }),
-                InnerConnection::Encrypted(c) => c.read_message().await.map_err(|e| {
+                InnerConnection::Tcp(c) => c.read_message().await.map_err(|e| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                         message: e,
                     })
@@ -419,75 +366,30 @@ impl BtPeerConn {
 
     pub fn is_connected(&self) -> bool {
         match &self.inner {
-            InnerConnection::Plain(c) => c.is_connected(),
-            InnerConnection::Encrypted(c) => c.is_connected(),
-            InnerConnection::Utp(c) => c.is_connected(),
+            InnerConnection::Tcp(connection) => connection.is_connected(),
+            InnerConnection::Utp(connection) => connection.is_connected(),
         }
     }
 
     pub fn is_encrypted(&self) -> bool {
-        matches!(self.inner, InnerConnection::Encrypted(_))
+        matches!(&self.inner, InnerConnection::Tcp(connection) if connection.is_encrypted())
     }
 
     // -----------------------------------------------------------------------
-    // Low-level write helper
+    // Serialized frame output
     // -----------------------------------------------------------------------
 
-    /// Write raw bytes directly to the inner connection.
-    ///
-    /// This is the single point of actual socket write used by both the
-    /// immediate-flush `send_*` methods and the `flush_send_buffer` path.
     pub(crate) async fn write_raw(&mut self, data: &[u8]) -> Result<()> {
         match &mut self.inner {
-            InnerConnection::Plain(c) => {
-                // PeerConnection exposes send_message(&BtMessage) as the
-                // high-level path. For the flush path we split the buffer
-                // into individual BT messages and send each one.  This is
-                // acceptable because flush is called infrequently.
-                Self::flush_raw_to_plain(c, data).await
-            }
-            InnerConnection::Encrypted(c) => Self::flush_raw_to_encrypted(c, data).await,
-            InnerConnection::Utp(c) => c.send_message(data).await,
-        }
-    }
-
-    /// Flush raw bytes through a plain TCP connection by splitting them
-    /// into individual BT messages.
-    pub(crate) async fn flush_raw_to_plain(
-        conn: &mut aria2_protocol::bittorrent::peer::connection::PeerConnection,
-        data: &[u8],
-    ) -> Result<()> {
-        use aria2_protocol::bittorrent::message::factory::parse_message_stream;
-        let messages = parse_message_stream(data);
-        for (msg, _size) in messages {
-            if let Some(bt_msg) = msg {
-                conn.send_message(&bt_msg).await.map_err(|e| {
+            InnerConnection::Tcp(connection) => {
+                connection.send_serialized(data).await.map_err(|e| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                         message: e,
                     })
-                })?;
+                })
             }
+            InnerConnection::Utp(connection) => connection.send_message(data).await,
         }
-        Ok(())
-    }
-
-    /// Flush raw bytes through an encrypted connection.
-    pub(crate) async fn flush_raw_to_encrypted(
-        conn: &mut aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection,
-        data: &[u8],
-    ) -> Result<()> {
-        use aria2_protocol::bittorrent::message::factory::parse_message_stream;
-        let messages = parse_message_stream(data);
-        for (msg, _size) in messages {
-            if let Some(bt_msg) = msg {
-                conn.send_message(&bt_msg).await.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: e,
-                    })
-                })?;
-            }
-        }
-        Ok(())
     }
 }
 

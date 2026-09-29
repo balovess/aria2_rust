@@ -392,6 +392,7 @@ impl PeerSwarm {
     }
 
     pub(crate) fn peer_snapshots(&self) -> Vec<crate::request::request_group::BtPeerSnapshot> {
+        let now = Instant::now();
         self.actors
             .iter()
             .filter(|actor| !actor.dead)
@@ -408,8 +409,8 @@ impl PeerSwarm {
                 bitfield: actor.has_bitfield.then(|| actor.bitfield.clone()),
                 uploaded_bytes: actor.stats.uploaded_bytes,
                 downloaded_bytes: actor.stats.downloaded_bytes,
-                upload_speed: actor.stats.upload_speed,
-                download_speed: actor.stats.download_speed,
+                upload_speed: actor.stats.recent_upload_speed_at(now) as f64,
+                download_speed: actor.stats.recent_download_speed_at(now) as f64,
                 avg_upload_speed: actor.stats.avg_upload_speed,
                 avg_download_speed: actor.stats.avg_download_speed,
                 am_choking: actor.stats.am_choking,
@@ -669,7 +670,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let connection = BtPeerConn::from_incoming_plain(
+        let connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -705,7 +706,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let connection = BtPeerConn::from_incoming_plain(
+        let connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -729,7 +730,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let connection = BtPeerConn::from_incoming_plain(
+        let connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -757,7 +758,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -808,7 +809,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -846,7 +847,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let connection = BtPeerConn::from_incoming_plain(
+        let connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -875,7 +876,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -940,12 +941,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_snapshots_use_rolling_rates_instead_of_burst_ema() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (local_stream, endpoint) = listener.accept().await.unwrap();
+        let mut connection = BtPeerConn::from_incoming_tcp(
+            PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
+            endpoint,
+        );
+        connection.stats.upload_speed = 80_000_000.0;
+        connection.stats.download_speed = 120_000_000.0;
+        let sample_time = Instant::now() - Duration::from_secs(1);
+        connection
+            .stats
+            .record_upload_rate_at(8 * 1024, sample_time);
+        connection
+            .stats
+            .record_download_rate_at(16 * 1024, sample_time);
+
+        let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let mut swarm = PeerSwarm::new(8);
+        assert!(swarm.spawn_peer(connection, None, provider).is_ok());
+
+        let snapshot = swarm.peer_snapshots().remove(0);
+        assert!(
+            (7_000.0..9_000.0).contains(&snapshot.upload_speed),
+            "peer snapshot upload speed should use the 10-second byte window, got {}",
+            snapshot.upload_speed
+        );
+        assert!(
+            (14_000.0..18_000.0).contains(&snapshot.download_speed),
+            "peer snapshot download speed should use the 10-second byte window, got {}",
+            snapshot.download_speed
+        );
+
+        swarm.shutdown_all().await;
+        drop(remote_stream);
+    }
+
+    #[tokio::test]
     async fn shutdown_all_closes_a_full_event_queue_before_joining_peer_actors() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1023,7 +1064,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1099,7 +1140,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let connection = BtPeerConn::from_incoming_plain(
+        let connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1144,7 +1185,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1270,7 +1311,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1359,7 +1400,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1421,7 +1462,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1496,7 +1537,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let connection = BtPeerConn::from_incoming_plain(
+        let connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1573,7 +1614,7 @@ mod tests {
                 .await
                 .unwrap();
             let (local_stream, endpoint) = listener.accept().await.unwrap();
-            let connection = BtPeerConn::from_incoming_plain(
+            let connection = BtPeerConn::from_incoming_tcp(
                 PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
                 endpoint,
             );
@@ -1616,7 +1657,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );
@@ -1700,7 +1741,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
-        let mut connection = BtPeerConn::from_incoming_plain(
+        let mut connection = BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
             endpoint,
         );

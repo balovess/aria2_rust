@@ -17,8 +17,9 @@ fn manager_resource_groups_apply_select_file_and_location_priority() {
     };
     let mut gids = [crate::request::request_group::GroupId::new(70)].into_iter();
     let groups = MetalinkToRequestGroup::new()
-        .create_resource_groups_from_bytes(data, &options, &mut gids)
-        .expect("filtered Metalink should create one resource group");
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("filtered Metalink should expand")
+        .resource_groups;
 
     assert_eq!(groups.len(), 1);
     let group = groups[0].recover();
@@ -47,8 +48,9 @@ fn create_torrent_graphs_allocates_metadata_and_payload_pairs() {
     ]
     .into_iter();
     let graphs = converter
-        .create_torrent_graphs_from_bytes(data, &options, &mut gids)
-        .expect("torrent-only Metalink should create graphs");
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("torrent-only Metalink should expand")
+        .torrent_graphs;
     assert_eq!(graphs.len(), 2);
     assert_eq!(
         graphs[0].metadata.recover().gid(),
@@ -80,8 +82,9 @@ fn shared_torrent_metaurl_creates_one_graph_with_all_fallbacks() {
     ]
     .into_iter();
     let graphs = converter
-        .create_torrent_graphs_from_bytes(data, &options, &mut gids)
-        .expect("shared torrent metaurl should create one graph");
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("shared torrent metaurl should expand")
+        .torrent_graphs;
     assert_eq!(graphs.len(), 1);
     assert_eq!(
         graphs[0]
@@ -108,12 +111,11 @@ fn grouped_metaurl_fixture_has_metadata_payload_and_independent_groups() {
     let options = DownloadOptions::default();
     let mut gids = (1..=6).map(crate::request::request_group::GroupId::new);
 
-    let resource_groups = converter
-        .create_resource_groups_from_bytes(data, &options, &mut gids)
-        .expect("fixture resources should convert");
-    let graphs = converter
-        .create_torrent_graphs_from_bytes(data, &options, &mut gids)
-        .expect("fixture torrent group should convert");
+    let expansion = converter
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("fixture should expand into resource and torrent groups");
+    let resource_groups = expansion.resource_groups;
+    let graphs = expansion.torrent_graphs;
 
     assert_eq!(resource_groups.len(), 1);
     assert_eq!(
@@ -216,8 +218,9 @@ fn shared_torrent_graph_maps_torrent_files_to_metalink_paths() {
     ]
     .into_iter();
     let mut graphs = converter
-        .create_torrent_graphs_from_bytes(data, &options, &mut gids)
-        .expect("shared torrent graph should be created");
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("shared torrent graph should be created")
+        .torrent_graphs;
     assert_eq!(graphs.len(), 1);
 
     let torrent_data = {
@@ -296,8 +299,9 @@ fn mixed_resource_group_is_retained_without_bittorrent_support() {
     let converter = MetalinkToRequestGroup::new();
     let mut gids = [crate::request::request_group::GroupId::new(90)].into_iter();
     let groups = converter
-        .create_resource_groups_from_bytes(data, &DownloadOptions::default(), &mut gids)
-        .expect("mixed Metalink should create one fallback group");
+        .create_groups_from_bytes(data, &DownloadOptions::default(), &mut gids)
+        .expect("mixed Metalink should create one fallback group")
+        .resource_groups;
     assert_eq!(groups.len(), 1);
     let source = groups[0]
         .recover()
@@ -326,8 +330,9 @@ fn mixed_resource_and_torrent_entry_uses_graph_fallback() {
     ]
     .into_iter();
     let graphs = converter
-        .create_torrent_graphs_from_bytes(data, &DownloadOptions::default(), &mut gids)
-        .expect("mixed Metalink should create a graph");
+        .create_groups_from_bytes(data, &DownloadOptions::default(), &mut gids)
+        .expect("mixed Metalink should create a graph")
+        .torrent_graphs;
     assert_eq!(graphs.len(), 1);
     assert_eq!(
         graphs[0].metadata.recover().gid(),
@@ -355,8 +360,9 @@ fn torrent_graph_detects_torrent_metaurl_after_other_metaurl() {
     ]
     .into_iter();
     let graphs = MetalinkToRequestGroup::new()
-        .create_torrent_graphs_from_bytes(data, &DownloadOptions::default(), &mut gids)
-        .expect("torrent metaurl should be detected regardless of position");
+        .create_groups_from_bytes(data, &DownloadOptions::default(), &mut gids)
+        .expect("torrent metaurl should be detected regardless of position")
+        .torrent_graphs;
 
     assert_eq!(graphs.len(), 1);
     assert_eq!(
@@ -368,17 +374,5 @@ fn torrent_graph_detects_torrent_metaurl_after_other_metaurl() {
             .map(|uri| uri.as_ref())
             .collect::<Vec<_>>(),
         ["https://example.test/payload.torrent"]
-    );
-}
-
-#[cfg(feature = "metalink")]
-#[test]
-fn mixed_resource_and_torrent_entry_is_detected() {
-    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://example.test/payload.bin</url><metaurl mediatype="torrent">https://example.test/payload.torrent</metaurl></file></metalink>"#;
-    let converter = MetalinkToRequestGroup::new();
-    assert!(
-        converter
-            .has_mixed_resource_torrent_entries(data, &DownloadOptions::default())
-            .expect("Metalink should parse")
     );
 }

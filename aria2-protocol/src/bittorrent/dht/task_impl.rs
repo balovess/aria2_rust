@@ -15,7 +15,7 @@ use super::message::DhtMessageBuilder;
 use super::node::DhtNode;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
-use super::task::DhtTask;
+use super::task::{DEFAULT_NUM_CONCURRENT, DhtTask};
 use super::tracker::{QueryType, TransactionTracker};
 
 const BUCKET_REFRESH_CONCURRENCY: usize = 3;
@@ -188,9 +188,8 @@ impl DhtTask for PingTask {
 
             if let Some(response) = response_wait.wait(self.timeout).await
                 && response.from == addr
-                && (response.message.is_response() || response.message.is_error())
+                && response.message.is_response()
             {
-                trace!("PingTask: node {} responded", hex::encode(node_id));
                 let response_node = response
                     .message
                     .r
@@ -203,17 +202,24 @@ impl DhtTask for PingTask {
                         response_id.copy_from_slice(id);
                         DhtNode::new(response_id, addr)
                     });
-                let mut rt = self.ctx.routing_table.write().await;
-                if node_id != [0u8; 20] {
-                    rt.mark_good(&node_id);
-                }
-                if let Some(response_node) = &response_node {
+
+                if let Some(response_node) = response_node {
+                    trace!(
+                        "PingTask: node {} responded",
+                        hex::encode(response_node.id())
+                    );
+                    let mut rt = self.ctx.routing_table.write().await;
+                    if node_id != [0u8; 20] && node_id != *response_node.id() {
+                        rt.remove(&node_id);
+                    } else if node_id != [0u8; 20] {
+                        rt.mark_good(&node_id);
+                    }
                     rt.insert(response_node.clone());
+                    if let Some(tx) = result_tx.take() {
+                        let _ = tx.send(Some(response_node));
+                    }
+                    return;
                 }
-                if let Some(tx) = result_tx.take() {
-                    let _ = tx.send(response_node);
-                }
-                return;
             }
         }
 
@@ -318,22 +324,43 @@ impl DhtTask for BucketRefreshTask {
 pub struct BootstrapRefreshTask {
     ctx: DhtTaskContext,
     timeout: Duration,
+    bootstrap_nodes: Vec<DhtNode>,
 }
 
 impl BootstrapRefreshTask {
-    pub fn new(ctx: DhtTaskContext, timeout: Duration) -> Self {
-        Self { ctx, timeout }
+    pub fn new(ctx: DhtTaskContext, timeout: Duration, bootstrap_nodes: Vec<DhtNode>) -> Self {
+        Self {
+            ctx,
+            timeout,
+            bootstrap_nodes,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl DhtTask for BootstrapRefreshTask {
     async fn run(self: Box<Self>) {
-        let refresh = Box::new(BucketRefreshTask::new(self.ctx, true));
-        if tokio::time::timeout(self.timeout, refresh.run())
-            .await
-            .is_err()
-        {
+        const BOOTSTRAP_PING_MAX_RETRIES: u32 = 9;
+
+        let ctx = self.ctx;
+        let bootstrap_nodes = self.bootstrap_nodes;
+        let refresh = async move {
+            futures::stream::iter(bootstrap_nodes.into_iter().map(|node| {
+                let ctx = ctx.clone();
+                async move {
+                    Box::new(PingTask::new(ctx, node, BOOTSTRAP_PING_MAX_RETRIES))
+                        .run()
+                        .await;
+                }
+            }))
+            .buffer_unordered(DEFAULT_NUM_CONCURRENT)
+            .for_each(|_| async {})
+            .await;
+
+            Box::new(BucketRefreshTask::new(ctx, true)).run().await;
+        };
+
+        if tokio::time::timeout(self.timeout, refresh).await.is_err() {
             warn!(timeout = ?self.timeout, "DHT bootstrap refresh timed out");
         }
     }

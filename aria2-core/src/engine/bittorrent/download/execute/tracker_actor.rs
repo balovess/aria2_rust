@@ -1,17 +1,29 @@
 //! Torrent-scoped owner for tracker announce state and its protocol deadlines.
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::engine::bittorrent::download::command::{BtRuntimeState, MAX_PUBLIC_TRACKERS_TO_TRY};
 use crate::engine::bittorrent::peer::message_handler::PeerEvent;
-use crate::engine::bittorrent::tracker::communication::{AnnounceResult, TrackerAnnouncer};
+use crate::engine::bittorrent::tracker::communication::{SharedTrackerRuntime, TrackerAnnouncer};
 use crate::request::request_group::AtomicProgress;
+
+#[path = "tracker_actor_runtime.rs"]
+mod runtime;
+use runtime::{
+    MAX_PUBLIC_TRACKERS_IN_FANOUT, add_public_tracker_announcers, announce_completed_many,
+    announce_due_public, announce_if_ready, announce_initial_primary, announce_many,
+    announce_stopped_many, merge_pending_peers, next_tracker_announce_delay,
+    publish_tracker_runtime, results_to_peer_addrs,
+};
 
 enum TrackerActorCommand {
     Completed(oneshot::Sender<()>),
@@ -60,9 +72,11 @@ impl BtTrackerAnnouncerActor {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (started_tx, started_rx) = oneshot::channel();
         let task_runtime = Arc::clone(&runtime);
+        let tracker_runtime = announcer.shared_runtime_snapshot();
         let task = tokio::spawn(async move {
             run_tracker_actor(
                 announcer,
+                tracker_runtime,
                 command_rx,
                 started_tx,
                 info_hash,
@@ -143,6 +157,7 @@ impl BtTrackerAnnouncerActor {
 #[allow(clippy::too_many_arguments)]
 async fn run_tracker_actor(
     mut announcer: TrackerAnnouncer,
+    tracker_runtime: Option<SharedTrackerRuntime>,
     mut command_rx: mpsc::Receiver<TrackerActorCommand>,
     started_tx: oneshot::Sender<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>>,
     info_hash: [u8; 20],
@@ -160,43 +175,122 @@ async fn run_tracker_actor(
     } else {
         None
     };
-    if enable_public_trackers {
-        let added = announcer
-            .sync_public_trackers(MAX_PUBLIC_TRACKERS_TO_TRY)
-            .await;
-        if added > 0 {
-            debug!(
-                added,
-                "Synchronized public trackers before initial announce"
-            );
-        }
+    let mut public_announcers = Vec::new();
+    let mut active_public_urls = HashSet::new();
+    let mut public_urls = if enable_public_trackers {
+        announcer
+            .public_tracker_urls(MAX_PUBLIC_TRACKERS_TO_TRY)
+            .await
+    } else {
+        Vec::new()
+    };
+    let added = add_public_tracker_announcers(
+        &announcer,
+        &mut public_announcers,
+        &mut active_public_urls,
+        MAX_PUBLIC_TRACKERS_IN_FANOUT,
+    )
+    .await;
+    if added > 0 {
+        debug!(
+            added,
+            "Selected public trackers for bounded announce fan-out"
+        );
     }
 
-    // Preserve aria2's initial started announce and tier failover semantics.
-    let mut initial_peers = Vec::new();
-    let mut attempts = 0;
-    while announcer.is_announce_ready() && attempts < MAX_PUBLIC_TRACKERS_TO_TRY {
-        if let Some(result) = announcer
-            .announce(&info_hash, &peer_id, 0, total_size, 0)
-            .await
-        {
-            info!(
-                peers = result.peers.len(),
-                tracker = %result.tracker_url,
-                event = ?result.event,
-                interval_secs = result.interval.as_secs(),
-                "Initial BitTorrent tracker announce completed"
-            );
-            initial_peers.extend(to_peer_addrs(result));
-            if !initial_peers.is_empty() {
-                break;
+    announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+    for public_announcer in &mut public_announcers {
+        public_announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+    }
+    publish_tracker_runtime(
+        tracker_runtime.as_ref(),
+        &announcer,
+        &public_announcers,
+        &public_urls,
+    );
+
+    // Poll independent announces concurrently and return the first source's
+    // peers immediately; a slow public tracker must not hold up peer dialing.
+    let mut primary_announce = Box::pin(announce_initial_primary(
+        &mut announcer,
+        &info_hash,
+        &peer_id,
+        total_size,
+    ));
+    let mut public_pending = public_announcers.len();
+    let mut public_announces = FuturesUnordered::new();
+    for public_announcer in &mut public_announcers {
+        public_announces.push(async move {
+            public_announcer
+                .announce(&info_hash, &peer_id, 0, total_size, 0)
+                .await
+        });
+    }
+    let mut primary_pending = true;
+    let mut started_tx = Some(started_tx);
+    let mut pending_tracker_peers = None;
+    let mut startup_commands = VecDeque::new();
+    let mut stop_received_during_startup = false;
+    let mut startup_command_channel_closed = false;
+    while primary_pending || public_pending > 0 {
+        tokio::select! {
+            command = command_rx.recv() => {
+                match command {
+                    Some(command @ TrackerActorCommand::Completed(_)) => {
+                        startup_commands.push_back(command);
+                    }
+                    Some(command @ TrackerActorCommand::Stop(_)) => {
+                        startup_commands.push_back(command);
+                        stop_received_during_startup = true;
+                        break;
+                    }
+                    None => {
+                        startup_command_channel_closed = true;
+                        break;
+                    }
+                }
+            }
+            results = &mut primary_announce, if primary_pending => {
+                primary_pending = false;
+                let peers = results_to_peer_addrs(results);
+                if let Some(started_tx) = started_tx.take() {
+                    let _ = started_tx.send(peers);
+                } else if peer_event_tx.is_some() {
+                    pending_tracker_peers = merge_pending_peers(pending_tracker_peers, peers);
+                }
+            }
+            result = public_announces.next(), if public_pending > 0 => {
+                public_pending -= 1;
+                let peers = results_to_peer_addrs(result.into_iter().flatten());
+                if let Some(started_tx) = started_tx.take() {
+                    let _ = started_tx.send(peers);
+                } else if peer_event_tx.is_some() {
+                    pending_tracker_peers = merge_pending_peers(pending_tracker_peers, peers);
+                }
             }
         }
-        attempts += 1;
     }
-    let _ = started_tx.send(initial_peers);
-
-    let mut pending_tracker_peers = None;
+    if let Some(started_tx) = started_tx.take() {
+        let _ = started_tx.send(Vec::new());
+    }
+    drop(primary_announce);
+    drop(public_announces);
+    publish_tracker_runtime(
+        tracker_runtime.as_ref(),
+        &announcer,
+        &public_announcers,
+        &public_urls,
+    );
+    let mut download_complete = false;
+    if startup_command_channel_closed {
+        return;
+    }
+    if stop_received_during_startup {
+        announcer.cancel_pending_announce();
+        for public_announcer in &mut public_announcers {
+            public_announcer.cancel_pending_announce();
+        }
+    }
     loop {
         // Keep the tracker peer batch pending under bounded-channel
         // backpressure while continuing to service actor commands. Pausing
@@ -204,39 +298,79 @@ async fn run_tracker_actor(
         let next_announce = if pending_tracker_peers.is_some() {
             None
         } else {
-            announcer.next_default_announce_delay()
+            next_tracker_announce_delay(&announcer, &public_announcers)
         };
         tokio::select! {
             biased;
-            command = command_rx.recv() => {
+            command = async {
+                if let Some(command) = startup_commands.pop_front() {
+                    Some(command)
+                } else {
+                    command_rx.recv().await
+                }
+            } => {
                 match command {
                     Some(TrackerActorCommand::Completed(reply)) => {
+                        download_complete = true;
                         announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+                        for public_announcer in &mut public_announcers {
+                            public_announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+                        }
                         let downloaded = progress.completed_length();
                         let uploaded = progress.upload_length();
-                        announcer
-                            .announce_completed(
+                        let ((), ()) = tokio::join!(
+                            announcer.announce_completed(
                                 &info_hash,
                                 &peer_id,
                                 downloaded,
                                 uploaded,
-                            )
-                            .await;
+                            ),
+                            announce_completed_many(
+                                &mut public_announcers,
+                                &info_hash,
+                                &peer_id,
+                                downloaded,
+                                uploaded,
+                            ),
+                        );
+                        publish_tracker_runtime(
+                            tracker_runtime.as_ref(),
+                            &announcer,
+                            &public_announcers,
+                            &public_urls,
+                        );
                         let _ = reply.send(());
                     }
                     Some(TrackerActorCommand::Stop(reply)) => {
                         announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+                        for public_announcer in &mut public_announcers {
+                            public_announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+                        }
                         let downloaded = progress.completed_length();
                         let uploaded = progress.upload_length();
-                        announcer
-                            .announce_stopped(
+                        let ((), ()) = tokio::join!(
+                            announcer.announce_stopped(
                                 &info_hash,
                                 &peer_id,
                                 downloaded,
                                 total_size.saturating_sub(downloaded),
                                 uploaded,
-                            )
-                            .await;
+                            ),
+                            announce_stopped_many(
+                                &mut public_announcers,
+                                &info_hash,
+                                &peer_id,
+                                downloaded,
+                                total_size.saturating_sub(downloaded),
+                                uploaded,
+                            ),
+                        );
+                        publish_tracker_runtime(
+                            tracker_runtime.as_ref(),
+                            &announcer,
+                            &public_announcers,
+                            &public_urls,
+                        );
                         let _ = reply.send(announcer);
                         return;
                     }
@@ -259,33 +393,93 @@ async fn run_tracker_actor(
                 }
             }
             _ = wait_for_public_tracker_update(&mut public_tracker_updates) => {
-                let added = announcer.sync_public_trackers(MAX_PUBLIC_TRACKERS_TO_TRY).await;
+                public_urls = announcer
+                    .public_tracker_urls(MAX_PUBLIC_TRACKERS_TO_TRY)
+                    .await;
+                let previous_count = public_announcers.len();
+                let added = add_public_tracker_announcers(
+                    &announcer,
+                    &mut public_announcers,
+                    &mut active_public_urls,
+                    MAX_PUBLIC_TRACKERS_IN_FANOUT,
+                )
+                .await;
                 if added > 0 {
                     debug!(added, "Added refreshed public trackers to active torrent");
+                    for public_announcer in &mut public_announcers[previous_count..] {
+                        public_announcer.set_less_than_min_peers(runtime.less_than_min_peers());
+                    }
+                    let downloaded = progress.completed_length();
+                    let left = total_size.saturating_sub(downloaded);
+                    let uploaded = progress.upload_length();
+                    let new_results = announce_many(
+                        &mut public_announcers[previous_count..],
+                        &info_hash,
+                        &peer_id,
+                        downloaded,
+                        left,
+                        uploaded,
+                    )
+                    .await;
+                    if download_complete {
+                        announce_completed_many(
+                            &mut public_announcers[previous_count..],
+                            &info_hash,
+                            &peer_id,
+                            downloaded,
+                            uploaded,
+                        )
+                        .await;
+                    }
+                    if peer_event_tx.is_some() {
+                        pending_tracker_peers = merge_pending_peers(
+                            pending_tracker_peers,
+                            results_to_peer_addrs(new_results),
+                        );
+                    }
                 }
+                publish_tracker_runtime(
+                    tracker_runtime.as_ref(),
+                    &announcer,
+                    &public_announcers,
+                    &public_urls,
+                );
             }
             _ = wait_until_announce(next_announce) => {
                 announcer.set_less_than_min_peers(runtime.less_than_min_peers());
-                if !announcer.is_default_announce_ready() {
-                    continue;
+                for public_announcer in &mut public_announcers {
+                    public_announcer.set_less_than_min_peers(runtime.less_than_min_peers());
                 }
                 let downloaded = progress.completed_length();
                 let uploaded = progress.upload_length();
-                if let Some(result) = announcer
-                    .announce(
+                let (primary_results, public_results) = tokio::join!(
+                    announce_if_ready(
+                        &mut announcer,
                         &info_hash,
                         &peer_id,
                         downloaded,
                         total_size.saturating_sub(downloaded),
                         uploaded,
-                    )
-                    .await
-                {
-                    let peers = to_peer_addrs(result);
-                    if !peers.is_empty() && peer_event_tx.is_some() {
-                        pending_tracker_peers = Some(peers);
-                    }
+                    ),
+                    announce_due_public(
+                        &mut public_announcers,
+                        &info_hash,
+                        &peer_id,
+                        downloaded,
+                        total_size.saturating_sub(downloaded),
+                        uploaded,
+                    ),
+                );
+                let peers = results_to_peer_addrs(primary_results.into_iter().chain(public_results));
+                if !peers.is_empty() && peer_event_tx.is_some() {
+                    pending_tracker_peers = merge_pending_peers(pending_tracker_peers, peers);
                 }
+                publish_tracker_runtime(
+                    tracker_runtime.as_ref(),
+                    &announcer,
+                    &public_announcers,
+                    &public_urls,
+                );
             }
         }
     }
@@ -318,19 +512,13 @@ async fn reserve_tracker_peer_event_slot<'a>(
     }
 }
 
-fn to_peer_addrs(
-    result: AnnounceResult,
-) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
-    result
-        .peers
-        .into_iter()
-        .map(|(ip, port)| aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port))
-        .collect()
-}
-
 #[cfg(test)]
 #[path = "../../../../../tests/fixtures/mock_tracker.rs"]
 mod mock_tracker_fixture;
+
+#[cfg(test)]
+#[path = "tracker_actor_fanout_tests.rs"]
+mod fanout_tests;
 
 #[cfg(test)]
 mod tests {

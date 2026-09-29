@@ -49,14 +49,6 @@ pub(crate) struct AnnounceResponse {
     pub(crate) leechers: Option<i64>,
 }
 
-#[allow(dead_code)]
-pub(crate) async fn announce(
-    tracker_url: &str,
-    announce: AnnounceRequest<'_>,
-) -> Result<AnnounceResponse, String> {
-    announce_with_policy(tracker_url, announce, &OutboundNetworkPolicy::direct()).await
-}
-
 pub(crate) async fn announce_with_policy(
     tracker_url: &str,
     announce: AnnounceRequest<'_>,
@@ -368,7 +360,7 @@ mod tests {
                 .unwrap();
         });
 
-        let peers = announce(
+        let peers = announce_with_policy(
             &format!("ws://{address}/announce"),
             AnnounceRequest {
                 info_hash: &[1u8; 20],
@@ -381,6 +373,7 @@ mod tests {
                 event: AnnounceEvent::Started,
                 options: &DownloadOptions::default(),
             },
+            &OutboundNetworkPolicy::direct(),
         )
         .await
         .unwrap();

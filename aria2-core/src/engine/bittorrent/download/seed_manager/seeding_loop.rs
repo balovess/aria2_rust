@@ -37,9 +37,10 @@ impl BtSeedManager {
     pub async fn run_seeding_loop(&mut self) -> crate::error::Result<()> {
         info!(
             info_hash = ?self.info_hash,
-            "Seeding loop started (ratio={:?}, time={:?}, peers={})",
+            "Seeding loop started (ratio={:?}, time={:?}, active_peers={}, pending_connections={})",
             self.exit_condition.seed_ratio,
             self.exit_condition.seed_time,
+            self.swarm.len(),
             self.pending_connections.len()
         );
 
@@ -434,14 +435,7 @@ impl BtSeedManager {
                 return;
             }
         }
-        let mut connection = match incoming.connection {
-            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(connection) => {
-                BtPeerConn::from_incoming_plain(*connection, endpoint)
-            }
-            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
-                connection,
-            ) => BtPeerConn::from_incoming_encrypted(*connection, endpoint),
-        };
+        let mut connection = BtPeerConn::from_incoming_tcp(incoming.connection, endpoint);
         connection.set_pex_enabled(
             self.peer_discovery
                 .as_ref()

@@ -10,12 +10,13 @@ use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::environment::parse_listen_ports;
+use super::types::DiscoveredPeer;
 
 /// Torrent-scoped swarm state retained from peer discovery through seeding.
 pub(super) struct TorrentSession {
     /// Discovered endpoints not yet connected; socket ownership starts in the
     /// actor-ready piece-session setup after its upload provider is available.
-    pub(super) initial_peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    pub(super) initial_peers: Vec<DiscoveredPeer>,
     pub(super) network_info_hash: [u8; 20],
     /// Registry handed directly from download-session lifetime into seeding.
     pub(super) swarm: PeerSwarm,
@@ -130,7 +131,7 @@ impl BtDownloadCommand {
         let peer_event_tx = swarm
             .event_sender()
             .expect("new torrent swarm must own an event sender");
-        let peer_addrs = self
+        let peers = self
             .discover_peers_with_events(meta, total_size, &network_info_hash, Some(peer_event_tx))
             .await?;
 
@@ -141,7 +142,7 @@ impl BtDownloadCommand {
         if self.is_private {
             info!("[BT] Private torrent: PEX disabled (BEP 0027)");
         } else {
-            self.set_pex_known_peers(peer_addrs.clone());
+            self.set_pex_known_peers(peers.iter().map(|peer| peer.address.clone()).collect());
             info!(
                 "[PEX] Initialized with {} known tracker and LPD peers",
                 self.pex_known_peers.len()
@@ -176,7 +177,7 @@ impl BtDownloadCommand {
 
         // Download pieces from the connected peers, using web seeds and PEX as configured.
         Ok(TorrentSession {
-            initial_peer_addrs: peer_addrs,
+            initial_peers: peers,
             network_info_hash,
             swarm,
             upload_counter: Arc::new(std::sync::atomic::AtomicU64::new(self.total_uploaded)),

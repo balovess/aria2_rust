@@ -1,15 +1,17 @@
 //! FTP control connection and response handling.
 
+pub mod control_io;
+
 mod commands;
 mod data;
 mod types;
 
 pub use types::{FtpActiveDataListener, FtpConnection, FtpOptions, FtpResponse, FtpResponseClass};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
 use tracing::{debug, info};
+
+use self::control_io::{FtpControlReadError, FtpControlWriteError, read_control_line};
 
 impl FtpConnection {
     /// Establish a control connection and consume the server welcome response.
@@ -21,15 +23,16 @@ impl FtpConnection {
         let options = options.unwrap_or_default();
         info!("FTP connecting: {}:{}", host, port);
 
-        let stream = timeout(options.connect_timeout, TcpStream::connect((host, port)))
-            .await
-            .map_err(|_| {
-                format!(
-                    "FTP connection timeout ({}s)",
-                    options.connect_timeout.as_secs()
-                )
-            })?
-            .map_err(|e| format!("FTP connection failed: {}", e))?;
+        let stream =
+            tokio::time::timeout(options.connect_timeout, TcpStream::connect((host, port)))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "FTP connection timeout ({}s)",
+                        options.connect_timeout.as_secs()
+                    )
+                })?
+                .map_err(|e| format!("FTP connection failed: {}", e))?;
 
         let mut conn = Self {
             stream: tokio::io::BufReader::new(stream),
@@ -52,18 +55,19 @@ impl FtpConnection {
 
     async fn send_command(&mut self, command: &str) -> Result<(), String> {
         debug!("FTP command: {}", command.trim());
-        self.stream
-            .write_all(command.as_bytes())
+        control_io::write_control_command(&mut self.stream, command)
             .await
-            .map_err(|e| format!("Failed to send FTP command: {}", e))?;
-        self.stream
-            .write_all(b"\r\n")
-            .await
-            .map_err(|e| format!("Failed to send newline: {}", e))?;
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| format!("Failed to flush buffer: {}", e))?;
+            .map_err(|error| match error {
+                FtpControlWriteError::Command(error) => {
+                    format!("Failed to send FTP command: {}", error)
+                }
+                FtpControlWriteError::Terminator(error) => {
+                    format!("Failed to send newline: {}", error)
+                }
+                FtpControlWriteError::Flush(error) => {
+                    format!("Failed to flush buffer: {}", error)
+                }
+            })?;
         Ok(())
     }
 
@@ -76,10 +80,15 @@ impl FtpConnection {
 
         loop {
             line.clear();
-            let bytes_read = timeout(self.options.read_timeout, self.stream.read_line(&mut line))
-                .await
-                .map_err(|_| "FTP read timeout".to_string())?
-                .map_err(|e| format!("Failed to read FTP response: {}", e))?;
+            let bytes_read =
+                read_control_line(&mut self.stream, &mut line, self.options.read_timeout)
+                    .await
+                    .map_err(|error| match error {
+                        FtpControlReadError::Timeout => "FTP read timeout".to_string(),
+                        FtpControlReadError::Io(error) => {
+                            format!("Failed to read FTP response: {}", error)
+                        }
+                    })?;
 
             if bytes_read == 0 {
                 break;

@@ -186,17 +186,13 @@ impl DownloadManager {
 
         let converter = super::metalink::to_request_group::MetalinkToRequestGroup::new()
             .with_pause_requested(options.pause);
-        let mut resource_gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
-        let resource_groups = converter
-            .create_resource_groups_from_bytes(&data, &options, &mut resource_gids)
+        let mut gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
+        let expansion = converter
+            .create_groups_from_bytes(&data, &options, &mut gids)
             .map_err(DownloadManagerError::Preparation)?;
-
+        let resource_groups = expansion.resource_groups;
         #[cfg(feature = "bittorrent")]
-        let mut graph_gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
-        #[cfg(feature = "bittorrent")]
-        let graphs = converter
-            .create_torrent_graphs_from_bytes(&data, &options, &mut graph_gids)
-            .map_err(DownloadManagerError::Preparation)?;
+        let graphs = expansion.torrent_graphs;
 
         let resource_tasks = resource_groups
             .into_iter()

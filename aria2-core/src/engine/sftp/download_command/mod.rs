@@ -19,6 +19,7 @@
 //!   -> 8. Mark RequestGroup as complete
 //! ```
 
+mod command;
 mod execution;
 #[cfg(test)]
 mod tests;

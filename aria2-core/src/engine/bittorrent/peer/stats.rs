@@ -34,16 +34,26 @@ struct PeerSpeedWindow {
 }
 
 impl PeerSpeedWindow {
-    fn speed_at(&mut self, now: Instant) -> u64 {
-        self.remove_expired(now);
-        let Some((oldest_sample, _)) = self.samples.front() else {
+    fn speed_at(&self, now: Instant) -> u64 {
+        let mut expired_bytes = 0u64;
+        let mut oldest_sample = None;
+        for (sample_time, bytes) in &self.samples {
+            if now.saturating_duration_since(*sample_time) > PEER_RATE_WINDOW {
+                expired_bytes = expired_bytes.saturating_add(*bytes);
+            } else {
+                oldest_sample = Some(*sample_time);
+                break;
+            }
+        }
+        let Some(oldest_sample) = oldest_sample else {
             return 0;
         };
         let elapsed_millis = now
-            .saturating_duration_since(*oldest_sample)
+            .saturating_duration_since(oldest_sample)
             .as_millis()
             .max(1);
-        ((self.window_bytes as u128 * 1000) / elapsed_millis).min(u64::MAX as u128) as u64
+        let bytes_in_window = self.window_bytes.saturating_sub(expired_bytes);
+        ((bytes_in_window as u128 * 1000) / elapsed_millis).min(u64::MAX as u128) as u64
     }
 
     fn record(&mut self, bytes: u64, at: Instant) {
@@ -303,13 +313,13 @@ impl PeerStats {
 
     /// Return upload throughput over the same rolling window used by aria2's
     /// `SpeedCalc::calculateSpeed`, for seeder-state choke ranking.
-    pub(crate) fn recent_upload_speed_at(&mut self, now: Instant) -> u64 {
+    pub(crate) fn recent_upload_speed_at(&self, now: Instant) -> u64 {
         self.upload_rate_window.speed_at(now)
     }
 
     /// Return download throughput over the same rolling window used by aria2's
     /// `SpeedCalc::calculateSpeed`, for leecher-state choke ranking.
-    pub(crate) fn recent_download_speed_at(&mut self, now: Instant) -> u64 {
+    pub(crate) fn recent_download_speed_at(&self, now: Instant) -> u64 {
         self.download_rate_window.speed_at(now)
     }
 

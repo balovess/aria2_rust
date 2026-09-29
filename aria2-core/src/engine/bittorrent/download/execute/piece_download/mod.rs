@@ -88,7 +88,7 @@ impl BtStopTimeoutState {
 }
 
 mod peer_events;
-mod session;
+pub(in crate::engine::bittorrent::download::execute) mod session;
 
 #[cfg(test)]
 mod tests;

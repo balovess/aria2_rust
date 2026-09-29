@@ -2,6 +2,16 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{debug, info};
 
+/// A discovered endpoint and the mechanism that supplied it.
+///
+/// Keep provenance attached until the connection becomes a peer actor so RPC
+/// and diagnostics can report the real discovery path.
+#[derive(Debug, Clone)]
+pub(super) struct DiscoveredPeer {
+    pub(super) address: aria2_protocol::bittorrent::peer::connection::PeerAddr,
+    pub(super) source: crate::request::request_group::BtPeerSource,
+}
+
 /// Stable identity for a connected BT peer.
 ///
 /// Unlike a position in `active_connections`, an address remains valid when

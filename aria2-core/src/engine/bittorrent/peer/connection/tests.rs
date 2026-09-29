@@ -15,10 +15,10 @@ async fn plain_peer_connection_uses_the_outbound_policy_source() {
     let peer_id = [8u8; 20];
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        let _connection =
-            aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
-                stream, &info_hash, &peer_id,
-            )
+        let _connection = aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash])
+            .await
+            .unwrap()
+            .complete(peer_id, None, false)
             .await
             .unwrap();
         peer
@@ -255,7 +255,7 @@ async fn test_bt_peer_conn_sends_configured_peer_agent_on_wire() {
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
         server, [0u8; 20], false, false,
     );
-    let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
+    let mut connection = BtPeerConn::from_incoming_tcp(peer, endpoint);
 
     connection
         .send_extension_handshake("contract-agent/1")
@@ -302,7 +302,7 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
         server, [0u8; 20], false, false,
     );
-    let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
+    let mut connection = BtPeerConn::from_incoming_tcp(peer, endpoint);
     connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
 
     let mut handshake = aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new();
@@ -341,7 +341,7 @@ async fn test_bt_peer_conn_initializes_fast_extension_from_handshake() {
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
         server, [0u8; 20], false, true,
     );
-    let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
+    let mut connection = BtPeerConn::from_incoming_tcp(peer, endpoint);
 
     connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
 

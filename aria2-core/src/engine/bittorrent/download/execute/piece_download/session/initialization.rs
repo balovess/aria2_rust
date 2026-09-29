@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::engine::bittorrent::download::command::BtDownloadCommand;
+use crate::engine::bittorrent::download::execute::types::DiscoveredPeer;
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
 use crate::engine::bittorrent::peer::message_handler::PeerSwarm;
 use crate::engine::bittorrent::piece::selector::BtPieceSelector;
@@ -20,7 +21,7 @@ impl<'a> PieceDownloadSession<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn new(
         command: &'a mut BtDownloadCommand,
-        initial_peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+        initial_peers: Vec<DiscoveredPeer>,
         network_info_hash: [u8; 20],
         swarm: &'a mut PeerSwarm,
         upload_counter: Arc<std::sync::atomic::AtomicU64>,
@@ -248,7 +249,7 @@ impl<'a> PieceDownloadSession<'a> {
             );
         let mut active_connections = command
             .connect_to_peers(
-                &initial_peer_addrs,
+                &initial_peers,
                 &network_info_hash,
                 meta.info_hash_v2,
                 num_pieces,

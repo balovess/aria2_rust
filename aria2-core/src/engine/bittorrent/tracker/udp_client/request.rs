@@ -1,9 +1,41 @@
+use std::fmt;
 use std::net::SocketAddr;
 use std::time::Instant;
 
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    AnnounceResponse, ScrapeResult, UdpError, UdpEvent, UdpState,
+    AnnounceResponse, ScrapeResult, UdpEvent,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct UdpAnnounceParams<'a> {
+    pub tracker_addr: SocketAddr,
+    pub info_hash: &'a [u8; 20],
+    pub peer_id: &'a [u8; 20],
+    pub downloaded: i64,
+    pub left: i64,
+    pub uploaded: i64,
+    pub event: UdpEvent,
+    pub num_want: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpError {
+    TrackerError,
+    MalformedResponse,
+    Timeout,
+    Network,
+}
+
+impl fmt::Display for UdpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TrackerError => write!(f, "tracker_error"),
+            Self::MalformedResponse => write!(f, "malformed_response"),
+            Self::Timeout => write!(f, "timeout"),
+            Self::Network => write!(f, "network"),
+        }
+    }
+}
 
 /// Internal request representation for UDP tracker operations.
 pub(crate) struct UdpTrackerRequest {
@@ -17,7 +49,6 @@ pub(crate) struct UdpTrackerRequest {
     pub(crate) num_want: i32,
     pub(crate) port: u16,
     pub(crate) is_connect: bool,
-    pub(crate) state: UdpState,
     pub(crate) error: Option<UdpError>,
     pub(crate) dispatched_at: Option<Instant>,
     pub(crate) fail_count: u32,
@@ -53,7 +84,6 @@ impl UdpTrackerRequest {
             num_want,
             port,
             is_connect: false,
-            state: UdpState::Pending,
             error: None,
             dispatched_at: None,
             fail_count: 0,

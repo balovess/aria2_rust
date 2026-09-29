@@ -312,10 +312,8 @@ impl DhtEngineContext {
             "Bootstrapping DHT with entry points"
         );
 
-        // Add bootstrap endpoints before the first tracked lookup. The lookup
-        // itself sends the first ping/find_node requests through the shared
-        // transaction tracker, so there is no untracked probe to race with
-        // the engine receive loop.
+        // Keep unresolved bootstrap endpoints available for the tracked ping
+        // retries below, but do not count them as good or persist them.
         {
             let mut routing_table = self.routing_table.write().await;
             for node in &entry_points {
@@ -323,13 +321,13 @@ impl DhtEngineContext {
             }
         }
 
-        // Queue the first refresh instead of performing a private lookup here.
-        // The refresh task uses the same tracker, sole UDP reader, and bounded
-        // concurrency as every later maintenance cycle.
+        // Ping each entry point with bounded retries before the first bucket
+        // refresh, matching aria2's bootstrap handshake. Both phases use the
+        // shared transaction tracker and sole UDP reader.
         let _ = task_queue
             .add_periodic_task_1(
                 self.task_factory
-                    .create_bootstrap_refresh_task(self.config.bootstrap_timeout),
+                    .create_bootstrap_refresh_task(self.config.bootstrap_timeout, entry_points),
             )
             .await;
 

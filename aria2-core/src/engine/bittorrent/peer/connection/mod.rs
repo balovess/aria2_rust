@@ -19,7 +19,7 @@
 //! considered dead after ~3 minutes of inactivity.
 
 mod peer_conn;
-pub use peer_conn::{MseConnectionOptions, UtpConnectionOptions};
+pub use peer_conn::UtpConnectionOptions;
 pub(crate) use peer_conn::{PeerActorId, PeerActorStartup};
 mod session_resource;
 #[cfg(test)]

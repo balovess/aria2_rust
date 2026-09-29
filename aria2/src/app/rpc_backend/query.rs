@@ -456,7 +456,7 @@ impl CoreRpcBackend {
                 BackendError::Internal("Failed to lock tracker runtime snapshot".into())
             })?;
             return Ok(BackendResult::response(BackendResponse::Trackers(
-                tracker_infos_from_runtime(&snapshot),
+                tracker_infos_from_runtime(&snapshot, unix_millis(std::time::SystemTime::now())),
             )));
         }
         let announce = object
@@ -749,7 +749,10 @@ fn unix_millis(time: std::time::SystemTime) -> u64 {
 }
 
 #[cfg(feature = "bittorrent")]
-fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rpc::TrackerInfo> {
+fn tracker_infos_from_runtime(
+    snapshot: &TrackerRuntimeSnapshot,
+    now_unix_millis: u64,
+) -> Vec<aria2_rpc::TrackerInfo> {
     if !snapshot.trackers.is_empty() {
         return snapshot
             .trackers
@@ -768,7 +771,10 @@ fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rp
                 leechers: tracker.leechers,
                 downloaded: tracker.downloaded.map(|value| value.to_string()),
                 tracker_id: tracker.tracker_id.clone(),
-                seconds_since_last_success: tracker.seconds_since_last_success,
+                seconds_since_last_success: tracker
+                    .last_success_at_unix_millis
+                    .map(|last_success| now_unix_millis.saturating_sub(last_success) / 1_000)
+                    .or(tracker.seconds_since_last_success),
                 last_success_at_unix_millis: tracker
                     .last_success_at_unix_millis
                     .map(|value| value.to_string()),

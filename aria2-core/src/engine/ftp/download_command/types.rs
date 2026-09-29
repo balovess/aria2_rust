@@ -1,7 +1,7 @@
 //! Core types for FTP download command.
 //!
 //! Contains the `FtpDownloadCommand` struct definition, constructors,
-//! URI parsing, filename extraction, and FTP error classification.
+//! URI parsing, filename extraction, and request configuration.
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -23,12 +23,12 @@ use crate::network::ConnectionContext;
 use crate::network::OutboundNetworkPolicy;
 
 use crate::constants;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, FatalError, Result};
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::control::urlencoding_decode;
+use crate::ftp::connection::percent_decode as urlencoding_decode;
 
 /// FTP download command that handles the complete download lifecycle
 pub struct FtpDownloadCommand {
@@ -385,79 +385,5 @@ impl FtpDownloadCommand {
     /// tokens from this limiter in addition to the per-download limiter.
     pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
         self.global_limiter = Some(limiter);
-    }
-
-    /// Classify an FTP response code using the public download error contract.
-    #[allow(dead_code)]
-    pub(super) fn classify_ftp_error(&self, code: u16, message: &str) -> Aria2Error {
-        match code {
-            // Positive responses (should not be errors)
-            100..=399 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Unexpected positive response: {} {}", code, message),
-            }),
-            // Transient negative completion - retry may succeed
-            421 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Service not available: {}", message),
-            }),
-            425 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Can't open data connection: {}", message),
-            }),
-            426 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Connection closed; transfer aborted: {}", message),
-            }),
-            450 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Requested file action not taken: {}", message),
-            }),
-            451 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Requested action aborted: {}", message),
-            }),
-            452 => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Requested action not taken: {}", message),
-            }),
-            // Permanent negative completion - do not retry
-            500..=504 => Aria2Error::Fatal(FatalError::Config(format!(
-                "FTP syntax error: {} {}",
-                code, message
-            ))),
-            530 => Aria2Error::Fatal(FatalError::PermissionDenied {
-                path: format!("{}:{}", self.host, self.port),
-            }),
-            532 => Aria2Error::Fatal(FatalError::PermissionDenied {
-                path: "Account required for storing file".into(),
-            }),
-            550 => Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
-            551 => Aria2Error::Fatal(FatalError::Config(format!(
-                "Page type unknown: {}",
-                message
-            ))),
-            552 => Aria2Error::Fatal(FatalError::Config(format!(
-                "Exceeded storage allocation: {}",
-                message
-            ))),
-            553 => Aria2Error::Fatal(FatalError::PermissionDenied {
-                path: format!("Filename not allowed: {}", message),
-            }),
-            // Unknown error codes
-            _ => {
-                // Check message content for hints about error type
-                let msg_lower = message.to_lowercase();
-                if msg_lower.contains("not found") || msg_lower.contains("no such") {
-                    Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-                } else if msg_lower.contains("access denied")
-                    || msg_lower.contains("permission")
-                    || msg_lower.contains("login")
-                    || msg_lower.contains("auth")
-                {
-                    Aria2Error::Fatal(FatalError::PermissionDenied {
-                        path: format!("{}:{}", self.host, self.port),
-                    })
-                } else {
-                    // Default to recoverable for unknown codes in 4xx/5xx range
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("FTP error {} {}: {}", code, message, self.remote_path),
-                    })
-                }
-            }
-        }
     }
 }

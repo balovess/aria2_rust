@@ -122,11 +122,6 @@ impl MetalinkDownloadCommand {
     }
 }
 
-/// Build the shared HTTP client for Metalink downloads.
-pub(crate) fn build_http_client(options: &DownloadOptions) -> Result<reqwest::Client> {
-    build_http_client_with_source(options, None)
-}
-
 pub(crate) fn build_http_client_with_source(
     options: &DownloadOptions,
     local_address: Option<std::net::IpAddr>,

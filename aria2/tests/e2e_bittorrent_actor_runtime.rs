@@ -627,6 +627,12 @@ async fn cli_download_keeps_live_peer_visible_during_actor_transfer() {
     );
     let peer_details = rpc(&client, 6, "aria2.getPeerDetails", json!([gid]));
     assert!(
+        peer_details
+            .as_array()
+            .is_some_and(|peers| { peers.iter().any(|peer| peer["source"] == "tracker") }),
+        "an outbound peer returned by the torrent's tracker must retain source=tracker through connection admission: {peer_details}"
+    );
+    assert!(
         peer_details.as_array().is_some_and(|peers| {
             peers
                 .iter()
@@ -1288,24 +1294,35 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
         .expect("incoming handshake response timed out")
         .expect("read incoming handshake response");
     assert_eq!(&response[28..48], &meta.info_hash.bytes);
-    leecher
-        .write_all(&[0, 0, 0, 1, 2])
-        .await
-        .expect("send Interested before requesting the completed piece");
-
-    let mut saw_bitfield = false;
-    let mut saw_unchoke = false;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !saw_bitfield || !saw_unchoke {
-            match read_peer_message(&mut leecher).await.first().copied() {
-                Some(1) => saw_unchoke = true,
-                Some(5) => saw_bitfield = true,
-                _ => {}
+    let bitfield = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let message = read_peer_message(&mut leecher).await;
+            if message.first() == Some(&5) {
+                break message;
             }
         }
     })
     .await
-    .expect("incoming peer was not admitted and served while a piece download was in flight");
+    .expect("incoming actor did not advertise its current piece bitfield");
+    assert_eq!(
+        bitfield,
+        [5, 0x80],
+        "only the verified first piece is available"
+    );
+    leecher
+        .write_all(&[0, 0, 0, 1, 2])
+        .await
+        .expect("express interest only after learning piece availability");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if read_peer_message(&mut leecher).await.first() == Some(&1) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("incoming peer was not admitted and unchoked while a piece download was in flight");
 
     let mut request = Vec::with_capacity(17);
     request.extend_from_slice(&13u32.to_be_bytes());
@@ -1343,6 +1360,26 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
     assert_eq!(active_status["status"], "active");
     assert_eq!(active_status["completedLength"], "16");
     assert_eq!(active_status["uploadLength"], "16");
+    let peer_details_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let details = rpc(&client, 4, "aria2.getPeerDetails", json!([gid]));
+        if details.as_array().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer["source"] == "incoming"
+                    && peer["uploadedBytes"] == "16"
+                    && peer["flags"]["peerInterested"] == true
+                    && peer["flags"]["amChoking"] == false
+                    && peer["outstandingRequestsFromPeer"] == 0
+            })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < peer_details_deadline,
+            "peer-details did not publish the incoming leecher's upload and protocol state within the bounded snapshot interval: {details}"
+        );
+        tokio::task::yield_now().await;
+    }
 
     peer.release_tail_piece();
     let deadline = Instant::now() + Duration::from_secs(10);

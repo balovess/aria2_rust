@@ -233,11 +233,11 @@ impl Command for BtDownloadCommand {
         }
 
         if self.seed_enabled {
-            let seeding_connections = if session.initial_peer_addrs.is_empty() {
+            let seeding_connections = if session.initial_peers.is_empty() {
                 Vec::new()
             } else {
                 self.connect_to_peers(
-                    &session.initial_peer_addrs,
+                    &session.initial_peers,
                     &network_info_hash,
                     meta.info_hash_v2,
                     num_pieces,
@@ -247,7 +247,9 @@ impl Command for BtDownloadCommand {
                 .await?
             };
             info!(
-                "Starting seeding phase with {} peers...",
+                "Starting seeding phase with {} connected peers ({} new connections, {} retained actors)...",
+                seeding_connections.len() + session.swarm.len(),
+                seeding_connections.len(),
                 session.swarm.len()
             );
             self.run_seeding_phase_with_swarm(

@@ -21,20 +21,11 @@ impl BtDownloadCommand {
         upload: &PeerActorUploadContext,
     ) -> bool {
         let endpoint = incoming.endpoint;
-        let mut connection = match incoming.connection {
-            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(connection) => {
-                crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_plain(
-                    *connection,
-                    endpoint,
-                )
-            }
-            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
-                connection,
-            ) => crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_encrypted(
-                *connection,
+        let mut connection =
+            crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+                incoming.connection,
                 endpoint,
-            ),
-        };
+            );
         self.apply_peer_exchange_policy(&mut connection);
 
         let remote_peer_id = connection.remote_peer_id();

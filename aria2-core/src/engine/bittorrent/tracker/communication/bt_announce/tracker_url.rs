@@ -10,8 +10,7 @@
 
 /// Returns `true` if the URL uses the UDP tracker protocol (`udp://`).
 ///
-/// This is used by the BtAnnounce integration to route UDP tracker URLs
-/// to the `UdpTrackerManager` instead of the HTTP announce path.
+/// This is used by `TrackerAnnouncer` to route UDP URLs to the UDP client.
 ///
 /// # C++ Reference
 ///
@@ -19,7 +18,8 @@
 /// `UdpTrackerRequest` objects for `udp://` URLs, while HTTP trackers
 /// use `HttpRequestCommand` → `HttpResponseCommand`.
 pub fn is_udp_tracker(url: &str) -> bool {
-    url.to_lowercase().starts_with("udp://")
+    url.get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("udp://"))
 }
 
 // ======================================================================

@@ -5,7 +5,9 @@ use tracing::info;
 
 use aria2_protocol::metalink::parser::UrlEntry;
 
-use super::{FileDownloadInfo, MetalinkDownloadCommand, MetalinkFileInfo, build_http_client};
+use super::{
+    FileDownloadInfo, MetalinkDownloadCommand, MetalinkFileInfo, build_http_client_with_source,
+};
 use crate::download::{DownloadContext, file_entry::FileEntry};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
@@ -75,7 +77,7 @@ impl MetalinkDownloadCommand {
         let group = RequestGroup::new(gid, urls, options.clone());
         group.set_output_name(file.name.clone());
 
-        let client = build_http_client(options)?;
+        let client = build_http_client_with_source(options, None)?;
 
         if doc.files.len() > 1 {
             info!(
@@ -143,24 +145,15 @@ impl MetalinkDownloadCommand {
     ///
     /// ```ignore
     /// let commands = MetalinkDownloadCommand::create_multi_file(
-    ///     &metalink_xml, &options, None, 100
+    ///     &metalink_xml, &options, None, None, 100
     /// )?;
     /// for info in commands {
     ///     println!("File {}: {}", info.file_index, info.command.output_path.display());
     /// }
     /// ```
-    pub fn create_multi_file(
-        metalink_bytes: &[u8],
-        options: &DownloadOptions,
-        output_dir: Option<&str>,
-        gid_start: u64,
-    ) -> Result<Vec<MetalinkFileInfo>> {
-        Self::create_multi_file_with_base_uri(metalink_bytes, options, output_dir, None, gid_start)
-    }
-
     /// Create per-file commands while resolving relative Metalink URLs
     /// against the source document URI.
-    pub fn create_multi_file_with_base_uri(
+    pub fn create_multi_file(
         metalink_bytes: &[u8],
         options: &DownloadOptions,
         output_dir: Option<&str>,
@@ -184,7 +177,7 @@ impl MetalinkDownloadCommand {
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
 
-        let client = build_http_client(options)?;
+        let client = build_http_client_with_source(options, None)?;
 
         let mut commands = Vec::with_capacity(doc.files.len());
 
@@ -295,7 +288,7 @@ impl MetalinkDownloadCommand {
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
 
-        let client = build_http_client(options)?;
+        let client = build_http_client_with_source(options, None)?;
 
         let torrent_metaurls: Vec<_> = file
             .meta_urls
@@ -403,7 +396,7 @@ impl MetalinkDownloadCommand {
             .map(str::to_owned)
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
-        let client = build_http_client(options)?;
+        let client = build_http_client_with_source(options, None)?;
         let mut entries = Vec::with_capacity(files.len());
         let mut grouped_file_infos = Vec::with_capacity(files.len());
         let mut offset = 0u64;
@@ -507,6 +500,7 @@ impl MetalinkDownloadCommand {
         file_index: usize,
         options: &DownloadOptions,
         base_uri: Option<&str>,
+        policy: &crate::network::OutboundNetworkPolicy,
     ) -> Result<Self> {
         let doc =
             aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, base_uri)
@@ -545,7 +539,10 @@ impl MetalinkDownloadCommand {
         };
         Ok(Self {
             group,
-            client: build_http_client(options)?,
+            client: super::build_http_client_with_source(
+                options,
+                policy.addresses().into_iter().next(),
+            )?,
             output_path: path,
             started: false,
             completed: false,
@@ -555,7 +552,7 @@ impl MetalinkDownloadCommand {
             grouped_file_infos: Vec::new(),
             checkpoint: None,
             global_limiter: None,
-            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+            outbound_network_policy: Arc::new(policy.clone()),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -565,21 +562,5 @@ impl MetalinkDownloadCommand {
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
         })
-    }
-
-    pub(crate) fn new_with_group_source_policy(
-        group: Arc<std::sync::RwLock<RequestGroup>>,
-        metalink_data: &[u8],
-        file_index: usize,
-        options: &DownloadOptions,
-        base_uri: Option<&str>,
-        policy: &crate::network::OutboundNetworkPolicy,
-    ) -> Result<Self> {
-        let mut command =
-            Self::new_with_group_source(group, metalink_data, file_index, options, base_uri)?;
-        command.client =
-            super::build_http_client_with_source(options, policy.addresses().into_iter().next())?;
-        command.outbound_network_policy = Arc::new(policy.clone());
-        Ok(command)
     }
 }

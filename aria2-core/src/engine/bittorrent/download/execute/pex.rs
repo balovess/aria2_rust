@@ -21,18 +21,14 @@
 //! ```
 
 use futures::stream::{self, StreamExt};
-use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, trace};
 
 use crate::engine::bittorrent::download::command::BtDownloadCommand;
+use crate::engine::bittorrent::download::execute::piece_download::session::peer_dials::PeerDialConfig;
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
-use crate::engine::bittorrent::peer::interaction::{
-    BtPeerConnectionOptions, BtPeerInteraction, PEER_CONNECT_SETTLE_TIME,
-};
-use crate::error::Result;
+use crate::engine::bittorrent::peer::interaction::{BtPeerInteraction, PEER_CONNECT_SETTLE_TIME};
 use crate::request::request_group::BtPeerSource;
-use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::pex::PexHandler;
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
 use aria2_protocol::bittorrent::peer::connection::PeerAddr;
@@ -109,152 +105,100 @@ impl BtDownloadCommand {
 
         Some(wire_bytes)
     }
+}
 
-    /// Connect to peers discovered via PEX.
-    ///
-    /// Completes handshakes for discovered candidates. The caller immediately
-    /// transfers each result into the torrent-owned peer swarm.
-    ///
-    /// # Returns
-    /// Handshake-complete connections awaiting actor admission.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::engine::bittorrent::download::execute) async fn connect_to_discovered_peers(
-        &mut self,
-        new_peers: &[PeerAddr],
-        source: BtPeerSource,
-        info_hash_raw: &[u8; 20],
-        num_pieces: u32,
-        piece_length: u32,
-        total_size: u64,
-    ) -> Vec<BtPeerConn> {
-        // This is the shared connection path for PEX, tracker, DHT, and
-        // incoming peers. PEX-specific gating happens before this function
-        // is called; tracker and DHT peers must remain connectable when PEX is
-        // disabled.
-        if new_peers.is_empty() {
-            return Vec::new();
-        }
+/// Establish one bounded batch of discovered peer handshakes.
+///
+/// The piece-session dial queue runs this work independently from its
+/// coordinator loop, then transfers ready sockets back for Swarm actor
+/// admission. Failures advance the candidate stream; the candidate tail is
+/// not limited by the number of simultaneous dials.
+pub(in crate::engine::bittorrent::download::execute) async fn connect_discovered_peers(
+    new_peers: Vec<PeerAddr>,
+    source: BtPeerSource,
+    max_connections: usize,
+    config: PeerDialConfig,
+) -> Vec<BtPeerConn> {
+    // This is the outbound connection path for PEX, tracker, and DHT peers.
+    // PEX-specific gating happens before this function is called; tracker
+    // and DHT peers remain connectable when PEX is disabled.
+    if new_peers.is_empty() || max_connections == 0 {
+        return Vec::new();
+    }
 
-        let peers_to_connect: Vec<PeerAddr> = new_peers
-            .iter()
-            .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
-            .cloned()
-            .collect();
+    info!(
+        source = ?source,
+        count = new_peers.len(),
+        "[BT] Attempting to connect to newly discovered peers"
+    );
 
-        if peers_to_connect.is_empty() {
-            debug!("[PEX] All discovered peers already connected");
-            return Vec::new();
-        }
-
-        info!(
-            source = ?source,
-            count = peers_to_connect.len(),
-            "[BT] Attempting to connect to newly discovered peers"
-        );
-        let connection_options = {
-            let group = self.group.recover();
-            let mut options =
-                BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
-            options.dht_enabled =
-                (group.options().enable_dht || group.options().enable_dht6) && !self.is_private;
-            options.listen_port = (self.listen_port != 0).then_some(self.listen_port);
-            options
-        };
-
-        // Connect concurrently and start using the first ready peers without
-        // waiting for every stale or unresponsive address to time out.
-        let command: &BtDownloadCommand = self;
-        let options = &connection_options;
-        let mut results = stream::iter(peers_to_connect.iter().cloned())
-            .map(|peer| async move {
-                let result = command
-                    .connect_peer_ready_unless_halted(
-                        &peer,
-                        info_hash_raw,
-                        options,
-                        num_pieces,
-                        piece_length,
-                        total_size,
-                    )
-                    .await;
+    // Connect concurrently and start using the first ready peers without
+    // waiting for every stale or unresponsive address to time out.
+    // The candidate list is not truncated to this concurrency bound: if
+    // early endpoints fail, later candidates still enter the dial stream.
+    let dial_concurrency = config.max_concurrent_dials.min(new_peers.len()).max(1);
+    let mut results = stream::iter(new_peers)
+        .map(|peer| {
+            let info_hash = config.info_hash;
+            let connection_options = config.connection_options.clone();
+            let num_pieces = config.num_pieces;
+            let piece_length = config.piece_length;
+            let total_size = config.total_size;
+            let utp_socket = config.utp_socket.clone();
+            let outbound_network_policy = std::sync::Arc::clone(&config.outbound_network_policy);
+            async move {
+                let result = BtPeerInteraction::connect_peer_ready(
+                    &peer,
+                    &info_hash,
+                    &connection_options,
+                    num_pieces,
+                    piece_length,
+                    total_size,
+                    utp_socket,
+                    &outbound_network_policy,
+                )
+                .await;
                 (peer, result)
-            })
-            .buffer_unordered(peers_to_connect.len().max(1));
-        let mut connected = Vec::with_capacity(peers_to_connect.len());
-        let mut settle_deadline = None;
-        loop {
-            let next = if let Some(deadline) = settle_deadline {
-                tokio::select! {
-                    biased;
-                    result = results.next() => result,
-                    _ = tokio::time::sleep_until(deadline) => break,
-                }
-            } else {
-                results.next().await
-            };
-            let Some((peer, result)) = next else {
-                break;
-            };
-            let Some(result) = result else {
-                break;
-            };
-            match result {
-                Ok(mut conn) => {
-                    debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
-                    conn.set_source(source);
-                    self.apply_peer_exchange_policy(&mut conn);
-                    connected.push(conn);
-                    settle_deadline = Some(tokio::time::Instant::now() + PEER_CONNECT_SETTLE_TIME);
-                }
-                Err(e) => {
-                    debug!(
-                        "[PEX] Failed to connect to {}:{}: {}",
-                        peer.ip, peer.port, e
-                    );
-                }
             }
-        }
-
-        // Return only connections that were established successfully.
-        connected
-    }
-
-    async fn connect_peer_ready_unless_halted(
-        &self,
-        peer: &PeerAddr,
-        info_hash_raw: &[u8; 20],
-        connection_options: &BtPeerConnectionOptions,
-        num_pieces: u32,
-        piece_length: u32,
-        total_size: u64,
-    ) -> Option<Result<BtPeerConn>> {
-        let lifecycle_notify = self.group.recover().lifecycle_notifier();
-        let lifecycle_wait = lifecycle_notify.notified();
-        tokio::pin!(lifecycle_wait);
-        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
-        let mut connect_future = Box::pin(BtPeerInteraction::connect_peer_ready(
-            peer,
-            info_hash_raw,
-            connection_options,
-            num_pieces,
-            piece_length,
-            total_size,
-            self.utp_socket.clone(),
-            &outbound_network_policy,
-        ));
-
-        loop {
+        })
+        .buffer_unordered(dial_concurrency);
+    let mut connected = Vec::with_capacity(max_connections.min(dial_concurrency));
+    let mut settle_deadline = None;
+    loop {
+        let next = if let Some(deadline) = settle_deadline {
             tokio::select! {
-                result = &mut connect_future => return Some(result),
-                _ = &mut lifecycle_wait => {
-                    if self.group.recover().is_halt_requested() {
-                        return None;
-                    }
-                    lifecycle_wait.set(lifecycle_notify.notified());
+                biased;
+                result = results.next() => result,
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        } else {
+            results.next().await
+        };
+        let Some((peer, result)) = next else {
+            break;
+        };
+        match result {
+            Ok(mut conn) => {
+                debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
+                conn.set_source(source);
+                connected.push(conn);
+                if connected.len() >= max_connections {
+                    break;
                 }
+                settle_deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + PEER_CONNECT_SETTLE_TIME);
+            }
+            Err(e) => {
+                debug!(
+                    "[PEX] Failed to connect to {}:{}: {}",
+                    peer.ip, peer.port, e
+                );
             }
         }
     }
+
+    // Return only connections that were established successfully.
+    connected
 }
 
 /// Send periodic BEP 11 messages through each peer's bounded actor mailbox.
@@ -311,11 +255,12 @@ pub(super) async fn send_periodic_pex_to_swarm(
 
 #[cfg(test)]
 mod tests {
-    use super::BtPeerSource;
+    use super::{BtPeerSource, connect_discovered_peers};
     use crate::engine::bittorrent::download::command::BtDownloadCommand;
+    use crate::engine::bittorrent::download::execute::piece_download::session::peer_dials::PeerDialConfig;
     use crate::engine::bittorrent::peer::interaction::PEER_CONNECT_SETTLE_TIME;
     use crate::request::request_group::{DownloadOptions, GroupId};
-    use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
+    use aria2_protocol::bittorrent::peer::connection::PeerAddr;
     use std::time::Duration;
 
     #[tokio::test]
@@ -324,7 +269,7 @@ mod tests {
         let metadata = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
             .expect("test torrent should parse");
         let info_hash = metadata.info_hash.bytes;
-        let mut command = BtDownloadCommand::new(
+        let command = BtDownloadCommand::new(
             GroupId::new(912),
             &torrent,
             &DownloadOptions {
@@ -341,11 +286,29 @@ mod tests {
         let good_peer = tokio::spawn(async move {
             loop {
                 let (stream, _) = good_listener.accept().await.unwrap();
-                if let Ok(connection) =
-                    PeerConnection::from_incoming_stream(stream, &info_hash, &[8; 20]).await
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
                 {
-                    return connection;
+                    if let Ok(connection) = incoming.complete([8; 20], None, false).await {
+                        return connection;
+                    }
                 }
+            }
+        });
+
+        let delayed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let delayed_addr = delayed_listener.local_addr().unwrap();
+        let delayed_peer = tokio::spawn(async move {
+            loop {
+                let (stream, _) = delayed_listener.accept().await.unwrap();
+                if let Ok(incoming) =
+                    aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                {
+                    if let Ok(connection) = incoming.complete([10; 20], None, false).await {
+                        return connection;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
             }
         });
 
@@ -362,28 +325,33 @@ mod tests {
 
         let peers = [
             PeerAddr::new(&good_addr.ip().to_string(), good_addr.port()),
+            PeerAddr::new(&delayed_addr.ip().to_string(), delayed_addr.port()),
             PeerAddr::new(&slow_addr.ip().to_string(), slow_addr.port()),
         ];
-        let elapsed = tokio::time::Instant::now();
+        let config = PeerDialConfig::new(
+            &command,
+            info_hash,
+            metadata.info_hash_v2,
+            u32::try_from(metadata.num_pieces()).unwrap(),
+            metadata.info.piece_length,
+            metadata.info.length.unwrap_or_default(),
+        );
         let connected = tokio::time::timeout(
-            PEER_CONNECT_SETTLE_TIME + Duration::from_millis(500),
-            command.connect_to_discovered_peers(
-                &peers,
-                BtPeerSource::Dht,
-                &info_hash,
-                u32::try_from(metadata.num_pieces()).unwrap(),
-                metadata.info.piece_length,
-                metadata.info.length.unwrap_or_default(),
-            ),
+            PEER_CONNECT_SETTLE_TIME + Duration::from_millis(250),
+            connect_discovered_peers(peers.to_vec(), BtPeerSource::Dht, 2, config),
         )
         .await
         .expect("slow discovered peer must not block actor admission");
 
-        assert_eq!(connected.len(), 1);
-        assert!(elapsed.elapsed() < Duration::from_millis(1500));
-        assert_eq!(connected[0].source(), BtPeerSource::Dht);
+        assert_eq!(connected.len(), 2);
+        assert!(
+            connected
+                .iter()
+                .all(|connection| connection.source() == BtPeerSource::Dht)
+        );
         drop(connected);
         drop(good_peer.await.unwrap());
+        drop(delayed_peer.await.unwrap());
         slow_peer.abort();
     }
 }

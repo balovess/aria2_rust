@@ -372,8 +372,16 @@ impl DhtTaskFactory {
     }
 
     /// Create the bounded first refresh used by bootstrap.
-    pub fn create_bootstrap_refresh_task(&self, timeout: Duration) -> BoxedDhtTask {
-        Box::new(BootstrapRefreshTask::new(self.ctx.clone(), timeout))
+    pub fn create_bootstrap_refresh_task(
+        &self,
+        timeout: Duration,
+        bootstrap_nodes: Vec<DhtNode>,
+    ) -> BoxedDhtTask {
+        Box::new(BootstrapRefreshTask::new(
+            self.ctx.clone(),
+            timeout,
+            bootstrap_nodes,
+        ))
     }
 
     /// Create a node lookup task for the given target ID.
