@@ -140,6 +140,7 @@ impl Default for DownloadOptions {
             piece_length: None,
             metalink_enable_unique_protocol: true,
             min_split_size: Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE),
+            min_http_range_size: Some(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES),
             parameterized_uri: false,
             reuse_uri: true,
             uri_selector: "feedback".to_string(),

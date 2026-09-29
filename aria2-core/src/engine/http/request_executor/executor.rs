@@ -217,10 +217,10 @@ impl HttpSegmentRequestExecutor {
             downloader.clear_last_peer_addr();
             downloader.clear_last_http_version();
             let transfer_started = std::time::Instant::now();
-            let result = if let Some(error) = session_capacity_error {
-                Err(error)
+            let (result, range_size_rejected) = if let Some(error) = session_capacity_error {
+                (Err(error), false)
             } else {
-                downloader
+                match downloader
                     .download_range_streaming_with_progress(
                         &request.url,
                         request.offset,
@@ -232,6 +232,10 @@ impl HttpSegmentRequestExecutor {
                         request.expected_entity_length,
                     )
                     .await
+                {
+                    Ok(bytes) => (Ok(bytes), false),
+                    Err(failure) => (Err(failure.error), failure.explicit_size_rejection),
+                }
             };
             let http_version = downloader.last_http_version();
             let downloaded_bytes = result.as_ref().map(|bytes| *bytes).unwrap_or(0);
@@ -272,6 +276,8 @@ impl HttpSegmentRequestExecutor {
                 segment_index: request.segment_index,
                 authority_key,
                 result,
+                range_size_limit: request.range_size_limit,
+                range_size_rejected,
                 peer_addr: downloader.last_peer_addr(),
                 _lease: lease,
             };

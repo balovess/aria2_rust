@@ -167,6 +167,71 @@ fn register_range_with_head(server: &MockHttpServer, path: &str, body: &[u8]) {
     server.register_range_response(path, body);
 }
 
+fn register_range_with_size_limit(
+    server: &MockHttpServer,
+    path: &str,
+    body: &[u8],
+    accepted_range_size: u64,
+    observed_range_lengths: Arc<std::sync::Mutex<Vec<u64>>>,
+) {
+    let body = Arc::new(body.to_vec());
+    server.on("GET", path, move |request| {
+        if request.method() == hyper::Method::HEAD {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", body.len())
+                .body(empty_body())
+                .unwrap();
+        }
+
+        let Some((start, end)) = request
+            .headers()
+            .get("Range")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("bytes="))
+            .and_then(|value| value.split_once('-'))
+            .and_then(|(start, end)| Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok()?)))
+        else {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(empty_body())
+                .unwrap();
+        };
+        let range_length = end.saturating_sub(start).saturating_add(1);
+        observed_range_lengths
+            .lock()
+            .expect("range length lock should be available")
+            .push(range_length);
+        if range_length > accepted_range_size {
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(empty_body())
+                .unwrap();
+        }
+        if start > end || end >= body.len() as u64 {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("Content-Range", format!("bytes */{}", body.len()))
+                .body(empty_body())
+                .unwrap();
+        }
+
+        let start = start as usize;
+        let end = end as usize;
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Accept-Ranges", "bytes")
+            .header(
+                "Content-Range",
+                format!("bytes {start}-{end}/{}", body.len()),
+            )
+            .header("Content-Length", end - start + 1)
+            .body(full_body(body[start..=end].to_vec()))
+            .unwrap()
+    });
+}
+
 fn range_response(req: &Request<Incoming>, body: &[u8]) -> Response<Body> {
     let Some(range) = req
         .headers()
@@ -486,6 +551,135 @@ async fn test_concurrent_download_multiple_range_requests() {
 
     // Cleanup
     let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_range_size_rejection_downshifts_without_changing_output() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 8 * 1024 * 1024;
+    let data = Arc::new(generate_test_data(file_size, 91));
+    let observed_range_lengths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let accepted_range_size = 128 * 1024u64;
+    register_range_with_size_limit(
+        &server,
+        "/range-size-limited",
+        &data,
+        accepted_range_size,
+        Arc::clone(&observed_range_lengths),
+    );
+
+    let url = make_url(&server.base_url(), "/range-size-limited");
+    let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+    let out_name = format!("test_range_size_downshift_{}.bin", std::process::id());
+    let out_path = format!("{tmp_dir}/{out_name}");
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(ControlFile::control_path_for(std::path::Path::new(
+        &out_path,
+    )));
+
+    let mut options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    options.http_version = HttpVersion::Http11;
+    options.min_http_range_size = Some(accepted_range_size);
+    let mut cmd = make_concurrent_command(
+        GroupId::new(98),
+        &url,
+        &options,
+        Some(&tmp_dir),
+        Some(&out_name),
+    );
+    cmd.execute()
+        .await
+        .expect("download should recover after the server rejects the initial Range size");
+
+    assert_eq!(
+        std::fs::read(&out_path).expect("downloaded file should be readable"),
+        data.as_slice(),
+        "downshifting Range requests must preserve the assembled file"
+    );
+    {
+        let observed = observed_range_lengths
+            .lock()
+            .expect("range length lock should be available");
+        assert!(
+            observed.contains(&(1024 * 1024)),
+            "the initial 1 MiB Range should be attempted: {observed:?}"
+        );
+        assert!(
+            observed.contains(&accepted_range_size),
+            "the scheduler should honor the configured 128 KiB floor: {observed:?}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn multi_mirror_range_size_downshift_is_shared_by_same_authority() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 8 * 1024 * 1024;
+    let data = generate_test_data(file_size, 93);
+    let accepted_range_size = 128 * 1024u64;
+    let observed_range_lengths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    register_range_with_size_limit(
+        &server,
+        "/multi-range-size-a",
+        &data,
+        accepted_range_size,
+        Arc::clone(&observed_range_lengths),
+    );
+    register_range_with_size_limit(
+        &server,
+        "/multi-range-size-b",
+        &data,
+        accepted_range_size,
+        Arc::clone(&observed_range_lengths),
+    );
+
+    let base_url = server.base_url();
+    let uris = vec![
+        make_url(&base_url, "/multi-range-size-a"),
+        make_url(&base_url, "/multi-range-size-b"),
+    ];
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "multi_mirror_range_size_downshift.bin";
+    let dir_string = dir.path().to_string_lossy().into_owned();
+    let mut options = make_options(Some(4), Some(2), &dir_string, output_name);
+    options.http_version = HttpVersion::Http11;
+    options.min_http_range_size = Some(accepted_range_size);
+    let mut command =
+        make_multi_mirror_command(GroupId::new(99), uris, &options, &dir_string, output_name);
+    command
+        .execute()
+        .await
+        .expect("multi-mirror pipeline should recover from rejected Range sizes");
+
+    assert_eq!(
+        tokio::fs::read(dir.path().join(output_name))
+            .await
+            .expect("downloaded file should be readable"),
+        data,
+        "per-authority downshifting must preserve data across mirrors"
+    );
+    {
+        let observed = observed_range_lengths
+            .lock()
+            .expect("range length lock should be available");
+        assert!(
+            observed.contains(&(1024 * 1024)),
+            "the initial 1 MiB Range should be attempted: {observed:?}"
+        );
+        assert!(
+            observed.contains(&accepted_range_size),
+            "same-authority mirrors should honor the configured 128 KiB floor: {observed:?}"
+        );
+    }
+
     server.shutdown().await;
 }
 

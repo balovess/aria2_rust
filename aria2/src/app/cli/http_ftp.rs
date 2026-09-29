@@ -110,6 +110,10 @@ pub struct HttpFtpArgs {
     #[arg(short = 'k', long = "min-split-size")]
     pub min_split_size: Option<String>,
 
+    /// Minimum adaptive HTTP Range size after explicit server rejection (default: 64K)
+    #[arg(long = "min-http-range-size")]
+    pub min_http_range_size: Option<String>,
+
     /// Hard per-download, per-server TCP connection ceiling; HTTP/2 Range streams may share a connection
     #[arg(short = 'x', long = "max-connection-per-server")]
     pub max_connection_per_server: Option<u64>,

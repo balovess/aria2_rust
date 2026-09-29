@@ -310,6 +310,10 @@ pub struct DownloadOptions {
     pub metalink_enable_unique_protocol: bool,
     /// Minimum range size used by segment and piece selection.
     pub min_split_size: Option<u64>,
+    /// Minimum size for adaptive HTTP Range requests after an explicit server
+    /// size rejection. Independent of the fixed piece length persisted for
+    /// resume support.
+    pub min_http_range_size: Option<u64>,
     /// Whether parameterized URI expansion is enabled for this task.
     pub parameterized_uri: bool,
     /// Whether a spent URI may be reused after a failed mirror attempt.

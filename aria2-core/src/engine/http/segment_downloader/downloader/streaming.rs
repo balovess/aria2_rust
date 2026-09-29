@@ -8,7 +8,10 @@ use crate::engine::command::ProgressUpdate;
 use crate::engine::http::segment_downloader::progress::SegmentProgress;
 use crate::error::{Aria2Error, RecoverableError, Result};
 
-use super::{HttpSegmentDownloader, WriteChunk, classify_range_status, validate_content_range};
+use super::{
+    HttpSegmentDownloader, RangeDownloadFailure, WriteChunk, classify_range_status,
+    validate_content_range,
+};
 
 impl HttpSegmentDownloader {
     /// Streaming variant of [`download_range`](Self::download_range).
@@ -41,6 +44,7 @@ impl HttpSegmentDownloader {
             expected_entity_length,
         )
         .await
+        .map_err(|failure| failure.error)
     }
 
     /// Streaming range download with lock-free progress aggregation for the
@@ -56,7 +60,7 @@ impl HttpSegmentDownloader {
         progress: Option<&SegmentProgress>,
         write_tx: &mpsc::Sender<WriteChunk>,
         expected_entity_length: u64,
-    ) -> Result<u64> {
+    ) -> std::result::Result<u64, RangeDownloadFailure> {
         self.download_range_streaming_inner(
             url,
             offset,
@@ -81,7 +85,7 @@ impl HttpSegmentDownloader {
         progress: Option<StreamingProgress<'_>>,
         write_tx: &mpsc::Sender<WriteChunk>,
         expected_entity_length: u64,
-    ) -> Result<u64> {
+    ) -> std::result::Result<u64, RangeDownloadFailure> {
         if length == 0 {
             return Ok(0);
         }
@@ -102,7 +106,16 @@ impl HttpSegmentDownloader {
         self.remember_http_version(response.version());
         let status = response.status();
         if let Some(error) = classify_range_status(status, &range_header) {
-            return Err(error);
+            return Err(RangeDownloadFailure {
+                error,
+                explicit_size_rejection: is_explicit_range_size_rejection(
+                    status,
+                    response.headers(),
+                    offset,
+                    length,
+                    expected_entity_length,
+                ),
+            });
         }
         if status.as_u16() == 206 {
             validate_content_range(&response, offset, length, expected_entity_length)?;
@@ -146,7 +159,8 @@ impl HttpSegmentDownloader {
                             total_written.saturating_add(chunk_len)
                         ),
                     },
-                ));
+                )
+                .into());
             }
 
             // Send chunk to writer immediately — no accumulation
@@ -161,9 +175,9 @@ impl HttpSegmentDownloader {
                 write_queue_wait = write_queue_wait.saturating_add(started.elapsed());
             }
             if write_result.is_err() {
-                return Err(Aria2Error::DownloadFailed(
-                    "download writer channel closed".into(),
-                ));
+                return Err(
+                    Aria2Error::DownloadFailed("download writer channel closed".into()).into(),
+                );
             }
 
             current_offset += chunk_len;
@@ -204,7 +218,8 @@ impl HttpSegmentDownloader {
                         total_written
                     ),
                 },
-            ));
+            )
+            .into());
         }
 
         if collect_timing {
@@ -227,4 +242,164 @@ impl HttpSegmentDownloader {
 enum StreamingProgress<'a> {
     Channel(&'a mpsc::Sender<ProgressUpdate>),
     Segment(&'a SegmentProgress),
+}
+
+fn is_explicit_range_size_rejection(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    offset: u64,
+    length: u64,
+    expected_entity_length: u64,
+) -> bool {
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return true;
+    }
+    if status != reqwest::StatusCode::RANGE_NOT_SATISFIABLE || expected_entity_length == 0 {
+        return false;
+    }
+
+    let Some(total_length) = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().strip_prefix("bytes */"))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    else {
+        return false;
+    };
+
+    total_length == expected_entity_length
+        && length > 0
+        && offset < total_length
+        && offset
+            .checked_add(length)
+            .is_some_and(|range_end_exclusive| range_end_exclusive <= total_length)
+}
+
+#[cfg(test)]
+mod range_size_rejection_tests {
+    use super::{HttpSegmentDownloader, is_explicit_range_size_rejection};
+    use reqwest::header::{CONTENT_RANGE, HeaderMap, HeaderValue};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn payload_too_large_is_an_explicit_range_size_rejection() {
+        assert!(is_explicit_range_size_rejection(
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            &HeaderMap::new(),
+            0,
+            32 * 1024 * 1024,
+            64 * 1024 * 1024,
+        ));
+    }
+
+    #[test]
+    fn confirmed_416_with_unchanged_length_and_valid_range_is_a_size_rejection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes */67108864"));
+
+        assert!(is_explicit_range_size_rejection(
+            reqwest::StatusCode::RANGE_NOT_SATISFIABLE,
+            &headers,
+            0,
+            32 * 1024 * 1024,
+            64 * 1024 * 1024,
+        ));
+    }
+
+    #[test]
+    fn unconfirmed_or_invalid_416_does_not_trigger_size_adaptation() {
+        let mut changed_length = HeaderMap::new();
+        changed_length.insert(CONTENT_RANGE, HeaderValue::from_static("bytes */65535"));
+        let mut missing_range = HeaderMap::new();
+        missing_range.insert(CONTENT_RANGE, HeaderValue::from_static("bytes */*"));
+
+        for headers in [&changed_length, &missing_range] {
+            assert!(!is_explicit_range_size_rejection(
+                reqwest::StatusCode::RANGE_NOT_SATISFIABLE,
+                headers,
+                0,
+                32 * 1024 * 1024,
+                64 * 1024 * 1024,
+            ));
+        }
+
+        let mut valid_total_but_out_of_bounds = HeaderMap::new();
+        valid_total_but_out_of_bounds
+            .insert(CONTENT_RANGE, HeaderValue::from_static("bytes */67108864"));
+        assert!(!is_explicit_range_size_rejection(
+            reqwest::StatusCode::RANGE_NOT_SATISFIABLE,
+            &valid_total_but_out_of_bounds,
+            64 * 1024 * 1024 - 1,
+            2,
+            64 * 1024 * 1024,
+        ));
+    }
+
+    #[test]
+    fn overload_statuses_do_not_trigger_range_size_adaptation() {
+        for status in [
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(!is_explicit_range_size_rejection(
+                status,
+                &HeaderMap::new(),
+                0,
+                32 * 1024 * 1024,
+                64 * 1024 * 1024,
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_path_preserves_explicit_413_signal_for_the_scheduler() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let address = listener.local_addr().expect("local_addr should succeed");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut request = [0u8; 2048];
+            let bytes = stream
+                .read(&mut request)
+                .await
+                .expect("read should succeed");
+            assert!(bytes > 0, "the downloader should send a Range request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write should succeed");
+        });
+
+        super::super::ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let downloader = HttpSegmentDownloader::new(&client);
+        let (write_tx, _write_rx) = mpsc::channel(1);
+        let failure = downloader
+            .download_range_streaming_with_progress(
+                &format!("http://{address}/file"),
+                0,
+                32 * 1024 * 1024,
+                None,
+                &[],
+                None,
+                &write_tx,
+                64 * 1024 * 1024,
+            )
+            .await
+            .expect_err("413 should reject the Range request");
+
+        assert!(failure.explicit_size_rejection);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("413 fixture should finish")
+            .expect("server task should succeed");
+    }
 }

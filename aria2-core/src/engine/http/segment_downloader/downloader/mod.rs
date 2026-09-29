@@ -32,6 +32,22 @@ pub struct WriteChunk {
     pub data: bytes::Bytes,
 }
 
+/// Internal failure metadata used by the concurrent scheduler. The public
+/// downloader API continues to expose only the existing `Aria2Error`.
+pub(crate) struct RangeDownloadFailure {
+    pub(crate) error: Aria2Error,
+    pub(crate) explicit_size_rejection: bool,
+}
+
+impl From<Aria2Error> for RangeDownloadFailure {
+    fn from(error: Aria2Error) -> Self {
+        Self {
+            error,
+            explicit_size_rejection: false,
+        }
+    }
+}
+
 pub struct HttpSegmentDownloader {
     pub client: reqwest::Client,
     request_policy: HttpRequestPolicy,
@@ -220,5 +236,22 @@ impl HttpSegmentDownloader {
         if let Ok(mut slot) = self.last_http_version.lock() {
             *slot = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod range_download_failure_tests {
+    use super::RangeDownloadFailure;
+    use crate::error::{Aria2Error, RecoverableError};
+
+    #[test]
+    fn ordinary_network_failures_do_not_signal_range_size_rejection() {
+        let failure = RangeDownloadFailure::from(Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure {
+                message: "connection reset".into(),
+            },
+        ));
+
+        assert!(!failure.explicit_size_rejection);
     }
 }

@@ -166,6 +166,11 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     {
         map.insert("min-split-size".to_string(), v.to_string());
     }
+    if let Some(v) = opts.min_http_range_size
+        && v != crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES
+    {
+        map.insert("min-http-range-size".to_string(), v.to_string());
+    }
     if !opts.parameterized_uri {
         map.insert("parameterized-uri".to_string(), "false".to_string());
     }

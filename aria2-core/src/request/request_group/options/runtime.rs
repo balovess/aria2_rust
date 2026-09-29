@@ -9,6 +9,16 @@ impl DownloadOptions {
             .clamp(1, 256) as usize
     }
 
+    /// Effective lower bound for adaptive HTTP Range requests.
+    pub fn min_http_range_size_bytes(&self) -> u64 {
+        self.min_http_range_size
+            .unwrap_or(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES)
+            .clamp(
+                crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES,
+                crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES,
+            )
+    }
+
     /// Whether a memory follow mode is configured.
     ///
     /// This is an option-level predicate only. Callers that are deciding how

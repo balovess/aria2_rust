@@ -591,6 +591,34 @@ fn test_effective_min_split_size_uses_task_snapshot_and_runtime_override() {
     assert_eq!(group.effective_min_split_size(), 4 * 1024 * 1024);
 }
 
+#[test]
+fn min_http_range_size_change_is_reserved_and_keeps_piece_budget_independent() {
+    let mut group = RequestGroup::new(
+        GroupId::new(13),
+        vec!["http://example.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert_eq!(
+        group.options().min_http_range_size,
+        Some(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES)
+    );
+    group
+        .try_update_option("min-http-range-size", serde_json::json!("32K"))
+        .expect("min-http-range-size should accept a valid reserved-task update");
+    assert_eq!(group.options().min_http_range_size, Some(32 * 1024));
+    assert_eq!(
+        group.options().min_split_size,
+        Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+    );
+    assert!(
+        group
+            .try_update_option("min-http-range-size", serde_json::json!("512"))
+            .is_err()
+    );
+    assert_eq!(group.options().min_http_range_size, Some(32 * 1024));
+}
+
 // ==================== BT Metadata Tests ====================
 
 #[test]

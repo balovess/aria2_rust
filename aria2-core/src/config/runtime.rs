@@ -41,6 +41,7 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "max-mmap-limit",
     "max-overall-download-limit",
     "max-resume-failure-tries",
+    "min-http-range-size",
     "min-split-size",
     "no-file-allocation-limit",
     "parameterized-uri",
@@ -286,6 +287,7 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "metalink-os",
     "metalink-preferred-protocol",
     "metalink-version",
+    "min-http-range-size",
     "min-split-size",
     "no-file-allocation-limit",
     "no-netrc",
@@ -319,7 +321,7 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
 
 /// Initial options whose typed execution representation must not replace the
 /// original wire spelling when a session entry is written.
-pub const INITIAL_SNAPSHOT_WIRE_OPTIONS: &[&str] = &["min-split-size"];
+pub const INITIAL_SNAPSHOT_WIRE_OPTIONS: &[&str] = &["min-http-range-size", "min-split-size"];
 
 /// Initial options consumed by task creation rather than download behavior.
 ///
@@ -404,6 +406,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "max-http2-streams-per-session",
     "http-version",
     "max-resume-failure-tries",
+    "min-http-range-size",
     "min-split-size",
     "no-file-allocation-limit",
     "pause-metadata",
@@ -600,6 +603,7 @@ mod tests {
     fn policy_matches_original_wire_names() {
         assert!(is_global_option_changeable("dir"));
         assert!(is_global_option_changeable("save-session"));
+        assert!(is_global_option_changeable("min-http-range-size"));
         #[cfg(feature = "bittorrent")]
         assert!(is_global_option_changeable("bt-force-encryption"));
         #[cfg(not(feature = "bittorrent"))]
@@ -632,14 +636,22 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 131);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 132);
         #[cfg(not(feature = "bittorrent"))]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 130);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 131);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate
         );
         assert_eq!(is_option_changeable("dir", true), ChangeableKind::Pending);
+        assert_eq!(
+            is_option_changeable("min-http-range-size", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("min-http-range-size", false),
+            ChangeableKind::Immediate
+        );
         assert_eq!(
             is_option_changeable("dir", false),
             ChangeableKind::Immediate

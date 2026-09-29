@@ -233,6 +233,7 @@ impl OptionRegistry {
             | "retry-wait"
             | "split"
             | "min-split-size"
+            | "min-http-range-size"
             | "max-connection-per-server"
             | "max-http2-sessions-per-server"
             | "max-http2-streams-per-session"

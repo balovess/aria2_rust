@@ -113,6 +113,7 @@ async fn concurrent_ranges_warm_and_multiplex_across_four_http2_sessions() {
                     url: url.clone(),
                     offset: start,
                     length: SEGMENT_SIZE as u64,
+                    range_size_limit: SEGMENT_SIZE as u64,
                     cookie_header: None,
                     progress: progress.new_segment(),
                     write_tx: write_tx.clone(),
@@ -158,6 +159,106 @@ async fn concurrent_ranges_warm_and_multiplex_across_four_http2_sessions() {
         .await
         .expect("HTTP/2 sessions should shut down after the clients are dropped")
         .unwrap();
+}
+
+#[tokio::test]
+async fn http2_range_size_rejection_reaches_the_scheduler_metadata() {
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::{
+        Request, Response, body::Incoming, header::RANGE, server::conn::http2, service::service_fn,
+    };
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests_served = Arc::new(AtomicUsize::new(0));
+    let server_requests_served = Arc::clone(&requests_served);
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let service = service_fn(move |request: Request<Incoming>| {
+            let requests_served = Arc::clone(&server_requests_served);
+            async move {
+                assert!(request.headers().contains_key(RANGE));
+                requests_served.fetch_add(1, AtomicOrdering::Relaxed);
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(reqwest::StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+            }
+        });
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(socket), service)
+            .await
+            .unwrap();
+    });
+
+    crate::http::client_pool::ensure_rustls_provider();
+    let client = crate::http::client_pool::configure_http2_download_client(
+        reqwest::Client::builder().http2_prior_knowledge(),
+    )
+    .build()
+    .unwrap();
+    let url = format!("http://{address}/file");
+    let authority = authority_key(&url).unwrap();
+    let mut executor = HttpSegmentRequestExecutor::new_with_clients(
+        &client,
+        std::slice::from_ref(&client),
+        HttpRequestPolicy::default(),
+        CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
+        AuthResolveOptions::default(),
+        None,
+        1,
+        std::slice::from_ref(&authority),
+        1,
+    );
+    let progress = crate::engine::http::segment_downloader::SegmentProgressTracker::new(
+        0,
+        Arc::new(crate::request::request_group::AtomicProgress::new()),
+    );
+    let (write_tx, _write_rx) = mpsc::channel(1);
+    assert!(
+        executor
+            .try_submit(HttpSegmentRequest {
+                segment_index: 0,
+                authority_key: authority.clone(),
+                url,
+                offset: 0,
+                length: 512 * 1024,
+                range_size_limit: 512 * 1024,
+                cookie_header: None,
+                progress: progress.new_segment(),
+                write_tx,
+                expected_entity_length: 1024 * 1024,
+            })
+            .is_some()
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), executor.next_result())
+        .await
+        .expect("HTTP/2 Range request should finish")
+        .expect("request should produce a completion result");
+    assert!(result.range_size_rejected);
+    assert_eq!(result.range_size_limit, 512 * 1024);
+    assert!(executor.is_http2(&authority));
+    assert!(matches!(
+        result.result,
+        Err(crate::error::Aria2Error::Recoverable(
+            crate::error::RecoverableError::HttpProtocolError { .. }
+        ))
+    ));
+    assert_eq!(requests_served.load(AtomicOrdering::Relaxed), 1);
+
+    executor.shutdown().await;
+    drop(client);
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -266,6 +367,7 @@ async fn one_http2_client_stays_on_one_tcp_when_server_caps_streams_at_one() {
                     url: url.clone(),
                     offset: segment_index as u64,
                     length: 1,
+                    range_size_limit: 1,
                     cookie_header: None,
                     progress: progress.new_segment(),
                     write_tx: write_tx.clone(),
@@ -412,6 +514,7 @@ async fn unavailable_http2_sessions_fall_back_to_the_primary_pool() {
                     url: url.clone(),
                     offset: start,
                     length: SEGMENT_SIZE as u64,
+                    range_size_limit: SEGMENT_SIZE as u64,
                     cookie_header: None,
                     progress: progress.new_segment(),
                     write_tx: write_tx.clone(),

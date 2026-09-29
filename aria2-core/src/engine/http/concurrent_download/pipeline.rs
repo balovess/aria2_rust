@@ -31,7 +31,7 @@ pub async fn execute_with_coordinator(
     let setup::PreparedMultiMirrorDownload {
         options,
         split,
-        piece_size,
+        fixed_piece_size,
         max_conn,
         session_limit,
         mut coordinator,
@@ -49,6 +49,7 @@ pub async fn execute_with_coordinator(
         max_retries_per_segment,
     )
     .await?;
+    let minimum_range_size_limit = options.min_http_range_size_bytes();
     let fallback_threshold_consecutive = 3u32;
     let fallback_threshold_ratio = 0.2f64;
     let mut consecutive_416_count = 0u32;
@@ -58,7 +59,7 @@ pub async fn execute_with_coordinator(
     let scheduler::RangeScheduler {
         retry_policy,
         mut adaptive,
-        range_lengths,
+        mut range_size_limits,
         mut executor,
         connection_guard,
         write_tx,
@@ -78,7 +79,7 @@ pub async fn execute_with_coordinator(
         split,
         max_conn,
         session_limit,
-        piece_size,
+        fixed_piece_size,
         &coordinator,
     );
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
@@ -134,8 +135,8 @@ pub async fn execute_with_coordinator(
                         .then_some(mirror_idx)
                 })
                 .collect();
-            let Some((mirror_idx, mirror_url, (seg_idx, offset, length))) =
-                coordinator.select_mirror_for_range_excluding(&excluded_mirrors, &range_lengths)
+            let Some((mirror_idx, mirror_url, (seg_idx, offset, length))) = coordinator
+                .select_mirror_for_range_excluding(&excluded_mirrors, &range_size_limits)
             else {
                 break;
             };
@@ -150,6 +151,7 @@ pub async fn execute_with_coordinator(
                 url: mirror_url.clone(),
                 offset,
                 length,
+                range_size_limit: range_size_limits[mirror_idx],
                 cookie_header: dl.cookie_helper.build_cookie_header(&mirror_url),
                 progress: Arc::clone(&progress),
                 write_tx: write_tx.clone(),
@@ -259,6 +261,8 @@ pub async fn execute_with_coordinator(
                     continue;
                 };
                 let segment_progress_for_result = segment_progress.remove(&seg_idx);
+                let rejected_range_size_limit = pool_result.range_size_limit;
+                let explicit_range_size_rejection = pool_result.range_size_rejected;
 
                 let result_authority_key = pool_result.authority_key.clone();
                 match pool_result.result {
@@ -312,6 +316,51 @@ pub async fn execute_with_coordinator(
                             e
                         };
                         tracing::warn!(seg_idx, mirror_idx, error = %e, "Pooled segment download failed");
+                        let current_range_size_limit = scheduler::current_authority_range_size_limit(
+                            uris,
+                            &range_size_limits,
+                            &result_authority_key,
+                        );
+                        let rejection_targets_current_or_old_limit = explicit_range_size_rejection
+                            && current_range_size_limit
+                                .is_some_and(|current| rejected_range_size_limit >= current);
+                        let reduced_range_size_limit = if current_range_size_limit
+                            == Some(rejected_range_size_limit)
+                        {
+                            scheduler::lower_authority_range_size_limit(
+                                uris,
+                                &mut range_size_limits,
+                                &result_authority_key,
+                                rejected_range_size_limit,
+                                minimum_range_size_limit,
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(next_limit) = reduced_range_size_limit {
+                            tracing::warn!(
+                                authority = %result_authority_key,
+                                previous_range_size_limit = rejected_range_size_limit,
+                                range_size_limit = next_limit,
+                                fixed_piece_size,
+                                "Reduced HTTP Range size limit after explicit server rejection"
+                            );
+                        }
+                        let range_size_rejection_handled = rejection_targets_current_or_old_limit
+                            && current_range_size_limit.is_some_and(|current| {
+                                rejected_range_size_limit > current
+                                    || reduced_range_size_limit.is_some()
+                            });
+                        if range_size_rejection_handled {
+                            if !coordinator.requeue_segment(seg_idx) {
+                                return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                                    format!(
+                                        "Multi-mirror scheduler could not requeue size-rejected parent {seg_idx}"
+                                    ),
+                                )));
+                            }
+                            consecutive_416_count = 0;
+                        } else {
                         let file_not_found_retry_allowed = !matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
@@ -398,6 +447,7 @@ pub async fn execute_with_coordinator(
                                     error_code,
                                 );
                             }
+                        }
                         }
                     }
                 }

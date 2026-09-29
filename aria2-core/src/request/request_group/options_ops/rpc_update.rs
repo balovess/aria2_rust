@@ -249,6 +249,22 @@ pub(super) fn apply_rpc_option(
             opts.max_http2_streams_per_session = Some(value);
             Ok(true)
         }
+        "min-http-range-size" => {
+            let value = rpc_option_size(value, key)?;
+            if !(crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES
+                ..=crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES)
+                .contains(&value)
+            {
+                return Err(format!(
+                    "Option '{}' must be between {} and {} bytes",
+                    key,
+                    crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES,
+                    crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES
+                ));
+            }
+            opts.min_http_range_size = Some(value);
+            Ok(true)
+        }
         "http-version" => {
             let value = rpc_option_string(value, key)?;
             let Some(version) = crate::http::HttpVersion::parse_option(&value) else {

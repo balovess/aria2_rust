@@ -154,6 +154,32 @@ fn rpc_option_map_uses_aria2_wire_strings() {
 }
 
 #[test]
+fn min_http_range_size_is_a_separate_rpc_option() {
+    let values = HashMap::from([("min-http-range-size".to_string(), serde_json::json!("128K"))]);
+
+    let options = DownloadOptions::try_from_rpc_options(&values).unwrap();
+    assert_eq!(options.min_http_range_size, Some(128 * 1024));
+    assert_eq!(
+        options.min_split_size,
+        Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+    );
+}
+
+#[test]
+fn min_http_range_size_rpc_validation_enforces_configured_bounds() {
+    for invalid in ["512", "2G"] {
+        let values = HashMap::from([(
+            "min-http-range-size".to_string(),
+            serde_json::json!(invalid),
+        )]);
+        assert!(
+            DownloadOptions::try_from_rpc_options(&values).is_err(),
+            "expected {invalid} to be rejected"
+        );
+    }
+}
+
+#[test]
 fn rpc_option_map_rejects_invalid_registered_values() {
     let mut values = HashMap::new();
     values.insert(

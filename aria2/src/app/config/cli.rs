@@ -258,6 +258,7 @@ impl App {
         set_u64!("retry-wait", h.retry_wait);
         set_u64!("split", h.split);
         set_str!("min-split-size", h.min_split_size);
+        set_str!("min-http-range-size", h.min_http_range_size);
         set_u64!("max-connection-per-server", h.max_connection_per_server);
         set_u64!(
             "max-http2-sessions-per-server",

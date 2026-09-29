@@ -18,7 +18,8 @@ use crate::engine::mirror_coordinator::MirrorCoordinator;
 pub(super) struct PreparedMultiMirrorDownload {
     pub(super) options: std::sync::Arc<DownloadOptions>,
     pub(super) split: usize,
-    pub(super) piece_size: u64,
+    /// Immutable parent-piece geometry persisted in the control file.
+    pub(super) fixed_piece_size: u64,
     pub(super) max_conn: usize,
     pub(super) session_limit: usize,
     pub(super) coordinator: MirrorCoordinator,
@@ -41,7 +42,7 @@ pub(super) async fn prepare(
     let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
     let min_split_size = dl.group.recover().effective_min_split_size();
     let split = effective_segment_count(total_length, requested_split, min_split_size);
-    let piece_size = resume_state
+    let fixed_piece_size = resume_state
         .control_file
         .as_ref()
         .filter(|control_file| {
@@ -50,9 +51,9 @@ pub(super) async fn prepare(
         .and_then(ControlFile::piece_length)
         .map(u64::from)
         .unwrap_or_else(|| calculate_fixed_piece_size(total_length));
-    let piece_length = u32::try_from(piece_size).map_err(|_| {
+    let piece_length = u32::try_from(fixed_piece_size).map_err(|_| {
         Aria2Error::InvalidArgument(format!(
-            "HTTP fixed piece length is not representable: {piece_size}"
+            "HTTP fixed piece length is not representable: {fixed_piece_size}"
         ))
     })?;
     let max_conn = options
@@ -82,7 +83,7 @@ pub(super) async fn prepare(
     let segment_manager = ConcurrentSegmentManager::new_with_selector(
         total_length,
         uris.to_vec(),
-        Some(piece_size),
+        Some(fixed_piece_size),
         crate::selector::server_stat_man::ServerStatMan::shared().clone(),
         selector,
     );
@@ -124,7 +125,7 @@ pub(super) async fn prepare(
         requested_split,
         min_split_size,
         max_conn,
-        fixed_piece_size = piece_size,
+        fixed_piece_size,
         piece_count = coordinator.num_segments(),
         "Concurrent multi-mirror download started"
     );
@@ -256,7 +257,7 @@ pub(super) async fn prepare(
     Ok(PreparedMultiMirrorDownload {
         options,
         split,
-        piece_size,
+        fixed_piece_size,
         max_conn,
         session_limit,
         coordinator,

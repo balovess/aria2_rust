@@ -960,7 +960,7 @@ fn bittorrent_execution_options_round_trip_through_task_session() {
 fn initial_option_snapshot_is_reserved_for_wire_fidelity_only() {
     assert_eq!(
         super::runtime::INITIAL_SNAPSHOT_WIRE_OPTIONS,
-        &["min-split-size"],
+        &["min-http-range-size", "min-split-size"],
         "raw snapshot preservation must not become an execution fallback"
     );
 }

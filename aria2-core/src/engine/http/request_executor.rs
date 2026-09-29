@@ -39,6 +39,8 @@ pub struct HttpSegmentRequest {
     pub url: String,
     pub offset: u64,
     pub length: u64,
+    /// Per-authority maximum Range size that governed this request.
+    pub range_size_limit: u64,
     pub cookie_header: Option<String>,
     pub(crate) progress: Arc<SegmentProgress>,
     pub write_tx: mpsc::Sender<WriteChunk>,
@@ -54,6 +56,10 @@ pub struct HttpSegmentRequestResult {
     pub segment_index: u32,
     pub authority_key: String,
     pub result: Result<u64>,
+    /// Limit snapshot allows the scheduler to ignore stale rejections from
+    /// requests that were already in flight before a downshift.
+    pub range_size_limit: u64,
+    pub range_size_rejected: bool,
     pub peer_addr: Option<std::net::SocketAddr>,
     // The lease intentionally remains attached to the result. A completed
     // request still counts as in-flight until the scheduler consumes it.

@@ -17,6 +17,7 @@ use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::range_size_limit::lower_rejected_range_size_limit;
 use super::slow_range::SlowRangeRecovery;
 use super::{ConcurrentDownloadResult, ConcurrentDownloader};
 
@@ -56,6 +57,8 @@ pub async fn execute(
         mut manager,
     } = plan;
     let options = dl.group.recover().options_arc();
+    let mut range_size_limit = u64::from(piece_length);
+    let minimum_range_size_limit = options.min_http_range_size_bytes();
 
     let mut consecutive_416_count = 0u32;
     let mut total_416_count = 0u32;
@@ -141,7 +144,7 @@ pub async fn execute(
             executor.in_flight_for(&authority_key),
             executor.is_http2(&authority_key),
         ) {
-            match manager.next_pending_segment_for_mirror(0) {
+            match manager.next_pending_range_for_mirror(0, range_size_limit) {
                 Some((seg_idx, offset, length)) => {
                     let progress = progress_tracker.new_segment();
                     segment_progress.insert(seg_idx, Arc::clone(&progress));
@@ -152,6 +155,7 @@ pub async fn execute(
                         url: uri.to_string(),
                         offset,
                         length,
+                        range_size_limit,
                         cookie_header: cookie_hdr.clone(),
                         progress,
                         write_tx: write_tx.clone(),
@@ -275,6 +279,8 @@ pub async fn execute(
                 }
                 let result = pool_result.result;
                 let peer_addr = pool_result.peer_addr;
+                let rejected_range_size_limit = pool_result.range_size_limit;
+                let explicit_range_size_rejection = pool_result.range_size_rejected;
                 if let Some(peer_addr) = peer_addr
                     && let Ok(url) = reqwest::Url::parse(uri)
                         && let Some(host) = url.host_str()
@@ -371,6 +377,43 @@ pub async fn execute(
                             e
                         };
                         tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                        let current_limit_rejected = explicit_range_size_rejection
+                            && rejected_range_size_limit >= range_size_limit;
+                        let rejection_is_from_an_older_limit =
+                            rejected_range_size_limit > range_size_limit;
+                        let reduced_limit = if current_limit_rejected
+                            && rejected_range_size_limit == range_size_limit
+                        {
+                            lower_rejected_range_size_limit(
+                                range_size_limit,
+                                rejected_range_size_limit,
+                                minimum_range_size_limit,
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(next_limit) = reduced_limit {
+                            range_size_limit = next_limit;
+                            tracing::warn!(
+                                authority = %authority_key,
+                                previous_range_size_limit = rejected_range_size_limit,
+                                range_size_limit,
+                                fixed_piece_size = piece_length,
+                                "Reduced HTTP Range size limit after explicit server rejection"
+                            );
+                        }
+                        let range_size_rejection_handled = current_limit_rejected
+                            && (reduced_limit.is_some() || rejection_is_from_an_older_limit);
+                        if range_size_rejection_handled {
+                            if !manager.requeue_segment(seg_idx) {
+                                return Err(Aria2Error::Fatal(
+                                    crate::error::FatalError::Config(format!(
+                                        "HTTP segment scheduler could not requeue size-rejected parent {seg_idx}"
+                                    )),
+                                ));
+                            }
+                            consecutive_416_count = 0;
+                        } else {
                         let is_http2 = executor.is_http2(&authority_key);
                         let is_file_not_found = matches!(
                             &e,
@@ -457,6 +500,7 @@ pub async fn execute(
                             manager.requeue_segment(seg_idx);
                         } else {
                             manager.fail_segment(seg_idx);
+                        }
                         }
                     }
                 }

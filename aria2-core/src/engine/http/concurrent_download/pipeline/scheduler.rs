@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::constants;
 use crate::engine::command::WRITE_CHANNEL_CAPACITY;
 use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
+use crate::engine::http::concurrent_download::range_size_limit::lower_rejected_range_size_limit;
 use crate::engine::http::concurrent_download::slow_range::SlowRangeRecovery;
 use crate::engine::http::request_executor::{HttpSegmentRequestExecutor, authority_key};
 use crate::engine::http::segment_downloader::{
@@ -23,7 +24,8 @@ use crate::request::request_group::DownloadOptions;
 pub(super) struct RangeScheduler {
     pub(super) retry_policy: RetryPolicy,
     pub(super) adaptive: HashMap<String, HttpAdaptiveConcurrency>,
-    pub(super) range_lengths: Vec<u64>,
+    /// In-memory per-mirror ceilings; aliases for one authority are lowered together.
+    pub(super) range_size_limits: Vec<u64>,
     pub(super) executor: HttpSegmentRequestExecutor,
     pub(super) connection_guard: ActiveConnectionGuard,
     pub(super) write_tx: mpsc::Sender<WriteChunk>,
@@ -46,7 +48,7 @@ pub(super) fn create(
     split: usize,
     max_conn: usize,
     session_limit: usize,
-    piece_size: u64,
+    initial_range_size_limit: u64,
     coordinator: &MirrorCoordinator,
 ) -> RangeScheduler {
     let server_keys: Vec<String> = uris
@@ -70,7 +72,7 @@ pub(super) fn create(
             ),
         );
     }
-    let range_lengths = vec![piece_size; uris.len()];
+    let range_size_limits = vec![initial_range_size_limit; uris.len()];
     let executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
         dl.range_clients.as_slice(),
@@ -104,7 +106,7 @@ pub(super) fn create(
     RangeScheduler {
         retry_policy,
         adaptive,
-        range_lengths,
+        range_size_limits,
         executor,
         connection_guard,
         write_tx,
@@ -116,5 +118,81 @@ pub(super) fn create(
         segment_stall_timeout,
         stall_check,
         lifecycle_notify,
+    }
+}
+
+pub(super) fn current_authority_range_size_limit(
+    uris: &[String],
+    range_size_limits: &[u64],
+    authority: &str,
+) -> Option<u64> {
+    uris.iter()
+        .zip(range_size_limits)
+        .find(|(uri, _)| authority_key(uri).unwrap_or_else(|| (*uri).clone()) == authority)
+        .map(|(_, limit)| *limit)
+}
+
+pub(super) fn lower_authority_range_size_limit(
+    uris: &[String],
+    range_size_limits: &mut [u64],
+    authority: &str,
+    rejected_limit: u64,
+    configured_floor: u64,
+) -> Option<u64> {
+    let current_limit = current_authority_range_size_limit(uris, range_size_limits, authority)?;
+    let next_limit =
+        lower_rejected_range_size_limit(current_limit, rejected_limit, configured_floor)?;
+
+    for (uri, limit) in uris.iter().zip(range_size_limits) {
+        if authority_key(uri).unwrap_or_else(|| uri.clone()) == authority {
+            *limit = next_limit;
+        }
+    }
+    Some(next_limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{current_authority_range_size_limit, lower_authority_range_size_limit};
+
+    #[test]
+    fn range_limit_downshift_is_shared_by_same_authority_only() {
+        let uris = vec![
+            "https://example.test/a".to_string(),
+            "https://example.test/b".to_string(),
+            "https://other.test/file".to_string(),
+        ];
+        let mut limits = vec![32 * 1024 * 1024, 32 * 1024 * 1024, 32 * 1024 * 1024];
+
+        assert_eq!(
+            lower_authority_range_size_limit(
+                &uris,
+                &mut limits,
+                "https://example.test:443",
+                32 * 1024 * 1024,
+                crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES,
+            ),
+            Some(16 * 1024 * 1024)
+        );
+        assert_eq!(
+            limits,
+            vec![16 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024]
+        );
+        assert_eq!(
+            current_authority_range_size_limit(&uris, &limits, "https://example.test:443"),
+            Some(16 * 1024 * 1024)
+        );
+
+        assert_eq!(
+            lower_authority_range_size_limit(
+                &uris,
+                &mut limits,
+                "https://example.test:443",
+                32 * 1024 * 1024,
+                crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES,
+            ),
+            None,
+            "a stale 32 MiB failure must not reduce the current 16 MiB limit again"
+        );
     }
 }

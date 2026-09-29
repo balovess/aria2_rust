@@ -436,6 +436,15 @@ impl DownloadOptions {
                 .map(|v| OptionValue::parse_size_str(v))
                 .filter(|value| *value > 0)
                 .or(Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)),
+            min_http_range_size: options
+                .get("min-http-range-size")
+                .and_then(|value| OptionValue::parse_size_str_checked(value).ok())
+                .filter(|value| {
+                    (crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES
+                        ..=crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES)
+                        .contains(value)
+                })
+                .or(Some(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES)),
             parameterized_uri: options
                 .get("parameterized-uri")
                 .map(|v| v == "true")

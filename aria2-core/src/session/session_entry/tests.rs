@@ -519,6 +519,7 @@ fn test_download_options_to_map_all_fields() {
         bt_remove_unselected_file: true,
         piece_length: Some(1024 * 1024),
         metalink_enable_unique_protocol: false,
+        min_http_range_size: Some(128 * 1024),
         // FTP
         timeout: Some(90),
         connect_timeout: Some(30),
@@ -565,6 +566,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("max-http2-sessions-per-server").unwrap(), "3");
     assert_eq!(map.get("max-http2-streams-per-session").unwrap(), "4");
     assert_eq!(map.get("http-version").unwrap(), "2");
+    assert_eq!(map.get("min-http-range-size").unwrap(), "131072");
 
     // File allocation
     assert_eq!(map.get("file-allocation").unwrap(), "trunc");
@@ -750,6 +752,7 @@ fn test_download_options_to_map_defaults_excluded() {
     assert!(!map.contains_key("seed-ratio"));
     assert!(!map.contains_key("metalink-enable-unique-protocol"));
     assert!(!map.contains_key("load-cookies"));
+    assert!(!map.contains_key("min-http-range-size"));
     // enable_dht and enable_public_trackers default to true -> NOT saved
     assert!(!map.contains_key("enable-dht"));
     assert!(!map.contains_key("enable-public-trackers"));

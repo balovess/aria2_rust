@@ -2,6 +2,7 @@
 
 mod fixed_piece_size;
 mod pipeline;
+mod range_size_limit;
 mod segment;
 mod slow_range;
 

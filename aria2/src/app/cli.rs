@@ -432,6 +432,7 @@ const BASIC_HELP_OPTIONS: &[&str] = &[
     "max-overall-upload-limit",
     "max-upload-limit",
     "max-tries",
+    "min-http-range-size",
     "min-split-size",
     "no-netrc",
     "out",

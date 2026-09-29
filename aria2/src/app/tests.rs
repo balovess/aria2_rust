@@ -432,6 +432,43 @@ async fn test_load_cli_args_rejects_invalid_split() {
 }
 
 #[tokio::test]
+async fn test_load_cli_args_accepts_min_http_range_size() {
+    let cli = CliArgs::try_parse_from(["aria2", "--min-http-range-size=32K"])
+        .expect("clap should parse the HTTP Range size before registry validation");
+    let mut app = App::new();
+
+    app.load_cli_args(cli)
+        .await
+        .expect("the registry should accept a valid configured Range floor");
+
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("min-http-range-size")
+            .await,
+        Some(32 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_too_small_min_http_range_size() {
+    let cli = CliArgs::try_parse_from(["aria2", "--min-http-range-size=512"])
+        .expect("clap should parse the size before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the configured Range floor must be at least 1 KiB");
+
+    assert!(
+        error.contains("min-http-range-size"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn test_load_cli_args_rejects_invalid_file_allocation() {
     let cli = CliArgs::try_parse_from(["aria2", "--file-allocation=invalid"])
         .expect("clap should parse the string before registry validation");

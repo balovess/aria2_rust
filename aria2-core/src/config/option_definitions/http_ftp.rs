@@ -216,6 +216,18 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "min-http-range-size".into(),
+            opt_type: OptionType::Size,
+            default_value: OptionValue::Int(
+                crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES as i64,
+            ),
+            min: Some(crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES as i64),
+            max: Some(crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES),
+            description: "Minimum HTTP Range request size after an explicit server size rejection; independent of fixed resume pieces".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "max-connection-per-server".into(),
             opt_type: OptionType::Integer,
             short_name: Some('x'),
