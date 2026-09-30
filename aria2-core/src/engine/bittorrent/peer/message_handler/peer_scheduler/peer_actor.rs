@@ -79,9 +79,10 @@ pub(crate) enum PeerEvent {
         bitfield: Vec<u8>,
         seeder: bool,
     },
-    PexNegotiated {
+    ExtensionHandshakeReceived {
         actor_id: PeerActorId,
         ut_pex_id: Option<u8>,
+        remote_listen_port: Option<u16>,
     },
     PexPeers {
         peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
@@ -917,9 +918,10 @@ pub(crate) async fn run_peer_actor(
                         }
                         if received_extension_handshake
                             && event_tx
-                                .send(PeerEvent::PexNegotiated {
+                                .send(PeerEvent::ExtensionHandshakeReceived {
                                     actor_id,
                                     ut_pex_id: connection.peer_extension_id("ut_pex"),
+                                    remote_listen_port: connection.remote_listen_port,
                                 })
                                 .await
                                 .is_err()

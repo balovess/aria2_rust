@@ -240,7 +240,7 @@ pub(crate) async fn download_piece_blocks_endgame(
                         }
                         PeerEvent::PexPeers { peers, .. } => workers.record_pex_peers(peers),
                         PeerEvent::TrackerPeers { peers } => tracker_peers.extend(peers),
-                        PeerEvent::PexNegotiated { .. } => {}
+                        PeerEvent::ExtensionHandshakeReceived { .. } => {}
                         PeerEvent::InterestChanged { actor_id, snapshot } => {
                             if peers.peer_index_by_actor_id(actor_id).is_none() {
                                 continue;

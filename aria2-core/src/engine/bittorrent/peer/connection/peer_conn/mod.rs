@@ -90,8 +90,10 @@ pub struct BtPeerConn {
     // -----------------------------------------------------------------------
     /// Remote IP address.
     pub(crate) ip_addr: String,
-    /// Remote port.
+    /// Remote TCP/uTP endpoint port used for this socket's identity and cleanup.
     pub(crate) port: u16,
+    /// Remote TCP listening port advertised by BEP 10, when known.
+    pub(crate) remote_listen_port: Option<u16>,
     /// 20-byte peer ID (set after handshake).
     pub(crate) peer_id: Option<[u8; 20]>,
     /// Client name learned from the remote BEP 10 extension handshake.
@@ -483,5 +485,16 @@ impl BtPeerConn {
                 .ok()
                 .map(|ip| std::net::SocketAddr::new(ip, self.port)),
         }
+    }
+
+    /// The endpoint that other peers can dial, distinct from an incoming
+    /// socket's ephemeral source port. Outbound peers retain the dialed endpoint;
+    /// inbound peers become advertisable only after a BEP 10 `p` is received.
+    pub(crate) fn advertised_endpoint(&self) -> Option<std::net::SocketAddr> {
+        let transport_endpoint = self.remote_endpoint()?;
+        if let Some(port) = self.remote_listen_port {
+            return Some(std::net::SocketAddr::new(transport_endpoint.ip(), port));
+        }
+        (!self.incoming).then_some(transport_endpoint)
     }
 }

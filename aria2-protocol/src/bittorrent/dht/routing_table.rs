@@ -489,6 +489,55 @@ mod tests {
     }
 
     #[test]
+    fn unverified_candidate_cannot_replace_bad_lru_in_full_non_local_bucket() {
+        let self_id = [0xFF; 20];
+        let mut table = RoutingTable::new(self_id);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
+
+        let failed_id = [1; 20];
+        for _ in 0..5 {
+            assert!(table.mark_bad(&failed_id));
+        }
+
+        let unverified_id = [0x40; 20];
+        table.insert(DhtNode::unverified(unverified_id, make_addr(6990)));
+
+        let bucket = table.get_bucket_for(&unverified_id);
+        assert_eq!(bucket.count_node(), super::super::bucket::K);
+        assert!(
+            bucket.nodes().iter().any(|node| node.id() == &failed_id),
+            "insertion must not evict a bad node in favor of an unverified candidate"
+        );
+        assert!(
+            bucket
+                .nodes()
+                .iter()
+                .all(|node| node.id() != &unverified_id),
+            "an unverified candidate must not enter a full non-local bucket"
+        );
+        assert!(
+            bucket
+                .cached_nodes()
+                .iter()
+                .all(|node| node.id() != &unverified_id),
+            "an unverified candidate must not enter the replacement cache"
+        );
+
+        assert_eq!(table.evict_bad_nodes(), 1);
+        let bucket = table.get_bucket_for(&unverified_id);
+        assert_eq!(bucket.count_node(), super::super::bucket::K - 1);
+        assert!(
+            bucket
+                .nodes()
+                .iter()
+                .all(|node| node.id() != &unverified_id),
+            "bad-node eviction must not promote the rejected unverified candidate"
+        );
+    }
+
+    #[test]
     fn test_evict_bad_nodes() {
         let mut table = RoutingTable::new([0u8; 20]);
         for i in 1..=super::super::bucket::K as u8 {

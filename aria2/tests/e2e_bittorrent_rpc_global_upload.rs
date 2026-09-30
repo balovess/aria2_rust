@@ -15,7 +15,10 @@ use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
 use base64::Engine as _;
 use mock_tracker::MockTrackerServer;
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use support::RunningAria2;
 use upload_fixture::{
     DEFAULT_BURST_LENGTH, PIECE_LENGTH, PartialSeeder, UPLOAD_RATE_BYTES_PER_SEC,
@@ -101,88 +104,161 @@ async fn wait_for_uploaded_bytes(client: &RunningAria2, gid: &str) {
     .expect("RPC uploadLength must reflect the completed wire transfer");
 }
 
-#[tokio::test]
-async fn cli_global_upload_limit_aggregates_rpc_added_torrents_on_peer_wire() {
-    let output_dir = tempfile::tempdir().expect("temporary download directory");
-    let placeholder_tracker = MockTrackerServer::start(0).await;
-    let placeholder_url = placeholder_tracker.announce_url();
-    let placeholder_a = upload_rate_torrent(&placeholder_url, "global-upload-a.bin");
-    let placeholder_b = upload_rate_torrent(&placeholder_url, "global-upload-b.bin");
-    let meta_a = TorrentMeta::parse(&placeholder_a).expect("first torrent metadata parses");
-    let meta_b = TorrentMeta::parse(&placeholder_b).expect("second torrent metadata parses");
-    let payload = Arc::new([vec![0x41; PIECE_LENGTH], vec![0x42; PIECE_LENGTH]].concat());
-    let peer_a = PartialSeeder::start(meta_a.info_hash.bytes, Arc::clone(&payload)).await;
-    let peer_b = PartialSeeder::start(meta_b.info_hash.bytes, Arc::clone(&payload)).await;
-    drop(placeholder_tracker);
+struct TwoTorrentProcess {
+    output_dir: tempfile::TempDir,
+    client: RunningAria2,
+    listen_port: u16,
+    meta_a: TorrentMeta,
+    meta_b: TorrentMeta,
+    payload: Arc<Vec<u8>>,
+    gid_a: String,
+    gid_b: String,
+    peer_a: PartialSeeder,
+    peer_b: PartialSeeder,
+    _tracker_a: MockTrackerServer,
+    _tracker_b: MockTrackerServer,
+}
 
-    let tracker_a = MockTrackerServer::start(peer_a.addr.port()).await;
-    let tracker_b = MockTrackerServer::start(peer_b.addr.port()).await;
-    let torrent_a = upload_rate_torrent(&tracker_a.announce_url(), "global-upload-a.bin");
-    let torrent_b = upload_rate_torrent(&tracker_b.announce_url(), "global-upload-b.bin");
-    let listen_port = reserve_loopback_port();
-    let args = [
-        format!("--dir={}", output_dir.path().display()),
-        format!("--listen-port={listen_port}"),
-        format!(
-            "--max-overall-upload-limit={}K",
-            UPLOAD_RATE_BYTES_PER_SEC / 1024
-        ),
-        "--enable-dht=false".to_owned(),
-        "--enable-public-trackers=false".to_owned(),
-        "--enable-peer-exchange=false".to_owned(),
-        "--bt-enable-web-seed=false".to_owned(),
-        "--seed-time=3600".to_owned(),
-    ];
+impl TwoTorrentProcess {
+    async fn start(initial_upload_limit: &str) -> Self {
+        let output_dir = tempfile::tempdir().expect("temporary download directory");
+        let placeholder_tracker = MockTrackerServer::start(0).await;
+        let placeholder_url = placeholder_tracker.announce_url();
+        let placeholder_a = upload_rate_torrent(&placeholder_url, "global-upload-a.bin");
+        let placeholder_b = upload_rate_torrent(&placeholder_url, "global-upload-b.bin");
+        let meta_a = TorrentMeta::parse(&placeholder_a).expect("first torrent metadata parses");
+        let meta_b = TorrentMeta::parse(&placeholder_b).expect("second torrent metadata parses");
+        let payload = Arc::new([vec![0x41; PIECE_LENGTH], vec![0x42; PIECE_LENGTH]].concat());
+        let peer_a = PartialSeeder::start(meta_a.info_hash.bytes, Arc::clone(&payload)).await;
+        let peer_b = PartialSeeder::start(meta_b.info_hash.bytes, Arc::clone(&payload)).await;
+        drop(placeholder_tracker);
 
-    // Start RPC-only: the configured process-wide limit must be installed
-    // before RPC later creates the torrent commands.
-    let client = RunningAria2::start_rpc(&args);
-    let gid_a = add_torrent(&client, 1, torrent_a);
-    let gid_b = add_torrent(&client, 2, torrent_b);
-    wait_for_piece(&client, &gid_a).await;
-    wait_for_piece(&client, &gid_b).await;
+        let tracker_a = MockTrackerServer::start(peer_a.addr.port()).await;
+        let tracker_b = MockTrackerServer::start(peer_b.addr.port()).await;
+        let torrent_a = upload_rate_torrent(&tracker_a.announce_url(), "global-upload-a.bin");
+        let torrent_b = upload_rate_torrent(&tracker_b.announce_url(), "global-upload-b.bin");
+        let listen_port = reserve_loopback_port();
+        let args = [
+            format!("--dir={}", output_dir.path().display()),
+            format!("--listen-port={listen_port}"),
+            format!("--max-overall-upload-limit={initial_upload_limit}"),
+            "--enable-dht=false".to_owned(),
+            "--enable-public-trackers=false".to_owned(),
+            "--enable-peer-exchange=false".to_owned(),
+            "--bt-enable-web-seed=false".to_owned(),
+            "--seed-time=3600".to_owned(),
+        ];
 
-    let mut leecher_a = connect_interested_leecher(listen_port, meta_a.info_hash.bytes).await;
-    let mut leecher_b = connect_interested_leecher(listen_port, meta_b.info_hash.bytes).await;
-    let transfer_started = std::time::Instant::now();
-    request_piece_blocks(&mut leecher_a, 0).await;
-    request_piece_blocks(&mut leecher_b, 0).await;
+        // Start RPC-only so global rate changes and task creation both cross
+        // the real application RPC boundary.
+        let client = RunningAria2::start_rpc(&args);
+        let gid_a = add_torrent(&client, 1, torrent_a);
+        let gid_b = add_torrent(&client, 2, torrent_b);
+        wait_for_piece(&client, &gid_a).await;
+        wait_for_piece(&client, &gid_b).await;
+
+        Self {
+            output_dir,
+            client,
+            listen_port,
+            meta_a,
+            meta_b,
+            payload,
+            gid_a,
+            gid_b,
+            peer_a,
+            peer_b,
+            _tracker_a: tracker_a,
+            _tracker_b: tracker_b,
+        }
+    }
+
+    async fn connect_leechers(&self) -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let leecher_a =
+            connect_interested_leecher(self.listen_port, self.meta_a.info_hash.bytes).await;
+        let leecher_b =
+            connect_interested_leecher(self.listen_port, self.meta_b.info_hash.bytes).await;
+        (leecher_a, leecher_b)
+    }
+
+    async fn assert_upload_counters_and_finish(&self) {
+        wait_for_uploaded_bytes(&self.client, &self.gid_a).await;
+        wait_for_uploaded_bytes(&self.client, &self.gid_b).await;
+        self.peer_a.release_tail();
+        self.peer_b.release_tail();
+        wait_for_complete(&self.client, &self.gid_a).await;
+        wait_for_complete(&self.client, &self.gid_b).await;
+        assert_eq!(
+            std::fs::read(self.output_dir.path().join("global-upload-a.bin")).unwrap(),
+            *self.payload
+        );
+        assert_eq!(
+            std::fs::read(self.output_dir.path().join("global-upload-b.bin")).unwrap(),
+            *self.payload
+        );
+    }
+}
+
+async fn upload_both_pieces(
+    leecher_a: &mut tokio::net::TcpStream,
+    leecher_b: &mut tokio::net::TcpStream,
+) -> (Vec<u8>, Vec<u8>, Duration) {
+    let started = Instant::now();
+    request_piece_blocks(leecher_a, 0).await;
+    request_piece_blocks(leecher_b, 0).await;
     let (uploaded_a, uploaded_b) = tokio::time::timeout(Duration::from_secs(25), async {
-        tokio::join!(
-            receive_piece(&mut leecher_a, 0),
-            receive_piece(&mut leecher_b, 0)
-        )
+        tokio::join!(receive_piece(leecher_a, 0), receive_piece(leecher_b, 0))
     })
     .await
-    .expect("both globally rate-limited uploads must finish");
-    let elapsed = transfer_started.elapsed();
+    .expect("both globally rate-limited uploads must finish within 25 seconds");
+    (uploaded_a, uploaded_b, started.elapsed())
+}
 
-    assert_eq!(uploaded_a, payload[..PIECE_LENGTH]);
-    assert_eq!(uploaded_b, payload[..PIECE_LENGTH]);
-    let combined_bytes = PIECE_LENGTH * 2;
+fn assert_global_rate_window(total_bytes: usize, elapsed: Duration) {
     let minimum_wait = Duration::from_millis(
-        (((combined_bytes - DEFAULT_BURST_LENGTH) * 3 * 1000) / (UPLOAD_RATE_BYTES_PER_SEC * 4))
+        (((total_bytes - DEFAULT_BURST_LENGTH) * 3 * 1000) / (UPLOAD_RATE_BYTES_PER_SEC * 4))
             as u64,
     );
     assert!(
         elapsed >= minimum_wait,
-        "the combined torrent uploads should share the {} KiB/s process limit after its {} KiB burst; took {elapsed:?}, expected at least {minimum_wait:?}",
+        "combined torrents should share the {} KiB/s process limit after the {} KiB burst; took {elapsed:?}, expected at least {minimum_wait:?}",
         UPLOAD_RATE_BYTES_PER_SEC / 1024,
         DEFAULT_BURST_LENGTH / 1024,
     );
+}
 
-    wait_for_uploaded_bytes(&client, &gid_a).await;
-    wait_for_uploaded_bytes(&client, &gid_b).await;
-    peer_a.release_tail();
-    peer_b.release_tail();
-    wait_for_complete(&client, &gid_a).await;
-    wait_for_complete(&client, &gid_b).await;
+#[tokio::test]
+async fn cli_global_upload_limit_aggregates_rpc_added_torrents_on_peer_wire() {
+    let setup = TwoTorrentProcess::start(&format!("{}K", UPLOAD_RATE_BYTES_PER_SEC / 1024)).await;
+    let (mut leecher_a, mut leecher_b) = setup.connect_leechers().await;
+    let (uploaded_a, uploaded_b, elapsed) =
+        upload_both_pieces(&mut leecher_a, &mut leecher_b).await;
+
+    assert_eq!(uploaded_a, setup.payload[..PIECE_LENGTH]);
+    assert_eq!(uploaded_b, setup.payload[..PIECE_LENGTH]);
+    assert_global_rate_window(PIECE_LENGTH * 2, elapsed);
+    setup.assert_upload_counters_and_finish().await;
+}
+
+#[tokio::test]
+async fn rpc_change_global_upload_limit_updates_live_torrent_peer_actors() {
+    let setup = TwoTorrentProcess::start("16K").await;
+    let (mut leecher_a, mut leecher_b) = setup.connect_leechers().await;
+
     assert_eq!(
-        std::fs::read(output_dir.path().join("global-upload-a.bin")).unwrap(),
-        *payload
+        rpc(
+            &setup.client,
+            30,
+            "aria2.changeGlobalOption",
+            json!([{"max-overall-upload-limit": format!("{}K", UPLOAD_RATE_BYTES_PER_SEC / 1024)}]),
+        ),
+        "OK"
     );
-    assert_eq!(
-        std::fs::read(output_dir.path().join("global-upload-b.bin")).unwrap(),
-        *payload
-    );
+
+    let (uploaded_a, uploaded_b, elapsed) =
+        upload_both_pieces(&mut leecher_a, &mut leecher_b).await;
+    assert_eq!(uploaded_a, setup.payload[..PIECE_LENGTH]);
+    assert_eq!(uploaded_b, setup.payload[..PIECE_LENGTH]);
+    assert_global_rate_window(PIECE_LENGTH * 2, elapsed);
+    setup.assert_upload_counters_and_finish().await;
 }

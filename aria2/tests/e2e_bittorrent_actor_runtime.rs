@@ -9,6 +9,7 @@ mod support;
 mod mock_tracker;
 
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+use aria2_protocol::bittorrent::message::types::BtMessage;
 use base64::Engine as _;
 use mock_tracker::MockTrackerServer;
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 use support::RunningAria2;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::{JoinHandle, JoinSet};
 
 fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
@@ -105,7 +106,23 @@ struct ControlledSeeder {
     addr: SocketAddr,
     request_count: Arc<AtomicUsize>,
     choked_request_count: Arc<AtomicUsize>,
+    request_seen: Arc<Notify>,
+    connection_closed: Arc<Notify>,
+    fast_message_sent: Arc<Notify>,
     task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct ControlledPeerSession {
+    info_hash: [u8; 20],
+    request_count: Arc<AtomicUsize>,
+    choked_request_count: Arc<AtomicUsize>,
+    unchoke_delay: Duration,
+    fast_extension_message: Option<BtMessage>,
+    negotiate_fast_extension: bool,
+    request_seen: Arc<Notify>,
+    connection_closed: Arc<Notify>,
+    fast_message_sent: Arc<Notify>,
 }
 
 impl ControlledSeeder {
@@ -114,27 +131,68 @@ impl ControlledSeeder {
     }
 
     async fn start_with_unchoke_delay(info_hash: [u8; 20], unchoke_delay: Duration) -> Self {
+        Self::start_with_behavior(info_hash, unchoke_delay, None, false).await
+    }
+
+    async fn start_with_allowed_fast_piece(info_hash: [u8; 20], piece_index: u32) -> Self {
+        Self::start_with_behavior(
+            info_hash,
+            Duration::ZERO,
+            Some(BtMessage::AllowedFast { index: piece_index }),
+            true,
+        )
+        .await
+    }
+
+    async fn start_sending_unnegotiated_allowed_fast(
+        info_hash: [u8; 20],
+        piece_index: u32,
+    ) -> Self {
+        Self::start_sending_unnegotiated_fast_message(
+            info_hash,
+            BtMessage::AllowedFast { index: piece_index },
+        )
+        .await
+    }
+
+    async fn start_sending_unnegotiated_fast_message(
+        info_hash: [u8; 20],
+        message: BtMessage,
+    ) -> Self {
+        Self::start_with_behavior(info_hash, Duration::ZERO, Some(message), false).await
+    }
+
+    async fn start_with_behavior(
+        info_hash: [u8; 20],
+        unchoke_delay: Duration,
+        fast_extension_message: Option<BtMessage>,
+        negotiate_fast_extension: bool,
+    ) -> Self {
         let listener = TokioTcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind controlled seeder");
         let addr = listener.local_addr().expect("seeder local address");
         let request_count = Arc::new(AtomicUsize::new(0));
         let choked_request_count = Arc::new(AtomicUsize::new(0));
-        let requests = Arc::clone(&request_count);
-        let choked_requests = Arc::clone(&choked_request_count);
+        let request_seen = Arc::new(Notify::new());
+        let connection_closed = Arc::new(Notify::new());
+        let fast_message_sent = Arc::new(Notify::new());
+        let peer_session = ControlledPeerSession {
+            info_hash,
+            request_count: Arc::clone(&request_count),
+            choked_request_count: Arc::clone(&choked_request_count),
+            unchoke_delay,
+            fast_extension_message,
+            negotiate_fast_extension,
+            request_seen: Arc::clone(&request_seen),
+            connection_closed: Arc::clone(&connection_closed),
+            fast_message_sent: Arc::clone(&fast_message_sent),
+        };
         let task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
-                let requests = Arc::clone(&requests);
-                let choked_requests = Arc::clone(&choked_requests);
+                let peer_session = peer_session.clone();
                 tokio::spawn(async move {
-                    serve_peer(
-                        &mut stream,
-                        info_hash,
-                        requests,
-                        choked_requests,
-                        unchoke_delay,
-                    )
-                    .await;
+                    serve_peer(&mut stream, peer_session).await;
                 });
             }
         });
@@ -142,6 +200,9 @@ impl ControlledSeeder {
             addr,
             request_count,
             choked_request_count,
+            request_seen,
+            connection_closed,
+            fast_message_sent,
             task,
         }
     }
@@ -298,13 +359,18 @@ async fn read_bt_message(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Resu
     Ok(message)
 }
 
-async fn serve_peer(
-    stream: &mut TcpStream,
-    info_hash: [u8; 20],
-    request_count: Arc<AtomicUsize>,
-    choked_request_count: Arc<AtomicUsize>,
-    unchoke_delay: Duration,
-) {
+async fn serve_peer(stream: &mut TcpStream, session: ControlledPeerSession) {
+    let ControlledPeerSession {
+        info_hash,
+        request_count,
+        choked_request_count,
+        unchoke_delay,
+        fast_extension_message,
+        negotiate_fast_extension,
+        request_seen,
+        connection_closed,
+        fast_message_sent,
+    } = session;
     let mut handshake = [0u8; 68];
     if tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut handshake))
         .await
@@ -317,6 +383,9 @@ async fn serve_peer(
     let mut response = [0u8; 68];
     response[0] = 19;
     response[1..20].copy_from_slice(b"BitTorrent protocol");
+    if negotiate_fast_extension {
+        response[27] |= 0x04;
+    }
     response[28..48].copy_from_slice(&info_hash);
     response[48..68].copy_from_slice(b"ActorSeeder-00000001");
     if stream.write_all(&response).await.is_err()
@@ -328,11 +397,19 @@ async fn serve_peer(
     if !unchoke_delay.is_zero() && stream.write_all(&[0, 0, 0, 1, 0]).await.is_err() {
         return;
     }
+    if let Some(message) = &fast_extension_message {
+        let encoded = aria2_protocol::bittorrent::message::serializer::serialize(message);
+        if stream.write_all(&encoded).await.is_err() {
+            return;
+        }
+        fast_message_sent.notify_one();
+    }
     let unchoke_at = Instant::now() + unchoke_delay;
+    let keep_choked = fast_extension_message.is_some();
     let mut early_request = None;
     let mut interested = false;
     loop {
-        if interested && Instant::now() >= unchoke_at {
+        if interested && Instant::now() >= unchoke_at && !keep_choked {
             if stream.write_all(&[0, 0, 0, 1, 1]).await.is_err() {
                 return;
             }
@@ -342,20 +419,31 @@ async fn serve_peer(
             let wait = unchoke_at.saturating_duration_since(Instant::now());
             match tokio::time::timeout(wait, read_bt_message(stream)).await {
                 Ok(Ok(message)) => message,
-                Ok(Err(_)) => return,
+                Ok(Err(_)) => {
+                    connection_closed.notify_one();
+                    return;
+                }
                 Err(_) => continue,
             }
         } else {
             match tokio::time::timeout(Duration::from_secs(5), read_bt_message(stream)).await {
                 Ok(Ok(message)) => message,
-                Ok(Err(_)) | Err(_) => return,
+                Ok(Err(_)) => {
+                    connection_closed.notify_one();
+                    return;
+                }
+                Err(_) => return,
             }
         };
         if message.first() == Some(&2) {
             interested = true;
         } else if message.first() == Some(&6) {
             choked_request_count.fetch_add(1, Ordering::SeqCst);
+            request_seen.notify_one();
             early_request = Some(message);
+            if keep_choked {
+                break;
+            }
         }
     }
 
@@ -365,7 +453,10 @@ async fn serve_peer(
         } else {
             match read_bt_message(stream).await {
                 Ok(message) => message,
-                Err(_) => return,
+                Err(_) => {
+                    connection_closed.notify_one();
+                    return;
+                }
             }
         };
         if message.is_empty() {
@@ -469,6 +560,202 @@ async fn cli_waits_for_unchoke_before_requesting_a_non_fast_piece() {
             .expect("completed payload is readable"),
         b"abc"
     );
+}
+
+#[tokio::test]
+async fn cli_downloads_allowed_fast_piece_while_peer_keeps_choking() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = test_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let peer = ControlledSeeder::start_with_allowed_fast_piece(meta.info_hash.bytes, 0).await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    let torrent = test_torrent(&tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--seed-time=1".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = rpc(
+                &client,
+                2,
+                "aria2.tellStatus",
+                json!([gid, ["completedLength", "totalLength"]]),
+            );
+            if status["completedLength"] == "3" && status["totalLength"] == "3" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("AllowedFast piece should complete without an Unchoke");
+
+    assert_eq!(peer.choked_request_count(), 1);
+    assert_eq!(peer.request_count(), 1);
+    assert_eq!(
+        std::fs::read(output_dir.path().join("actor-runtime.bin"))
+            .expect("completed payload is readable"),
+        b"abc"
+    );
+}
+
+#[tokio::test]
+async fn cli_rejects_allowed_fast_without_fast_extension_negotiation() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = test_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let peer =
+        ControlledSeeder::start_sending_unnegotiated_allowed_fast(meta.info_hash.bytes, 0).await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    let torrent = test_torrent(&tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--seed-time=1".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    tokio::time::timeout(Duration::from_secs(5), peer.fast_message_sent.notified())
+        .await
+        .expect("fixture sent the unsolicited AllowedFast message");
+    let disconnected_without_request = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            _ = peer.connection_closed.notified() => true,
+            _ = peer.request_seen.notified() => false,
+        }
+    })
+    .await
+    .expect("peer should either be rejected or expose an invalid piece request");
+
+    assert!(
+        disconnected_without_request,
+        "client must reject AllowedFast when Fast Extension was not negotiated"
+    );
+    assert_eq!(
+        peer.request_count(),
+        0,
+        "rejected peer must receive no request"
+    );
+    assert_eq!(
+        peer.choked_request_count(),
+        0,
+        "unnegotiated AllowedFast must not bypass choking"
+    );
+
+    let _ = rpc(&client, 2, "aria2.forceRemove", json!([gid]));
+}
+
+async fn assert_unnegotiated_fast_message_is_rejected(message: BtMessage) {
+    let label = format!("{message:?}");
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = test_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let peer =
+        ControlledSeeder::start_sending_unnegotiated_fast_message(meta.info_hash.bytes, message)
+            .await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    let torrent = test_torrent(&tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--seed-time=1".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    tokio::time::timeout(Duration::from_secs(5), peer.fast_message_sent.notified())
+        .await
+        .unwrap_or_else(|_| panic!("fixture did not send {label}"));
+    let disconnected_without_request = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            _ = peer.connection_closed.notified() => true,
+            _ = peer.request_seen.notified() => false,
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("client did not reject {label}"));
+
+    assert!(
+        disconnected_without_request,
+        "client requested after {label}"
+    );
+    assert_eq!(peer.request_count(), 0, "client requested after {label}");
+    let _ = rpc(&client, 2, "aria2.forceRemove", json!([gid]));
+}
+
+#[tokio::test]
+async fn cli_rejects_fast_extension_messages_without_negotiation() {
+    for message in [
+        BtMessage::HaveAll,
+        BtMessage::HaveNone,
+        BtMessage::Reject {
+            index: 0,
+            offset: 0,
+            length: 3,
+        },
+    ] {
+        assert_unnegotiated_fast_message_is_rejected(message).await;
+    }
 }
 
 #[tokio::test]
@@ -1053,6 +1340,7 @@ async fn serve_partial_peer(
     let mut response = [0u8; 68];
     response[0] = 19;
     response[1..20].copy_from_slice(b"BitTorrent protocol");
+    response[27] |= 0x04;
     response[28..48].copy_from_slice(&info_hash);
     response[48..68].fill(0x53);
     let bitfield = [0, 0, 0, 2, 5, initial_bitfield];

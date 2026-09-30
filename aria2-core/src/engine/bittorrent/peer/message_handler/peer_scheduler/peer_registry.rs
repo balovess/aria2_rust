@@ -21,7 +21,10 @@ const MAX_RECENTLY_DROPPED_PEERS: usize = 50;
 /// One long-lived I/O owner for a handshaken BitTorrent connection.
 pub(crate) struct PeerActorEntry {
     pub(crate) actor_id: PeerActorId,
+    /// Socket endpoint used for actor identity, deduplication, and cleanup.
     pub(crate) endpoint: SocketAddr,
+    /// Remote listen endpoint suitable for RPC and peer exchange, if known.
+    pub(crate) advertised_endpoint: Option<SocketAddr>,
     pub(crate) dead: bool,
     pub(crate) incoming: bool,
     pub(crate) source: crate::request::request_group::BtPeerSource,
@@ -49,6 +52,7 @@ impl PeerActorEntry {
         let stats = connection.stats.clone();
         let seeder = connection.seeder;
         let incoming = connection.incoming;
+        let advertised_endpoint = connection.advertised_endpoint();
         let source = connection.source;
         let client = connection.remote_client.clone();
         let pending_download_requests = Arc::new(AtomicUsize::new(0));
@@ -72,6 +76,7 @@ impl PeerActorEntry {
         Self {
             actor_id,
             endpoint,
+            advertised_endpoint,
             dead: false,
             incoming,
             source,
@@ -410,7 +415,7 @@ impl PeerSwarm {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone(),
-                addr: actor.endpoint,
+                addr: actor.advertised_endpoint.unwrap_or(actor.endpoint),
                 is_incoming: actor.incoming,
                 source: actor.source,
                 bitfield: actor.has_bitfield.then(|| actor.bitfield.clone()),
@@ -537,12 +542,18 @@ impl PeerSwarm {
                     actor.peer_allowed_fast.insert(*piece_index);
                 }
             }
-            PeerEvent::PexNegotiated {
+            PeerEvent::ExtensionHandshakeReceived {
                 actor_id,
                 ut_pex_id,
+                remote_listen_port,
             } => {
                 if let Some(actor) = self.actor_mut(*actor_id) {
                     actor.ut_pex_id = *ut_pex_id;
+                    if let Some(port) = remote_listen_port {
+                        actor.advertised_endpoint =
+                            Some(SocketAddr::new(actor.endpoint.ip(), *port));
+                        actor.incoming = false;
+                    }
                 }
             }
             PeerEvent::Disconnected { actor_id } => {
@@ -561,6 +572,10 @@ impl PeerSwarm {
                 | PeerEvent::PeerChokingChanged { .. }
                 | PeerEvent::PeerAvailabilityChanged { .. }
                 | PeerEvent::PeerAvailabilitySnapshot { .. }
+                | PeerEvent::ExtensionHandshakeReceived {
+                    remote_listen_port: Some(_),
+                    ..
+                }
         );
         let publishes_peer_stats = matches!(
             event,
@@ -611,27 +626,32 @@ impl PeerSwarm {
 
     pub(crate) async fn remove_dead(&mut self) -> Vec<(PeerActorId, SocketAddr)> {
         let mut removed = Vec::new();
+        let mut dropped_advertisements = Vec::new();
         for index in (0..self.actors.len()).rev() {
             if self.actors[index].dead {
                 let actor_id = self.actors[index].actor_id;
                 let endpoint = self.actors[index].endpoint;
+                let advertised_endpoint = self.actors[index].advertised_endpoint;
                 // Keep the entry registered until shutdown completes. If this
                 // future is cancelled while awaiting the actor, the next
                 // maintenance pass can safely resume the same shutdown.
                 self.actors[index].shutdown().await;
                 removed.push((actor_id, endpoint));
+                if let Some(advertised_endpoint) = advertised_endpoint {
+                    dropped_advertisements.push(advertised_endpoint);
+                }
             }
         }
         if !removed.is_empty() {
-            for (_, endpoint) in &removed {
+            for endpoint in dropped_advertisements {
                 if let Some(index) = self
                     .recently_dropped_endpoints
                     .iter()
-                    .position(|known| known == endpoint)
+                    .position(|known| *known == endpoint)
                 {
                     self.recently_dropped_endpoints.remove(index);
                 }
-                self.recently_dropped_endpoints.push_front(*endpoint);
+                self.recently_dropped_endpoints.push_front(endpoint);
                 self.recently_dropped_endpoints
                     .truncate(MAX_RECENTLY_DROPPED_PEERS);
             }
@@ -779,7 +799,13 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let mut connection = BtPeerConn::from_incoming_tcp(
-            PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
+            PeerConnection::from_stream_with_peer_capabilities(
+                local_stream,
+                [0; 20],
+                false,
+                true,
+                true,
+            ),
             endpoint,
         );
         let actor_id = connection.actor_id;
@@ -795,8 +821,13 @@ mod tests {
         assert!(swarm.spawn_peer(connection, None, provider).is_ok());
 
         assert!(swarm.set_upload_choked(actor_id, false));
-        let mut remote =
-            PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
+        let mut remote = PeerConnection::from_stream_with_peer_capabilities(
+            remote_stream,
+            [1; 20],
+            false,
+            false,
+            true,
+        );
         assert_eq!(
             timeout(Duration::from_secs(1), remote.read_message())
                 .await
@@ -1085,7 +1116,13 @@ mod tests {
         let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let mut connection = BtPeerConn::from_incoming_tcp(
-            PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
+            PeerConnection::from_stream_with_peer_capabilities(
+                local_stream,
+                [0; 20],
+                false,
+                true,
+                true,
+            ),
             endpoint,
         );
         connection.allocate_session_resource(16, 1, 16);
@@ -1098,8 +1135,13 @@ mod tests {
             Ok(registered_actor_id) if registered_actor_id == actor_id
         ));
 
-        let mut remote =
-            PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
+        let mut remote = PeerConnection::from_stream_with_peer_capabilities(
+            remote_stream,
+            [1; 20],
+            false,
+            false,
+            true,
+        );
         let mut extension_handshake = ExtensionHandshake::new();
         extension_handshake.with_ut_pex(9);
         remote
@@ -1118,9 +1160,10 @@ mod tests {
         };
         assert!(matches!(
             negotiation,
-            PeerEvent::PexNegotiated {
+            PeerEvent::ExtensionHandshakeReceived {
                 actor_id: event_actor,
                 ut_pex_id: Some(9),
+                remote_listen_port: None,
             } if event_actor == actor_id
         ));
         assert_eq!(swarm.actor(actor_id).unwrap().ut_pex_id, Some(9));

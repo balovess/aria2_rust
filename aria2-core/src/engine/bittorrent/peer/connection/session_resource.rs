@@ -205,9 +205,16 @@ impl PeerSessionResource {
     // Extension Protocol (BEP 10)
     // -----------------------------------------------------------------------
 
-    /// Register an extension with the given key and message ID.
+    /// Apply a peer's BEP 10 extension ID update.
+    ///
+    /// An ID of zero disables the extension, so disabled extensions are
+    /// removed rather than exposed as an active `Some(0)` mapping.
     pub fn add_extension(&mut self, key: &str, id: u8) {
-        self.peer_extensions.insert(key.into(), id);
+        if id == 0 {
+            self.peer_extensions.remove(key);
+        } else {
+            self.peer_extensions.insert(key.into(), id);
+        }
     }
 
     /// Look up the message ID for a given extension key.

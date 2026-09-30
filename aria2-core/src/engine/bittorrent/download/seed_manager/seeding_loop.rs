@@ -416,7 +416,7 @@ impl BtSeedManager {
             | PeerEvent::PeerAvailabilityChanged { .. }
             | PeerEvent::PeerAvailabilitySnapshot { .. }
             | PeerEvent::AllowedFast { .. }
-            | PeerEvent::PexNegotiated { .. }
+            | PeerEvent::ExtensionHandshakeReceived { .. }
             | PeerEvent::Disconnected { .. }
             | PeerEvent::RequestFailed { .. } => {}
             PeerEvent::PexPeers { peers } => {

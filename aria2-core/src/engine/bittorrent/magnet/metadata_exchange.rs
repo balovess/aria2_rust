@@ -314,6 +314,14 @@ impl MetadataExchangeSession {
             }
         };
 
+        if !conn.remote_supports_extended_messaging() {
+            return Err(MetadataExchangeError::UnsupportedPeer {
+                addr: addr_str,
+                reason: "Remote did not advertise extended messaging in the BitTorrent handshake"
+                    .to_string(),
+            });
+        }
+
         debug!("Connected to {}, sending extension handshake", peer_addr);
 
         let local_hs = ExtensionHandshake::new();

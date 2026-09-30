@@ -46,8 +46,8 @@ fn flip_bit(id: &mut [u8; 20], bit_index: usize) {
 /// A Kademlia DHT k-bucket holding nodes for a specific ID range.
 ///
 /// Each bucket covers IDs in the range `[min_id, max_id]` (inclusive) and
-/// can hold up to `K` nodes. When the bucket is full, new nodes are either
-/// rejected or replace bad/questionable nodes.
+/// can hold up to `K` nodes. When the bucket is full, only a verified good
+/// candidate may replace a bad LRU node; other candidates are rejected.
 ///
 /// Buckets also maintain a replacement cache of up to `CACHE_SIZE` nodes
 /// that can be promoted when existing nodes become unresponsive.
@@ -180,7 +180,8 @@ impl Bucket {
     ///
     /// - If the node's ID already exists, update it (move to tail).
     /// - If there's room, add the node.
-    /// - If the bucket is full and the LRU node is bad, replace it.
+    /// - If the bucket is full and the LRU node is bad, replace it with a
+    ///   verified good candidate.
     /// - Otherwise, return `false` (bucket is full of good/questionable nodes).
     ///
     /// Equivalent to C++ `DHTBucket::addNode()`.
@@ -209,6 +210,7 @@ impl Bucket {
         // Bucket is full. Try to replace a bad node (LRU = front).
         if let Some(front) = self.nodes.first()
             && front.is_bad()
+            && node.is_good()
         {
             self.nodes.remove(0);
             self.nodes.push(node);

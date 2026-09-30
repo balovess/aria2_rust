@@ -307,6 +307,31 @@ impl BtPeerConn {
         };
         let result = result.and_then(|message| {
             if let Some(message_ref) = message.as_ref() {
+                if matches!(
+                    message_ref,
+                    BtMessage::AllowedFast { .. }
+                        | BtMessage::Reject { .. }
+                        | BtMessage::HaveAll
+                        | BtMessage::HaveNone
+                ) && !self.remote_supports_fast_extension()
+                {
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: "peer sent a Fast Extension message without negotiating Fast Extension"
+                                .to_owned(),
+                        },
+                    ));
+                }
+                if matches!(message_ref, BtMessage::Extended { .. })
+                    && !self.remote_supports_extended_messaging()
+                {
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: "peer sent an extended message without negotiating extended messaging"
+                                .to_owned(),
+                        },
+                    ));
+                }
                 let validation = if let Some(validator) = validator {
                     validator.validate(message_ref)
                 } else if let Some(resource) = &self.session_resource {
@@ -330,14 +355,21 @@ impl BtPeerConn {
                         payload,
                     )
             {
-                *self
-                    .remote_client
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = handshake
+                if let Some(port) = handshake.port() {
+                    self.remote_listen_port = Some(port);
+                    self.incoming = false;
+                }
+                if let Some(client) = handshake
                     .v()
                     .map(str::trim)
                     .filter(|client| !client.is_empty())
-                    .map(str::to_owned);
+                {
+                    *self
+                        .remote_client
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(client.to_owned());
+                }
                 if let Some(id) = handshake.ut_metadata_id() {
                     self.register_peer_extension("ut_metadata", id);
                 }

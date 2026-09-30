@@ -380,6 +380,92 @@ async fn test_e2e_metadata_exchange_over_peer_wire() {
 }
 
 #[tokio::test]
+async fn test_e2e_metadata_exchange_rejects_peer_without_extended_capability() {
+    use aria2_protocol::bittorrent::message::handshake::Handshake;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let info_hash = [0x46u8; 20];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback peer");
+    let peer_addr = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept metadata peer");
+        let mut request = [0u8; 68];
+        stream
+            .read_exact(&mut request)
+            .await
+            .expect("read client's BitTorrent handshake");
+        assert_eq!(&request[28..48], &info_hash);
+
+        let mut response = Handshake::new(&info_hash, &[0x47u8; 20]);
+        response.reserved[5] &= !0x10;
+        stream
+            .write_all(&response.to_bytes())
+            .await
+            .expect("send handshake without BEP 10 capability");
+
+        let mut frame_length = [0u8; 4];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_exact(&mut frame_length),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                let frame_size = u32::from_be_bytes(frame_length) as usize;
+                let mut payload = vec![0u8; frame_size];
+                if frame_size == 0 || stream.read_exact(&mut payload).await.is_err() {
+                    return false;
+                }
+                let sent_extended = payload.first() == Some(&20);
+                if sent_extended {
+                    let mut next_frame = [0u8; 4];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        stream.read_exact(&mut next_frame),
+                    )
+                    .await;
+                }
+                sent_extended
+            }
+            Ok(Err(_)) | Err(_) => false,
+        }
+    });
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        max_peers_to_try: 1,
+        connect_timeout: std::time::Duration::from_secs(1),
+        request_timeout: std::time::Duration::from_secs(4),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    });
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        session.fetch_metadata(&info_hash, &[peer_addr]),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        !peer.await.expect("peer observer should finish"),
+        "metadata client must not send an Extended frame without negotiating BEP 10"
+    );
+    let result =
+        result.expect("unsupported peer should be rejected before metadata request timeout");
+    let error = result.expect_err("peer without BEP 10 cannot serve ut_metadata");
+    assert!(matches!(
+        error,
+        MetadataExchangeError::AllPeersFailed { attempts: 1, .. }
+    ));
+    assert!(error.to_string().contains("unsupported"));
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "peer classification took {elapsed:?}, request timeout is 4 seconds"
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_magnet_metadata_resolution_with_udp_only_tracker() {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 

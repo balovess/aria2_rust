@@ -345,7 +345,8 @@ impl BtSeedManager {
             .pending_connections
             .iter()
             .filter_map(|session| {
-                let addr = session.remote_endpoint()?;
+                let transport_endpoint = session.remote_endpoint()?;
+                let addr = session.advertised_endpoint().unwrap_or(transport_endpoint);
                 Some(BtPeerSnapshot {
                     peer_id: session.remote_peer_id().unwrap_or([0; 20]),
                     client: session
@@ -382,7 +383,7 @@ impl BtSeedManager {
             })
             .collect::<Vec<_>>();
         snapshots.extend(self.swarm.iter().map(|actor| {
-            let addr = actor.endpoint;
+            let addr = actor.advertised_endpoint.unwrap_or(actor.endpoint);
             let stats = &actor.stats;
             BtPeerSnapshot {
                 peer_id: stats.peer_id,

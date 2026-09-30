@@ -137,16 +137,16 @@ impl ExtensionHandshake {
             .as_dict()
             .ok_or("Extension handshake payload is not a dict")?;
 
-        let m_val = dict
-            .get(b"m".as_slice())
-            .ok_or("Missing 'm' key in extension handshake")?;
-
-        let m_inner = m_val
-            .as_dict()
-            .ok_or("'m' value is not a dict in extension handshake")?;
-
-        // Clone the m dict contents
-        let m_dict = m_inner.clone();
+        // BEP 10 makes each top-level field optional. An omitted `m` therefore
+        // means this peer advertises no extension IDs; if present, it must be a
+        // dictionary.
+        let m_dict = match dict.get(b"m".as_slice()) {
+            Some(m_val) => m_val
+                .as_dict()
+                .ok_or("'m' value is not a dict in extension handshake")?
+                .clone(),
+            None => BTreeMap::new(),
+        };
 
         // Parse reqq (default to DEFAULT_REQQ if absent)
         let reqq = dict
@@ -330,14 +330,14 @@ mod tests {
     }
 
     #[test]
-    fn test_handshake_missing_m_key() {
-        // A dict without 'm' key should fail
+    fn test_handshake_without_m_key_has_no_extension_ids() {
         let mut dict = BTreeMap::new();
         dict.insert(b"reqq".to_vec(), BencodeValue::Int(500));
         let bytes = BencodeValue::Dict(dict).encode();
-        let result = ExtensionHandshake::from_bytes(&bytes);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing 'm' key"));
+        let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ut_metadata_id(), None);
+        assert_eq!(parsed.ut_pex_id(), None);
+        assert_eq!(parsed.reqq(), 500);
     }
 
     #[test]

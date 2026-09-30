@@ -716,7 +716,7 @@ impl PieceDownloadSession<'_> {
                 false
             }
             PeerEvent::AllowedFast { .. } => false,
-            PeerEvent::PexNegotiated { .. } => false,
+            PeerEvent::ExtensionHandshakeReceived { .. } => false,
             PeerEvent::Message {
                 actor_id,
                 message: aria2_protocol::bittorrent::message::types::BtMessage::Piece { .. },

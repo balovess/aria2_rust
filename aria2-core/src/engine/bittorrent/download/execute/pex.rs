@@ -211,12 +211,13 @@ pub(crate) async fn send_periodic_pex_to_swarm(
     let added = swarm
         .iter()
         .filter(|actor| !actor.dead)
-        .filter(|actor| known_endpoints.insert(actor.endpoint))
-        .map(|actor| PeerAddr::new(&actor.endpoint.ip().to_string(), actor.endpoint.port()))
+        .filter_map(|actor| actor.advertised_endpoint)
+        .filter(|endpoint| known_endpoints.insert(*endpoint))
+        .map(|endpoint| PeerAddr::new(&endpoint.ip().to_string(), endpoint.port()))
         .collect::<Vec<_>>();
     let dropped = swarm
         .recently_dropped_endpoints()
-        .filter(|endpoint| !swarm.has_endpoint(*endpoint))
+        .filter(|endpoint| !known_endpoints.contains(endpoint))
         .map(|endpoint| PeerAddr::new(&endpoint.ip().to_string(), endpoint.port()))
         .collect::<Vec<_>>();
     if added.is_empty() && dropped.is_empty() {
@@ -226,21 +227,22 @@ pub(crate) async fn send_periodic_pex_to_swarm(
     let peers = swarm
         .iter()
         .filter(|actor| !actor.dead)
-        .filter_map(|actor| Some((actor.actor_id, actor.endpoint, actor.ut_pex_id?)))
+        .filter_map(|actor| Some((actor.actor_id, actor.advertised_endpoint, actor.ut_pex_id?)))
         .collect::<Vec<_>>();
     let mut sent_count = 0;
     let mut disconnected = Vec::new();
     for (actor_id, endpoint, remote_ut_pex_id) in peers {
-        let remote_addr = PeerAddr::new(&endpoint.ip().to_string(), endpoint.port());
+        let remote_addr =
+            endpoint.map(|endpoint| PeerAddr::new(&endpoint.ip().to_string(), endpoint.port()));
         let peer_addrs = added
             .iter()
-            .filter(|peer| **peer != remote_addr)
+            .filter(|peer| remote_addr.as_ref().is_none_or(|remote| *peer != remote))
             .take(PexHandler::DEFAULT_MAX_PEERS)
             .cloned()
             .collect::<Vec<_>>();
         let dropped_addrs = dropped
             .iter()
-            .filter(|peer| **peer != remote_addr)
+            .filter(|peer| remote_addr.as_ref().is_none_or(|remote| *peer != remote))
             .take(PexHandler::DEFAULT_MAX_PEERS)
             .cloned()
             .collect::<Vec<_>>();
@@ -402,6 +404,7 @@ mod tests {
                 live_transport,
                 live_endpoint,
             );
+        live_connection.incoming = false;
         live_connection.allocate_session_resource(16, 1, 16);
         live_connection.register_peer_extension("ut_pex", 19);
         let live_actor_id = live_connection.actor_id;
@@ -409,11 +412,12 @@ mod tests {
         let dropped_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (dropped_remote_stream, dropped_endpoint, dropped_transport) =
             make_incoming_connection(dropped_listener, [2; 20]).await;
-        let dropped_connection =
+        let mut dropped_connection =
             crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
                 dropped_transport,
                 dropped_endpoint,
             );
+        dropped_connection.incoming = false;
         let dropped_actor_id = dropped_connection.actor_id;
 
         let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
@@ -467,3 +471,7 @@ mod tests {
         drop(dropped_remote_stream);
     }
 }
+
+#[cfg(test)]
+#[path = "pex/bep10_port_tests.rs"]
+mod bep10_port_tests;
