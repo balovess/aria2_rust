@@ -161,6 +161,10 @@ listed here can be called with `call(method, params)`.
 - `tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `getGlobalStat(): Promise<GlobalStat>`
 
+`TrackerInfo.lastFailureKind` is optional and identifies the latest failed
+announce (`network`, `timeout`, `remoteTemporary`, `trackerRejected`, or
+`malformedResponse`). A successful announce clears it.
+
 **Session and browser context:**
 - `updateBrowserContext(context: unknown): Promise<string>`
 - `clearBrowserContext(): Promise<string>`

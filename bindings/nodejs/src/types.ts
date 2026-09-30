@@ -102,8 +102,16 @@ export interface TrackerInfo {
   seeders: number;
   leechers: number;
   trackerId: string;
+  lastFailureKind?: TrackerFailureKind;
   secondsSinceLastSuccess?: number;
 }
+
+export type TrackerFailureKind =
+  | 'network'
+  | 'timeout'
+  | 'remoteTemporary'
+  | 'trackerRejected'
+  | 'malformedResponse';
 
 export interface DhtStatus {
   state: string;

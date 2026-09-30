@@ -234,7 +234,9 @@ peer 快照返回 `source`、`progressPercent`、累计 `uploadedBytes`/`downloa
 `aria2.getTrackers` 返回指定 GID 的某一时点运行快照，并不表示每个 tracker
 当前都在线或正在实时返回数据。每个元素包含 `uri`、1-based `tier`、`current`、`lastAttempt`、`announceReady`、
 `allFailed`、`inFlight`、`interval`、`minInterval`、`seeders`、`leechers`、
-`trackerId` 和可选的 `secondsSinceLastSuccess`。状态来自正在执行的 BT
+`trackerId`、可选的 `lastFailureKind` 和可选的 `secondsSinceLastSuccess`。失败类别
+包括 `network`、`timeout`、`remoteTemporary`、`trackerRejected`、`malformedResponse`；
+announce 成功后清除该 URL 的最近失败类别。状态来自正在执行的 BT
 命令；命令退出后不再保留该 GID 的运行快照。`current` 是下一次选择的
 tracker，`lastAttempt` 是最近一次尝试的 tracker。该扩展接口中
 `interval` 按字符串返回，其他 tracker 数字和布尔状态按 JSON 原生类型返回。
@@ -244,6 +246,9 @@ torrent 数而非字节，仅 HTTP bencode 响应提供时返回。
 当 tracker 没有提供对应的有效 `complete` 或 `incomplete` 值时，`seeders`
 或 `leechers` 字段会省略；明确返回的 `0` 会保留为真实零值。这些调度字段
 描述 announce 状态，不能把所有 URL 解读为统一的实时/在线状态。
+`status` 是逐 URL 的观察标签：`announcing`、`succeeded`、`failed`、`ready`、
+`idle` 或 `unknown`。`unknown` 表示该 URL 尚无 announce 结果和尝试级运行记录，
+不表示失败。
 
 `aria2.getDhtStatus` 是进程级聚合接口，汇总当前活动 BT/magnet 命令注册的
 DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
@@ -278,8 +283,10 @@ Tracker 响应中的扩展 `announce-list` 也会被解析并追加到现有 tie
 用户配置、公共列表和 tracker 动态返回列表形成一条可观察的完整发现链。
 
 `getTrackers` 是 tracker 健康状态的 RPC 面：`allFailed`、`announceReady`、
-`lastAttempt`、`secondsSinceLastSuccess` 和 `inFlight` 可用于判断每个任务的
-tracker 状态与当前请求并发。公共列表源的抓取并发固定限制为 4，避免多源更新
+`lastAttempt`、`lastFailureKind`、`secondsSinceLastSuccess` 和 `inFlight` 可用于判断每个任务的
+tracker 状态与当前请求并发。每个任务启动时最多并发 announce 3 个公共 tracker，另加 torrent
+自身的 tracker 调度；未选入活动槽位的 catalog URL 保持 idle。启用该扩展会向这些公共 tracker
+发送 info-hash、peer-id、监听端口和传输计数。公共列表源的抓取并发固定限制为 4，避免多源更新
 造成无界连接；该限制属于内部保护，不改变原版 tracker RPC 响应。
 
 ### 选项、会话与进程

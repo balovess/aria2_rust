@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, watch};
 #[derive(Clone)]
 struct TrackerResponseConfig {
     peer_ports: Vec<u16>,
+    later_peer_ports: Option<Vec<u16>>,
     fail_requests: bool,
     fail_after_requests: Option<usize>,
     interval_secs: u64,
@@ -48,6 +49,22 @@ impl MockTrackerServer {
         Self::start_with_response(peer_ports, fail_requests, interval_secs, Vec::new(), None).await
     }
 
+    pub async fn start_with_event_peers(
+        started_peer_ports: Vec<u16>,
+        later_peer_ports: Vec<u16>,
+        interval_secs: u64,
+    ) -> Self {
+        Self::start_with_peer_responses(
+            started_peer_ports,
+            Some(later_peer_ports),
+            false,
+            interval_secs,
+            Vec::new(),
+            None,
+        )
+        .await
+    }
+
     pub async fn start_with_dynamic_announce_list(
         peer_ports: Vec<u16>,
         interval_secs: u64,
@@ -71,6 +88,25 @@ impl MockTrackerServer {
         announce_list: Vec<Vec<String>>,
         fail_after_requests: Option<usize>,
     ) -> Self {
+        Self::start_with_peer_responses(
+            peer_ports,
+            None,
+            fail_requests,
+            interval_secs,
+            announce_list,
+            fail_after_requests,
+        )
+        .await
+    }
+
+    async fn start_with_peer_responses(
+        peer_ports: Vec<u16>,
+        later_peer_ports: Option<Vec<u16>>,
+        fail_requests: bool,
+        interval_secs: u64,
+        announce_list: Vec<Vec<String>>,
+        fail_after_requests: Option<usize>,
+    ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
@@ -82,6 +118,7 @@ impl MockTrackerServer {
 
         let response_config = TrackerResponseConfig {
             peer_ports: peer_ports.clone(),
+            later_peer_ports,
             fail_requests,
             fail_after_requests,
             interval_secs,
@@ -234,8 +271,16 @@ impl MockTrackerServer {
             return;
         }
 
+        let peer_ports = if request_line.contains("event=started") {
+            &response_config.peer_ports
+        } else {
+            response_config
+                .later_peer_ports
+                .as_ref()
+                .unwrap_or(&response_config.peer_ports)
+        };
         let body = build_tracker_response_bencode(
-            &response_config.peer_ports,
+            peer_ports,
             response_config.interval_secs,
             &response_config.announce_list,
         );

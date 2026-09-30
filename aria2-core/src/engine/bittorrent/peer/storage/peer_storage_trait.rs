@@ -1,11 +1,9 @@
 //! PeerStorage trait — abstract interface for peer lifecycle storage.
 //!
-//! Matches C++ `PeerStorage.h` — the abstract base class that
-//! `DefaultPeerStorage` implements.
+//! Peer discovery and connection-lifecycle storage contract. Choke policy and
+//! scheduling belong to the torrent's active peer-swarm owner, not this store.
 
 use std::collections::{HashSet, VecDeque};
-
-use crate::engine::bittorrent::peer::stats::PeerStats;
 
 use super::peer_entry::PeerEntry;
 
@@ -17,9 +15,9 @@ use super::peer_entry::PeerEntry;
 ///
 /// # C++ Architecture Reference
 ///
-/// Based on `src/PeerStorage.h` — the abstract base class that
-/// `DefaultPeerStorage` implements. The C++ class defines 13 pure-virtual
-/// methods; this trait maps each to its Rust equivalent.
+/// Based on the peer discovery and lifecycle subset of `src/PeerStorage.h`.
+/// Choke scheduling is deliberately excluded because active peer actors are
+/// owned and scheduled by the torrent swarm.
 ///
 /// # Thread Safety
 ///
@@ -42,8 +40,6 @@ use super::peer_entry::PeerEntry;
 /// | `addBadPeer`                 | [`reject_peer_temporarily`](PeerStorage::reject_peer_temporarily) |
 /// | `checkoutPeer`               | [`checkout_peer`](PeerStorage::checkout_peer) |
 /// | `returnPeer`                 | [`return_peer`](PeerStorage::return_peer) |
-/// | `chokeRoundIntervalElapsed`  | [`choke_round_interval_elapsed`](PeerStorage::choke_round_interval_elapsed) |
-/// | `executeChoke`               | [`execute_choke`](PeerStorage::execute_choke) |
 pub trait PeerStorage: Send + Sync {
     /// Add a single peer to the unused list.
     ///
@@ -101,17 +97,4 @@ pub trait PeerStorage: Send + Sync {
     ///
     /// Matches C++ `PeerStorage::returnPeer`.
     fn return_peer(&mut self, peer: &PeerEntry);
-
-    /// Check whether a choke round interval has elapsed.
-    ///
-    /// Matches C++ `PeerStorage::chokeRoundIntervalElapsed`.
-    fn choke_round_interval_elapsed(&self) -> bool;
-
-    /// Execute a choke round through stable peer identities.
-    fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]);
-
-    /// Execute a choke round on the given peers.
-    ///
-    /// Matches C++ `PeerStorage::executeChoke`.
-    fn execute_choke(&mut self, peers: &mut [&mut PeerStats]);
 }

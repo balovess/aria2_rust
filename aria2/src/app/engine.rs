@@ -12,7 +12,7 @@ use aria2_core::config::TrackerCatalogConfig;
 use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
@@ -200,6 +200,21 @@ impl App {
         #[cfg(not(feature = "bittorrent"))]
         let mut engine = DownloadEngine::new();
 
+        let global_download_limit = self
+            .get_opt_i64("max-overall-download-limit")
+            .await
+            .and_then(|limit| (limit > 0).then_some(limit as u64));
+        let global_upload_limit = self
+            .get_opt_i64("max-overall-upload-limit")
+            .await
+            .and_then(|limit| (limit > 0).then_some(limit as u64));
+        if global_download_limit.is_some() || global_upload_limit.is_some() {
+            engine.set_global_rate_limiter(aria2_core::rate_limiter::RateLimiterConfig::new(
+                global_download_limit,
+                global_upload_limit,
+            ));
+        }
+
         engine.set_outbound_network_policy(outbound_policy);
 
         let dns_timeout = self
@@ -297,24 +312,10 @@ impl App {
                     .ok_or_else(|| format!("Invalid GID '{}': expected a hexadecimal u64", value))
             })
             .transpose()?;
-        let global_dl = self
-            .get_opt_i64("max-overall-download-limit")
-            .await
-            .and_then(|v| (v > 0).then_some(v as u64));
-        let global_ul = self
-            .get_opt_i64("max-overall-upload-limit")
-            .await
-            .and_then(|v| (v > 0).then_some(v as u64));
-
         let mut engine_lock = self.engine.lock().await;
         let engine = engine_lock
             .as_mut()
             .ok_or_else(|| "Engine not initialized".to_string())?;
-
-        if global_dl.is_some() || global_ul.is_some() {
-            use aria2_core::rate_limiter::RateLimiterConfig;
-            engine.set_global_rate_limiter(RateLimiterConfig::new(global_dl, global_ul));
-        }
 
         #[cfg(feature = "metalink")]
         let mut metalink_resource_groups = Vec::new();
@@ -358,12 +359,12 @@ impl App {
                 let input_snapshot =
                     option_snapshot_for_input(&option_snapshot, input, self.explicit_timeout);
                 let converter = MetalinkToRequestGroup::new();
+                let expansion = converter
+                    .create_groups_from_bytes(data, &input_options, &mut gid_iter)
+                    .map_err(|error| format!("Metalink group construction failed: {error}"))?;
                 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
                 {
-                    let graphs = converter
-                        .create_torrent_graphs_from_bytes(data, &input_options, &mut gid_iter)
-                        .map_err(|e| format!("Metalink graph construction failed: {}", e))?;
-                    for graph in &graphs {
+                    for graph in &expansion.torrent_graphs {
                         graph
                             .metadata
                             .recover_mut()
@@ -373,19 +374,16 @@ impl App {
                             .recover_mut()
                             .set_option_snapshot(input_snapshot.clone());
                     }
-                    metalink_graphs.extend(graphs);
+                    metalink_graphs.extend(expansion.torrent_graphs);
                 }
                 #[cfg(feature = "metalink")]
                 {
-                    let groups = converter
-                        .create_resource_groups_from_bytes(data, &input_options, &mut gid_iter)
-                        .map_err(|e| format!("Metalink resource construction failed: {}", e))?;
-                    for group in &groups {
+                    for group in &expansion.resource_groups {
                         group
                             .recover_mut()
                             .set_option_snapshot(input_snapshot.clone());
                     }
-                    metalink_resource_groups.extend(groups);
+                    metalink_resource_groups.extend(expansion.resource_groups);
                 }
             }
         }

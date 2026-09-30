@@ -6,11 +6,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 #[tokio::test]
-async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
+async fn seeding_discovery_sources_survive_storage_and_actor_admission() {
     let info_hash = [0x71; 20];
     let mut endpoints = Vec::new();
     let mut peers = Vec::new();
-    for remote_peer_id in [[0x72; 20], [0x74; 20]] {
+    for remote_peer_id in [[0x72; 20], [0x74; 20], [0x76; 20]] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         endpoints.push(listener.local_addr().unwrap());
         peers.push(tokio::spawn(async move {
@@ -18,10 +18,9 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
                 let (stream, _) = listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete(remote_peer_id, None, false).await
                 {
-                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
             }
         }));
@@ -30,7 +29,7 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
     let options = crate::request::request_group::DownloadOptions {
         enable_utp: false,
         enable_peer_exchange: true,
-        bt_max_peers: 2,
+        bt_max_peers: 3,
         ..crate::request::request_group::DownloadOptions::default()
     };
     let group = Arc::new(std::sync::RwLock::new(
@@ -81,13 +80,26 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
     manager.store_tracker_peers(vec![tracker_peer.clone(), tracker_peer]);
     manager.apply_peer_event(
         crate::engine::bittorrent::peer::message_handler::PeerEvent::PexPeers {
-            peers: vec![aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                &endpoints[1].ip().to_string(),
-                endpoints[1].port(),
-            )],
+            peers: vec![
+                aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                    &endpoints[0].ip().to_string(),
+                    endpoints[0].port(),
+                ),
+                aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                    &endpoints[1].ip().to_string(),
+                    endpoints[1].port(),
+                ),
+            ],
         },
     );
-    assert_eq!(peer_storage.lock().unwrap().count_all_peers(), 2);
+    manager.store_peer_addresses(
+        vec![aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+            &endpoints[2].ip().to_string(),
+            endpoints[2].port(),
+        )],
+        crate::request::request_group::BtPeerSource::Dht,
+    );
+    assert_eq!(peer_storage.lock().unwrap().count_all_peers(), 3);
 
     manager.start_peer_connection_attempt();
     let result = {
@@ -98,14 +110,29 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
     };
     manager.finish_peer_connection_attempt(result);
 
-    assert_eq!(manager.swarm.len(), 2);
-    for endpoint in endpoints {
+    assert_eq!(manager.swarm.len(), 3);
+    let peer_snapshots = manager.peer_snapshots();
+    let expected_sources = [
+        crate::request::request_group::BtPeerSource::Tracker,
+        crate::request::request_group::BtPeerSource::Pex,
+        crate::request::request_group::BtPeerSource::Dht,
+    ];
+    for (endpoint, expected_source) in endpoints.iter().zip(expected_sources) {
         assert!(
             peer_storage
                 .lock()
                 .unwrap()
                 .get_peer(&endpoint.ip().to_string(), endpoint.port())
                 .is_some_and(|peer| peer.is_active)
+        );
+        assert_eq!(
+            peer_snapshots
+                .iter()
+                .find(|peer| peer.addr == *endpoint)
+                .expect("discovered peer snapshot")
+                .source,
+            expected_source,
+            "discovery provenance must survive peer storage and actor admission"
         );
     }
 
@@ -380,12 +407,20 @@ async fn seeding_manager_adopts_the_existing_torrent_peer_actor() {
         16,
         false,
     );
+    connection.actor_startup = Some(
+        crate::engine::bittorrent::peer::connection::PeerActorStartup {
+            peer_agent: aria2_protocol::identity::DEFAULT_PEER_AGENT.to_string(),
+            listen_port: None,
+            allowed_fast: Vec::new(),
+        },
+    );
     connection.stats.am_choking = true;
     let actor_id = connection.actor_id;
     let mut swarm = PeerSwarm::new(8);
-    let provider = Arc::new(
-        crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1),
-    );
+    let mut provider =
+        crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1);
+    provider.set_piece_data(0, vec![0x5a; 16]);
+    let provider = Arc::new(provider);
     let provider_dyn: Arc<dyn crate::engine::bittorrent::peer::upload_session::PieceDataProvider> =
         provider;
     assert!(
@@ -406,6 +441,7 @@ async fn seeding_manager_adopts_the_existing_torrent_peer_actor() {
         [1u8; 20],
         None,
         upload_counter,
+        std::time::Instant::now(),
     );
     assert!(manager.swarm.actor(actor_id).is_some());
     manager.cancel();
@@ -800,7 +836,7 @@ async fn cancelled_seeding_loop_future_preserves_incoming_peer_and_actor_channel
     let client = tokio::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         let availability = read_bt_frame(&mut stream).await;
-        assert!(matches!(availability.first(), Some(5)));
+        assert_eq!(availability.first(), Some(&5));
         assert_eq!(availability.get(1), Some(&0x80));
         cancel_after_availability.cancel();
     });
@@ -864,9 +900,16 @@ async fn incoming_seed_peer_receives_piece_availability_before_interested() {
             info_hash
         );
 
+        let extension_handshake = read_bt_frame(&mut stream).await;
+        assert_eq!(extension_handshake.first(), Some(&20));
+        assert_eq!(extension_handshake.get(1), Some(&0));
+
         let availability = read_bt_frame(&mut stream).await;
-        assert!(matches!(availability.first(), Some(5)));
-        assert_eq!(availability.get(1), Some(&0x80));
+        assert_eq!(
+            availability,
+            [14],
+            "a peer advertising Fast Extension receives HaveAll for a complete seed"
+        );
 
         stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap();
         loop {
@@ -1049,4 +1092,133 @@ async fn seeding_does_not_end_just_because_all_peers_disconnect() {
 
     assert!(duration >= Duration::from_millis(40));
     assert!(!halt_requested);
+}
+
+#[tokio::test]
+async fn seeding_actor_sends_periodic_pex_with_recently_dropped_peers() {
+    let live_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live_remote_stream = TcpStream::connect(live_listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (live_local_stream, live_endpoint) = live_listener.accept().await.unwrap();
+    let mut live_connection =
+        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+            PeerConnection::from_stream_with_peer(live_local_stream, [0x71; 20], false, false),
+            live_endpoint,
+        );
+    live_connection.allocate_session_resource(16, 1, 16);
+    live_connection.register_peer_extension("ut_pex", 19);
+
+    let dropped_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dropped_remote_stream = TcpStream::connect(dropped_listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (dropped_local_stream, dropped_endpoint) = dropped_listener.accept().await.unwrap();
+    let dropped_connection =
+        crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+            PeerConnection::from_stream_with_peer(dropped_local_stream, [0x72; 20], false, false),
+            dropped_endpoint,
+        );
+
+    let provider = Arc::new(
+        crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1),
+    );
+    let provider_dyn: Arc<dyn crate::engine::bittorrent::peer::upload_session::PieceDataProvider> =
+        provider;
+    let mut swarm = crate::engine::bittorrent::peer::message_handler::PeerSwarm::new(8);
+    assert!(
+        swarm
+            .spawn_peer(live_connection, None, Arc::clone(&provider_dyn))
+            .is_ok()
+    );
+    let dropped_actor_id = dropped_connection.actor_id;
+    assert!(
+        swarm
+            .spawn_peer(dropped_connection, None, Arc::clone(&provider_dyn))
+            .is_ok()
+    );
+    swarm.mark_dead(dropped_actor_id);
+    swarm.remove_dead().await;
+
+    let options = crate::request::request_group::DownloadOptions {
+        enable_peer_exchange: true,
+        ..crate::request::request_group::DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            crate::request::request_group::GroupId::new(919),
+            Vec::new(),
+            options.clone(),
+        ),
+    ));
+    let discovery = super::SeedPeerDiscovery {
+        group,
+        dht_engines: crate::engine::bittorrent::dht::engine_set::DhtEngineSet::default(),
+        dht_lookup: crate::engine::bittorrent::download::execute::DhtPeriodicLookup::new(),
+        listen_port: 0,
+        connection_options:
+            crate::engine::bittorrent::peer::interaction::BtPeerConnectionOptions::from_download_options(
+                &options,
+                [0x73; 20],
+            ),
+        total_size: 16,
+        utp_socket: None,
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        enable_peer_exchange: true,
+    };
+    let manager = BtSeedManager::new_with_swarm(
+        [0x74; 20],
+        swarm,
+        Arc::clone(&provider_dyn),
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        16,
+        None,
+        [0x75; 20],
+        None,
+        Arc::new(AtomicU64::new(0)),
+        Instant::now() - crate::engine::bittorrent::download::execute::PEX_SEND_INTERVAL,
+    )
+    .with_peer_discovery(discovery);
+    let cancel = manager.cancellation_token();
+    let manager_task = tokio::spawn(async move {
+        let mut manager = manager;
+        manager.run_seeding_loop().await
+    });
+
+    let mut remote =
+        PeerConnection::from_stream_with_peer(live_remote_stream, [0x76; 20], false, false);
+    let received_pex = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let Some(message) = remote.read_message().await.unwrap() else {
+                continue;
+            };
+            if let aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+                ext_id: 19,
+                payload,
+            } = message
+            {
+                break payload;
+            }
+        }
+    })
+    .await
+    .expect("seeding coordinator should send its due PEX message");
+    let aria2_protocol::bittorrent::extension::pex::PexMessage::Added { dropped, .. } =
+        aria2_protocol::bittorrent::extension::pex::PexHandler::parse_pex_data(&received_pex)
+            .unwrap()
+    else {
+        panic!("expected a BEP 11 added/dropped payload");
+    };
+    assert!(dropped.iter().any(|peer| {
+        peer.ip == dropped_endpoint.ip().to_string() && peer.port == dropped_endpoint.port()
+    }));
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), manager_task)
+        .await
+        .expect("seeding manager should shut down after cancellation")
+        .unwrap()
+        .unwrap();
+    drop(dropped_remote_stream);
 }

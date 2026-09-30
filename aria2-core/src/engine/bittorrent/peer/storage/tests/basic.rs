@@ -33,7 +33,6 @@ fn test_new_is_empty() {
     assert!(!storage.is_peer_available());
     assert_eq!(storage.count_all_peers(), 0);
     assert_eq!(storage.max_peer_list_size, MAX_PEER_LIST_SIZE);
-    assert!(!storage.download_finished);
     storage.verify_invariant();
 }
 

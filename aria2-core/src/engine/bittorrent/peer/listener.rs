@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use rand::seq::SliceRandom;
@@ -24,7 +25,7 @@ struct SharedRoute {
     id: u64,
     local_peer_id: [u8; 20],
     caretaker_id: u64,
-    max_peers: usize,
+    max_peers: Arc<AtomicUsize>,
     peer_storage: Arc<Mutex<DefaultPeerStorage>>,
     sender: mpsc::Sender<IncomingPeer>,
     crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
@@ -91,11 +92,20 @@ impl BtPeerListenerManager {
         &self,
         config: BtPeerRouteConfig,
     ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
+        let max_peers = Arc::new(AtomicUsize::new(config.max_peers));
+        self.register_with_max_peers(config, max_peers).await
+    }
+
+    pub(crate) async fn register_with_max_peers(
+        &self,
+        config: BtPeerRouteConfig,
+        max_peers: Arc<AtomicUsize>,
+    ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
         let mut state = self.state.lock().await;
         if let Some(listener) = state.listeners.first() {
             let port = listener.local_addr()?.port();
             drop(state);
-            return self.insert_route(config, port);
+            return self.insert_route(config, port, max_peers);
         }
 
         let listener = bind_ports(config.bind_ip, config.ports.clone()).await?;
@@ -126,7 +136,7 @@ impl BtPeerListenerManager {
             tokio::spawn(async move { run_shared_listener(listener, routes, shutdown).await });
         }
 
-        self.insert_route(config, local_addr.port())
+        self.insert_route(config, local_addr.port(), max_peers)
     }
 
     pub async fn local_addr(&self) -> Option<SocketAddr> {
@@ -145,6 +155,7 @@ impl BtPeerListenerManager {
         &self,
         config: BtPeerRouteConfig,
         port: u16,
+        max_peers_state: Arc<AtomicUsize>,
     ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
         let BtPeerRouteConfig {
             info_hash,
@@ -182,7 +193,7 @@ impl BtPeerListenerManager {
                 id,
                 local_peer_id,
                 caretaker_id,
-                max_peers,
+                max_peers: max_peers_state,
                 peer_storage,
                 sender,
                 crypto_policy,
@@ -323,7 +334,7 @@ async fn run_shared_listener(
                     id: route.id,
                     local_peer_id: route.local_peer_id,
                     caretaker_id: route.caretaker_id,
-                    max_peers: route.max_peers,
+                    max_peers: Arc::clone(&route.max_peers),
                     peer_storage: Arc::clone(&route.peer_storage),
                     sender: route.sender.clone(),
                     crypto_policy: route.crypto_policy,
@@ -351,7 +362,8 @@ async fn run_shared_listener(
                     .peer_storage
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if route.max_peers != 0 && storage.used_peers().len() >= route.max_peers {
+                let max_peers = route.max_peers.load(Ordering::Acquire);
+                if max_peers != 0 && storage.used_peers().len() >= max_peers {
                     false
                 } else {
                     let entry = PeerEntry::new(endpoint.ip().to_string(), endpoint.port());

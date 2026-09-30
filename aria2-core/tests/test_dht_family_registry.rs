@@ -30,9 +30,7 @@ async fn spawn_ping_responder(
             query.q.as_ref().map(|method| method.0.as_str()),
             Some("ping")
         );
-        let response = DhtMessageBuilder::ping_response(&query.t, &node_id)
-            .encode()
-            .expect("ping response should encode");
+        let response = DhtMessageBuilder::ping_response(&query.t, &node_id).encode();
         socket
             .send_to(&response, from)
             .await

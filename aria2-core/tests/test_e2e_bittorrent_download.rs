@@ -2213,6 +2213,84 @@ async fn test_e2e_bt_failed_peer_is_replaced_by_healthy_peer() {
 }
 
 #[tokio::test]
+async fn test_e2e_bt_failed_piece_keeps_dynamic_tracker_peers() {
+    let dir = tmp_dir();
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let total_size = 512;
+    let piece_length = 512;
+    let torrent = build_test_torrent(
+        "dynamic-tracker-peer.bin",
+        total_size,
+        piece_length,
+        &placeholder_tracker.announce_url(),
+    );
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+        .expect("dynamic-tracker torrent should parse");
+    let piece = expected_piece_data(0, piece_length, total_size);
+    let choked_peer =
+        MockBtPeerServer::start_staying_choked(meta.info_hash.bytes, vec![piece.clone()]).await;
+    let healthy_peer = MockBtPeerServer::start(meta.info_hash.bytes, vec![piece.clone()]).await;
+    let healthy_tracker = MockTrackerServer::start(healthy_peer.addr().port()).await;
+    let first_tracker = MockTrackerServer::start_with_dynamic_announce_list(
+        vec![choked_peer.addr().port()],
+        1,
+        vec![vec![healthy_tracker.announce_url()]],
+        Some(2),
+    )
+    .await;
+    drop(placeholder_tracker);
+
+    let torrent = build_test_torrent(
+        "dynamic-tracker-peer.bin",
+        total_size,
+        piece_length,
+        &first_tracker.announce_url(),
+    );
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(132),
+        &torrent,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_utp: false,
+            enable_public_trackers: false,
+            bt_request_timeout: 1,
+            bt_tracker_interval: 1,
+            bt_stop_timeout: Some(8),
+            max_retries: 1,
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .expect("dynamic-tracker command should construct");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(12), command.execute())
+        .await
+        .expect("dynamic-tracker replacement download timed out");
+
+    assert!(
+        healthy_tracker
+            .wait_for_query_count(1, std::time::Duration::from_secs(1))
+            .await,
+        "the dynamically announced tracker was never queried; first tracker requests: {:?}",
+        first_tracker.captured_queries().await
+    );
+    result.expect("healthy peer from the dynamic tracker was not admitted");
+    assert!(
+        !healthy_peer.requested_pieces().await.is_empty(),
+        "piece failure discarded the healthy peer returned by the dynamic tracker"
+    );
+    assert!(
+        choked_peer.requested_pieces().await.is_empty(),
+        "the client must not request a piece from a peer that kept us choked"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("dynamic-tracker-peer.bin")).unwrap(),
+        piece
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_bt_duplicate_tracker_peers_do_not_consume_connection_limit() {
     let dir = tmp_dir();
     let placeholder_tracker = MockTrackerServer::start(0).await;

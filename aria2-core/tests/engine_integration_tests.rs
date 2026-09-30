@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 // Import from aria2_core crate (external to integration test)
 use aria2_core::engine::command::{Command, CommandStatus};
-use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp::download_command::FtpDownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 #[cfg(feature = "metalink")]
 use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};

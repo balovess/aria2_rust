@@ -1,6 +1,5 @@
 mod basic;
 mod blocklist;
-mod choke;
 mod dropped;
 mod invariant;
 mod lifecycle;

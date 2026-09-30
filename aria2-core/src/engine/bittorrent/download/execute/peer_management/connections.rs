@@ -121,7 +121,6 @@ impl BtDownloadCommand {
 
         let max_peers = self.group.recover().options().bt_max_peers;
         self.peer_coordinator.set_max_peers(max_peers);
-        self.bt_runtime.set_max_peers(max_peers);
         self.bt_runtime.set_connections(0);
         let remaining_slots = if self.bt_runtime.less_than_max_peers() {
             max_peers.saturating_sub(self.bt_runtime.connections())

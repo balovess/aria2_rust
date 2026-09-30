@@ -331,11 +331,13 @@ class TestGetFiles:
                 "seeders": 3,
                 "leechers": 1,
                 "trackerId": "tracker-id",
+                "lastFailureKind": "network",
             }
         ]
         result = await client.get_trackers("gid1")
         assert isinstance(result[0], TrackerInfo)
         assert result[0].tracker_id == "tracker-id"
+        assert result[0].last_failure_kind == "network"
         mock_transport.send_request.assert_called_once_with(
             "aria2.getTrackers", ["gid1"]
         )

@@ -10,6 +10,7 @@ export type {
   ServerInfoIndex,
   PeerInfo,
   TrackerInfo,
+  TrackerFailureKind,
   DhtStatus,
   DownloadEvent,
   ClientOptions,

@@ -531,6 +531,32 @@ async fn test_rate_limiter_set_upload_rate() {
 }
 
 #[tokio::test]
+async fn test_setting_upload_limit_from_unlimited_starts_with_only_the_default_burst() {
+    let limiter = RateLimiter::unlimited();
+    limiter.set_upload_rate(Some(1));
+
+    let burst_bytes = crate::constants::DEFAULT_BURST_BYTES as u64;
+    assert!(limiter.try_acquire_upload(burst_bytes).await);
+    assert!(
+        !limiter.try_acquire_upload(1).await,
+        "switching from unlimited to limited must not preserve an effectively infinite token balance"
+    );
+}
+
+#[tokio::test]
+async fn test_unlimited_rate_limiter_preserves_configured_burst_for_later_limits() {
+    let limiter =
+        RateLimiter::new(&RateLimiterConfig::new(None, None).with_burst(Some(3), Some(5)));
+    limiter.set_download_rate(Some(1));
+    limiter.set_upload_rate(Some(1));
+
+    assert!(limiter.try_acquire_download(3).await);
+    assert!(!limiter.try_acquire_download(1).await);
+    assert!(limiter.try_acquire_upload(5).await);
+    assert!(!limiter.try_acquire_upload(1).await);
+}
+
+#[tokio::test]
 async fn test_token_bucket_unlimited_wakes_waiting_acquire() {
     let bucket = Arc::new(TokenBucket::new(100, Some(0)));
     let waiting_bucket = Arc::clone(&bucket);

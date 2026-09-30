@@ -260,7 +260,7 @@ impl PieceDownloadSession<'_> {
                     &mut self.peer_tracker,
                     &mut self.peer_last_data_time,
                 );
-                (Ok(actor_result.piece), actor_result.peer_actor_ids)
+                (actor_result.piece, actor_result.peer_actor_ids)
             }
             Err(error) => (Err(error), Vec::new()),
         };

@@ -33,7 +33,6 @@ impl<'a> PieceDownloadSession<'a> {
             Arc<crate::engine::bittorrent::download::web_seed::WebSeedManager>,
         >,
         last_pex_send: &'a mut Instant,
-        pex_send_interval_secs: u64,
         verified_piece_indices: &[usize],
     ) -> Result<Self> {
         // Single-file torrents are written with a positioned + cached writer:
@@ -338,10 +337,11 @@ impl<'a> PieceDownloadSession<'a> {
         command
             .drain_incoming_peers_to_swarm(
                 swarm,
-                piece_length,
-                num_pieces,
-                total_size,
-                crate::engine::bittorrent::download::execute::incoming::PeerActorUploadContext {
+                crate::engine::bittorrent::download::execute::incoming::PeerActorAdmissionContext {
+                    network_info_hash,
+                    piece_length,
+                    num_pieces,
+                    total_size,
                     provider: std::sync::Arc::clone(&upload_provider),
                     upload_counter: std::sync::Arc::clone(&upload_counter),
                 },
@@ -361,6 +361,7 @@ impl<'a> PieceDownloadSession<'a> {
             command,
             swarm,
             meta,
+            network_info_hash,
             piece_length,
             total_size,
             num_pieces,
@@ -368,7 +369,6 @@ impl<'a> PieceDownloadSession<'a> {
             pending_pex_peers: Vec::new(),
             pending_tracker_peers: Vec::new(),
             last_pex_send,
-            pex_send_interval_secs,
             writer,
             start_time,
             last_speed_update,

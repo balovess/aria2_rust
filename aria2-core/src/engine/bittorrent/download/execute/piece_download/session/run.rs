@@ -1,7 +1,6 @@
 use std::time::Instant;
 use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
-use crate::engine::bittorrent::download::execute::incoming::PeerActorUploadContext;
 use crate::engine::bittorrent::download::execute::types::PeerKey;
 use crate::engine::bittorrent::peer::choking_algorithm::PeerIdentity;
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
@@ -87,7 +86,7 @@ type WebSeedTaskCompletion = Option<
 
 enum PieceDownloadWait {
     Completed(Vec<(usize, PieceLoopAction)>),
-    Incoming(Option<crate::engine::bittorrent::peer::listener::IncomingPeer>),
+    Incoming(Option<Box<crate::engine::bittorrent::peer::listener::IncomingPeer>>),
     StopTimeout,
 }
 
@@ -161,16 +160,7 @@ impl PieceDownloadSession<'_> {
                 self.apply_upload_choke_round();
             }
             self.command
-                .drain_incoming_peers_to_swarm(
-                    self.swarm,
-                    self.piece_length,
-                    self.num_pieces,
-                    self.total_size,
-                    PeerActorUploadContext {
-                        provider: std::sync::Arc::clone(&self.upload_provider),
-                        upload_counter: std::sync::Arc::clone(&self.upload_counter),
-                    },
-                )
+                .drain_incoming_peers_to_swarm(self.swarm, self.peer_actor_admission_context())
                 .await;
             self.command.bt_runtime.set_connections(self.swarm.len());
 
@@ -232,9 +222,6 @@ impl PieceDownloadSession<'_> {
             // wait, so an empty swarm cannot strand discovered endpoints.
             let tracker_peers = std::mem::take(&mut self.pending_tracker_peers);
             if !tracker_peers.is_empty() {
-                for peer in &tracker_peers {
-                    self.command.add_pex_peer(peer.clone());
-                }
                 self.queue_discovered_swarm_peers(
                     &tracker_peers,
                     BtPeerSource::Tracker,
@@ -306,10 +293,9 @@ impl PieceDownloadSession<'_> {
 
             // PEX Integration: Periodic PEX message sending (BEP 11)
             super::super::super::pex::send_periodic_pex_to_swarm(
-                self.command,
                 self.swarm,
                 self.last_pex_send,
-                self.pex_send_interval_secs,
+                self.command.peer_exchange_enabled(),
             )
             .await;
 
@@ -318,9 +304,6 @@ impl PieceDownloadSession<'_> {
             let all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
                 std::mem::take(&mut self.pending_pex_peers);
             if !all_new_pex_peers.is_empty() {
-                for peer in &all_new_pex_peers {
-                    self.command.add_pex_peer(peer.clone());
-                }
                 info!(
                     "[PEX] Drained {} inbound peers from connections, attempting to connect",
                     all_new_pex_peers.len()
@@ -357,9 +340,6 @@ impl PieceDownloadSession<'_> {
             .await;
             dht_peers.retain(|peer| !self.command.is_peer_temporarily_rejected(&peer.ip));
             if !dht_peers.is_empty() {
-                for peer in &dht_peers {
-                    self.command.add_pex_peer(peer.clone());
-                }
                 info!(
                     discovered = dht_peers.len(),
                     "[BT] Periodic DHT lookup found new peers"
@@ -450,21 +430,13 @@ impl PieceDownloadSession<'_> {
                 };
                 let interest_changed = actor_interest_changed;
                 let incoming = match event {
-                    super::super::peer_events::PeerWaitEvent::Incoming(incoming) => Some(incoming),
+                    super::super::peer_events::PeerWaitEvent::Incoming(incoming) => Some(*incoming),
                     _ => None,
                 };
                 if let Some(incoming) = incoming {
-                    self.command.admit_incoming_peer_to_swarm(
-                        self.swarm,
-                        incoming,
-                        self.piece_length,
-                        self.num_pieces,
-                        self.total_size,
-                        &PeerActorUploadContext {
-                            provider: std::sync::Arc::clone(&self.upload_provider),
-                            upload_counter: std::sync::Arc::clone(&self.upload_counter),
-                        },
-                    );
+                    let context = self.peer_actor_admission_context();
+                    self.command
+                        .admit_incoming_peer_to_swarm(self.swarm, incoming, &context);
                     self.announce_available_pieces().await;
                 }
                 let released_upload_slot = self.remove_dead_swarm_peers().await;
@@ -567,22 +539,14 @@ impl PieceDownloadSession<'_> {
                     let interest_changed = actor_interest_changed;
                     let incoming = match event {
                         super::super::peer_events::PeerWaitEvent::Incoming(incoming) => {
-                            Some(incoming)
+                            Some(*incoming)
                         }
                         _ => None,
                     };
                     if let Some(incoming) = incoming {
-                        self.command.admit_incoming_peer_to_swarm(
-                            self.swarm,
-                            incoming,
-                            self.piece_length,
-                            self.num_pieces,
-                            self.total_size,
-                            &PeerActorUploadContext {
-                                provider: std::sync::Arc::clone(&self.upload_provider),
-                                upload_counter: std::sync::Arc::clone(&self.upload_counter),
-                            },
-                        );
+                        let context = self.peer_actor_admission_context();
+                        self.command
+                            .admit_incoming_peer_to_swarm(self.swarm, incoming, &context);
                         self.announce_available_pieces().await;
                     }
                     let released_upload_slot = self.remove_dead_swarm_peers().await;
@@ -616,7 +580,7 @@ impl PieceDownloadSession<'_> {
             let wait = if let Some(deadline) = self.stop_timeout.deadline() {
                 tokio::select! {
                     actions = self.download_piece_batch(&selected_pieces) => PieceDownloadWait::Completed(actions?),
-                    incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming),
+                    incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming.map(Box::new)),
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                         PieceDownloadWait::StopTimeout
                     }
@@ -624,23 +588,15 @@ impl PieceDownloadSession<'_> {
             } else {
                 tokio::select! {
                     actions = self.download_piece_batch(&selected_pieces) => PieceDownloadWait::Completed(actions?),
-                    incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming),
+                    incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming.map(Box::new)),
                 }
             };
             let action = match wait {
                 PieceDownloadWait::Completed(action) => action,
                 PieceDownloadWait::Incoming(Some(incoming)) => {
-                    self.command.admit_incoming_peer_to_swarm(
-                        self.swarm,
-                        incoming,
-                        self.piece_length,
-                        self.num_pieces,
-                        self.total_size,
-                        &PeerActorUploadContext {
-                            provider: std::sync::Arc::clone(&self.upload_provider),
-                            upload_counter: std::sync::Arc::clone(&self.upload_counter),
-                        },
-                    );
+                    let context = self.peer_actor_admission_context();
+                    self.command
+                        .admit_incoming_peer_to_swarm(self.swarm, *incoming, &context);
                     self.announce_available_pieces().await;
                     for piece_index in &selected_pieces {
                         self.piece_picker

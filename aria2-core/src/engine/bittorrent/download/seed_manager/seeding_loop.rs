@@ -12,7 +12,7 @@ use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS};
 use crate::engine::bittorrent::peer::message_handler::{PeerCommand, PeerEvent};
 
 enum SeedWaitEvent {
-    Incoming(crate::engine::bittorrent::peer::listener::IncomingPeer),
+    Incoming(Box<crate::engine::bittorrent::peer::listener::IncomingPeer>),
     PeerEvent(PeerEvent),
     TrackerAnnounce(
         Result<
@@ -94,6 +94,16 @@ impl BtSeedManager {
                 self.run_choke_round();
                 self.last_choke_time = Instant::now();
             }
+            let peer_exchange_enabled = self
+                .peer_discovery
+                .as_ref()
+                .is_some_and(|discovery| discovery.enable_peer_exchange);
+            crate::engine::bittorrent::download::execute::send_periodic_pex_to_swarm(
+                &mut self.swarm,
+                &mut self.last_pex_send,
+                peer_exchange_enabled,
+            )
+            .await;
             self.start_peer_connection_attempt();
 
             // Park until a socket message, an incoming peer, cancellation, or
@@ -104,7 +114,7 @@ impl BtSeedManager {
                 .await
             {
                 SeedWaitEvent::Incoming(incoming) => {
-                    self.admit_incoming_peer(incoming).await;
+                    self.admit_incoming_peer(*incoming).await;
                 }
                 SeedWaitEvent::PeerEvent(event) => {
                     self.apply_peer_event(event);
@@ -173,6 +183,16 @@ impl BtSeedManager {
         }
         deadline =
             deadline.min(self.last_choke_time + Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS));
+        if self
+            .peer_discovery
+            .as_ref()
+            .is_some_and(|discovery| discovery.enable_peer_exchange)
+        {
+            deadline = deadline.min(
+                self.last_pex_send
+                    + crate::engine::bittorrent::download::execute::PEX_SEND_INTERVAL,
+            );
+        }
         if self.pending_tracker_announce.is_none()
             && let Some(delay) = self
                 .announcer
@@ -227,7 +247,7 @@ impl BtSeedManager {
                     None => std::future::pending().await,
                 }
             } => match incoming {
-                Some(incoming) => SeedWaitEvent::Incoming(incoming),
+                Some(incoming) => SeedWaitEvent::Incoming(Box::new(incoming)),
                 None => {
                     self.incoming_peers = None;
                     SeedWaitEvent::Wake
@@ -330,7 +350,8 @@ impl BtSeedManager {
             .peer_discovery
             .as_ref()
             .map(|discovery| discovery.dht_engines.clone());
-        for connection in connections {
+        for mut connection in connections {
+            self.prepare_actor_startup(&mut connection);
             let dht_engine = connection
                 .remote_endpoint()
                 .and_then(|endpoint| dht_engines.as_ref()?.for_peer(endpoint));
@@ -345,6 +366,30 @@ impl BtSeedManager {
                 }
             }
         }
+    }
+
+    fn prepare_actor_startup(&self, connection: &mut BtPeerConn) {
+        let (peer_agent, listen_port) = self
+            .peer_discovery
+            .as_ref()
+            .map(|discovery| {
+                (
+                    discovery.connection_options.peer_agent.clone(),
+                    discovery.connection_options.listen_port,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    aria2_protocol::identity::DEFAULT_PEER_AGENT.to_string(),
+                    None,
+                )
+            });
+        connection.prepare_actor_startup(
+            peer_agent,
+            listen_port,
+            &self.info_hash,
+            self.piece_provider.num_pieces(),
+        );
     }
 
     pub(super) fn any_peer_choke_state_mismatch(&self) -> bool {
@@ -380,7 +425,10 @@ impl BtSeedManager {
                     .as_ref()
                     .is_some_and(|discovery| discovery.enable_peer_exchange)
                 {
-                    self.store_peer_addresses(peers);
+                    self.store_peer_addresses(
+                        peers,
+                        crate::request::request_group::BtPeerSource::Pex,
+                    );
                 }
             }
             PeerEvent::TrackerPeers { peers } => {
@@ -448,6 +496,7 @@ impl BtSeedManager {
             self.piece_provider.piece_length(),
             false,
         );
+        self.prepare_actor_startup(&mut connection);
         connection.set_upload_counter(std::sync::Arc::clone(&self.upload_counter));
         connection.stats.am_choking = true;
         let remote_peer_id = connection.remote_peer_id();
@@ -498,7 +547,8 @@ impl BtSeedManager {
         info!(%endpoint, "Admitted incoming BitTorrent seed peer");
     }
 
-    fn release_peer(&self, endpoint: std::net::SocketAddr) {
+    fn release_peer(&mut self, endpoint: std::net::SocketAddr) {
+        self.peer_sources.remove(&endpoint);
         if let Some(peer_storage) = &self.peer_storage {
             peer_storage
                 .lock()

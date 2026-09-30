@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+const BAD_FAILURE_THRESHOLD: u8 = 5;
+
 #[derive(Debug, Clone)]
 pub struct DhtNode {
     pub(crate) id: [u8; 20],
@@ -48,7 +50,9 @@ impl DhtNode {
     }
 
     pub fn is_good(&self) -> bool {
-        self.verified && self.failed_count < 3 && self.last_seen.elapsed().as_secs() < 900
+        self.verified
+            && self.failed_count < BAD_FAILURE_THRESHOLD
+            && self.last_seen.elapsed().as_secs() < 900
     }
 
     pub fn is_questionable(&self) -> bool {
@@ -56,7 +60,7 @@ impl DhtNode {
     }
 
     pub fn is_bad(&self) -> bool {
-        self.failed_count >= 3
+        self.failed_count >= BAD_FAILURE_THRESHOLD
     }
 
     pub fn touch(&mut self) {
@@ -128,18 +132,31 @@ mod tests {
     #[test]
     fn test_node_failures() {
         let mut node = DhtNode::new([2u8; 20], "0.0.0.0:0".parse().unwrap());
-        for _ in 0..3 {
+        for _ in 0..BAD_FAILURE_THRESHOLD {
             node.record_failure();
         }
         assert!(node.is_bad());
         assert!(!node.is_questionable());
 
         let mut good_node = DhtNode::new([3u8; 20], "0.0.0.0:0".parse().unwrap());
-        for _ in 0..3 {
+        for _ in 0..BAD_FAILURE_THRESHOLD {
             good_node.record_failure();
         }
         good_node.touch();
         assert!(good_node.is_good());
+    }
+
+    #[test]
+    fn node_is_bad_after_five_consecutive_failures() {
+        let mut node = DhtNode::new([5u8; 20], "0.0.0.0:0".parse().unwrap());
+
+        for _ in 0..4 {
+            node.record_failure();
+            assert!(!node.is_bad());
+        }
+
+        node.record_failure();
+        assert!(node.is_bad());
     }
 
     #[test]

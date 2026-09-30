@@ -604,29 +604,33 @@ pub(crate) async fn run_peer_actor(
     let mut wanted_pieces: Arc<[u8]> = Arc::from([]);
     if let Some(startup) = connection.actor_startup.take() {
         let startup_result = async {
-            connection
-                .send_extension_handshake_with_port(&startup.peer_agent, startup.listen_port)
-                .await?;
+            if connection.remote_supports_extended_messaging() {
+                connection
+                    .send_extension_handshake_with_port(&startup.peer_agent, startup.listen_port)
+                    .await?;
+            }
             let provider = upload_provider.as_deref().ok_or_else(|| {
                 crate::error::Aria2Error::DownloadFailed(
                     "peer actor started without an upload provider".into(),
                 )
             })?;
             connection.announce_upload_availability(provider).await?;
-            for piece_index in startup.allowed_fast {
-                connection
-                    .send_bt_message(
-                        &aria2_protocol::bittorrent::message::types::BtMessage::AllowedFast {
-                            index: piece_index,
-                        },
-                    )
-                    .await?;
-                connection.add_am_allowed_fast(piece_index);
-            }
             if connection.remote_supports_dht()
                 && let Some(engine) = dht_engine.as_ref()
             {
                 connection.send_port(engine.local_addr().port()).await?;
+            }
+            if connection.remote_supports_fast_extension() {
+                for piece_index in startup.allowed_fast {
+                    connection
+                        .send_bt_message(
+                            &aria2_protocol::bittorrent::message::types::BtMessage::AllowedFast {
+                                index: piece_index,
+                            },
+                        )
+                        .await?;
+                    connection.add_am_allowed_fast(piece_index);
+                }
             }
             Result::<()>::Ok(())
         }
@@ -947,6 +951,7 @@ pub(crate) async fn run_peer_actor(
                                 snapshot: Box::new(connection.stats.clone()),
                             }).await.is_err()
                         {
+                            tracing::debug!(actor_id = actor_id.0, "Peer swarm event receiver closed while publishing queued upload state");
                             break;
                         }
                         if connection.stats.outstanding_upload_count != outstanding_upload_count
@@ -1081,7 +1086,15 @@ pub(crate) async fn run_peer_actor(
                             break;
                         }
                     }
-                    Ok(None) | Err(_) => {
+                    Ok(None) => {
+                        tracing::debug!(actor_id = actor_id.0, "BT peer closed its connection");
+                        let _ = event_tx
+                            .send(PeerEvent::Disconnected { actor_id })
+                            .await;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::debug!(actor_id = actor_id.0, %error, "BT peer message read failed");
                         let _ = event_tx
                             .send(PeerEvent::Disconnected { actor_id })
                             .await;
@@ -1121,6 +1134,7 @@ pub(crate) async fn run_peer_actor(
                                 snapshot: Box::new(connection.stats.clone()),
                             }).await.is_err()
                         {
+                            tracing::debug!(actor_id = actor_id.0, "Peer swarm event receiver closed while publishing flushed upload state");
                             break;
                         }
                     }
@@ -1546,10 +1560,11 @@ mod tests {
 
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
-        let _extension_handshake = read_message_while_actor_runs(&mut remote).await;
         assert_eq!(
             read_message_while_actor_runs(&mut remote).await,
-            BtMessage::Bitfield { data: vec![0b1000_0000] },
+            BtMessage::Bitfield {
+                data: vec![0b1000_0000]
+            },
             "outbound actor startup must advertise only verified local pieces"
         );
         let allowed_fast = timeout(Duration::from_secs(1), remote.read_message()).await;
@@ -1586,7 +1601,7 @@ mod tests {
             crate::engine::bittorrent::peer::connection::PeerActorStartup {
                 peer_agent: "test-peer".to_string(),
                 listen_port: Some(6881),
-                allowed_fast: Vec::new(),
+                allowed_fast: vec![0],
             },
         );
         let dht = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
@@ -1617,12 +1632,19 @@ mod tests {
 
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
-        let _extension_handshake = read_message_while_actor_runs(&mut remote).await;
-        let _availability = read_message_while_actor_runs(&mut remote).await;
+        assert_eq!(
+            read_message_while_actor_runs(&mut remote).await,
+            BtMessage::HaveNone,
+            "availability must precede DHT and AllowedFast startup messages"
+        );
         assert_eq!(
             read_message_while_actor_runs(&mut remote).await,
             BtMessage::Port { port: dht_port },
-            "BEP 5 PORT must advertise the selected DHT engine's UDP port"
+            "BEP 5 PORT must advertise the selected DHT engine's UDP port before AllowedFast"
+        );
+        assert_eq!(
+            read_message_while_actor_runs(&mut remote).await,
+            BtMessage::AllowedFast { index: 0 }
         );
 
         command_tx.send(PeerCommand::Shutdown).await.unwrap();

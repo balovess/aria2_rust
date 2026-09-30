@@ -70,6 +70,25 @@ fn test_checkout_and_return_multiple() {
     storage.verify_invariant();
 }
 
+#[test]
+fn test_active_peer_lifecycle_uses_endpoint_identity() {
+    let mut storage = DefaultPeerStorage::new();
+    storage.add_peer(make_peer("192.168.1.1", 6881));
+    assert_eq!(storage.checkout_peer(42).unwrap().used_by, 42);
+
+    storage.set_peer_active("192.168.1.1", 6881, true);
+    assert!(
+        storage
+            .get_peer("192.168.1.1", 6881)
+            .is_some_and(|peer| peer.is_active)
+    );
+
+    storage.return_peer_by_endpoint("192.168.1.1", 6881);
+    assert!(storage.used_peers.is_empty());
+    assert!(storage.uniq_peers.is_empty());
+    storage.verify_invariant();
+}
+
 // ------------------------------------------------------------------
 // add_and_checkout_peer
 // ------------------------------------------------------------------

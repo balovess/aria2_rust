@@ -167,6 +167,7 @@ impl BtSeedManager {
         peer_id: [u8; 20],
         incoming_peers: Option<crate::engine::bittorrent::peer::listener::IncomingPeerReceiver>,
         upload_counter: Arc<AtomicU64>,
+        last_pex_send: Instant,
     ) -> Self {
         let mut manager = Self::build(
             info_hash,
@@ -183,6 +184,7 @@ impl BtSeedManager {
         );
         manager.tracker_actor = tracker_actor;
         manager.upload_counter = upload_counter;
+        manager.last_pex_send = last_pex_send;
         manager
     }
 
@@ -238,6 +240,7 @@ impl BtSeedManager {
             seeder_choke,
             cancel_token,
             peer_storage: None,
+            peer_sources: std::collections::HashMap::new(),
             peer_discovery: None,
             pending_peer_connection: None,
             halt_requested: false,
@@ -245,6 +248,7 @@ impl BtSeedManager {
             // update.  A newly admitted interested peer should not wait for
             // the full rotation interval before receiving an unchoke.
             last_choke_time: Instant::now() - Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS),
+            last_pex_send: Instant::now(),
             announcer: announcer.map(|announcer| Arc::new(tokio::sync::Mutex::new(announcer))),
             tracker_actor: None,
             pending_tracker_announce: None,

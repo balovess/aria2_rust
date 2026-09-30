@@ -116,7 +116,7 @@ fn test_message_encode_decode_roundtrip() {
 
     // --- Ping message ---
     let ping = DhtMessageBuilder::ping(42, &sender_id);
-    let encoded_ping = ping.encode().expect("ping encode should succeed");
+    let encoded_ping = ping.encode();
     let decoded_ping = DhtMessage::decode(&encoded_ping).expect("ping decode should succeed");
 
     assert!(decoded_ping.is_query(), "decoded ping must be a query");
@@ -133,7 +133,7 @@ fn test_message_encode_decode_roundtrip() {
     // --- Find_node message ---
     let target = [0xBBu8; 20];
     let find_node = DhtMessageBuilder::find_node(43, &sender_id, &target);
-    let encoded_fn = find_node.encode().expect("find_node encode should succeed");
+    let encoded_fn = find_node.encode();
     let decoded_fn = DhtMessage::decode(&encoded_fn).expect("find_node decode should succeed");
 
     assert!(decoded_fn.is_query());
@@ -142,7 +142,7 @@ fn test_message_encode_decode_roundtrip() {
     // --- Get_peers message ---
     let info_hash = [0xCCu8; 20];
     let get_peers = DhtMessageBuilder::get_peers(44, &sender_id, &info_hash);
-    let encoded_gp = get_peers.encode().expect("get_peers encode should succeed");
+    let encoded_gp = get_peers.encode();
     let decoded_gp = DhtMessage::decode(&encoded_gp).expect("get_peers decode should succeed");
 
     assert!(decoded_gp.is_query());
@@ -167,7 +167,7 @@ fn test_persistence_v3_roundtrip() {
         DhtNode::new([0x03u8; 20], "10.0.0.5:6883".parse::<SocketAddr>().unwrap()),
     ];
 
-    let serialized = DhtPersistence::serialize(&self_id, &nodes).expect("serialize should succeed");
+    let serialized = DhtPersistence::serialize(&self_id, &nodes);
     let deserialized =
         DhtPersistence::deserialize(&serialized).expect("deserialize should succeed");
 
@@ -203,19 +203,19 @@ fn test_node_state_transitions() {
         "new node must not be 'questionable'"
     );
 
-    // Record failure once -> still below threshold of 3
+    // Four consecutive failures remain below aria2's eviction threshold.
     node.record_failure();
     assert!(node.is_good(), "1 failure: still good");
     assert!(!node.is_bad());
+    for failures in 2..=4 {
+        node.record_failure();
+        assert!(node.is_good(), "{failures} failures: still good");
+        assert!(!node.is_bad());
+    }
 
-    // Record second failure -> still below threshold
+    // Fifth failure crosses the upstream threshold.
     node.record_failure();
-    assert!(node.is_good(), "2 failures: still good");
-    assert!(!node.is_bad());
-
-    // Third failure crosses threshold -> node becomes bad
-    node.record_failure();
-    assert!(node.is_bad(), "3 failures: node should now be 'bad'");
+    assert!(node.is_bad(), "5 failures: node should now be 'bad'");
     assert!(!node.is_good(), "bad node cannot also be good");
 
     // Touch resets failure count and updates last_seen -> becomes good again
@@ -372,11 +372,15 @@ async fn test_dht_announce_peer_flow() {
     let self_id = [0xCCu8; 20];
     let info_hash = [0xDDu8; 20];
     let token = "abc123token";
-    let announce_msg = DhtMessageBuilder::announce_peer(99, &self_id, &info_hash, 9999, token);
+    let announce_msg = DhtMessageBuilder::announce_peer_with_token(
+        99,
+        &self_id,
+        &info_hash,
+        9999,
+        token.as_bytes(),
+    );
 
-    let encoded = announce_msg
-        .encode()
-        .expect("encode announce_peer should succeed");
+    let encoded = announce_msg.encode();
     sock.send_to(server.addr(), &encoded)
         .await
         .expect("send announce_peer should succeed");
@@ -431,7 +435,7 @@ async fn test_dht_persistence_save_load_roundtrip() {
     );
 
     // Collect good nodes and persist to disk
-    let good_nodes = DhtPersistence::collect_good_nodes(&rt);
+    let good_nodes = rt.collect_good_nodes();
     assert_eq!(good_nodes.len(), 5, "all 5 nodes should be good");
 
     let saved_count = DhtPersistence::save_to_file(&dht_path, &self_id, &good_nodes)
@@ -730,7 +734,7 @@ fn test_mock_dht_server_returns_ipv6_peers() {
         use aria2_protocol::bittorrent::dht::socket::DhtSocket;
         let client = DhtSocket::bind(0).await.expect("client bind failed");
         let query = DhtMessageBuilder::get_peers(55, &[0xCCu8; 20], &[0xBBu8; 20]);
-        client.send_to(server.addr(), &query.encode()?).await?;
+        client.send_to(server.addr(), &query.encode()).await?;
 
         let mut buf = [0u8; 1024];
         let (n, _) = client

@@ -94,8 +94,10 @@ interface TrackerInfo {
     seeders: number;
     leechers: number;
     trackerId: string;
+    lastFailureKind?: TrackerFailureKind;
     secondsSinceLastSuccess?: number;
 }
+type TrackerFailureKind = 'network' | 'timeout' | 'remoteTemporary' | 'trackerRejected' | 'malformedResponse';
 interface DhtStatus {
     state: string;
     totalNodes: string;
@@ -239,4 +241,4 @@ declare class TimeoutError extends Aria2Error {
     constructor(message: string);
 }
 
-export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, PositionMode, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerInfo, type UriEntry, type VersionInfo };
+export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, PositionMode, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerFailureKind, type TrackerInfo, type UriEntry, type VersionInfo };

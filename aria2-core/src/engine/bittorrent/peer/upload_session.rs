@@ -131,15 +131,28 @@ impl BtUploadState {
         provider: &dyn PieceDataProvider,
     ) -> Result<()> {
         let num_pieces = provider.num_pieces();
-        let message = if num_pieces == 0 {
-            BtMessage::HaveNone
-        } else {
-            let mut bitfield = vec![0u8; (num_pieces as usize).div_ceil(8)];
-            for piece_index in 0..num_pieces {
-                if provider.has_piece(piece_index) {
-                    bitfield[piece_index as usize / 8] |= 1 << (7 - piece_index % 8);
-                }
+        let supports_fast_extension = transport.supports_fast_extension();
+        let mut bitfield = vec![0u8; (num_pieces as usize).div_ceil(8)];
+        let mut has_any_piece = false;
+        let mut has_all_pieces = true;
+        for piece_index in 0..num_pieces {
+            if provider.has_piece(piece_index) {
+                bitfield[piece_index as usize / 8] |= 1 << (7 - piece_index % 8);
+                has_any_piece = true;
+            } else {
+                has_all_pieces = false;
             }
+        }
+
+        let message = if supports_fast_extension && has_all_pieces {
+            BtMessage::HaveAll
+        } else if !has_any_piece {
+            if supports_fast_extension {
+                BtMessage::HaveNone
+            } else {
+                return Ok(());
+            }
+        } else {
             BtMessage::Bitfield { data: bitfield }
         };
         transport
@@ -612,6 +625,52 @@ mod tests {
             self.sent.push(BtMessage::Unchoke);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn startup_availability_matches_fast_extension_capabilities() {
+        let mut no_pieces = InMemoryPieceProvider::new(16, 2);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        let mut non_fast_transport = TestUploadTransport::default();
+        state
+            .send_piece_availability(&mut non_fast_transport, &no_pieces)
+            .await
+            .unwrap();
+        assert!(
+            non_fast_transport.sent.is_empty(),
+            "without Fast Extension, do not send an empty bitfield"
+        );
+
+        let mut fast_transport = TestUploadTransport {
+            supports_fast_extension: true,
+            ..TestUploadTransport::default()
+        };
+        state
+            .send_piece_availability(&mut fast_transport, &no_pieces)
+            .await
+            .unwrap();
+        assert_eq!(fast_transport.sent, [BtMessage::HaveNone]);
+
+        no_pieces.set_piece_data(0, vec![0x11; 16]);
+        non_fast_transport.sent.clear();
+        state
+            .send_piece_availability(&mut non_fast_transport, &no_pieces)
+            .await
+            .unwrap();
+        assert_eq!(
+            non_fast_transport.sent,
+            [BtMessage::Bitfield {
+                data: vec![0b1000_0000]
+            }]
+        );
+
+        no_pieces.set_piece_data(1, vec![0x22; 16]);
+        fast_transport.sent.clear();
+        state
+            .send_piece_availability(&mut fast_transport, &no_pieces)
+            .await
+            .unwrap();
+        assert_eq!(fast_transport.sent, [BtMessage::HaveAll]);
     }
 
     #[tokio::test]

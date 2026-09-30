@@ -501,6 +501,7 @@ impl CoreRpcBackend {
                     seeders: None,
                     leechers: None,
                     downloaded: None,
+                    last_failure_kind: None,
                     tracker_id: if current.as_deref() == Some(uri.as_str()) {
                         current_announce.tracker_id().to_string()
                     } else {
@@ -770,6 +771,9 @@ fn tracker_infos_from_runtime(
                 seeders: tracker.seeders,
                 leechers: tracker.leechers,
                 downloaded: tracker.downloaded.map(|value| value.to_string()),
+                last_failure_kind: tracker
+                    .last_failure_kind
+                    .map(|failure| failure.as_str().to_string()),
                 tracker_id: tracker.tracker_id.clone(),
                 seconds_since_last_success: tracker
                     .last_success_at_unix_millis
@@ -815,6 +819,13 @@ fn tracker_infos_from_runtime(
                 seeders: None,
                 leechers: None,
                 downloaded: None,
+                last_failure_kind: if snapshot.last_attempt_url.as_deref() == Some(uri.as_str()) {
+                    snapshot
+                        .last_failure_kind
+                        .map(|failure| failure.as_str().to_string())
+                } else {
+                    None
+                },
                 tracker_id: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
                     snapshot.tracker_id.clone()
                 } else {

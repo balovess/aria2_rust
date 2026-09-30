@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 use crate::engine::bittorrent::peer::interaction::{BtPeerInteraction, PeerConnectionResult};
 use crate::engine::bittorrent::peer::message_handler::PeerCommand;
 use crate::engine::bittorrent::peer::storage::PeerEntry;
+use crate::request::request_group::BtPeerSource;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{BtSeedManager, SeedPeerConnectionAttempt};
@@ -13,7 +14,7 @@ use super::{BtSeedManager, SeedPeerConnectionAttempt};
 const MAX_SEED_CONNECTION_BATCH: usize = 32;
 
 impl BtSeedManager {
-    pub(super) fn store_tracker_peers(&self, peers: Vec<(String, u16)>) {
+    pub(super) fn store_tracker_peers(&mut self, peers: Vec<(String, u16)>) {
         if peers.is_empty() {
             return;
         }
@@ -24,20 +25,24 @@ impl BtSeedManager {
                     aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
                 })
                 .collect(),
+            BtPeerSource::Tracker,
         );
     }
 
     pub(super) fn store_peer_addresses(
-        &self,
+        &mut self,
         peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+        source: BtPeerSource,
     ) {
         let Some(peer_storage) = self.peer_storage.as_ref() else {
             return;
         };
         let peers = peers
             .into_iter()
-            .filter(|peer| peer.to_socket_addr().is_ok())
-            .map(|peer| PeerEntry::new(peer.ip, peer.port))
+            .filter_map(|peer| {
+                let endpoint = peer.to_socket_addr().ok()?;
+                Some((peer.ip, peer.port, endpoint))
+            })
             .collect::<Vec<_>>();
         if peers.is_empty() {
             return;
@@ -46,7 +51,12 @@ impl BtSeedManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = storage.count_all_peers();
-        storage.add_peers(peers);
+        storage.add_peers(
+            peers
+                .iter()
+                .map(|(ip, port, _)| PeerEntry::new(ip.clone(), *port))
+                .collect(),
+        );
         let added = storage.count_all_peers().saturating_sub(before);
         if added > 0 {
             debug!(
@@ -54,6 +64,19 @@ impl BtSeedManager {
                 "Added discovered BitTorrent peers to seeding storage"
             );
         }
+        for (ip, port, endpoint) in &peers {
+            if storage
+                .get_peer(ip, *port)
+                .is_some_and(|peer| !peer.is_active)
+            {
+                self.peer_sources.entry(*endpoint).or_insert(source);
+            }
+        }
+        self.peer_sources.retain(|endpoint, _| {
+            storage
+                .get_peer(&endpoint.ip().to_string(), endpoint.port())
+                .is_some_and(|peer| !peer.is_active)
+        });
     }
 
     pub(super) async fn collect_periodic_dht_peers(&mut self) {
@@ -84,7 +107,7 @@ impl BtSeedManager {
             .await;
             (peers, discovery.dht_lookup.is_lookup_completion_pending())
         };
-        self.store_peer_addresses(peers);
+        self.store_peer_addresses(peers, BtPeerSource::Dht);
 
         if lookup_completion_pending {
             let tracked_peer_count = self
@@ -244,6 +267,12 @@ impl BtSeedManager {
                 continue;
             }
 
+            let source = self
+                .peer_sources
+                .get(&endpoint)
+                .copied()
+                .unwrap_or(BtPeerSource::Unknown);
+            connection.set_source(source);
             connection.set_pex_enabled(pex_enabled);
             connection.configure_upload_with_auto_unchoke(
                 &self.config,
@@ -269,13 +298,14 @@ impl BtSeedManager {
                 }
             };
 
-            if let Some(peer) = checked_out.remove(&key)
-                && let Some(peer_storage) = self.peer_storage.as_ref()
-            {
-                peer_storage
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set_peer_active(&peer.ip, peer.port, true);
+            if let Some(peer) = checked_out.remove(&key) {
+                self.peer_sources.remove(&endpoint);
+                if let Some(peer_storage) = self.peer_storage.as_ref() {
+                    peer_storage
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .set_peer_active(&peer.ip, peer.port, true);
+                }
             }
             if let Some(actor) = self.swarm.actor_mut(actor_id)
                 && let Err(error) = actor.try_send(PeerCommand::AnnounceAvailability)
@@ -290,14 +320,19 @@ impl BtSeedManager {
         self.publish_connection_state();
     }
 
-    fn return_checked_out(&self, peers: impl IntoIterator<Item = PeerEntry>) {
-        if let Some(peer_storage) = self.peer_storage.as_ref() {
-            let mut storage = peer_storage
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for peer in peers {
-                storage.return_peer(&peer);
+    fn return_checked_out(&mut self, peers: impl IntoIterator<Item = PeerEntry>) {
+        let Some(peer_storage) = self.peer_storage.as_ref() else {
+            return;
+        };
+        let mut storage = peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for peer in peers {
+            if let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() {
+                self.peer_sources
+                    .remove(&std::net::SocketAddr::new(ip, peer.port));
             }
+            storage.return_peer(&peer);
         }
     }
 

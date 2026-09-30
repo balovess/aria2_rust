@@ -136,6 +136,11 @@ pub struct DownloadResult {
     pub info_hash: String,
     /// BT metadata needed after the live download context is released.
     pub bt_metadata: Option<BittorrentResultMetadata>,
+    /// Raw torrent metadata retained only for session entries that may be
+    /// written after this result has been detached from its RequestGroup.
+    #[cfg(feature = "bittorrent")]
+    #[serde(skip)]
+    bt_metadata_data: Option<std::sync::Arc<Vec<u8>>>,
 
     // ── Metadata ───────────────────────────────────────────────────────
     /// Download context attributes (e.g. CTX_ATTR_ED2K for aria2-next).
@@ -179,6 +184,8 @@ impl DownloadResult {
             files: Vec::new(),
             info_hash: String::new(),
             bt_metadata: None,
+            #[cfg(feature = "bittorrent")]
+            bt_metadata_data: None,
             attrs: std::collections::HashMap::new(),
             in_memory_download: false,
             session_download_length: 0,
@@ -196,6 +203,11 @@ impl DownloadResult {
     /// Return the option state captured when the request became terminal.
     pub fn option_snapshot(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         self.option_snapshot.as_ref()
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn bt_metadata_data(&self) -> Option<&[u8]> {
+        self.bt_metadata_data.as_deref().map(Vec::as_slice)
     }
 
     /// Create a successful result (convenience for tests).
@@ -221,6 +233,8 @@ impl DownloadResult {
             files: Vec::new(),
             info_hash: String::new(),
             bt_metadata: None,
+            #[cfg(feature = "bittorrent")]
+            bt_metadata_data: None,
             attrs: std::collections::HashMap::new(),
             in_memory_download: false,
             session_download_length: 0,
@@ -307,6 +321,27 @@ impl DownloadResult {
                     .and_then(|value| value.downcast_ref::<TorrentAttribute>())
                     .map(BittorrentResultMetadata::from_torrent_attribute)
             });
+
+            let option_bool = |name: &str, default: bool| {
+                self.option_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.get(name))
+                    .and_then(crate::request::request_group::option_value_to_string)
+                    .and_then(|value| value.parse::<bool>().ok())
+                    .unwrap_or(default)
+            };
+            let resumable_result = match self.code {
+                DownloadResultCode::Finished | DownloadResultCode::Removed => {
+                    option_bool("force-save", false)
+                }
+                DownloadResultCode::ResourceNotFound | DownloadResultCode::MaxFileNotFound => {
+                    option_bool("save-not-found", true)
+                }
+                _ => true,
+            };
+            if resumable_result {
+                self.bt_metadata_data = group.bt_metadata_data().map(std::sync::Arc::new);
+            }
         }
 
         let fallback_path = {
@@ -480,6 +515,140 @@ mod tests {
 
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].path, "my file.zip");
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn stopped_metadata_snapshot_matches_session_save_policy() {
+        use crate::session::session_serializer::{
+            serialize_groups_with_results, should_save_download_result,
+        };
+
+        let mut info = std::collections::BTreeMap::new();
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+        info.insert(b"length".to_vec(), BencodeValue::Int(1));
+        info.insert(
+            b"name".to_vec(),
+            BencodeValue::Bytes(b"snapshot.bin".to_vec()),
+        );
+        info.insert(b"piece length".to_vec(), BencodeValue::Int(16));
+        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 20]));
+        let mut torrent = std::collections::BTreeMap::new();
+        torrent.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.invalid/announce".to_vec()),
+        );
+        torrent.insert(b"info".to_vec(), BencodeValue::Dict(info));
+        let metadata = BencodeValue::Dict(torrent).encode();
+        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&metadata)
+            .expect("fixture torrent metadata parses")
+            .info_hash
+            .as_hex();
+        let group = crate::request::request_group::RequestGroup::new(
+            GroupId::new(3),
+            vec![format!("bt://{info_hash}")],
+            crate::request::request_group::DownloadOptions::default(),
+        );
+        group.set_bt_metadata_data(metadata.to_vec());
+
+        let cases = [
+            (
+                DownloadResultCode::Finished,
+                Some(("force-save", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::Finished,
+                Some(("force-save", true)),
+                true,
+            ),
+            (
+                DownloadResultCode::Removed,
+                Some(("force-save", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::Removed,
+                Some(("force-save", true)),
+                true,
+            ),
+            (DownloadResultCode::InProgress, None, true),
+            (
+                DownloadResultCode::ResourceNotFound,
+                Some(("save-not-found", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::ResourceNotFound,
+                Some(("save-not-found", true)),
+                true,
+            ),
+            (
+                DownloadResultCode::MaxFileNotFound,
+                Some(("save-not-found", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::MaxFileNotFound,
+                Some(("save-not-found", true)),
+                true,
+            ),
+            (DownloadResultCode::TimeOut, None, true),
+        ];
+
+        for (index, (code, option, expected_save)) in cases.into_iter().enumerate() {
+            let snapshot = option
+                .map(|(key, value)| {
+                    std::collections::HashMap::from([(
+                        key.to_string(),
+                        serde_json::Value::Bool(value),
+                    )])
+                })
+                .unwrap_or_default();
+            let mut result = DownloadResult::new(
+                GroupId::new(10 + index as u64),
+                DownloadStatus::Complete,
+                code,
+            );
+            result.set_option_snapshot(Some(snapshot));
+            result.fill_from_group(&group);
+
+            assert_eq!(
+                result.bt_metadata_data().is_some(),
+                expected_save,
+                "metadata retention for {code:?} with option {option:?}"
+            );
+            assert_eq!(
+                should_save_download_result(&result),
+                expected_save,
+                "session-save policy for {code:?} with option {option:?}"
+            );
+            let serialized =
+                serialize_groups_with_results(&[], &[result]).expect("session results serialize");
+            assert_eq!(
+                serialized.contains("aria2-rust-bt-metadata-data="),
+                expected_save,
+                "serialized metadata for {code:?} with option {option:?}"
+            );
+            if code == DownloadResultCode::Finished && expected_save {
+                use base64::Engine as _;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(
+                        serialized
+                            .split("aria2-rust-bt-metadata-data=")
+                            .nth(1)
+                            .expect("serialized torrent metadata option")
+                            .split_whitespace()
+                            .next()
+                            .expect("base64 metadata value"),
+                    )
+                    .expect("serialized metadata is base64");
+                let decoded: Vec<u8> =
+                    serde_json::from_slice(&decoded).expect("metadata descriptor is JSON bytes");
+                assert_eq!(decoded, metadata);
+            }
+        }
     }
 
     #[test]

@@ -377,9 +377,9 @@ impl AnnounceList {
     /// Reconfigure the announce list from a new multi-tier list.
     ///
     /// C++: `AnnounceList::reconfigure(const vector<vector<string>>& announceList)`
-    /// Replaces all tiers with the new list and resets the iterator.
-    /// Used when processing tracker responses that update the announce list
-    /// (e.g., from BEP 12 or BEP 15).
+    /// Replaces all tiers with the supplied list and resets the iterator. Live
+    /// tracker-response extensions use `append_tiers` instead, preserving the
+    /// torrent, user, and public-tracker tiers already in the list.
     pub fn reconfigure(&mut self, announce_list: &[Vec<String>]) {
         self.tiers.clear();
         for tier_urls in announce_list {

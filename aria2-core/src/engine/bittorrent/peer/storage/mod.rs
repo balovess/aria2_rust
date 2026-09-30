@@ -16,8 +16,6 @@
 //! | `deque<shared_ptr<Peer>>` | `VecDeque<PeerEntry>` | Same FIFO ordering |
 //! | `PeerSet` (sorted by ptr) | `HashSet<PeerEntry>` | Identity by (ip, port) suffices |
 //! | `map<string, Timer>` | `HashMap<String, Instant>` | Same ip → timeout mapping |
-//! | `unique_ptr<BtSeederStateChoke>` | `BtSeederStateChoke` | Inline ownership |
-//! | `unique_ptr<BtLeecherStateChoke>` | `BtLeecherStateChoke` | Inline ownership |
 
 mod constants;
 mod default_storage;
@@ -29,8 +27,8 @@ mod tests;
 
 // Re-export the peer-storage API from this domain boundary.
 pub use constants::{
-    CHOKE_ROUND_INTERVAL_SECS, MAX_DROPPED_PEERS, MAX_PEER_LIST_SIZE,
-    TEMP_PEER_CLEANUP_INTERVAL_SECS, TEMP_REJECT_TIMEOUT_MIN_SECS, TEMP_REJECT_TIMEOUT_RANGE_SECS,
+    MAX_DROPPED_PEERS, MAX_PEER_LIST_SIZE, TEMP_PEER_CLEANUP_INTERVAL_SECS,
+    TEMP_REJECT_TIMEOUT_MIN_SECS, TEMP_REJECT_TIMEOUT_RANGE_SECS,
 };
 pub use default_storage::DefaultPeerStorage;
 pub use peer_entry::PeerEntry;

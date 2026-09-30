@@ -458,6 +458,14 @@ impl BtPeerConn {
         }
     }
 
+    /// Whether the remote BitTorrent handshake advertised BEP 10 support.
+    pub fn remote_supports_extended_messaging(&self) -> bool {
+        match &self.inner {
+            InnerConnection::Tcp(conn) => conn.remote_supports_extended_messaging(),
+            InnerConnection::Utp(conn) => conn.remote_supports_extended_messaging(),
+        }
+    }
+
     /// Synchronize the peer identity captured by the transport handshake.
     pub(crate) fn sync_peer_identity(&mut self) {
         if let Some(peer_id) = self.remote_peer_id() {

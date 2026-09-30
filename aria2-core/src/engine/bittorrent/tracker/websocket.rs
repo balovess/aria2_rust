@@ -22,6 +22,7 @@ use crate::http::socks_connector::NoProxyMatcher;
 use crate::http::{HttpConnectProxyTunnel, HttpProxyConfig, ProxyType};
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
+use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 
 /// Announce a magnet lookup to a WebSocket tracker.
 ///
@@ -49,23 +50,57 @@ pub(crate) struct AnnounceResponse {
     pub(crate) leechers: Option<i64>,
 }
 
+#[derive(Debug)]
+pub(crate) struct AnnounceError {
+    pub(crate) kind: TrackerFailureKind,
+    message: String,
+}
+
+impl AnnounceError {
+    fn new(kind: TrackerFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AnnounceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 pub(crate) async fn announce_with_policy(
     tracker_url: &str,
     announce: AnnounceRequest<'_>,
     policy: &OutboundNetworkPolicy,
-) -> Result<AnnounceResponse, String> {
-    let url = reqwest::Url::parse(tracker_url)
-        .map_err(|error| format!("invalid WebSocket tracker URL: {error}"))?;
+) -> Result<AnnounceResponse, AnnounceError> {
+    let url = reqwest::Url::parse(tracker_url).map_err(|error| {
+        AnnounceError::new(
+            TrackerFailureKind::Network,
+            format!("invalid WebSocket tracker URL: {error}"),
+        )
+    })?;
     let scheme = url.scheme();
     if !matches!(scheme, "ws" | "wss") {
-        return Err(format!("unsupported WebSocket tracker scheme '{scheme}'"));
+        return Err(AnnounceError::new(
+            TrackerFailureKind::Network,
+            format!("unsupported WebSocket tracker scheme '{scheme}'"),
+        ));
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "WebSocket tracker URL has no host".to_string())?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| "WebSocket tracker URL has no port".to_string())?;
+    let host = url.host_str().ok_or_else(|| {
+        AnnounceError::new(
+            TrackerFailureKind::Network,
+            "WebSocket tracker URL has no host",
+        )
+    })?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        AnnounceError::new(
+            TrackerFailureKind::Network,
+            "WebSocket tracker URL has no port",
+        )
+    })?;
     let timeout = Duration::from_secs(
         announce
             .options
@@ -76,16 +111,24 @@ pub(crate) async fn announce_with_policy(
 
     crate::http::client_pool::ensure_rustls_provider();
     let stream = connect_socket(&url, host, port, announce.options, timeout, policy).await?;
-    let ws_request = tracker_url
-        .into_client_request()
-        .map_err(|error| format!("invalid WebSocket tracker request: {error}"))?;
+    let ws_request = tracker_url.into_client_request().map_err(|error| {
+        AnnounceError::new(
+            TrackerFailureKind::Network,
+            format!("invalid WebSocket tracker request: {error}"),
+        )
+    })?;
     let (mut websocket, _) = tokio::time::timeout(
         timeout,
         tokio_tungstenite::client_async_tls_with_config(ws_request, stream, None, None),
     )
     .await
-    .map_err(|_| "WebSocket tracker handshake timed out".to_string())?
-    .map_err(|error| format!("WebSocket tracker handshake failed: {error}"))?;
+    .map_err(|_| {
+        AnnounceError::new(
+            TrackerFailureKind::Timeout,
+            "WebSocket tracker handshake timed out",
+        )
+    })?
+    .map_err(classify_websocket_error)?;
 
     let mut message = serde_json::json!({
         "action": "announce",
@@ -105,8 +148,18 @@ pub(crate) async fn announce_with_policy(
     }
     tokio::time::timeout(timeout, websocket.send(Message::Text(message.to_string())))
         .await
-        .map_err(|_| "WebSocket tracker announce timed out while sending".to_string())?
-        .map_err(|error| format!("WebSocket tracker announce send failed: {error}"))?;
+        .map_err(|_| {
+            AnnounceError::new(
+                TrackerFailureKind::Timeout,
+                "WebSocket tracker announce timed out while sending",
+            )
+        })?
+        .map_err(|error| {
+            AnnounceError::new(
+                TrackerFailureKind::Network,
+                format!("WebSocket tracker announce send failed: {error}"),
+            )
+        })?;
 
     let response = tokio::time::timeout(timeout, async {
         let mut response = None;
@@ -126,25 +179,45 @@ pub(crate) async fn announce_with_policy(
                     websocket
                         .send(Message::Pong(payload))
                         .await
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| {
+                            AnnounceError::new(
+                                TrackerFailureKind::Network,
+                                format!("WebSocket tracker pong send failed: {error}"),
+                            )
+                        })?;
                 }
                 Ok(Message::Close(_)) => break,
                 Ok(_) => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(classify_websocket_error(error)),
             }
         }
-        Ok::<_, String>(response)
+        Ok::<_, AnnounceError>(response)
     })
     .await
-    .map_err(|_| "WebSocket tracker announce timed out while receiving".to_string())??;
+    .map_err(|_| {
+        AnnounceError::new(
+            TrackerFailureKind::Timeout,
+            "WebSocket tracker announce timed out while receiving",
+        )
+    })??;
 
     let Some(response) = response else {
-        return Err("WebSocket tracker closed without an announce response".to_string());
+        return Err(AnnounceError::new(
+            TrackerFailureKind::MalformedResponse,
+            "WebSocket tracker closed without an announce response",
+        ));
     };
-    let response: Value = serde_json::from_str(&response)
-        .map_err(|error| format!("invalid WebSocket tracker response: {error}"))?;
+    let response: Value = serde_json::from_str(&response).map_err(|error| {
+        AnnounceError::new(
+            TrackerFailureKind::MalformedResponse,
+            format!("invalid WebSocket tracker response: {error}"),
+        )
+    })?;
     if let Some(reason) = response.get("failure reason").and_then(Value::as_str) {
-        return Err(format!("WebSocket tracker rejected announce: {reason}"));
+        return Err(AnnounceError::new(
+            TrackerFailureKind::TrackerRejected,
+            format!("WebSocket tracker rejected announce: {reason}"),
+        ));
     }
 
     let mut peers = response.get("peers").map(parse_peers).unwrap_or_default();
@@ -163,6 +236,41 @@ pub(crate) async fn announce_with_policy(
     })
 }
 
+fn classify_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> AnnounceError {
+    use tokio_tungstenite::tungstenite::Error;
+
+    let (kind, message) = match error {
+        Error::Http(response)
+            if response.status().is_server_error()
+                || matches!(response.status().as_u16(), 408 | 425 | 429) =>
+        {
+            (
+                TrackerFailureKind::RemoteTemporary,
+                format!(
+                    "WebSocket tracker rejected handshake with {}",
+                    response.status()
+                ),
+            )
+        }
+        Error::Http(response) => (
+            TrackerFailureKind::TrackerRejected,
+            format!(
+                "WebSocket tracker rejected handshake with {}",
+                response.status()
+            ),
+        ),
+        Error::Protocol(error) => (
+            TrackerFailureKind::MalformedResponse,
+            format!("invalid WebSocket tracker protocol response: {error}"),
+        ),
+        error => (
+            TrackerFailureKind::Network,
+            format!("WebSocket tracker connection failed: {error}"),
+        ),
+    };
+    AnnounceError::new(kind, message)
+}
+
 async fn connect_socket(
     url: &reqwest::Url,
     target_host: &str,
@@ -170,7 +278,7 @@ async fn connect_socket(
     options: &DownloadOptions,
     timeout: Duration,
     policy: &OutboundNetworkPolicy,
-) -> Result<TcpStream, String> {
+) -> Result<TcpStream, AnnounceError> {
     let no_proxy = options
         .no_proxy
         .as_deref()
@@ -206,8 +314,18 @@ async fn connect_socket(
     let Some(proxy_url) = proxy else {
         return tokio::time::timeout(timeout, policy.connect_host(target_host, target_port))
             .await
-            .map_err(|_| "WebSocket tracker TCP connection timed out".to_string())?
-            .map_err(|error| format!("WebSocket tracker TCP connection failed: {error}"));
+            .map_err(|_| {
+                AnnounceError::new(
+                    TrackerFailureKind::Timeout,
+                    "WebSocket tracker TCP connection timed out",
+                )
+            })?
+            .map_err(|error| {
+                AnnounceError::new(
+                    TrackerFailureKind::Network,
+                    format!("WebSocket tracker TCP connection failed: {error}"),
+                )
+            });
     };
 
     let credentials_selector = if url.scheme() == "ws" {
@@ -223,12 +341,21 @@ async fn connect_socket(
         options.proxy_credentials_for_scheme("all")
     };
     let mut config =
-        HttpProxyConfig::from_proxy_url(proxy_url, target_host.to_string(), target_port)
-            .map_err(|error| format!("invalid WebSocket proxy configuration: {error}"))?;
+        HttpProxyConfig::from_proxy_url(proxy_url, target_host.to_string(), target_port).map_err(
+            |error| {
+                AnnounceError::new(
+                    TrackerFailureKind::Network,
+                    format!("invalid WebSocket proxy configuration: {error}"),
+                )
+            },
+        )?;
     if config.proxy_type != ProxyType::Http {
-        return Err(format!(
-            "WebSocket tracker proxy must use an HTTP CONNECT proxy; '{}' is {}",
-            proxy_url, config.proxy_type
+        return Err(AnnounceError::new(
+            TrackerFailureKind::Network,
+            format!(
+                "WebSocket tracker proxy must use an HTTP CONNECT proxy; '{}' is {}",
+                proxy_url, config.proxy_type
+            ),
         ));
     }
     if let Some(username) = credentials.0 {
@@ -243,8 +370,18 @@ async fn connect_socket(
         HttpConnectProxyTunnel::new(config).connect_with_policy(policy),
     )
     .await
-    .map_err(|_| "WebSocket tracker proxy connection timed out".to_string())?
-    .map_err(|error| format!("WebSocket tracker proxy connection failed: {error}"))
+    .map_err(|_| {
+        AnnounceError::new(
+            TrackerFailureKind::Timeout,
+            "WebSocket tracker proxy connection timed out",
+        )
+    })?
+    .map_err(|error| {
+        AnnounceError::new(
+            TrackerFailureKind::Network,
+            format!("WebSocket tracker proxy connection failed: {error}"),
+        )
+    })
 }
 
 fn parse_peers(value: &Value) -> Vec<SocketAddr> {

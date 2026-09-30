@@ -16,24 +16,19 @@
 //! | deque<shared_ptr<Peer>> | VecDeque<PeerEntry> | Same FIFO ordering |
 //! | PeerSet (sorted by ptr) | HashSet<PeerEntry> | Identity by (ip, port) suffices |
 //! | map<string, Timer> | HashMap<String, Instant> | Same ip -> timeout mapping |
-//! | unique_ptr<BtSeederStateChoke> | BtSeederStateChoke | Inline ownership |
-//! | unique_ptr<BtLeecherStateChoke> | BtLeecherStateChoke | Inline ownership |
 
-mod choke_and_config;
 mod peer_ops;
 mod rejection;
+mod state;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::engine::bittorrent::peer::blocklist::BtPeerBlocklist;
-use crate::engine::bittorrent::peer::choke_manager::{BtLeecherStateChoke, BtSeederStateChoke};
-use crate::engine::bittorrent::peer::stats::PeerStats;
-
 use super::constants::*;
 use super::peer_entry::PeerEntry;
 use super::peer_storage_trait::PeerStorage;
+use crate::engine::bittorrent::peer::blocklist::BtPeerBlocklist;
 
 /// Peer lifecycle storage, matching C++ DefaultPeerStorage.
 ///
@@ -45,7 +40,6 @@ use super::peer_storage_trait::PeerStorage;
 /// Additionally provides:
 /// - Deduplication by (ip, port) via uniq_peers
 /// - Temporary peer rejection with variable timeout
-/// - Choking algorithm integration (seeder vs leecher)
 ///
 /// # Invariant
 ///
@@ -68,23 +62,11 @@ pub struct DefaultPeerStorage {
     /// Recently disconnected peers, bounded to MAX_DROPPED_PEERS.
     pub(super) dropped_peers: VecDeque<PeerEntry>,
 
-    /// Choking algorithm for seeder state (when download is complete).
-    seeder_state_choke: BtSeederStateChoke,
-
-    /// Choking algorithm for leecher state (when download is in progress).
-    leecher_state_choke: BtLeecherStateChoke,
-
     /// Temporarily rejected peers: ip -> timeout instant.
     pub(super) temporarily_rejected_peers: HashMap<Box<str>, Instant>,
 
     /// Last time we cleaned up expired entries from temporarily_rejected_peers.
     pub(super) last_temp_peer_cleanup: Instant,
-
-    /// Whether piece storage has been configured.
-    piece_storage_available: bool,
-
-    /// Whether the download has finished (determines seeder vs leecher choke).
-    pub(super) download_finished: bool,
 
     /// IP range-based blocklist for rejecting peers by address.
     ///
@@ -109,12 +91,8 @@ impl DefaultPeerStorage {
             unused_peers: VecDeque::new(),
             used_peers: HashSet::new(),
             dropped_peers: VecDeque::new(),
-            seeder_state_choke: BtSeederStateChoke::new(),
-            leecher_state_choke: BtLeecherStateChoke::new(),
             temporarily_rejected_peers: HashMap::new(),
             last_temp_peer_cleanup: Instant::now(),
-            piece_storage_available: false,
-            download_finished: false,
             peer_blocklist: None,
             blocklist_reject_count: 0,
         }
@@ -174,17 +152,5 @@ impl PeerStorage for DefaultPeerStorage {
 
     fn return_peer(&mut self, peer: &PeerEntry) {
         self.return_peer(peer)
-    }
-
-    fn choke_round_interval_elapsed(&self) -> bool {
-        self.choke_round_interval_elapsed()
-    }
-
-    fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
-        self.execute_choke_by_identity(peers)
-    }
-
-    fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
-        self.execute_choke(peers)
     }
 }

@@ -150,6 +150,7 @@ fn primitive_wire_models_match_golden_fixture() {
         seeders: Some(0),
         leechers: Some(0),
         downloaded: Some("0".into()),
+        last_failure_kind: Some("timeout".into()),
         tracker_id: String::new(),
         seconds_since_last_success: Some(12),
         last_success_at_unix_millis: Some("1720000000000".into()),
@@ -159,6 +160,22 @@ fn primitive_wire_models_match_golden_fixture() {
     assert_eq!(
         serde_json::to_value(tracker).unwrap(),
         golden["tracker_info"]
+    );
+
+    let mut legacy_tracker_wire = golden["tracker_info"].clone();
+    legacy_tracker_wire
+        .as_object_mut()
+        .expect("tracker fixture must be an object")
+        .remove("lastFailureKind");
+    let legacy_tracker: TrackerInfo =
+        serde_json::from_value(legacy_tracker_wire).expect("older tracker payload remains valid");
+    assert_eq!(legacy_tracker.last_failure_kind, None);
+    assert!(
+        serde_json::to_value(legacy_tracker)
+            .expect("legacy tracker type remains serializable")
+            .get("lastFailureKind")
+            .is_none(),
+        "absent failure kind should stay omitted on the wire"
     );
 
     assert_eq!(

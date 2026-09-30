@@ -76,11 +76,12 @@ impl IncomingHandshake {
                     .await
                     .map_err(|error| format!("Failed to send handshake response: {error}"))?;
                 Ok(
-                    crate::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+                    crate::bittorrent::peer::connection::PeerConnection::from_stream_with_peer_capabilities(
                         stream,
                         handshake.peer_id,
                         handshake.supports_dht(),
                         handshake.supports_fast_extension(),
+                        handshake.supports_extended_messaging(),
                     ),
                 )
             }
@@ -110,6 +111,7 @@ impl IncomingHandshake {
                         handshake.peer_id,
                         handshake.supports_dht(),
                         handshake.supports_fast_extension(),
+                        handshake.supports_extended_messaging(),
                     ),
                 )
             }
@@ -352,6 +354,7 @@ mod tests {
         let connection = server.await.unwrap();
         assert!(connection.remote_supports_dht());
         assert!(connection.remote_supports_fast_extension());
+        assert!(connection.remote_supports_extended_messaging());
     }
 
     #[tokio::test]
@@ -379,6 +382,7 @@ mod tests {
         let server_connection = server.await.unwrap().unwrap();
         assert!(server_connection.is_mse_negotiated());
         assert!(!server_connection.is_encrypted());
+        assert!(server_connection.remote_supports_extended_messaging());
     }
 
     #[tokio::test]

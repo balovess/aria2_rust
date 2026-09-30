@@ -5,9 +5,36 @@ use std::collections::HashSet;
 
 use super::super::session_resource::PeerSessionResource;
 use super::super::types::ConnectionType;
-use super::BtPeerConn;
+use super::{BtPeerConn, PeerActorStartup};
 
 impl BtPeerConn {
+    pub(crate) fn prepare_actor_startup(
+        &mut self,
+        peer_agent: String,
+        listen_port: Option<u16>,
+        info_hash: &[u8; 20],
+        num_pieces: u32,
+    ) {
+        if self.actor_startup.is_some() {
+            return;
+        }
+        let allowed_fast = if self.remote_supports_fast_extension() {
+            aria2_protocol::bittorrent::fast_set::compute_fast_set(
+                self.remote_ip(),
+                num_pieces,
+                info_hash,
+                10,
+            )
+        } else {
+            Vec::new()
+        };
+        self.actor_startup = Some(PeerActorStartup {
+            peer_agent,
+            listen_port,
+            allowed_fast,
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Connection classification
     // -----------------------------------------------------------------------

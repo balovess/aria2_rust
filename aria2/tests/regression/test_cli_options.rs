@@ -1008,6 +1008,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "lpd-listen-port",
         "max-http2-sessions-per-server",
         "max-http2-streams-per-session",
+        "min-http-range-size",
         "http-version",
         "mmap-threshold",
         "on-bt-download-error",
@@ -1042,7 +1043,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        242,
+        245,
         "all-features registry inventory changed"
     );
     assert_eq!(

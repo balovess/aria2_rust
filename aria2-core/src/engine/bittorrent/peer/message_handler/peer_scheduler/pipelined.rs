@@ -70,9 +70,8 @@ pub(crate) async fn download_piece_blocks(
         .pieces
         .pop()
         .expect("single-piece batch always returns its requested piece");
-    let piece = entry.result.map_err(Aria2Error::Network)?;
     Ok(ActorAwarePieceDownloadResult {
-        piece,
+        piece: entry.result.map_err(Aria2Error::Network),
         peer_actor_ids: entry.peer_actor_ids,
         availability_changed_actor_ids: batch.availability_changed_actor_ids,
         pex_peers: batch.pex_peers,

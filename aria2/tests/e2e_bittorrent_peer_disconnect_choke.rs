@@ -293,6 +293,89 @@ async fn connect_interested_leecher(
 }
 
 #[tokio::test]
+async fn cli_logs_tracker_source_for_discovered_peer_connection() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let log_path = output_dir.path().join("aria2.log");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = torrent(&placeholder_tracker.announce_url());
+    let metadata = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent parses");
+    let source = PieceSource::start(metadata.info_hash.bytes).await;
+    let initial_dead_port = reserve_loopback_port();
+    let later_dead_port = reserve_loopback_port();
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start_with_event_peers(
+        vec![initial_dead_port],
+        vec![later_dead_port, source.addr.port()],
+        1,
+    )
+    .await;
+    let torrent = torrent(&tracker.announce_url());
+    let listen_port = reserve_loopback_port();
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--log={}", log_path.display()),
+        "--log-level=debug".to_owned(),
+        format!("--listen-port={listen_port}"),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--bt-tracker-interval=1".to_owned(),
+        "--seed-time=0".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(&client, 1, "aria2.addTorrent", json!([encoded, [], {}]))
+        .as_str()
+        .expect("addTorrent returns GID")
+        .to_owned();
+
+    let downloaded_first_piece = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status = rpc(
+                &client,
+                2,
+                "aria2.tellStatus",
+                json!([gid, ["status", "completedLength", "totalLength"]]),
+            );
+            if status["completedLength"] == "16" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if downloaded_first_piece.is_err() {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        panic!(
+            "the peer returned by the later tracker announce did not complete the first piece; tracker_queries={:?}; requests={}; log={log}",
+            tracker.captured_queries().await,
+            source.requests.load(Ordering::SeqCst),
+        );
+    }
+
+    let log = std::fs::read_to_string(&log_path).expect("aria2 should write its debug log");
+    let tracker_dial_succeeded = log.lines().any(|line| {
+        line.contains("Connected to discovered peer") && line.contains("source=Tracker")
+    });
+    assert!(
+        tracker_dial_succeeded,
+        "successful tracker-discovered dial must be logged with its source, not mislabeled as PEX: {log}"
+    );
+    assert!(
+        !log.lines().any(|line| {
+            (line.contains("Connected to discovered peer")
+                || line.contains("Failed to connect discovered peer"))
+                && line.contains("[PEX]")
+        }),
+        "generic peer dial results must not be labeled as PEX: {log}"
+    );
+}
+
+#[tokio::test]
 async fn cli_rebalances_unchoke_when_interested_peer_disconnects_during_idle_wait() {
     let output_dir = tempfile::tempdir().expect("temporary download directory");
     let log_path = output_dir.path().join("aria2.log");

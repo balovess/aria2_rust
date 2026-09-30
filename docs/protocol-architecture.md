@@ -163,6 +163,11 @@ behavior. UDP tracker framing and packet codecs live in
 announce lifecycle. DHT wire and lookup primitives live in
 `aria2-protocol::bittorrent`; torrent-scoped lookup scheduling and process
 ownership live in `aria2-core::engine::bittorrent`.
+HTTP tracker requests use reqwest: under the direct network policy there is no
+local source address to select, so the request client owns DNS and proxy
+routing. Host resolution is needed for source-family matching only when an
+explicit outbound address/interface is configured; pre-resolving in direct
+mode can reject an announce before the HTTP client starts it.
 Local Peer Discovery is implemented as a BitTorrent discovery module in core:
 its BEP 14 framing, multicast socket, receive loop, and peer-registry updates
 are currently coupled to torrent activity, so they stay together under
@@ -187,6 +192,12 @@ facade.
    with the existing `RequestGroup`, the resolved torrent bytes, and the
    outbound-network policy. Any DHT engines acquired for metadata discovery
    are handed to that command so the payload stage can reuse them.
+   For payload downloads, the validated, normalized metainfo is also retained
+   on that same group before handoff. Session snapshots encode it in the
+   existing `aria2-rust-bt-metadata-data` field, allowing a restored magnet task
+   to start directly from its metainfo without needing the original `xs`
+   source or repeating BEP 9 discovery. Metadata-only requests complete before
+   this payload-resume snapshot is installed.
 4. `BtDownloadCommand::execute` prepares the torrent layout and integrity
    state, then coordinates tracker/DHT discovery, peer sessions, piece
    selection, and WebSeeds through `download::execute`. Peer messages and
@@ -199,9 +210,89 @@ facade.
     negotiated. `BtPeerConn` then adds engine peer state and statistics.
 6. `TrackerAnnouncer` selects one tracker URL from `BtAnnounce`, resolves UDP
    tracker addresses through the outbound policy, and calls the core UDP
-   client. The client sends CONNECT then ANNOUNCE/SCRAPE using the protocol
-   crate's packet codecs; the separate multi-endpoint UDP manager and duplicate
-   synchronous protocol client are removed.
+   client. The retained `AnnounceList` manages multi-tier URL order and failure
+   rotation; the UDP client sends CONNECT then ANNOUNCE/SCRAPE using the
+   protocol crate's packet codecs. Only the redundant UDP-specific manager and
+   duplicate synchronous protocol client were removed.
+   If a bencoded HTTP tracker response includes an `announce-list` field, the
+   client treats it as an additional tracker extension and appends unseen
+   tiers without replacing configured primary tiers; the actor's separate
+   public-tracker fan-out remains independent. A later primary failure can
+   select the added tiers. This is a Rust extension: upstream aria2's
+   response handler does not consume that field, and BEP 15's fixed binary UDP
+   announce response has no URL-list field.
+
+### DHT inbound query path
+
+The DHT engine is assembled from the UDP socket, routing table, KRPC services,
+and bounded lookup scheduler. `engine/startup.rs::DhtEngine::start` loads the
+family-specific state, binds the socket, builds the shared engine context, then
+starts the inbound loop in `engine/receive.rs` and maintenance loops in
+`engine_inner.rs`. `engine/api.rs` exposes peer lookup, announce, and BEP 44/51
+operations; `engine/lifecycle.rs` owns bootstrap state, shutdown, and statistics.
+`RoutingTable` owns node admission and health queries; `Bucket` owns node
+membership and replacement candidates; `DhtNode` records responsiveness; the
+private `bucket_tree` module owns bucket splitting and tree traversal.
+
+`DhtEngineContext` stores one `DhtTaskContext` for the effective local node ID,
+routing table, UDP socket, transaction tracker, and query timeout used at
+runtime. Startup copies the configured timeout into that context. `DhtEngineInner`
+stores only mutable lifecycle state, so direct engine calls, background loops,
+and scheduled tasks share the same protocol resources.
+
+1. `DhtSocket` is the sole UDP reader. `engine/receive.rs` distributes datagrams
+   round-robin through bounded worker queues, skips full or closed workers, and
+   drops a packet only when no queue accepts it. The KRPC decoder accepts only
+   exact `y` values (`q`, `r`, or `e`), requires response dictionaries to carry
+   a 20-byte node ID, and validates the two-field error shape. Invalid messages
+   are dropped before they reach shared state. Responses and errors go to the
+   transaction tracker. Unknown transactions and replies from the wrong source
+   are ignored; a valid KRPC error closes its matched waiter as a failure so the
+   querying task updates node health through the same path as a timeout.
+   Queries enter `DhtQueryHandler`. Shutdown closes queue senders, drains
+   pending packets for up to 100 ms, then aborts workers that are still blocked.
+2. The handler validates the query method and sender node ID, ignores packets
+   from the local node, then dispatches `ping`, `find_node`, `get_peers`, and
+   `announce_peer` to the BEP 5 handlers. `items` owns BEP 44 `get`/`put`, and
+   `sample` owns BEP 51 `sample_infohashes`; sampling depends on peer storage,
+   not on the optional BEP 44 item store.
+3. `HandleResult` carries the response and an optional sender ID eligible for
+   promotion. The engine releases the routing-table and token locks, sends the
+   response, then promotes an accepted sender into the routing table.
+
+### DHT background maintenance path
+
+1. `engine_inner.rs::spawn_periodic_tasks` owns the maintenance timers and
+   submits work to the bounded `DhtTaskQueue`; it does not perform network or
+   persistence work in the timer loop. Token rotation is the synchronous
+   exception and updates the token tracker directly.
+2. Bucket refresh runs in periodic lane 1 through `BucketRefreshTask`.
+   Node contact and cleanup run in periodic lane 2 through `MaintenanceTask`:
+   contact selects one good node per bucket and issues bounded `PingTask`s;
+   cleanup expires peer and transaction state, then evicts bad nodes and
+   attempts cached replacements. These network-maintenance ticks are skipped
+   while lane 2 is busy, preventing overlapping stale work.
+3. Routing-table saves use the same lane but are queued even when it is busy.
+   `MaintenanceTask` is the adapter required by the shared `DhtTask` queue;
+   its variants each perform a distinct engine operation. The public
+   `save_state` and `evict_nodes` methods call those same operations directly
+   for on-demand requests.
+
+### DHT persistence path
+
+1. `engine/startup.rs::DhtEngine::start` reads the configured family-specific
+   snapshot, accepts it only within `persistence_max_age`, and inserts restored
+   nodes as unverified routing candidates.
+2. Periodic saves, `save_state`, and shutdown all call
+   `DhtEngineContext::save_state`. Shutdown first stops queued and background
+   work, then reuses this method. It collects current good nodes;
+   `DhtPersistence` serializes that single snapshot and atomically replaces the
+   file under its cross-process file lock. Expired or evicted nodes are not
+   merged back from an older snapshot.
+3. The BEP 44 item store uses its own `.items` file. Both file writes run
+   outside the async runtime and are attempted independently; one write failure
+   does not suppress the other, and the shared method reports either or both
+   errors.
 
 Magnet is a metadata-resolution stage, not a second payload downloader. Both
 magnet and `.torrent` inputs converge on the same `BtDownloadCommand` and piece
@@ -321,9 +412,42 @@ Do not add pass-through engine clients around these public interfaces.
   encoding and decoding; core owns policy-based DNS and binding, one-shot
   announce/scrape exchanges, transaction state, and timeout/retry handling.
   `AnnounceList` keeps URL order, tiers, and failure rotation; the UDP client
-  receives only the currently selected URL. Remove the duplicate synchronous
-  client and manager layer. Resolve that URL once and reuse its address; DNS
+  receives only the currently selected URL. Keep this multi-tier tracker
+  manager; remove only the duplicate synchronous client and UDP-specific
+  execution manager. Resolve the selected URL once and reuse its address; DNS
   failures stay inside the outbound-policy boundary.
+- **Narrow** DHT peer task composition: one `PeerLookupTask` performs the
+  iterative `get_peers` traversal and can announce with tokens from that same
+  traversal. Remove the duplicate `PeerAnnounceTask`; both peer discovery and
+  explicit `announce_peer` use the same task path.
+- Remove `DhtTaskFactory`, which only forwarded the shared context to task
+  constructors. The engine now constructs the scheduled task directly, making
+  task selection and its inputs visible at the scheduling point.
+- Remove `NodeLookupTask`: it duplicated the public result-returning
+  `lookup::iterative_find_node`, discarded its `NodeLookupResult`, and had no
+  production callers. `BucketRefreshTask` keeps bounded fan-out while selecting
+  stale bucket targets; callers that need one lookup can call the lookup API.
+- Split DHT iterative queries by responsibility (`find_node`, `get_peers`,
+  BEP 44 items, BEP 51 sampling, and announce) while keeping candidate
+  ordering and query batching in the shared lookup module. Keep transaction
+  matching in one RAII response-wait path; remove unused per-transaction
+  `info_hash` and token storage.
+- Encode outbound KRPC messages directly to bytes: the bencode writer is
+  infallible, so `DhtMessage::encode` returns its buffer without a redundant
+  `Result` layer. Keep parsing errors at the `decode` boundary and pass
+  announce tokens as opaque bytes.
+- **Narrow** the DHT UDP seam: keep the Tokio socket behind `DhtSocket` and
+  route the engine receive loop through it instead of exposing the raw shared
+  socket. The engine still handles timeout and shutdown selection around reads.
+- **Narrow** DHT persistence to one current-good-node snapshot path. Keep the
+  file lock and atomic replacement, remove the unused read/merge/write path
+  that could restore evicted nodes, and collect good nodes at the routing-table
+  boundary. The binary serializer is infallible; parse errors and filesystem
+  failures remain at their respective decode and I/O boundaries.
+- Split inbound DHT query handling by protocol responsibility: shared sender
+  validation and dispatch stay in `DhtQueryHandler`; BEP 44 item operations and
+  BEP 51 sampling live in focused submodules. Keep one handler entry point with
+  an optional item store, and remove its former no-store forwarding overload.
 - The unregistered `peer_choke_command.rs` file had no `engine` module
   declaration, call sites, or reachable public API. It was removed as dead
   source; active choking state and execution remain with BitTorrent peer

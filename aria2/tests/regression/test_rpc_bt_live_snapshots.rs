@@ -51,7 +51,14 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         .collect::<Vec<_>>();
     let piece_len = piece.len();
 
-    let tracker = mock_tracker::MockTrackerServer::start_with_peers(vec![65535], false).await;
+    let returned_dynamic_url = "http://dynamic-response-tracker.example/announce".to_string();
+    let tracker = mock_tracker::MockTrackerServer::start_with_dynamic_announce_list(
+        vec![65535],
+        300,
+        vec![vec![returned_dynamic_url.clone()]],
+        None,
+    )
+    .await;
     let tracker_url = tracker.announce_url();
     let tracker_runtime = Arc::new(std::sync::RwLock::new(TrackerRuntimeSnapshot::default()));
     let mut tracker_announcer = TrackerAnnouncer::new(&[], &Some(tracker_url.clone()));
@@ -101,9 +108,15 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
 
         let mut length = [0u8; 4];
         stream.read_exact(&mut length).await.unwrap();
+        let mut extension_handshake = vec![0u8; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut extension_handshake).await.unwrap();
+        assert_eq!(extension_handshake.first(), Some(&20));
+        assert_eq!(extension_handshake.get(1), Some(&0));
+
+        stream.read_exact(&mut length).await.unwrap();
         let mut availability = vec![0u8; u32::from_be_bytes(length) as usize];
         stream.read_exact(&mut availability).await.unwrap();
-        assert_eq!(availability, vec![5, 0x80]);
+        assert_eq!(availability, vec![14], "Fast seeder advertises HaveAll");
 
         stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // Interested
         loop {
@@ -281,7 +294,7 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         .await;
     assert_success(&trackers_resp);
     let trackers = trackers_resp.result.unwrap();
-    assert_eq!(trackers.as_array().unwrap().len(), 1);
+    assert_eq!(trackers.as_array().unwrap().len(), 2);
     assert_eq!(trackers[0]["uri"], tracker_url);
     assert_eq!(trackers[0]["tier"], 1);
     assert_eq!(trackers[0]["current"], true);
@@ -291,6 +304,14 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(trackers[0]["leechers"], 1);
     assert_eq!(trackers[0]["downloaded"], serde_json::Value::Null);
     assert!(trackers[0]["snapshotAtUnixMillis"].as_str().is_some());
+    assert!(
+        trackers.as_array().unwrap().iter().any(|tracker| {
+            tracker["uri"] == returned_dynamic_url
+                && tracker["tier"] == 2
+                && tracker["status"] == "unknown"
+        }),
+        "dynamic tracker response is absent from getTrackers: {trackers}"
+    );
 
     {
         let mut snapshot = tracker_runtime.write().unwrap();
@@ -309,18 +330,29 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         );
         let public_url = "http://public-tracker.example/announce".to_string();
         let dynamic_url = "http://dynamic-tracker.example/announce".to_string();
+        let failed_url = "http://failed-tracker.example/announce".to_string();
         snapshot.tracker_tiers.push(vec![public_url.clone()]);
         snapshot.tracker_tiers.push(vec![dynamic_url.clone()]);
+        snapshot.tracker_tiers.push(vec![failed_url.clone()]);
         snapshot.trackers.push(TrackerRuntimeInfo {
             uri: public_url.clone(),
-            tier: 2,
+            tier: 3,
             status: "succeeded".to_string(),
             ..TrackerRuntimeInfo::default()
         });
         snapshot.trackers.push(TrackerRuntimeInfo {
             uri: dynamic_url.clone(),
-            tier: 3,
+            tier: 4,
             status: "idle".to_string(),
+            ..TrackerRuntimeInfo::default()
+        });
+        snapshot.trackers.push(TrackerRuntimeInfo {
+            uri: failed_url.clone(),
+            tier: 5,
+            last_failure_kind: Some(
+                aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind::Timeout,
+            ),
+            status: "failed".to_string(),
             ..TrackerRuntimeInfo::default()
         });
     }
@@ -329,7 +361,7 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         .await;
     assert_success(&elapsed_trackers_resp);
     let elapsed_trackers = elapsed_trackers_resp.result.unwrap();
-    assert_eq!(elapsed_trackers.as_array().unwrap().len(), 3);
+    assert_eq!(elapsed_trackers.as_array().unwrap().len(), 5);
     assert!(
         elapsed_trackers[0]["secondsSinceLastSuccess"]
             .as_u64()
@@ -337,14 +369,25 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         "getTrackers must calculate elapsed time at query time instead of returning a frozen snapshot age: {elapsed_trackers}"
     );
     assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
-        tracker["uri"] == "http://public-tracker.example/announce"
+        tracker["uri"] == returned_dynamic_url
             && tracker["tier"] == 2
+            && tracker["status"] == "unknown"
+    }));
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://public-tracker.example/announce"
+            && tracker["tier"] == 3
             && tracker["status"] == "succeeded"
     }));
     assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
         tracker["uri"] == "http://dynamic-tracker.example/announce"
-            && tracker["tier"] == 3
+            && tracker["tier"] == 4
             && tracker["status"] == "idle"
+    }));
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://failed-tracker.example/announce"
+            && tracker["tier"] == 5
+            && tracker["status"] == "failed"
+            && tracker["lastFailureKind"] == "timeout"
     }));
 
     let dht_resp = engine

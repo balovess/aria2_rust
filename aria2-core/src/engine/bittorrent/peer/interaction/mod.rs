@@ -24,7 +24,7 @@ use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::engine::bittorrent::peer::connection::{BtPeerConn, PeerActorStartup};
+use crate::engine::bittorrent::peer::connection::BtPeerConn;
 use crate::error::Result;
 use crate::network::OutboundNetworkPolicy;
 use tracing::{debug, info};
@@ -164,20 +164,12 @@ impl BtPeerInteraction {
             piece_length,
             total_length
         );
-        conn.actor_startup = Some(PeerActorStartup {
-            peer_agent: connection_options.peer_agent.clone(),
-            listen_port: connection_options.listen_port,
-            allowed_fast: if conn.is_fast_extension_enabled() {
-                aria2_protocol::bittorrent::fast_set::compute_fast_set(
-                    &addr.ip,
-                    num_pieces,
-                    info_hash_raw,
-                    10,
-                )
-            } else {
-                Vec::new()
-            },
-        });
+        conn.prepare_actor_startup(
+            connection_options.peer_agent.clone(),
+            connection_options.listen_port,
+            info_hash_raw,
+            num_pieces,
+        );
         Ok(conn)
     }
 
@@ -298,10 +290,9 @@ mod tests {
                 let (stream, _) = good_listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete(remote_peer_id, None, false).await
                 {
-                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
             }
         });
@@ -369,10 +360,9 @@ mod tests {
                 let (stream, _) = first_listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete(remote_peer_id, None, false).await
                 {
-                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
             }
         });
@@ -384,10 +374,9 @@ mod tests {
                 let (stream, _) = delayed_listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete([10; 20], None, false).await
                 {
-                    if let Ok(connection) = incoming.complete([10; 20], None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
                 // The first connection is the MSE probe. Delay accepting the
                 // plaintext retry so this peer becomes ready well inside the
@@ -461,10 +450,9 @@ mod tests {
                 let (stream, _) = listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete(remote_peer_id, None, false).await
                 {
-                    if let Ok(connection) = incoming.complete(remote_peer_id, None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
             }
         });

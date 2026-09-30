@@ -6,9 +6,6 @@ pub const MAX_PEER_LIST_SIZE: usize = 512;
 /// Maximum number of dropped peers to retain for reconnect attempts.
 pub const MAX_DROPPED_PEERS: usize = 50;
 
-/// Choke round interval in seconds (matching C++ 10_s).
-pub const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
-
 /// Minimum temporary rejection timeout in seconds (C++ uses 120).
 pub const TEMP_REJECT_TIMEOUT_MIN_SECS: u64 = 120;
 

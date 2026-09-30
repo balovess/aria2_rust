@@ -144,7 +144,7 @@ pub(crate) async fn resolve_udp_tracker_addr(
     let port = parsed.port().unwrap_or(DEFAULT_UDP_TRACKER_PORT);
 
     policy
-        .resolve_udp_host(&host, port)
+        .resolve_udp_host(host, port)
         .await
         .map_err(|error| format!("failed to resolve UDP tracker {url}: {error}"))
 }

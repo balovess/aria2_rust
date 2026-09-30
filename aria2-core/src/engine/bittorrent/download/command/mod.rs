@@ -23,14 +23,14 @@ pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 #[derive(Debug)]
 pub(crate) struct BtRuntimeState {
     connections: std::sync::atomic::AtomicUsize,
-    max_peers: std::sync::atomic::AtomicUsize,
+    max_peers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl BtRuntimeState {
-    pub(crate) fn new(max_peers: usize) -> Self {
+    pub(crate) fn new(max_peers: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
             connections: std::sync::atomic::AtomicUsize::new(0),
-            max_peers: std::sync::atomic::AtomicUsize::new(max_peers),
+            max_peers,
         }
     }
 
@@ -39,17 +39,16 @@ impl BtRuntimeState {
             .store(connections, std::sync::atomic::Ordering::Release);
     }
 
-    pub(crate) fn set_max_peers(&self, max_peers: usize) {
-        self.max_peers
-            .store(max_peers, std::sync::atomic::Ordering::Release);
-    }
-
     pub(crate) fn connections(&self) -> usize {
         self.connections.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn max_peers(&self) -> usize {
         self.max_peers.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn max_peers_state(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.max_peers)
     }
 
     pub(crate) fn min_peers(&self) -> usize {
@@ -317,6 +316,7 @@ impl BtDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::{BtDownloadCommand, BtRuntimeState};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn shutdown_persists_owned_dht_engine_before_drop() {
@@ -390,14 +390,15 @@ mod tests {
 
     #[test]
     fn runtime_state_uses_the_same_min_peer_boundary_as_tracker_demand() {
-        let runtime = BtRuntimeState::new(55);
+        let max_peers = Arc::new(std::sync::atomic::AtomicUsize::new(55));
+        let runtime = BtRuntimeState::new(Arc::clone(&max_peers));
         assert_eq!(runtime.min_peers(), 44);
         assert!(runtime.less_than_min_peers());
 
         runtime.set_connections(44);
         assert!(!runtime.less_than_min_peers());
 
-        runtime.set_max_peers(0);
+        max_peers.store(0, std::sync::atomic::Ordering::Release);
         assert_eq!(runtime.min_peers(), 0);
         assert!(!runtime.less_than_min_peers());
         assert!(runtime.less_than_max_peers());
@@ -405,11 +406,12 @@ mod tests {
 
     #[test]
     fn runtime_state_accepts_runtime_max_peer_changes() {
-        let runtime = BtRuntimeState::new(10);
+        let max_peers = Arc::new(std::sync::atomic::AtomicUsize::new(10));
+        let runtime = BtRuntimeState::new(Arc::clone(&max_peers));
         runtime.set_connections(7);
         assert!(runtime.less_than_min_peers());
 
-        runtime.set_max_peers(8);
+        max_peers.store(8, std::sync::atomic::Ordering::Release);
         assert!(!runtime.less_than_min_peers());
         assert_eq!(runtime.max_peers(), 8);
     }

@@ -7,6 +7,10 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::rpc_update::{RuntimeOptionChanges, apply_rpc_option};
 
 impl super::super::RequestGroup {
+    pub(crate) fn bt_max_peers_limit(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.bt_max_peers_limit)
+    }
+
     // ── Rate Limiter ────────────────────────────────────────────────────
 
     /// Store a handle to the download's `RateLimiter` so that runtime option
@@ -130,6 +134,10 @@ impl super::super::RequestGroup {
 
         let opts = Arc::make_mut(&mut self.options);
         let applied = apply_rpc_option(opts, key, &value)?;
+        if key == "bt-max-peers" {
+            self.bt_max_peers_limit
+                .store(opts.bt_max_peers, std::sync::atomic::Ordering::Release);
+        }
 
         match key {
             "max-download-limit" => {

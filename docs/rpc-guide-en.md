@@ -248,7 +248,10 @@ bitfield is unknown; seeders report 100%.
 GID. It is not a claim that every tracker is currently live or online. Each
 entry contains `uri`, 1-based `tier`, `current`, `lastAttempt`, `announceReady`,
 `allFailed`, `inFlight`, `interval`, `minInterval`, `seeders`, `leechers`,
-`trackerId`, and optional `secondsSinceLastSuccess`. The snapshot is published
+`trackerId`, optional `lastFailureKind`, and optional `secondsSinceLastSuccess`.
+Failure kinds are `network`, `timeout`, `remoteTemporary`, `trackerRejected`,
+and `malformedResponse`; a successful announce clears that URL's most recent
+failure category. The snapshot is published
 by the executing BitTorrent command and is removed when that command exits.
 `current` identifies the next tracker selected by the announce state machine;
 `lastAttempt` identifies the most recently attempted tracker. In this extension
@@ -261,6 +264,9 @@ by an HTTP bencoded response. `seeders` and `leechers` are omitted when the trac
 not provide the corresponding valid `complete` or `incomplete` value; an explicit zero is
 preserved as zero. The scheduling flags describe
 announce state, not a universal realtime/online status for all URLs.
+`status` is a per-URL observation: `announcing`, `succeeded`, `failed`, `ready`,
+`idle`, or `unknown`. `unknown` means the URL has not produced an announce
+result and has no attempt-specific runtime record; it is not a failure signal.
 
 `aria2.getDhtStatus` is process-wide. It aggregates the DHT engines registered
 by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
@@ -304,8 +310,12 @@ never replaced. This makes torrent metadata, user configuration, the public
 catalog, and tracker-discovered URLs one observable discovery chain.
 
 `getTrackers` is the tracker health surface: `allFailed`, `announceReady`,
-`lastAttempt`, `secondsSinceLastSuccess`, and `inFlight` expose per-task health
-and current request concurrency. Public-catalog source fetching is internally
+`lastAttempt`, `lastFailureKind`, `secondsSinceLastSuccess`, and `inFlight` expose
+per-task health and current request concurrency. Startup can announce to up to
+three public trackers concurrently in addition to the torrent's own tracker
+schedule; catalog URLs outside the active slots remain idle. Enabling this
+extension sends the info hash, peer ID, listening port, and transfer counters
+to those public trackers. Public-catalog source fetching is internally
 bounded to four concurrent sources, preventing an unbounded refresh fan-out;
 this guard does not change the original tracker RPC response.
 

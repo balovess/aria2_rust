@@ -72,10 +72,9 @@ fn metadata_dependency_emits_resolved_event_for_payload_gid() {
         payload_gid,
     )
     .unwrap();
-    graph
-        .metadata
-        .recover()
-        .set_in_memory_data(crate::engine::bittorrent::download::command_tests::build_test_torrent());
+    graph.metadata.recover().set_in_memory_data(
+        crate::engine::bittorrent::download::command_tests::build_test_torrent(),
+    );
     man.add_metalink_graph(graph).unwrap();
 
     let hooks = crate::engine::download_event_hooks::DownloadEventHooks::new();

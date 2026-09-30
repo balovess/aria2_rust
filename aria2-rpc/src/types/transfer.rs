@@ -150,6 +150,9 @@ pub struct TrackerInfo {
     /// Tracker-reported completed torrent count, not downloaded bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded: Option<String>,
+    /// Category of this tracker's most recent failed announce, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_kind: Option<String>,
     pub tracker_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds_since_last_success: Option<u64>,

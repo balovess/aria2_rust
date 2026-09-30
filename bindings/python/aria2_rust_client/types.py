@@ -137,6 +137,7 @@ class TrackerInfo:
     seeders: Optional[int] = None
     leechers: Optional[int] = None
     tracker_id: Optional[str] = None
+    last_failure_kind: Optional[str] = None
     seconds_since_last_success: Optional[int] = None
 
     @classmethod
@@ -155,6 +156,7 @@ class TrackerInfo:
             seeders=converted.get("seeders"),
             leechers=converted.get("leechers"),
             tracker_id=converted.get("tracker_id"),
+            last_failure_kind=converted.get("last_failure_kind"),
             seconds_since_last_success=converted.get("seconds_since_last_success"),
         )
 

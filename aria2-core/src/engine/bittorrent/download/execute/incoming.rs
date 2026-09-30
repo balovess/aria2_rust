@@ -5,7 +5,11 @@ use crate::engine::bittorrent::peer::message_handler::{PeerCommand, PeerSwarm};
 use crate::engine::bittorrent::peer::upload_session::PieceDataProvider;
 use crate::util::rwlock_ext::RwLockRecover;
 
-pub(super) struct PeerActorUploadContext {
+pub(super) struct PeerActorAdmissionContext {
+    pub(super) network_info_hash: [u8; 20],
+    pub(super) piece_length: u32,
+    pub(super) num_pieces: u32,
+    pub(super) total_size: u64,
     pub(super) provider: std::sync::Arc<dyn PieceDataProvider>,
     pub(super) upload_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -15,10 +19,7 @@ impl BtDownloadCommand {
         &mut self,
         swarm: &mut PeerSwarm,
         incoming: crate::engine::bittorrent::peer::listener::IncomingPeer,
-        piece_length: u32,
-        num_pieces: u32,
-        total_size: u64,
-        upload: &PeerActorUploadContext,
+        context: &PeerActorAdmissionContext,
     ) -> bool {
         let endpoint = incoming.endpoint;
         let mut connection =
@@ -46,15 +47,32 @@ impl BtDownloadCommand {
             return false;
         }
 
-        connection.allocate_session_resource(piece_length, num_pieces, total_size);
-        self.configure_upload_connection(&mut connection, piece_length, num_pieces);
-        connection.set_upload_counter(std::sync::Arc::clone(&upload.upload_counter));
+        connection.allocate_session_resource(
+            context.piece_length,
+            context.num_pieces,
+            context.total_size,
+        );
+        self.configure_upload_connection(&mut connection, context.piece_length, context.num_pieces);
+        let (peer_agent, listen_port) = {
+            let group = self.group.recover();
+            (
+                group.options().peer_agent.clone(),
+                (self.listen_port != 0).then_some(self.listen_port),
+            )
+        };
+        connection.prepare_actor_startup(
+            peer_agent,
+            listen_port,
+            &context.network_info_hash,
+            context.num_pieces,
+        );
+        connection.set_upload_counter(std::sync::Arc::clone(&context.upload_counter));
         connection.set_upload_progress(std::sync::Arc::clone(&self.progress));
         self.track_peer_for_upload_choking(&connection.stats);
         let actor_id = match swarm.spawn_peer(
             connection,
             self.dht_engines.for_peer(endpoint),
-            std::sync::Arc::clone(&upload.provider),
+            std::sync::Arc::clone(&context.provider),
         ) {
             Ok(actor_id) => actor_id,
             Err(connection) => {
@@ -79,10 +97,7 @@ impl BtDownloadCommand {
     pub(super) async fn drain_incoming_peers_to_swarm(
         &mut self,
         swarm: &mut PeerSwarm,
-        piece_length: u32,
-        num_pieces: u32,
-        total_size: u64,
-        upload: PeerActorUploadContext,
+        context: PeerActorAdmissionContext,
     ) -> usize {
         let mut admitted = 0;
         loop {
@@ -92,14 +107,8 @@ impl BtDownloadCommand {
             let incoming = receiver.lock().await.try_recv();
             match incoming {
                 Ok(incoming) => {
-                    admitted += usize::from(self.admit_incoming_peer_to_swarm(
-                        swarm,
-                        incoming,
-                        piece_length,
-                        num_pieces,
-                        total_size,
-                        &upload,
-                    ));
+                    admitted +=
+                        usize::from(self.admit_incoming_peer_to_swarm(swarm, incoming, &context));
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {

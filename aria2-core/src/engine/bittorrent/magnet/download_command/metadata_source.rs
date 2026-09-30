@@ -256,7 +256,6 @@ impl MagnetDownloadCommand {
     /// metadata lets the existing BitTorrent context and web-seed manager
     /// consume it without introducing a second magnet-only configuration
     /// path.
-
     pub(super) async fn fetch_magnet_metadata(
         &mut self,
         magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,

@@ -223,7 +223,7 @@ async fn serve_windowed_peer(
     {
         return;
     }
-    if &handshake[28..48] != info_hash {
+    if handshake[28..48] != info_hash {
         return;
     }
 
@@ -309,7 +309,7 @@ async fn serve_peer(
     if tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut handshake))
         .await
         .is_err()
-        || &handshake[28..48] != info_hash
+        || handshake[28..48] != info_hash
     {
         return;
     }
@@ -515,7 +515,11 @@ async fn cli_expands_peer_request_window_after_successful_block_responses() {
             "aria2.tellStatus",
             json!([gid, ["status", "completedLength", "totalLength"]]),
         );
-        if status["completedLength"] == PIECE_LENGTH.to_string() {
+        if status["completedLength"]
+            .as_str()
+            .and_then(|completed| completed.parse::<usize>().ok())
+            == Some(PIECE_LENGTH)
+        {
             break;
         }
         if Instant::now() >= deadline {
@@ -573,6 +577,97 @@ async fn read_peer_message_or_disconnect(stream: &mut TcpStream) -> Option<Vec<u
         stream.read_exact(&mut message).await.ok()?;
         return Some(message);
     }
+}
+
+#[tokio::test]
+async fn cli_seeding_reports_tracker_source_for_a_peer_discovered_after_completion() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    std::fs::write(output_dir.path().join("actor-runtime.bin"), b"abc")
+        .expect("preseed the fully verified torrent payload");
+
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = test_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let peer = ControlledSeeder::start(meta.info_hash.bytes).await;
+    drop(placeholder_tracker);
+
+    let tracker =
+        MockTrackerServer::start_with_event_peers(Vec::new(), vec![peer.addr.port()], 1).await;
+    let torrent = test_torrent(&tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--check-integrity=true".to_owned(),
+        "--bt-hash-check-seed=true".to_owned(),
+        "--seed-time=30".to_owned(),
+        "--seed-ratio=1".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    let completion_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let status = rpc(
+            &client,
+            2,
+            "aria2.tellStatus",
+            json!([gid, ["completedLength", "totalLength"]]),
+        );
+        if status["completedLength"] == "3" {
+            break;
+        }
+        assert!(
+            Instant::now() < completion_deadline,
+            "preverified torrent did not enter the completed lifecycle: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    tracker.wait_for_event("completed").await;
+    assert!(
+        tracker
+            .wait_for_query_count(3, Duration::from_secs(10))
+            .await,
+        "the seeding tracker actor did not perform its follow-up announce"
+    );
+
+    let peer_details_deadline = Instant::now() + Duration::from_secs(10);
+    let peer_details = loop {
+        let peer_details = rpc(&client, 3, "aria2.getPeerDetails", json!([gid]));
+        if peer_details
+            .as_array()
+            .is_some_and(|peers| peers.iter().any(|peer| peer["source"] == "tracker"))
+        {
+            break peer_details;
+        }
+        assert!(
+            Instant::now() < peer_details_deadline,
+            "a peer returned by the seeding-phase tracker announce must appear with source=tracker: {peer_details}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(
+        peer_details.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["source"] == "tracker" && peer["seeder"].as_bool() == Some(true))
+        }),
+        "seeding-phase RPC snapshot must preserve both source and peer availability: {peer_details}"
+    );
 }
 
 #[tokio::test]
@@ -710,6 +805,15 @@ async fn cli_download_keeps_live_peer_visible_during_actor_transfer() {
         &meta.info_hash.bytes,
         "seeding listener accepted this torrent's info hash"
     );
+    let availability =
+        tokio::time::timeout(Duration::from_secs(2), read_peer_message(&mut leecher))
+            .await
+            .expect("seeding actor did not announce piece availability");
+    assert_eq!(
+        availability,
+        [5, 0x80],
+        "a handshaken leecher must receive the complete piece bitfield before other peer messages"
+    );
 
     leecher
         .write_all(&[0, 0, 0, 1, 2])
@@ -799,6 +903,8 @@ fn two_piece_upload_torrent(tracker_url: &str) -> Vec<u8> {
 
 struct PartialSeeder {
     addr: SocketAddr,
+    connection_count: Arc<AtomicUsize>,
+    piece_request_counts: Arc<[AtomicUsize; 2]>,
     upload_request: Arc<tokio::sync::Notify>,
     release_first_piece: Arc<tokio::sync::Notify>,
     release_tail: Arc<tokio::sync::Notify>,
@@ -807,6 +913,17 @@ struct PartialSeeder {
     peer_interested: Arc<tokio::sync::Notify>,
     peer_not_interested: Arc<tokio::sync::Notify>,
     task: JoinHandle<()>,
+}
+
+struct PartialSeederState {
+    upload_request: Arc<tokio::sync::Notify>,
+    release_first_piece: Arc<tokio::sync::Notify>,
+    release_tail: Arc<tokio::sync::Notify>,
+    uploaded_bytes: Arc<AtomicUsize>,
+    peer_unchoked: Arc<std::sync::atomic::AtomicBool>,
+    peer_interested: Arc<tokio::sync::Notify>,
+    peer_not_interested: Arc<tokio::sync::Notify>,
+    piece_request_counts: Arc<[AtomicUsize; 2]>,
 }
 
 impl PartialSeeder {
@@ -826,35 +943,37 @@ impl PartialSeeder {
         let upload_request = Arc::new(tokio::sync::Notify::new());
         let release_first_piece = Arc::new(tokio::sync::Notify::new());
         let release_tail = Arc::new(tokio::sync::Notify::new());
-        let upload_request_task = upload_request.clone();
-        let release_first_piece_task = release_first_piece.clone();
-        let release_tail_task = release_tail.clone();
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let connection_count_task = Arc::clone(&connection_count);
+        let piece_request_counts = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
         let uploaded_bytes = Arc::new(AtomicUsize::new(0));
-        let uploaded_bytes_task = Arc::clone(&uploaded_bytes);
         let peer_unchoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let peer_unchoked_task = Arc::clone(&peer_unchoked);
         let peer_interested = Arc::new(tokio::sync::Notify::new());
-        let peer_interested_task = Arc::clone(&peer_interested);
         let peer_not_interested = Arc::new(tokio::sync::Notify::new());
-        let peer_not_interested_task = Arc::clone(&peer_not_interested);
+        let peer_state = Arc::new(PartialSeederState {
+            upload_request: Arc::clone(&upload_request),
+            release_first_piece: Arc::clone(&release_first_piece),
+            release_tail: Arc::clone(&release_tail),
+            uploaded_bytes: Arc::clone(&uploaded_bytes),
+            peer_unchoked: Arc::clone(&peer_unchoked),
+            peer_interested: Arc::clone(&peer_interested),
+            peer_not_interested: Arc::clone(&peer_not_interested),
+            piece_request_counts: Arc::clone(&piece_request_counts),
+        });
+        let peer_state_task = Arc::clone(&peer_state);
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let Ok((stream, _)) = accepted else { break };
+                        connection_count_task.fetch_add(1, Ordering::SeqCst);
                         connections.spawn(serve_partial_peer(
                             stream,
                             info_hash,
                             Arc::clone(&payload),
                             initial_bitfield,
-                            upload_request_task.clone(),
-                            release_first_piece_task.clone(),
-                            release_tail_task.clone(),
-                            Arc::clone(&uploaded_bytes_task),
-                            Arc::clone(&peer_unchoked_task),
-                            Arc::clone(&peer_interested_task),
-                            Arc::clone(&peer_not_interested_task),
+                            Arc::clone(&peer_state_task),
                         ));
                     }
                     Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -863,6 +982,8 @@ impl PartialSeeder {
         });
         Self {
             addr,
+            connection_count,
+            piece_request_counts,
             upload_request,
             release_first_piece,
             release_tail,
@@ -885,6 +1006,14 @@ impl PartialSeeder {
     fn release_tail_piece(&self) {
         self.release_tail.notify_one();
     }
+
+    fn connection_count(&self) -> usize {
+        self.connection_count.load(Ordering::SeqCst)
+    }
+
+    fn piece_request_count(&self, piece: usize) -> usize {
+        self.piece_request_counts[piece].load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for PartialSeeder {
@@ -898,14 +1027,17 @@ async fn serve_partial_peer(
     info_hash: [u8; 20],
     payload: Arc<Vec<u8>>,
     initial_bitfield: u8,
-    upload_request: Arc<tokio::sync::Notify>,
-    release_first_piece: Arc<tokio::sync::Notify>,
-    release_tail: Arc<tokio::sync::Notify>,
-    uploaded_bytes: Arc<AtomicUsize>,
-    peer_unchoked: Arc<std::sync::atomic::AtomicBool>,
-    peer_interested: Arc<tokio::sync::Notify>,
-    peer_not_interested: Arc<tokio::sync::Notify>,
+    state: Arc<PartialSeederState>,
 ) {
+    let upload_request = &state.upload_request;
+    let release_first_piece = &state.release_first_piece;
+    let release_tail = &state.release_tail;
+    let uploaded_bytes = &state.uploaded_bytes;
+    let peer_unchoked = &state.peer_unchoked;
+    let peer_interested = &state.peer_interested;
+    let peer_not_interested = &state.peer_not_interested;
+    let piece_request_counts = &state.piece_request_counts;
+
     let mut request_handshake = [0u8; 68];
     if tokio::time::timeout(
         Duration::from_secs(3),
@@ -914,7 +1046,7 @@ async fn serve_partial_peer(
     .await
     .is_err()
         || request_handshake[0] != 19
-        || &request_handshake[28..48] != info_hash
+        || request_handshake[28..48] != info_hash
     {
         return;
     }
@@ -933,6 +1065,7 @@ async fn serve_partial_peer(
     }
 
     let mut upload_request_sent = false;
+    let mut local_piece_available = false;
     let mut first_piece_released = initial_bitfield & 0x80 != 0;
     let mut tail_released = false;
     loop {
@@ -941,7 +1074,7 @@ async fn serve_partial_peer(
                 let Some(message) = message else { return };
                 Some(message)
             }
-            _ = upload_request.notified(), if !upload_request_sent => {
+            _ = upload_request.notified(), if !upload_request_sent && local_piece_available => {
                 let mut request = Vec::with_capacity(17);
                 request.extend_from_slice(&13u32.to_be_bytes());
                 request.push(6);
@@ -980,8 +1113,17 @@ async fn serve_partial_peer(
             Some(1) => peer_unchoked.store(true, Ordering::SeqCst),
             Some(2) => peer_interested.notify_one(),
             Some(3) => peer_not_interested.notify_one(),
+            Some(4) if message.len() == 5 => {
+                let piece_index = u32::from_be_bytes(message[1..5].try_into().unwrap());
+                if piece_index == 0 {
+                    local_piece_available = true;
+                }
+            }
             Some(6) if message.len() == 13 => {
                 let index = u32::from_be_bytes(message[1..5].try_into().unwrap());
+                if let Some(count) = piece_request_counts.get(index as usize) {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
                 let begin = u32::from_be_bytes(message[5..9].try_into().unwrap()) as usize;
                 let length = u32::from_be_bytes(message[9..13].try_into().unwrap()) as usize;
                 let start = index as usize * 16 + begin;
@@ -1010,6 +1152,284 @@ async fn serve_partial_peer(
             _ => {}
         }
     }
+}
+
+#[tokio::test]
+async fn cli_restores_bt_metadata_and_verified_pieces_across_process_restart() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = two_piece_upload_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("two-piece torrent metadata parses");
+    let payload = Arc::new([vec![0x41; 16], vec![0x42; 16]].concat());
+    let peer = PartialSeeder::start(meta.info_hash.bytes, Arc::clone(&payload)).await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    let torrent = two_piece_upload_torrent(&tracker.announce_url());
+    let session_path = output_dir.path().join("bt-session.txt");
+    let listen_port = reserve_loopback_port();
+    let common_args = || {
+        [
+            format!("--dir={}", output_dir.path().display()),
+            format!("--listen-port={listen_port}"),
+            "--enable-dht=false".to_owned(),
+            "--enable-public-trackers=false".to_owned(),
+            "--enable-peer-exchange=false".to_owned(),
+            "--bt-enable-web-seed=false".to_owned(),
+            "--seed-time=3600".to_owned(),
+            format!("--save-session={}", session_path.display()),
+        ]
+    };
+
+    let mut first = RunningAria2::start_rpc(&common_args());
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &first,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    let first_piece_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc(
+            &first,
+            2,
+            "aria2.tellStatus",
+            json!([gid, ["status", "completedLength", "totalLength"]]),
+        );
+        if status["completedLength"] == "16" {
+            assert_eq!(status["status"], "active", "tail piece is still pending");
+            assert_eq!(status["totalLength"], "32");
+            break;
+        }
+        assert!(
+            Instant::now() < first_piece_deadline,
+            "first process did not verify one piece: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        peer.piece_request_count(0) > 0,
+        "the first process must fetch piece 0 from the controlled peer"
+    );
+    let piece_zero_requests_before_restart = peer.piece_request_count(0);
+
+    assert_eq!(
+        rpc(&first, 3, "aria2.saveSession", json!([])),
+        "OK",
+        "saveSession must persist the active BT task"
+    );
+    let saved_session = std::fs::read_to_string(&session_path)
+        .expect("saveSession writes the configured session file");
+    assert!(
+        saved_session.contains("aria2-rust-bt-metadata-data="),
+        "session entry must carry the torrent metadata needed by its synthetic bt:// URI"
+    );
+    assert!(
+        saved_session.contains(" BITFIELD=80\n"),
+        "session entry must preserve the verified first-piece bitfield: {saved_session}"
+    );
+
+    let _ = rpc(&first, 4, "aria2.forceShutdown", json!([]));
+    let exit = first.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "first aria2c process exits cleanly: {exit}");
+    let saved_after_exit = std::fs::read_to_string(&session_path)
+        .expect("shutdown must leave the configured session file readable");
+    assert!(
+        saved_after_exit.contains("aria2-rust-bt-metadata-data="),
+        "shutdown must preserve torrent metadata when it rewrites the session: {saved_after_exit}"
+    );
+    assert!(
+        saved_after_exit.contains(" BITFIELD=80\n"),
+        "shutdown must preserve the verified-piece bitfield: {saved_after_exit}"
+    );
+
+    let mut second_args = common_args().to_vec();
+    second_args.push(format!("--input-file={}", session_path.display()));
+    let second = RunningAria2::start_rpc(&second_args);
+    let restored_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc(
+            &second,
+            5,
+            "aria2.tellStatus",
+            json!([
+                gid,
+                ["status", "completedLength", "totalLength", "numPieces"]
+            ]),
+        );
+        if status["status"] == "active" {
+            assert_eq!(
+                status["completedLength"], "16",
+                "verified progress is restored"
+            );
+            assert_eq!(status["totalLength"], "32");
+            assert_eq!(status["numPieces"], "2", "BT metadata is loaded at runtime");
+            break;
+        }
+        assert!(
+            Instant::now() < restored_deadline,
+            "second process did not resume the saved BitTorrent task: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reconnect_deadline = Instant::now() + Duration::from_secs(5);
+    while peer.connection_count() < 2 {
+        assert!(
+            Instant::now() < reconnect_deadline,
+            "restored process did not reconnect to the controlled peer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        peer.piece_request_count(0),
+        piece_zero_requests_before_restart,
+        "the restored verified piece must not be downloaded again"
+    );
+}
+
+#[tokio::test]
+async fn cli_magnet_persists_resolved_metadata_for_process_restart() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = two_piece_upload_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("two-piece torrent metadata parses");
+    let payload = Arc::new([vec![0x41; 16], vec![0x42; 16]].concat());
+    let peer = PartialSeeder::start(meta.info_hash.bytes, Arc::clone(&payload)).await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    let torrent = two_piece_upload_torrent(&tracker.announce_url());
+    let source_path = output_dir.path().join("exact-source.torrent");
+    std::fs::write(&source_path, &torrent).expect("write initial magnet exact source");
+    let source_path = source_path.to_string_lossy().replace('\\', "/");
+    let source_uri = if cfg!(windows) {
+        format!("file:///{}", source_path.replace(' ', "%20"))
+    } else {
+        format!("file://{}", source_path.replace(' ', "%20"))
+    };
+    let magnet_uri = format!(
+        "magnet:?xt=urn:btih:{}&xs={source_uri}",
+        meta.info_hash.as_hex()
+    );
+    let session_path = output_dir.path().join("magnet-session.txt");
+    let listen_port = reserve_loopback_port();
+    let common_args = || {
+        [
+            format!("--dir={}", output_dir.path().display()),
+            format!("--listen-port={listen_port}"),
+            "--enable-dht=false".to_owned(),
+            "--enable-public-trackers=false".to_owned(),
+            "--enable-peer-exchange=false".to_owned(),
+            "--bt-enable-web-seed=false".to_owned(),
+            "--bt-save-metadata=false".to_owned(),
+            "--bt-load-saved-metadata=false".to_owned(),
+            "--seed-time=3600".to_owned(),
+            format!("--save-session={}", session_path.display()),
+        ]
+    };
+
+    let mut first = RunningAria2::start_rpc(&common_args());
+    let gid = rpc(&first, 1, "aria2.addUri", json!([[magnet_uri], {}]))
+        .as_str()
+        .expect("addUri returns a GID")
+        .to_owned();
+
+    let first_piece_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc(
+            &first,
+            2,
+            "aria2.tellStatus",
+            json!([gid, ["status", "completedLength", "totalLength"]]),
+        );
+        if status["completedLength"] == "16" {
+            assert_eq!(status["status"], "active", "tail piece is still pending");
+            assert_eq!(status["totalLength"], "32");
+            break;
+        }
+        assert!(
+            Instant::now() < first_piece_deadline,
+            "magnet did not resolve metadata and verify its first piece: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(peer.piece_request_count(0) > 0);
+    let piece_zero_requests_before_restart = peer.piece_request_count(0);
+
+    assert_eq!(
+        rpc(&first, 3, "aria2.saveSession", json!([])),
+        "OK",
+        "saveSession must persist the active magnet task"
+    );
+    let saved_session = std::fs::read_to_string(&session_path)
+        .expect("saveSession writes the configured session file");
+    assert!(
+        saved_session.contains("aria2-rust-bt-metadata-data="),
+        "resolved magnet metadata must be embedded in the resumable session: {saved_session}"
+    );
+
+    let _ = rpc(&first, 4, "aria2.forceShutdown", json!([]));
+    let exit = first.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "first aria2c process exits cleanly: {exit}");
+    std::fs::remove_file(output_dir.path().join("exact-source.torrent"))
+        .expect("remove the only metadata source before restart");
+
+    let mut second_args = common_args().to_vec();
+    second_args.push(format!("--input-file={}", session_path.display()));
+    let mut second = RunningAria2::start_rpc(&second_args);
+    let restored_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc(
+            &second,
+            5,
+            "aria2.tellStatus",
+            json!([
+                gid,
+                ["status", "completedLength", "totalLength", "numPieces"]
+            ]),
+        );
+        if status["status"] == "active" {
+            assert_eq!(status["completedLength"], "16");
+            assert_eq!(status["totalLength"], "32");
+            assert_eq!(status["numPieces"], "2");
+            break;
+        }
+        assert!(
+            Instant::now() < restored_deadline,
+            "magnet task did not resume from the session after its exact source was removed: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reconnect_deadline = Instant::now() + Duration::from_secs(5);
+    while peer.connection_count() < 2 {
+        assert!(
+            Instant::now() < reconnect_deadline,
+            "restored magnet task did not reconnect to the controlled peer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        peer.piece_request_count(0),
+        piece_zero_requests_before_restart,
+        "the restored magnet task must not download its verified piece again"
+    );
+    let _ = rpc(&second, 6, "aria2.forceShutdown", json!([]));
+    let exit = second.wait_for_exit(Duration::from_secs(10));
+    assert!(
+        exit.success(),
+        "second aria2c process exits cleanly: {exit}"
+    );
 }
 
 #[tokio::test]
@@ -1223,13 +1643,17 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
     let tracker = MockTrackerServer::start(peer.addr.port()).await;
     let torrent = two_piece_upload_torrent(&tracker.announce_url());
     let listen_port = reserve_loopback_port();
+    let log_path = output_dir.path().join("aria2.log");
     let args = [
         format!("--dir={}", output_dir.path().display()),
+        format!("--log={}", log_path.display()),
+        "--log-level=debug".to_owned(),
         format!("--listen-port={listen_port}"),
         "--enable-dht=false".to_owned(),
         "--enable-public-trackers=false".to_owned(),
         "--enable-peer-exchange=false".to_owned(),
         "--bt-enable-web-seed=false".to_owned(),
+        "--bt-max-peers=1".to_owned(),
         "--seed-time=0".to_owned(),
         "--seed-ratio=0".to_owned(),
     ];
@@ -1276,6 +1700,16 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
     .await
     .expect("first verified piece did not complete while the tail remained unavailable");
 
+    let change_result = rpc(
+        &client,
+        20,
+        "aria2.changeOption",
+        json!([gid, {"bt-max-peers": "2"}]),
+    );
+    assert_eq!(change_result, "OK");
+    let options = rpc(&client, 21, "aria2.getOption", json!([gid]));
+    assert_eq!(options["bt-max-peers"], "2");
+
     let mut leecher = TcpStream::connect(("127.0.0.1", listen_port))
         .await
         .expect("connect incoming leecher to the active torrent listener");
@@ -1294,16 +1728,24 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
         .expect("incoming handshake response timed out")
         .expect("read incoming handshake response");
     assert_eq!(&response[28..48], &meta.info_hash.bytes);
-    let bitfield = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let message = read_peer_message(&mut leecher).await;
-            if message.first() == Some(&5) {
-                break message;
-            }
-        }
-    })
-    .await
-    .expect("incoming actor did not advertise its current piece bitfield");
+    let bitfield = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_peer_message_or_disconnect(&mut leecher),
+    )
+    .await;
+    let bitfield = match bitfield {
+        Ok(Some(bitfield)) => bitfield,
+        Ok(None) => panic!(
+            "incoming actor disconnected before advertising its piece bitfield; aria2 log: {}",
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|error| format!("unavailable: {error}"))
+        ),
+        Err(_) => panic!(
+            "incoming actor did not advertise its piece bitfield before timeout; aria2 log: {}",
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|error| format!("unavailable: {error}"))
+        ),
+    };
     assert_eq!(
         bitfield,
         [5, 0x80],
@@ -1314,15 +1756,30 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
         .await
         .expect("express interest only after learning piece availability");
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let unchoke_result = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if read_peer_message(&mut leecher).await.first() == Some(&1) {
-                break;
+            let Some(message) = read_peer_message_or_disconnect(&mut leecher).await else {
+                break false;
+            };
+            if message.first() == Some(&1) {
+                break true;
             }
         }
     })
-    .await
-    .expect("incoming peer was not admitted and unchoked while a piece download was in flight");
+    .await;
+    match unchoke_result {
+        Ok(true) => {}
+        Ok(false) => panic!(
+            "incoming actor disconnected before unchoking the interested peer; aria2 log: {}",
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|error| format!("unavailable: {error}"))
+        ),
+        Err(_) => panic!(
+            "incoming peer was not unchoked while a piece download was in flight; aria2 log: {}",
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|error| format!("unavailable: {error}"))
+        ),
+    }
 
     let mut request = Vec::with_capacity(17);
     request.extend_from_slice(&13u32.to_be_bytes());
@@ -1334,16 +1791,44 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
         .write_all(&request)
         .await
         .expect("request already-verified piece from the newly admitted peer");
-    let piece = tokio::time::timeout(Duration::from_secs(5), async {
+    let piece_result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let message = read_peer_message(&mut leecher).await;
+            let Some(message) = read_peer_message_or_disconnect(&mut leecher).await else {
+                break None;
+            };
             if message.first() == Some(&7) {
-                break message;
+                break Some(message);
             }
         }
     })
-    .await
-    .expect("new incoming actor did not upload the verified piece");
+    .await;
+    let piece = match piece_result {
+        Ok(Some(piece)) => piece,
+        Ok(None) => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let status = rpc(
+                &client,
+                10,
+                "aria2.tellStatus",
+                json!([
+                    gid,
+                    ["status", "completedLength", "totalLength", "numSeeders"]
+                ]),
+            );
+            let peers = rpc(&client, 11, "aria2.getPeers", json!([gid]));
+            let peer_details = rpc(&client, 12, "aria2.getPeerDetails", json!([gid]));
+            panic!(
+                "incoming actor disconnected while handling a piece request; status={status}; peers={peers}; peer_details={peer_details}; aria2 log: {}",
+                std::fs::read_to_string(&log_path)
+                    .unwrap_or_else(|error| format!("unavailable: {error}"))
+            )
+        }
+        Err(_) => panic!(
+            "incoming actor did not upload the verified piece before timeout; aria2 log: {}",
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|error| format!("unavailable: {error}"))
+        ),
+    };
     assert_eq!(&piece[1..5], &0u32.to_be_bytes());
     assert_eq!(&piece[5..9], &0u32.to_be_bytes());
     assert_eq!(&piece[9..], &payload[..16]);

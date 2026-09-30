@@ -1,12 +1,12 @@
 #![cfg(feature = "bittorrent")]
 
 mod fixtures;
-use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::bittorrent::magnet::download_command::MagnetDownloadCommand;
 use aria2_core::engine::bittorrent::magnet::metadata_collector::MetadataCollector;
 use aria2_core::engine::bittorrent::magnet::metadata_exchange::{
     MetadataExchangeConfig, MetadataExchangeError, MetadataExchangeSession,
 };
+use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::bittorrent::dht::compact::extract_compact_peers_from_response;

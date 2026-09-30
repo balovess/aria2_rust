@@ -36,11 +36,11 @@ impl RateLimiter {
 
         let download = match dl_rate {
             Some(rate) if rate > 0 => TokenBucket::new(rate, dl_burst),
-            _ => TokenBucket::unlimited(),
+            _ => TokenBucket::unlimited_with_burst(dl_burst),
         };
         let upload = match ul_rate {
             Some(rate) if rate > 0 => TokenBucket::new(rate, ul_burst),
-            _ => TokenBucket::unlimited(),
+            _ => TokenBucket::unlimited_with_burst(ul_burst),
         };
 
         Self {

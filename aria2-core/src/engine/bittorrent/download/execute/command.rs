@@ -204,7 +204,6 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        const PEX_SEND_INTERVAL_SECS: u64 = 60;
         let mut session = self
             .prepare_torrent_session(&meta, piece_length, total_size, network_info_hash)
             .await?;
@@ -216,7 +215,6 @@ impl Command for BtDownloadCommand {
                 piece_length,
                 total_size,
                 num_pieces,
-                PEX_SEND_INTERVAL_SECS,
                 &verified_piece_indices,
             )
             .await;
@@ -256,6 +254,7 @@ impl Command for BtDownloadCommand {
                 seeding_connections,
                 session.swarm,
                 session.upload_counter,
+                session.last_pex_send,
                 piece_length,
                 num_pieces,
                 network_info_hash,

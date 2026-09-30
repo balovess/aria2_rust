@@ -17,6 +17,9 @@ use fixtures::mock_bt_seeder::{MockBtSeeder, SeederConfig};
 use fixtures::mock_tracker::MockTrackerServer;
 use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 
+use aria2_core::engine::bittorrent::discovery::lpd::{
+    LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
+};
 use aria2_core::engine::bittorrent::persistence::progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
@@ -25,9 +28,6 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
-};
-use aria2_core::engine::bittorrent::discovery::lpd::{
-    LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
 };
 use aria2_core::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,

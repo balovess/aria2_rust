@@ -530,6 +530,7 @@ mod tests {
     use crate::engine::bittorrent::tracker::communication::TrackerAnnouncer;
     use crate::request::request_group::AtomicProgress;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -592,7 +593,7 @@ mod tests {
             [1; 20],
             1,
             Arc::new(AtomicProgress::new()),
-            Arc::new(BtRuntimeState::new(64)),
+            Arc::new(BtRuntimeState::new(Arc::new(AtomicUsize::new(64)))),
             false,
             Some(peer_event_tx.clone()),
         )

@@ -139,6 +139,7 @@ pub async fn connect_with_stream(
         remote_hs.peer_id,
         remote_hs.supports_dht(),
         remote_hs.supports_fast_extension(),
+        remote_hs.supports_extended_messaging(),
     ))
 }
 

@@ -213,8 +213,10 @@ describe('TrackerInfo and DhtStatus', () => {
       seeders: 3,
       leechers: 1,
       trackerId: 'tracker-id',
+      lastFailureKind: 'timeout',
     };
     expect(tracker.trackerId).toBe('tracker-id');
+    expect(tracker.lastFailureKind).toBe('timeout');
   });
 
   it('can represent DHT counters', () => {

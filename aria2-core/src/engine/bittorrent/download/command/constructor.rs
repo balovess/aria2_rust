@@ -269,7 +269,7 @@ pub(crate) fn apply_file_mappings(
 fn apply_file_mapping(entry: &mut crate::download::file_entry::FileEntry, mapping: &BtFileMapping) {
     entry.set_requested(true);
     entry.set_path(mapping.path.clone());
-    entry.set_uris(&mapping.uris);
+    entry.add_uris(&mapping.uris);
     entry.set_max_connection_per_server(mapping.max_connection_per_server);
     entry.set_unique_protocol(mapping.unique_protocol);
 }
@@ -396,6 +396,7 @@ impl BtDownloadCommand {
         policy: &crate::network::OutboundNetworkPolicy,
     ) -> Result<Self> {
         let gid = group.recover().gid();
+        let live_max_peers = group.recover().bt_max_peers_limit();
         let mut command = Self::new_with_policy(gid, torrent_bytes, options, output_dir, policy)?;
         let current_info_hash = command.group.recover().get_bt_info_hash_hex();
         let existing_context = group.recover().get_download_context();
@@ -458,6 +459,7 @@ impl BtDownloadCommand {
             external.set_rate_limiter(command.torrent_upload_limiter.clone());
         }
         command.group = group;
+        command.bt_runtime = std::sync::Arc::new(super::BtRuntimeState::new(live_max_peers));
         command.progress = command.group.recover().progress.clone();
         command.total_uploaded = command.group.recover().get_uploaded_length();
         command.apply_context_paths()?;
@@ -696,6 +698,8 @@ impl BtDownloadCommand {
         } else {
             None
         };
+        let bt_runtime =
+            std::sync::Arc::new(super::BtRuntimeState::new(group.bt_max_peers_limit()));
         let mut command = Self {
             local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
                 &options.peer_id_prefix,
@@ -717,7 +721,7 @@ impl BtDownloadCommand {
             total_uploaded: 0,
             tracker_actor: None,
             listen_port: 0,
-            bt_runtime: std::sync::Arc::new(super::BtRuntimeState::new(options.bt_max_peers)),
+            bt_runtime,
             peer_coordinator: crate::engine::bittorrent::peer::coordinator::BtPeerCoordinator::new(
                 options.bt_max_peers,
                 10,
@@ -801,9 +805,30 @@ impl BtDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::{
-        BtDownloadCommand, DownloadOptions, GroupId, file_web_seed_urls, normalized_announce_list,
-        normalized_web_seed_list,
+        BtDownloadCommand, DownloadOptions, GroupId, apply_file_mapping, file_web_seed_urls,
+        normalized_announce_list, normalized_web_seed_list,
     };
+    use crate::download::file_entry::FileEntry;
+    use crate::request::request_group::BtFileMapping;
+
+    #[test]
+    fn metalink_file_mapping_preserves_torrent_web_seeds_and_appends_mirrors() {
+        let torrent_web_seed = "https://torrent-seed.example/file.bin".to_string();
+        let metalink_mirror = "https://metalink-mirror.example/file.bin".to_string();
+        let mut entry = FileEntry::new("original.bin".into(), 8, 0, vec![torrent_web_seed.clone()]);
+        let mapping = BtFileMapping {
+            original_name: "original.bin".into(),
+            path: "renamed.bin".into(),
+            uris: vec![metalink_mirror.clone()],
+            max_connection_per_server: 4,
+            unique_protocol: false,
+        };
+
+        apply_file_mapping(&mut entry, &mapping);
+
+        assert_eq!(entry.path(), "renamed.bin");
+        assert_eq!(entry.uris(), vec![torrent_web_seed, metalink_mirror]);
+    }
 
     #[test]
     fn fills_a_missing_tier_from_the_single_announce_field() {

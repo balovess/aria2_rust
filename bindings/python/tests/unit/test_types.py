@@ -267,12 +267,14 @@ class TestTrackerInfo:
                 "seeders": 3,
                 "leechers": 1,
                 "trackerId": "tracker-id",
+                "lastFailureKind": "timeout",
                 "secondsSinceLastSuccess": 4,
             }
         )
         assert info.uri == "udp://tracker.example/announce"
         assert info.last_attempt is False
         assert info.interval == "1800"
+        assert info.last_failure_kind == "timeout"
         assert info.seconds_since_last_success == 4
 
 

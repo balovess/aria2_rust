@@ -134,9 +134,18 @@ impl OutboundNetworkPolicy {
         Ok(Some(source.address))
     }
 
-    /// Resolve a host and select a compatible local source for a client that
-    /// owns its connection pool (for example reqwest).
+    /// Select a compatible local source for a client-owned connection pool.
+    /// The direct policy returns `None` without resolving the host, leaving
+    /// DNS and proxy routing to that client.
     pub async fn source_for_host(&self, host: &str, port: u16) -> io::Result<Option<IpAddr>> {
+        // With no explicit source/interface constraint, the HTTP client owns
+        // hostname resolution (including its proxy and DNS configuration).
+        // Pre-resolving here is both unnecessary and can reject a request
+        // before that client gets a chance to resolve it.
+        if self.is_direct() {
+            return Ok(None);
+        }
+
         let addresses = tokio::net::lookup_host((host, port)).await?;
         for remote in addresses {
             if let Ok(source) = self.source_for(remote) {
@@ -397,6 +406,13 @@ fn family_mismatch(remote: SocketAddr) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn direct_policy_does_not_require_hostname_resolution_for_source_selection() {
+        let policy = OutboundNetworkPolicy::direct();
+
+        assert_eq!(policy.source_for_host("\0", 80).await.unwrap(), None);
+    }
 
     #[tokio::test]
     async fn policy_connect_uses_configured_source_address() {

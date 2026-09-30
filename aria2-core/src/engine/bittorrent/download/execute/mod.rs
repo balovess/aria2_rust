@@ -25,6 +25,7 @@ pub(crate) use tracker_actor::BtTrackerAnnouncerActor;
 pub use types::EndgameState;
 
 pub(crate) use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
+pub(crate) use pex::{PEX_SEND_INTERVAL, send_periodic_pex_to_swarm};
 
 use std::collections::HashSet;
 

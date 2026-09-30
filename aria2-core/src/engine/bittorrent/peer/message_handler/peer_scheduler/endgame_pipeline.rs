@@ -464,11 +464,11 @@ pub(crate) async fn download_piece_blocks_endgame(
                 })
                 .collect();
             return Ok(ActorAwarePieceDownloadResult {
-                piece: PieceDownloadResult {
+                piece: Ok(PieceDownloadResult {
                     data: piece_data,
                     peer_bytes,
                     failed_peers,
-                },
+                }),
                 peer_actor_ids,
                 availability_changed_actor_ids: availability_changed_actor_ids
                     .into_iter()
@@ -495,13 +495,19 @@ pub(crate) async fn download_piece_blocks_endgame(
         workers.advance_generations();
     }
 
-    Err(Aria2Error::Network(format!(
-        "Failed to download piece {} after {} endgame attempts",
-        piece_index,
-        if max_attempts == 0 {
-            attempts
-        } else {
-            max_attempts
-        }
-    )))
+    Ok(ActorAwarePieceDownloadResult {
+        piece: Err(Aria2Error::Network(format!(
+            "Failed to download piece {} after {} endgame attempts",
+            piece_index,
+            if max_attempts == 0 {
+                attempts
+            } else {
+                max_attempts
+            }
+        ))),
+        peer_actor_ids: Vec::new(),
+        availability_changed_actor_ids: availability_changed_actor_ids.into_iter().collect(),
+        pex_peers: workers.take_pex_peers(),
+        tracker_peers,
+    })
 }

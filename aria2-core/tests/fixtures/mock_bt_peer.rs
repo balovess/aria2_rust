@@ -326,8 +326,10 @@ impl MockBtPeerServer {
             *last = 0xff << (8 - last_byte_bits);
         }
 
-        let msg_bitfield = build_message(5, &bitfield);
-        stream.write_all(&msg_bitfield).await.ok();
+        if !bitfield.is_empty() {
+            let msg_bitfield = build_message(5, &bitfield);
+            stream.write_all(&msg_bitfield).await.ok();
+        }
         let mut client_ut_metadata_id = 1u8;
         let mut availability_sent = false;
         let mut control_sent = false;

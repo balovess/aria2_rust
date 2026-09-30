@@ -49,8 +49,11 @@ pub(crate) struct PieceRequestPlan {
 /// Internal result carrying stable peer identities alongside the public
 /// endpoint/index attribution contract.
 pub(crate) struct ActorAwarePieceDownloadResult {
-    pub(crate) piece: PieceDownloadResult,
-    /// Actor IDs aligned with `piece.peer_bytes`.
+    /// Piece outcome and peer-discovery sideband from the same request round.
+    /// Discovery must survive an exhausted piece attempt so the torrent
+    /// coordinator can replenish its swarm.
+    pub(crate) piece: std::result::Result<PieceDownloadResult, crate::error::Aria2Error>,
+    /// Actor IDs aligned with `piece.peer_bytes` when the piece succeeds.
     pub(crate) peer_actor_ids: Vec<PeerActorId>,
     /// Peers whose availability changed while this piece was in flight.
     pub(crate) availability_changed_actor_ids: Vec<PeerActorId>,

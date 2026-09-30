@@ -216,12 +216,8 @@ impl DefaultPeerStorage {
 
     /// Update the connection lifecycle flag for a checked-out peer.
     pub fn set_peer_active(&mut self, ip: &str, port: u16, active: bool) {
-        let Some(peer) = self
-            .used_peers
-            .iter()
-            .find(|peer| peer.ip.as_ref() == ip && peer.port == port)
-            .cloned()
-        else {
+        let key = PeerEntry::new(ip.to_owned(), port);
+        let Some(peer) = self.used_peers.get(&key).cloned() else {
             return;
         };
         self.used_peers.remove(&peer);
@@ -232,12 +228,8 @@ impl DefaultPeerStorage {
 
     /// Return the checked-out peer identified by its endpoint.
     pub fn return_peer_by_endpoint(&mut self, ip: &str, port: u16) {
-        let Some(peer) = self
-            .used_peers
-            .iter()
-            .find(|peer| peer.ip.as_ref() == ip && peer.port == port)
-            .cloned()
-        else {
+        let key = PeerEntry::new(ip.to_owned(), port);
+        let Some(peer) = self.used_peers.get(&key).cloned() else {
             return;
         };
         self.return_peer(&peer);

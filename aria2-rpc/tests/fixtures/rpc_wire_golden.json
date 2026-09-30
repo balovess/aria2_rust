@@ -98,6 +98,7 @@
     "seeders": 0,
     "leechers": 0,
     "downloaded": "0",
+    "lastFailureKind": "timeout",
     "trackerId": "",
     "secondsSinceLastSuccess": 12,
     "lastSuccessAtUnixMillis": "1720000000000",

@@ -106,6 +106,7 @@ async fn connect_completes_real_bittorrent_handshake_over_utp() {
     assert!(connection.is_connected());
     assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
     assert!(connection.remote_supports_fast_extension());
+    assert!(connection.remote_supports_extended_messaging());
 }
 
 #[tokio::test]

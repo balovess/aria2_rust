@@ -58,7 +58,9 @@ use crate::engine::bittorrent::peer::message_handler::PeerSwarm;
 use crate::engine::bittorrent::peer::upload_session::{BtSeedingConfig, PieceDataProvider};
 use crate::engine::bittorrent::tracker::communication::TrackerAnnouncer;
 use crate::rate_limiter::RateLimiter;
-use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
+use crate::request::request_group::{
+    AtomicProgress, BtPeerSnapshot, BtPeerSource, ConnectionState,
+};
 
 /// Discovery and connection state transferred from download execution to the
 /// long-lived seeding coordinator. This keeps torrent-scoped peer discovery
@@ -141,6 +143,10 @@ pub struct BtSeedManager {
             std::sync::Mutex<crate::engine::bittorrent::peer::storage::DefaultPeerStorage>,
         >,
     >,
+    /// Discovery provenance for queued seeding peers, keyed by endpoint.
+    /// Active actors own their source directly; this index bridges storage,
+    /// whose public PeerEntry contract intentionally remains address-only.
+    peer_sources: std::collections::HashMap<std::net::SocketAddr, BtPeerSource>,
     /// DHT/tracker/PEX discovered peers are connected through the same swarm
     /// after the piece scheduler has ended.
     peer_discovery: Option<SeedPeerDiscovery>,
@@ -151,6 +157,8 @@ pub struct BtSeedManager {
     halt_requested: bool,
     /// Timestamp of the last choke round
     last_choke_time: Instant,
+    /// Shared BEP 11 send deadline across downloading and seeding.
+    last_pex_send: Instant,
     /// Tracker announcer for periodic re-announce while seeding
     /// (mirrors C++ SeedCheckCommand keeping the swarm informed).
     announcer: Option<Arc<tokio::sync::Mutex<TrackerAnnouncer>>>,

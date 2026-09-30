@@ -3,7 +3,7 @@ use crate::engine::bittorrent::download::command::BtRuntimeState;
 use crate::engine::bittorrent::tracker::communication::TrackerAnnouncer;
 use crate::request::request_group::AtomicProgress;
 use aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
@@ -190,7 +190,7 @@ async fn actor_fans_out_to_three_public_trackers_and_aggregates_rpc_state() {
         [1; 20],
         100,
         Arc::new(AtomicProgress::new()),
-        Arc::new(BtRuntimeState::new(64)),
+        Arc::new(BtRuntimeState::new(Arc::new(AtomicUsize::new(64)))),
         true,
         None,
     )
@@ -299,7 +299,7 @@ async fn slow_public_announce_does_not_hold_up_initial_peer_discovery() {
             [1; 20],
             100,
             Arc::new(AtomicProgress::new()),
-            Arc::new(BtRuntimeState::new(64)),
+            Arc::new(BtRuntimeState::new(Arc::new(AtomicUsize::new(64)))),
             true,
             None,
         ),
@@ -337,7 +337,7 @@ async fn stop_command_is_serviced_while_initial_public_announce_is_pending() {
         [1; 20],
         100,
         Arc::new(AtomicProgress::new()),
-        Arc::new(BtRuntimeState::new(64)),
+        Arc::new(BtRuntimeState::new(Arc::new(AtomicUsize::new(64)))),
         true,
         None,
     )

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 
 use tokio::sync::Notify;
 use tracing::info;
@@ -71,6 +71,9 @@ pub struct RequestGroup {
     pub(super) resolved_output_path: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
     pub(super) options: Arc<DownloadOptions>,
+    /// Live peer limit shared with the BT runtime and incoming listener.
+    /// Runtime option changes publish here before returning to their caller.
+    pub(crate) bt_max_peers_limit: Arc<AtomicUsize>,
     /// Canonical option values captured when this task was created.
     ///
     /// The task owns this immutable snapshot so external adapters can report
@@ -260,6 +263,7 @@ impl RequestGroup {
     /// first `FileEntry` when `set_download_context()` is called.
     pub fn new(gid: GroupId, uris: Vec<String>, options: DownloadOptions) -> Self {
         info!("Creating request group #{}", gid.value());
+        let bt_max_peers_limit = Arc::new(AtomicUsize::new(options.bt_max_peers));
 
         RequestGroup {
             gid,
@@ -267,6 +271,7 @@ impl RequestGroup {
             output_name: std::sync::RwLock::new(None),
             resolved_output_path: std::sync::RwLock::new(None),
             options: Arc::new(options),
+            bt_max_peers_limit,
             option_snapshot: None,
             runtime_options: std::sync::RwLock::new(HashMap::new()),
             pending_options: std::sync::RwLock::new(HashMap::new()),

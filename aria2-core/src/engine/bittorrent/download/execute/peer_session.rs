@@ -72,8 +72,9 @@ impl BtDownloadCommand {
             };
             let dht_enabled_ipv4 = !self.is_private && self.dht_engines.ipv4().is_some();
             let dht_enabled_ipv6 = !self.is_private && self.dht_engines.ipv6().is_some();
+            let max_peers_state = self.bt_runtime.max_peers_state();
             let register = |bind_ip: std::net::IpAddr| {
-                listener_manager.register(
+                listener_manager.register_with_max_peers(
                     crate::engine::bittorrent::peer::listener::BtPeerRouteConfig {
                         bind_ip,
                         ports: listen_ports.clone(),
@@ -90,6 +91,7 @@ impl BtDownloadCommand {
                             dht_enabled_ipv4
                         },
                     },
+                    Arc::clone(&max_peers_state),
                 )
             };
             let route = if disable_ipv6 {
@@ -142,11 +144,7 @@ impl BtDownloadCommand {
         if self.is_private {
             info!("[BT] Private torrent: PEX disabled (BEP 0027)");
         } else {
-            self.set_pex_known_peers(peers.iter().map(|peer| peer.address.clone()).collect());
-            info!(
-                "[PEX] Initialized with {} known tracker and LPD peers",
-                self.pex_known_peers.len()
-            );
+            info!("[PEX] Outbound peer lists are derived from the live swarm");
         }
 
         // Initialize web seed manager only when the task explicitly enables

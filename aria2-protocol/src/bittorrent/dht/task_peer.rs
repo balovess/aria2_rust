@@ -1,29 +1,18 @@
-//! Peer-related DHT task implementations: PeerLookupTask, ReplaceNodeTask,
-//! PeerAnnounceTask, and DhtTaskFactory.
+//! Peer-related DHT task implementations: PeerLookupTask and ReplaceNodeTask.
 //!
 //! These tasks correspond to the C++ peer-oriented task classes:
 //!
 //! - `PeerLookupTask`    ↔ C++ `DHTPeerLookupTask`
 //! - `ReplaceNodeTask`   ↔ C++ `DHTReplaceNodeTask`
-//! - `PeerAnnounceTask`  ↔ C++ `DHTPeerAnnounceTask` (stub in C++)
-//!
-//! Also contains `DhtTaskFactory`, equivalent to C++ `DHTTaskFactoryImpl`,
-//! which bundles the common context so that task creation is a single
-//! method call.
-
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
-use super::lookup::{announce_to_token_nodes, iterative_get_peers};
+use super::lookup::{announce_to_token_nodes_and_update_routing_table, iterative_get_peers};
 use super::message::DhtMessageBuilder;
 use super::node::DhtNode;
-use super::task::BoxedDhtTask;
 use super::task::DhtTask;
-use super::task_impl::{
-    BootstrapRefreshTask, BucketRefreshTask, DhtTaskContext, NodeLookupTask, PingTask,
-};
+use super::task_impl::DhtTaskContext;
 use super::tracker::QueryType;
 
 // ---------------------------------------------------------------------------
@@ -51,7 +40,7 @@ pub struct PeerLookupTask {
 pub struct PeerLookupResult {
     /// Discovered peer addresses.
     pub peers: Vec<SocketAddr>,
-    /// Number of nodes contacted.
+    /// Number of queries accepted by the local UDP socket (whether or not nodes reply).
     pub nodes_contacted: usize,
 }
 
@@ -91,14 +80,11 @@ impl DhtTask for PeerLookupTask {
 
         // Announce to token nodes if requested.
         if self.announce_port > 0 && !result.token_nodes.is_empty() {
-            announce_to_token_nodes(
+            announce_to_token_nodes_and_update_routing_table(
                 &self.info_hash,
-                &self.ctx.self_id,
                 self.announce_port,
                 &result.token_nodes,
-                &self.ctx.socket,
-                &self.ctx.tracker,
-                self.ctx.query_timeout,
+                &self.ctx,
             )
             .await;
         }
@@ -134,7 +120,7 @@ impl DhtTask for PeerLookupTask {
 /// node in the bucket. If it doesn't respond after `MAX_RETRY` attempts,
 /// the questionable node is replaced with the new node.
 #[derive(Debug)]
-pub struct ReplaceNodeTask {
+pub(super) struct ReplaceNodeTask {
     ctx: DhtTaskContext,
     /// Node identifying the bucket and replacement target.
     questionable_node_id: [u8; 20],
@@ -143,7 +129,11 @@ pub struct ReplaceNodeTask {
 }
 
 impl ReplaceNodeTask {
-    pub fn new(ctx: DhtTaskContext, questionable_node_id: [u8; 20], new_node: DhtNode) -> Self {
+    pub(super) fn new(
+        ctx: DhtTaskContext,
+        questionable_node_id: [u8; 20],
+        new_node: DhtNode,
+    ) -> Self {
         Self {
             ctx,
             questionable_node_id,
@@ -158,13 +148,7 @@ impl DhtTask for ReplaceNodeTask {
         // Find the bucket and extract the questionable node info.
         let (q_id, q_addr) = {
             let rt = self.ctx.routing_table.read().await;
-            let Some(bucket) = rt.get_bucket_for(&self.questionable_node_id) else {
-                trace!(
-                    "ReplaceNodeTask: bucket not found for node {}",
-                    hex::encode(self.questionable_node_id)
-                );
-                return;
-            };
+            let bucket = rt.get_bucket_for(&self.questionable_node_id);
 
             let Some(node) = bucket
                 .nodes()
@@ -179,21 +163,12 @@ impl DhtTask for ReplaceNodeTask {
 
         // Send ping to the questionable node with retry.
         for attempt in 0..2 {
-            let (transaction_id, response_wait) = self.ctx.tracker.allocate_wait(
-                QueryType::Ping,
-                q_addr,
-                Some(q_id),
-                None,
-                self.ctx.query_timeout,
-            );
+            let (transaction_id, response_wait) =
+                self.ctx
+                    .tracker
+                    .allocate_wait(QueryType::Ping, q_addr, self.ctx.query_timeout);
             let msg = DhtMessageBuilder::ping(transaction_id, &self.ctx.self_id);
-            let encoded = match msg.encode() {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("ReplaceNodeTask: encode error: {}", e);
-                    return;
-                }
-            };
+            let encoded = msg.encode();
 
             if let Err(e) = self.ctx.socket.send_to(q_addr, &encoded).await {
                 debug!(
@@ -204,9 +179,9 @@ impl DhtTask for ReplaceNodeTask {
                 return;
             }
 
-            if let Some(response) = response_wait.wait(self.ctx.query_timeout).await
+            if let Some(response) = response_wait.wait().await
                 && response.from == q_addr
-                && (response.message.is_response() || response.message.is_error())
+                && response.message.is_response()
             {
                 info!(
                     "ReplaceNodeTask: ping reply received from {} — node is alive",
@@ -216,6 +191,9 @@ impl DhtTask for ReplaceNodeTask {
                 rt.mark_good(&q_id);
                 return;
             }
+            let mut rt = self.ctx.routing_table.write().await;
+            rt.mark_bad(&q_id);
+            rt.evict_bad_nodes();
             if attempt < 1 {
                 debug!(
                     "ReplaceNodeTask: ping timeout from {}, retrying",
@@ -232,7 +210,6 @@ impl DhtTask for ReplaceNodeTask {
         );
 
         let mut rt = self.ctx.routing_table.write().await;
-        rt.mark_bad(&q_id);
         if !rt.replace_node(&q_id, self.new_node.clone()) {
             trace!(
                 "ReplaceNodeTask: replacement candidate {} is no longer available",
@@ -243,183 +220,6 @@ impl DhtTask for ReplaceNodeTask {
 
     fn name(&self) -> &'static str {
         "ReplaceNodeTask"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PeerAnnounceTask
-// ---------------------------------------------------------------------------
-
-/// Announce that we are serving a torrent identified by `info_hash`.
-///
-/// Equivalent to C++ `DHTPeerAnnounceTask` (which is a stub in the
-/// original C++ code). Performs a `get_peers` lookup to obtain tokens,
-/// then sends `announce_peer` to the closest K nodes.
-#[derive(Debug)]
-pub struct PeerAnnounceTask {
-    ctx: DhtTaskContext,
-    /// Info hash to announce for.
-    info_hash: [u8; 20],
-    /// Port we are listening on for the torrent.
-    port: u16,
-}
-
-impl PeerAnnounceTask {
-    /// Create a new peer announce task.
-    pub fn new(ctx: DhtTaskContext, info_hash: [u8; 20], port: u16) -> Self {
-        Self {
-            ctx,
-            info_hash,
-            port,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl DhtTask for PeerAnnounceTask {
-    async fn run(self: Box<Self>) {
-        debug!(
-            info_hash = %hex::encode(self.info_hash),
-            port = self.port,
-            "PeerAnnounceTask: starting get_peers lookup"
-        );
-
-        let result = iterative_get_peers(
-            &self.info_hash,
-            &self.ctx.self_id,
-            &self.ctx.routing_table,
-            &self.ctx.socket,
-            &self.ctx.tracker,
-            self.ctx.query_timeout,
-        )
-        .await;
-
-        // Announce to token nodes.
-        if result.token_nodes.is_empty() {
-            debug!(
-                info_hash = %hex::encode(self.info_hash),
-                "PeerAnnounceTask: no token nodes found, cannot announce"
-            );
-            return;
-        }
-
-        let announced = announce_to_token_nodes(
-            &self.info_hash,
-            &self.ctx.self_id,
-            self.port,
-            &result.token_nodes,
-            &self.ctx.socket,
-            &self.ctx.tracker,
-            self.ctx.query_timeout,
-        )
-        .await;
-
-        info!(
-            info_hash = %hex::encode(self.info_hash),
-            announced,
-            "PeerAnnounceTask completed"
-        );
-    }
-
-    fn name(&self) -> &'static str {
-        "PeerAnnounceTask"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TaskFactory — convenience for creating tasks with a shared context
-// ---------------------------------------------------------------------------
-
-/// Factory for creating DHT tasks with a shared context.
-///
-/// Equivalent to C++ `DHTTaskFactoryImpl`. Bundles the common resources
-/// (routing table, socket, tracker, self_id) so that task creation is
-/// a single method call without repeating all the plumbing.
-#[derive(Clone)]
-pub struct DhtTaskFactory {
-    ctx: DhtTaskContext,
-}
-
-impl DhtTaskFactory {
-    /// Create a new task factory with the given context.
-    pub fn new(ctx: DhtTaskContext) -> Self {
-        Self { ctx }
-    }
-
-    /// Create a ping task for the given remote node.
-    pub fn create_ping_task(&self, remote_node: DhtNode, max_retry: u32) -> BoxedDhtTask {
-        Box::new(PingTask::new(self.ctx.clone(), remote_node, max_retry))
-    }
-
-    /// Create a ping task that returns the node ID from a successful reply.
-    pub fn create_ping_task_with_result(
-        &self,
-        remote_node: DhtNode,
-        max_retry: u32,
-        result_tx: tokio::sync::oneshot::Sender<Option<DhtNode>>,
-    ) -> BoxedDhtTask {
-        Box::new(PingTask::with_result(
-            self.ctx.clone(),
-            remote_node,
-            max_retry,
-            result_tx,
-        ))
-    }
-
-    /// Create a bucket refresh task.
-    pub fn create_bucket_refresh_task(&self, force_refresh: bool) -> BoxedDhtTask {
-        Box::new(BucketRefreshTask::new(self.ctx.clone(), force_refresh))
-    }
-
-    /// Create the bounded first refresh used by bootstrap.
-    pub fn create_bootstrap_refresh_task(
-        &self,
-        timeout: Duration,
-        bootstrap_nodes: Vec<DhtNode>,
-    ) -> BoxedDhtTask {
-        Box::new(BootstrapRefreshTask::new(
-            self.ctx.clone(),
-            timeout,
-            bootstrap_nodes,
-        ))
-    }
-
-    /// Create a node lookup task for the given target ID.
-    pub fn create_node_lookup_task(&self, target_id: [u8; 20]) -> BoxedDhtTask {
-        Box::new(NodeLookupTask::new(self.ctx.clone(), target_id))
-    }
-
-    /// Create a peer lookup task for the given info hash.
-    pub fn create_peer_lookup_task(
-        &self,
-        info_hash: [u8; 20],
-        announce_port: u16,
-        result_tx: Option<tokio::sync::oneshot::Sender<PeerLookupResult>>,
-    ) -> BoxedDhtTask {
-        Box::new(PeerLookupTask::new(
-            self.ctx.clone(),
-            info_hash,
-            announce_port,
-            result_tx,
-        ))
-    }
-
-    /// Create a replace node task.
-    pub fn create_replace_node_task(
-        &self,
-        questionable_node_id: [u8; 20],
-        new_node: DhtNode,
-    ) -> BoxedDhtTask {
-        Box::new(ReplaceNodeTask::new(
-            self.ctx.clone(),
-            questionable_node_id,
-            new_node,
-        ))
-    }
-
-    /// Create a peer announce task.
-    pub fn create_peer_announce_task(&self, info_hash: [u8; 20], port: u16) -> BoxedDhtTask {
-        Box::new(PeerAnnounceTask::new(self.ctx.clone(), info_hash, port))
     }
 }
 
@@ -436,27 +236,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
-
-    #[test]
-    fn test_task_factory_creation() {
-        let ctx = DhtTaskContext::new(
-            [0u8; 20],
-            Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
-            DhtSocket::new_test(),
-            Arc::new(TransactionTracker::new()),
-            Duration::from_secs(10),
-        );
-        let factory = DhtTaskFactory::new(ctx);
-
-        // Verify we can create tasks without panicking.
-        let _ping = factory.create_ping_task(
-            DhtNode::new([1u8; 20], "127.0.0.1:6881".parse().unwrap()),
-            0,
-        );
-        let _refresh = factory.create_bucket_refresh_task(false);
-        let _lookup = factory.create_node_lookup_task([2u8; 20]);
-        let _announce = factory.create_peer_announce_task([3u8; 20], 6881);
-    }
 
     #[test]
     fn test_peer_lookup_result() {

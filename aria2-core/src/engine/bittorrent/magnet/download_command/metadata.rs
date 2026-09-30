@@ -177,7 +177,6 @@ impl MagnetDownloadCommand {
     /// metadata-capable peer. HTTP(S) sources use the same proxy, TLS, and
     /// authentication options as ordinary HTTP downloads. Local `file://`
     /// sources are also accepted and still go through the info-hash check.
-
     pub(super) fn merge_magnet_web_seeds(
         magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
         torrent_bytes: &[u8],

@@ -85,6 +85,8 @@ pub struct PeerConnection {
     remote_supports_dht: bool,
     /// Whether the remote BitTorrent handshake advertised BEP 6 support.
     remote_supports_fast_extension: bool,
+    /// Whether the remote BitTorrent handshake advertised BEP 10 support.
+    remote_supports_extended_messaging: bool,
     /// MSE is negotiated at connection setup; `None` means plaintext TCP.
     crypto: Option<MseCryptoState>,
     /// Encrypted bytes read past the MSE handshake, awaiting message decoding.
@@ -183,6 +185,7 @@ impl PeerConnection {
             remote_peer_id: Some(remote_hs.peer_id),
             remote_supports_dht: remote_hs.supports_dht(),
             remote_supports_fast_extension: remote_hs.supports_fast_extension(),
+            remote_supports_extended_messaging: remote_hs.supports_extended_messaging(),
             crypto: None,
             read_ahead: Vec::new(),
             read_buffer: BytesMut::new(),
@@ -197,6 +200,24 @@ impl PeerConnection {
         remote_supports_dht: bool,
         remote_supports_fast_extension: bool,
     ) -> Self {
+        Self::from_stream_with_peer_capabilities(
+            stream,
+            peer_id,
+            remote_supports_dht,
+            remote_supports_fast_extension,
+            false,
+        )
+    }
+
+    /// Wrap a stream after an external handshake while preserving the remote
+    /// peer's advertised protocol capabilities.
+    pub fn from_stream_with_peer_capabilities(
+        stream: tokio::net::TcpStream,
+        peer_id: [u8; 20],
+        remote_supports_dht: bool,
+        remote_supports_fast_extension: bool,
+        remote_supports_extended_messaging: bool,
+    ) -> Self {
         let remote_addr = stream.peer_addr().ok();
         Self {
             stream,
@@ -205,6 +226,7 @@ impl PeerConnection {
             remote_peer_id: Some(peer_id),
             remote_supports_dht,
             remote_supports_fast_extension,
+            remote_supports_extended_messaging,
             crypto: None,
             read_ahead: Vec::new(),
             read_buffer: BytesMut::new(),
@@ -218,12 +240,14 @@ impl PeerConnection {
         peer_id: [u8; 20],
         remote_supports_dht: bool,
         remote_supports_fast_extension: bool,
+        remote_supports_extended_messaging: bool,
     ) -> Self {
-        let mut connection = Self::from_stream_with_peer(
+        let mut connection = Self::from_stream_with_peer_capabilities(
             stream,
             peer_id,
             remote_supports_dht,
             remote_supports_fast_extension,
+            remote_supports_extended_messaging,
         );
         connection.crypto = Some(crypto);
         connection.read_ahead = read_ahead;
@@ -389,6 +413,11 @@ impl PeerConnection {
     /// Whether the remote BitTorrent handshake advertised BEP 6 support.
     pub fn remote_supports_fast_extension(&self) -> bool {
         self.remote_supports_fast_extension
+    }
+
+    /// Whether the remote BitTorrent handshake advertised BEP 10 support.
+    pub fn remote_supports_extended_messaging(&self) -> bool {
+        self.remote_supports_extended_messaging
     }
 
     pub fn is_mse_negotiated(&self) -> bool {

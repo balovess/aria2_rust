@@ -88,14 +88,21 @@ impl TokenBucket {
     /// Create an unlimited token bucket — `acquire` / `try_acquire` always
     /// succeed instantly without consuming any real tokens.
     pub fn unlimited() -> Self {
+        Self::unlimited_with_burst(None)
+    }
+
+    pub(crate) fn unlimited_with_burst(burst_bytes: Option<u64>) -> Self {
         let anchor = Instant::now();
         let (rate_changed, _) = watch::channel(0u64);
-        // Use a large but safe value to avoid overflow on arithmetic.
-        let huge = u64::MAX / 4;
+        // Unlimited calls bypass token accounting. Keep only the normal burst
+        // reserve so a later switch to a finite rate starts bounded.
+        let capacity_milli = burst_bytes
+            .unwrap_or(constants::DEFAULT_BURST_BYTES as u64)
+            .saturating_mul(1000);
         Self {
-            tokens_milli: AtomicU64::new(huge),
-            capacity_milli: huge,
-            rate_milli_per_sec: AtomicU64::new(huge),
+            tokens_milli: AtomicU64::new(capacity_milli),
+            capacity_milli,
+            rate_milli_per_sec: AtomicU64::new(u64::MAX / 4),
             last_refill_elapsed_ns: AtomicU64::new(0),
             unlimited: AtomicBool::new(true),
             anchor,

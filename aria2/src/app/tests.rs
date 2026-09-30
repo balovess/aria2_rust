@@ -1421,7 +1421,11 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
         .request_man
         .find_group(GroupId::new(0x40))
         .expect("payload group should be indexed");
+    let torrent_metadata = b"d8:announce27:http://127.0.0.1:1/announce4:infod6:lengthi0e4:name9:empty.bin12:piece lengthi16384e6:pieces0:ee".to_vec();
     payload.recover().set_bt_bitfield(Some(vec![0xa5, 0x03]));
+    payload
+        .recover()
+        .set_bt_metadata_data(torrent_metadata.clone());
     payload.recover().set_bt_metadata(
         11,
         16_384,
@@ -1493,6 +1497,11 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
     assert_eq!(
         metadata.recover().belongs_to_gid(),
         Some(GroupId::new(0x40))
+    );
+    assert_eq!(
+        metadata.recover().in_memory_data(),
+        Some(torrent_metadata),
+        "a memory-backed Metalink graph must retain its torrent metadata across session restore"
     );
 
     let payload = groups

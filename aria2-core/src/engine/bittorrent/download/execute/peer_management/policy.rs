@@ -53,8 +53,6 @@ impl BtDownloadCommand {
         &mut self,
         active_connections: usize,
     ) {
-        let max_peers = self.group.recover().options().bt_max_peers;
-        self.bt_runtime.set_max_peers(max_peers);
         self.bt_runtime.set_connections(active_connections);
     }
 

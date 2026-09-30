@@ -344,6 +344,7 @@ impl Command for MagnetDownloadCommand {
             &[],
             &self.outbound_network_policy,
         )?;
+        self.group.recover_mut().set_bt_metadata_data(torrent_bytes);
         DownloadEventHooks::shared()
             .notify_metadata_resolved(MetadataResolvedEvent::new(gid, vec![gid]));
         if let Some(gl) = self.global_limiter.clone() {

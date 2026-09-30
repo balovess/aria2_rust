@@ -1,54 +1,11 @@
-use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::Duration;
-
 use super::DefaultPeerStorage;
 use crate::engine::bittorrent::peer::blocklist::BtPeerBlocklist;
-use crate::engine::bittorrent::peer::stats::PeerStats;
-use crate::engine::bittorrent::peer::storage::constants::{
-    CHOKE_ROUND_INTERVAL_SECS, MAX_DROPPED_PEERS,
-};
+use crate::engine::bittorrent::peer::storage::constants::MAX_DROPPED_PEERS;
 use crate::engine::bittorrent::peer::storage::peer_entry::PeerEntry;
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 impl DefaultPeerStorage {
-    // ==================================================================
-    // Choking integration
-    // ==================================================================
-
-    /// Check whether a choke round interval (10s) has elapsed.
-    ///
-    /// Delegates to the appropriate choke algorithm (seeder or leecher)
-    /// based on whether the download is finished.
-    ///
-    /// Matches C++ DefaultPeerStorage::chokeRoundIntervalElapsed.
-    pub fn choke_round_interval_elapsed(&self) -> bool {
-        let choke_interval = Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS);
-
-        if self.download_finished {
-            self.seeder_state_choke.should_execute(choke_interval)
-        } else {
-            self.leecher_state_choke.should_execute(choke_interval)
-        }
-    }
-
-    /// Execute a choke round on the given peers.
-    ///
-    /// If the download is finished, delegates to the seeder choke algorithm.
-    /// Otherwise, delegates to the leecher choke algorithm.
-    ///
-    /// Matches C++ DefaultPeerStorage::executeChoke.
-    pub fn execute_choke_by_identity(&mut self, peers: &mut [&mut PeerStats]) {
-        if self.download_finished {
-            self.seeder_state_choke.execute_choke_by_identity(peers);
-        } else {
-            self.leecher_state_choke.execute_choke_by_identity(peers);
-        }
-    }
-
-    pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
-        self.execute_choke_by_identity(peers);
-    }
-
     // ==================================================================
     // Accessors
     // ==================================================================
@@ -82,16 +39,6 @@ impl DefaultPeerStorage {
     /// Set the maximum peer list size.
     pub fn set_max_peer_list_size(&mut self, size: usize) {
         self.max_peer_list_size = size;
-    }
-
-    /// Set whether the download has finished (affects choke algorithm).
-    pub fn set_download_finished(&mut self, finished: bool) {
-        self.download_finished = finished;
-    }
-
-    /// Set whether piece storage is available.
-    pub fn set_piece_storage_available(&mut self, available: bool) {
-        self.piece_storage_available = available;
     }
 
     /// Set the peer blocklist for IP-based rejection.

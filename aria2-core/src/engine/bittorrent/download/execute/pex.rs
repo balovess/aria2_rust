@@ -21,7 +21,8 @@
 //! ```
 
 use futures::stream::{self, StreamExt};
-use std::time::Instant;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
 
 use crate::engine::bittorrent::download::command::BtDownloadCommand;
@@ -33,30 +34,13 @@ use aria2_protocol::bittorrent::extension::pex::PexHandler;
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
 use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
+pub(crate) const PEX_SEND_INTERVAL: Duration = Duration::from_secs(60);
+
 // ---------------------------------------------------------------------------
 // Outbound PEX: building + sending
 // ---------------------------------------------------------------------------
 
 impl BtDownloadCommand {
-    /// Build one actor-owned peer's BEP 11 payload. The download session owns
-    /// the periodic deadline; unlike the legacy connection helper, this does
-    /// not mutate the command-wide PEX rate-limit timestamp per peer.
-    pub(super) fn build_pex_message_for_actor(
-        &self,
-        remote_peer_addr: &PeerAddr,
-        remote_ut_pex_id: u8,
-    ) -> Option<Vec<u8>> {
-        if !self.peer_exchange_enabled() || self.pex_known_peers.is_empty() {
-            return None;
-        }
-        let bencode = PexHandler::build_pex_added(
-            &self.pex_known_peers,
-            remote_peer_addr,
-            PexHandler::DEFAULT_MAX_PEERS,
-        );
-        Some(serialize_extended(remote_ut_pex_id, bencode.encode()))
-    }
-
     /// Build a complete wire-format PEX extended message for one remote peer.
     ///
     /// Returns `None` when PEX should not be sent (private torrent, interval
@@ -179,7 +163,12 @@ pub(in crate::engine::bittorrent::download::execute) async fn connect_discovered
         };
         match result {
             Ok(mut conn) => {
-                debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
+                debug!(
+                    source = ?source,
+                    peer_ip = %peer.ip,
+                    peer_port = peer.port,
+                    "Connected to discovered peer"
+                );
                 conn.set_source(source);
                 connected.push(conn);
                 if connected.len() >= max_connections {
@@ -190,8 +179,11 @@ pub(in crate::engine::bittorrent::download::execute) async fn connect_discovered
             }
             Err(e) => {
                 debug!(
-                    "[PEX] Failed to connect to {}:{}: {}",
-                    peer.ip, peer.port, e
+                    source = ?source,
+                    peer_ip = %peer.ip,
+                    peer_port = peer.port,
+                    error = %e,
+                    "Failed to connect to discovered peer"
                 );
             }
         }
@@ -201,21 +193,36 @@ pub(in crate::engine::bittorrent::download::execute) async fn connect_discovered
     connected
 }
 
-/// Send periodic BEP 11 messages through each peer's bounded actor mailbox.
-pub(super) async fn send_periodic_pex_to_swarm(
-    cmd: &BtDownloadCommand,
+/// Send current-swarm and recently dropped endpoints through peer actors.
+///
+/// The swarm owns connection membership and drop history, so this is shared
+/// by both downloading and seeding rather than depending on a piece loop.
+pub(crate) async fn send_periodic_pex_to_swarm(
     swarm: &mut crate::engine::bittorrent::peer::message_handler::PeerSwarm,
     last_pex_send: &mut Instant,
-    pex_send_interval_secs: u64,
+    pex_enabled: bool,
 ) {
-    if last_pex_send.elapsed().as_secs() < pex_send_interval_secs
-        || !cmd.peer_exchange_enabled()
-        || cmd.pex_known_peers.is_empty()
-    {
+    if last_pex_send.elapsed() < PEX_SEND_INTERVAL || !pex_enabled {
         return;
     }
 
     *last_pex_send = Instant::now();
+    let mut known_endpoints = HashSet::new();
+    let added = swarm
+        .iter()
+        .filter(|actor| !actor.dead)
+        .filter(|actor| known_endpoints.insert(actor.endpoint))
+        .map(|actor| PeerAddr::new(&actor.endpoint.ip().to_string(), actor.endpoint.port()))
+        .collect::<Vec<_>>();
+    let dropped = swarm
+        .recently_dropped_endpoints()
+        .filter(|endpoint| !swarm.has_endpoint(*endpoint))
+        .map(|endpoint| PeerAddr::new(&endpoint.ip().to_string(), endpoint.port()))
+        .collect::<Vec<_>>();
+    if added.is_empty() && dropped.is_empty() {
+        return;
+    }
+
     let peers = swarm
         .iter()
         .filter(|actor| !actor.dead)
@@ -225,10 +232,23 @@ pub(super) async fn send_periodic_pex_to_swarm(
     let mut disconnected = Vec::new();
     for (actor_id, endpoint, remote_ut_pex_id) in peers {
         let remote_addr = PeerAddr::new(&endpoint.ip().to_string(), endpoint.port());
-        let Some(wire_bytes) = cmd.build_pex_message_for_actor(&remote_addr, remote_ut_pex_id)
-        else {
+        let peer_addrs = added
+            .iter()
+            .filter(|peer| **peer != remote_addr)
+            .take(PexHandler::DEFAULT_MAX_PEERS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let dropped_addrs = dropped
+            .iter()
+            .filter(|peer| **peer != remote_addr)
+            .take(PexHandler::DEFAULT_MAX_PEERS)
+            .cloned()
+            .collect::<Vec<_>>();
+        if peer_addrs.is_empty() && dropped_addrs.is_empty() {
             continue;
-        };
+        }
+        let payload = PexHandler::build_pex_message(&peer_addrs, &dropped_addrs).encode();
+        let wire_bytes = serialize_extended(remote_ut_pex_id, payload);
         if swarm
             .send_to(
                 actor_id,
@@ -255,13 +275,23 @@ pub(super) async fn send_periodic_pex_to_swarm(
 
 #[cfg(test)]
 mod tests {
-    use super::{BtPeerSource, connect_discovered_peers};
+    use super::{
+        BtPeerSource, PEX_SEND_INTERVAL, connect_discovered_peers, send_periodic_pex_to_swarm,
+    };
     use crate::engine::bittorrent::download::command::BtDownloadCommand;
     use crate::engine::bittorrent::download::execute::piece_download::session::peer_dials::PeerDialConfig;
     use crate::engine::bittorrent::peer::interaction::PEER_CONNECT_SETTLE_TIME;
+    use crate::engine::bittorrent::peer::message_handler::PeerSwarm;
+    use crate::engine::bittorrent::peer::upload_session::{
+        InMemoryPieceProvider, PieceDataProvider,
+    };
     use crate::request::request_group::{DownloadOptions, GroupId};
+    use aria2_protocol::bittorrent::extension::pex::{PexHandler, PexMessage};
+    use aria2_protocol::bittorrent::message::types::BtMessage;
     use aria2_protocol::bittorrent::peer::connection::PeerAddr;
-    use std::time::Duration;
+    use aria2_protocol::bittorrent::peer::connection::PeerConnection;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn dynamically_discovered_ready_peer_is_returned_before_slow_peer_timeout() {
@@ -288,10 +318,9 @@ mod tests {
                 let (stream, _) = good_listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete([8; 20], None, false).await
                 {
-                    if let Ok(connection) = incoming.complete([8; 20], None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
             }
         });
@@ -303,10 +332,9 @@ mod tests {
                 let (stream, _) = delayed_listener.accept().await.unwrap();
                 if let Ok(incoming) =
                     aria2_protocol::bittorrent::peer::incoming::receive(stream, &[info_hash]).await
+                    && let Ok(connection) = incoming.complete([10; 20], None, false).await
                 {
-                    if let Ok(connection) = incoming.complete([10; 20], None, false).await {
-                        return connection;
-                    }
+                    return connection;
                 }
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
@@ -353,5 +381,89 @@ mod tests {
         drop(good_peer.await.unwrap());
         drop(delayed_peer.await.unwrap());
         slow_peer.abort();
+    }
+
+    #[tokio::test]
+    async fn periodic_pex_sends_removed_swarm_peers_to_actor_connections() {
+        let make_incoming_connection = |listener: tokio::net::TcpListener, peer_id| async move {
+            let remote = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (local, endpoint) = listener.accept().await.unwrap();
+            let connection = PeerConnection::from_stream_with_peer(local, peer_id, false, true);
+            (remote, endpoint, connection)
+        };
+
+        let live_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (live_remote_stream, live_endpoint, live_transport) =
+            make_incoming_connection(live_listener, [1; 20]).await;
+        let mut live_connection =
+            crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+                live_transport,
+                live_endpoint,
+            );
+        live_connection.allocate_session_resource(16, 1, 16);
+        live_connection.register_peer_extension("ut_pex", 19);
+        let live_actor_id = live_connection.actor_id;
+
+        let dropped_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (dropped_remote_stream, dropped_endpoint, dropped_transport) =
+            make_incoming_connection(dropped_listener, [2; 20]).await;
+        let dropped_connection =
+            crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
+                dropped_transport,
+                dropped_endpoint,
+            );
+        let dropped_actor_id = dropped_connection.actor_id;
+
+        let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let mut swarm = PeerSwarm::new(8);
+        assert!(
+            swarm
+                .spawn_peer(live_connection, None, Arc::clone(&provider))
+                .is_ok()
+        );
+        assert!(swarm.spawn_peer(dropped_connection, None, provider).is_ok());
+
+        swarm.mark_dead(dropped_actor_id);
+        let removed = swarm.remove_dead().await;
+        assert!(
+            removed
+                .iter()
+                .any(|(_, endpoint)| *endpoint == dropped_endpoint)
+        );
+        assert!(
+            swarm
+                .recently_dropped_endpoints()
+                .any(|addr| addr == dropped_endpoint)
+        );
+        assert_eq!(swarm.actor(live_actor_id).unwrap().ut_pex_id, Some(19));
+
+        let mut last_pex_send = Instant::now() - PEX_SEND_INTERVAL;
+        send_periodic_pex_to_swarm(&mut swarm, &mut last_pex_send, true).await;
+        assert!(last_pex_send.elapsed() < Duration::from_secs(1));
+
+        let mut remote =
+            PeerConnection::from_stream_with_peer(live_remote_stream, [10; 20], false, false);
+        let message = tokio::time::timeout(Duration::from_secs(1), remote.read_message())
+            .await
+            .expect("live actor should send the scheduled PEX message")
+            .unwrap()
+            .unwrap();
+        let BtMessage::Extended { ext_id, payload } = message else {
+            panic!("expected an extended PEX message, got {message:?}");
+        };
+        assert_eq!(ext_id, 19);
+        let PexMessage::Added { dropped, .. } = PexHandler::parse_pex_data(&payload).unwrap()
+        else {
+            panic!("expected a BEP 11 added/dropped payload");
+        };
+        assert!(dropped.iter().any(|peer| {
+            peer.ip == dropped_endpoint.ip().to_string() && peer.port == dropped_endpoint.port()
+        }));
+        assert!(swarm.actor(live_actor_id).is_some());
+
+        swarm.shutdown_all().await;
+        drop(dropped_remote_stream);
     }
 }

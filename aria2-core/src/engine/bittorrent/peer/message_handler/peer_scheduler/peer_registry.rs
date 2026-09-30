@@ -1,6 +1,6 @@
 //! Owned peer actors and stable-ID routing for a torrent swarm.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -16,6 +16,7 @@ use super::super::types::{DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_OUTSTANDING_REQUE
 use super::{PeerActorControl, PeerActorTask, PeerCommand, PeerEvent};
 
 const PEER_STATS_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_RECENTLY_DROPPED_PEERS: usize = 50;
 
 /// One long-lived I/O owner for a handshaken BitTorrent connection.
 pub(crate) struct PeerActorEntry {
@@ -125,6 +126,7 @@ pub(crate) struct PeerSwarm {
     indices: HashMap<PeerActorId, usize>,
     peer_id_counts: HashMap<[u8; 20], usize>,
     endpoint_counts: HashMap<SocketAddr, usize>,
+    recently_dropped_endpoints: VecDeque<SocketAddr>,
     wanted_pieces: Arc<[u8]>,
     peer_snapshot_store:
         Option<Arc<std::sync::RwLock<Vec<crate::request::request_group::BtPeerSnapshot>>>>,
@@ -224,6 +226,7 @@ impl PeerSwarm {
             indices: HashMap::new(),
             peer_id_counts: HashMap::new(),
             endpoint_counts: HashMap::new(),
+            recently_dropped_endpoints: VecDeque::new(),
             wanted_pieces: Arc::from([]),
             peer_snapshot_store: None,
             last_stats_snapshot_publish: None,
@@ -292,6 +295,10 @@ impl PeerSwarm {
 
     pub(crate) fn has_endpoint(&self, endpoint: SocketAddr) -> bool {
         self.endpoint_counts.contains_key(&endpoint)
+    }
+
+    pub(crate) fn recently_dropped_endpoints(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.recently_dropped_endpoints.iter().copied()
     }
 
     pub(crate) fn has_peer_id(&self, peer_id: [u8; 20]) -> bool {
@@ -616,6 +623,18 @@ impl PeerSwarm {
             }
         }
         if !removed.is_empty() {
+            for (_, endpoint) in &removed {
+                if let Some(index) = self
+                    .recently_dropped_endpoints
+                    .iter()
+                    .position(|known| known == endpoint)
+                {
+                    self.recently_dropped_endpoints.remove(index);
+                }
+                self.recently_dropped_endpoints.push_front(*endpoint);
+                self.recently_dropped_endpoints
+                    .truncate(MAX_RECENTLY_DROPPED_PEERS);
+            }
             // Do not compact and rebuild the stable-ID index once per dead
             // peer. All awaits happen before mutation, so cancellation leaves
             // every entry registered and the next pass can resume shutdown.
@@ -638,6 +657,7 @@ impl PeerSwarm {
         self.indices.clear();
         self.peer_id_counts.clear();
         self.endpoint_counts.clear();
+        self.recently_dropped_endpoints.clear();
     }
 
     fn rebuild_index(&mut self) {

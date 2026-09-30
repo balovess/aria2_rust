@@ -5,7 +5,7 @@ use crate::engine::bittorrent::peer::message_handler::{PeerEvent, PeerSwarm};
 use crate::util::rwlock_ext::RwLockRecover;
 
 pub(super) enum PeerWaitEvent {
-    Incoming(crate::engine::bittorrent::peer::listener::IncomingPeer),
+    Incoming(Box<crate::engine::bittorrent::peer::listener::IncomingPeer>),
     Actor(PeerEvent),
     Wake,
 }
@@ -35,7 +35,7 @@ impl BtDownloadCommand {
                     None => std::future::pending::<Option<crate::engine::bittorrent::peer::listener::IncomingPeer>>().await,
                 }
             } => match incoming {
-                Some(incoming) => PeerWaitEvent::Incoming(incoming),
+                Some(incoming) => PeerWaitEvent::Incoming(Box::new(incoming)),
                 None => {
                     incoming_closed = true;
                     PeerWaitEvent::Wake

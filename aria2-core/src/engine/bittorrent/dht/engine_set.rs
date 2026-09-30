@@ -258,7 +258,7 @@ mod tests {
                     }
                     method => panic!("unexpected DHT query: {method:?}"),
                 };
-                let encoded = response.encode().expect("DHT response should encode");
+                let encoded = response.encode();
                 responder
                     .send_to(&encoded, from)
                     .await

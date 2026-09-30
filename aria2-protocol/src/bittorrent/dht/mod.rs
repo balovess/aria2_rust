@@ -1,6 +1,6 @@
 pub mod bootstrap;
 pub mod bucket;
-pub mod bucket_tree;
+mod bucket_tree;
 pub mod compact;
 pub mod engine;
 pub(super) mod engine_inner;
@@ -15,8 +15,8 @@ pub mod routing_table;
 pub mod socket;
 pub mod store;
 pub mod task;
-pub mod task_impl;
-pub mod task_peer;
+mod task_impl;
+mod task_peer;
 pub mod token_tracker;
 pub mod tracker;
 
@@ -24,7 +24,5 @@ pub use engine::{DhtEngine, DhtEngineConfig, DhtEngineState, FindPeersResult};
 pub use peer_storage::DhtPeerStorage;
 pub use store::{DhtItemStore, StoreError};
 pub use task::{BoxedDhtTask, DEFAULT_NUM_CONCURRENT, DhtTask, DhtTaskExecutor, DhtTaskQueue};
-pub use task_impl::{BucketRefreshTask, DhtTaskContext, NodeLookupTask, PingTask};
-pub use task_peer::{
-    DhtTaskFactory, PeerAnnounceTask, PeerLookupResult, PeerLookupTask, ReplaceNodeTask,
-};
+pub use task_impl::{BucketRefreshTask, DhtTaskContext, PingTask};
+pub use task_peer::{PeerLookupResult, PeerLookupTask};

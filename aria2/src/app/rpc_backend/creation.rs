@@ -34,13 +34,15 @@ impl CoreRpcBackend {
                 .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?
                 .options()
                 .clone();
-            if let Err(error) = aria2_core::engine::bittorrent::download::command::prepare_group_metadata(
-                Arc::clone(&group),
-                data,
-                &options,
-                options.dir.as_deref(),
-                additional_web_seeds,
-            ) {
+            if let Err(error) =
+                aria2_core::engine::bittorrent::download::command::prepare_group_metadata(
+                    Arc::clone(&group),
+                    data,
+                    &options,
+                    options.dir.as_deref(),
+                    additional_web_seeds,
+                )
+            {
                 let _ = self.group_man.remove_group_by_id(gid);
                 return Err(Self::invalid(error.to_string()));
             }
@@ -134,12 +136,12 @@ impl CoreRpcBackend {
             let converter =
                 aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup::new();
             let mut gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
-            let resource_groups = converter
-                .create_resource_groups_from_bytes(&data, &download_options, &mut gids)
+            let expansion = converter
+                .create_groups_from_bytes(&data, &download_options, &mut gids)
                 .map_err(|error| Self::invalid(error.to_string()))?;
             let mut response_gids = Vec::new();
             let mut start_gids = Vec::new();
-            for group in resource_groups {
+            for group in expansion.resource_groups {
                 let gid = group.recover().gid();
                 group.recover_mut().set_option_snapshot(snapshot.clone());
                 let wake_group = Arc::clone(&group);
@@ -152,12 +154,7 @@ impl CoreRpcBackend {
 
             #[cfg(all(feature = "metalink", feature = "bittorrent"))]
             {
-                let mut graph_gids =
-                    std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
-                let graphs = converter
-                    .create_torrent_graphs_from_bytes(&data, &download_options, &mut graph_gids)
-                    .map_err(|error| Self::invalid(error.to_string()))?;
-                for graph in graphs {
+                for graph in expansion.torrent_graphs {
                     let metadata_gid = graph.metadata.recover().gid();
                     let payload_gid = graph.payload.recover().gid();
                     graph

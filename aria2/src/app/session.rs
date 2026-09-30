@@ -19,6 +19,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "bittorrent")]
+fn decode_bt_session_metadata(encoded: &str) -> std::result::Result<Vec<u8>, String> {
+    use base64::Engine;
+
+    let json = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("invalid base64 torrent metadata: {error}"))?;
+    serde_json::from_slice(&json)
+        .map_err(|error| format!("invalid encoded torrent metadata: {error}"))
+}
+
 impl App {
     /// Restore incomplete download tasks from a session file.
     ///
@@ -143,6 +154,18 @@ impl App {
                                     entry.bitfield.as_ref().map(|b| b.len()).unwrap_or(0)
                                 );
                             }
+                            #[cfg(feature = "bittorrent")]
+                            if let Some(encoded) = entry.options.get("aria2-rust-bt-metadata-data")
+                            {
+                                match decode_bt_session_metadata(encoded) {
+                                    Ok(data) => group.set_bt_metadata_data(data),
+                                    Err(error) => warn!(
+                                        gid = %gid.value(),
+                                        error = %error,
+                                        "Ignoring invalid BitTorrent metadata in session entry"
+                                    ),
+                                }
+                            }
                             group.update_progress(entry.completed_length);
                             group.set_total_length(entry.total_length);
                         }
@@ -210,6 +233,20 @@ impl App {
             decode_session_uris(entry.options.get("aria2-rust-fallback-uris")).unwrap_or_default();
         let file_mappings = decode_session_mappings(entry.options.get("aria2-rust-file-mappings"))
             .unwrap_or_default();
+        let metadata_data = entry
+            .options
+            .get("aria2-rust-bt-metadata-data")
+            .and_then(|encoded| match decode_bt_session_metadata(encoded) {
+                Ok(data) => Some(data),
+                Err(error) => {
+                    warn!(
+                        gid = %entry.gid,
+                        error = %error,
+                        "Ignoring invalid BitTorrent metadata in Metalink session entry"
+                    );
+                    None
+                }
+            });
         let memory_source = entry
             .options
             .get("aria2-rust-metadata-memory")
@@ -236,6 +273,9 @@ impl App {
             .set_option_snapshot(option_snapshot.clone());
         if memory_source {
             metadata.recover().mark_in_memory_download();
+            if let Some(data) = metadata_data {
+                metadata.recover().set_in_memory_data(data);
+            }
         }
         metadata.recover().set_belongs_to_gid(payload_gid);
 

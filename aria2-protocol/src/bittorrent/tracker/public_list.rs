@@ -119,6 +119,19 @@ pub enum TrackerFailureKind {
     MalformedResponse,
 }
 
+impl TrackerFailureKind {
+    /// Stable lowercase name used by RPC and diagnostic output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Timeout => "timeout",
+            Self::RemoteTemporary => "remoteTemporary",
+            Self::TrackerRejected => "trackerRejected",
+            Self::MalformedResponse => "malformedResponse",
+        }
+    }
+}
+
 impl TrackerProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -650,6 +663,24 @@ fn parse_single_tracker_url(url: &str) -> Option<TrackerEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracker_failure_kind_names_are_stable() {
+        assert_eq!(TrackerFailureKind::Network.as_str(), "network");
+        assert_eq!(TrackerFailureKind::Timeout.as_str(), "timeout");
+        assert_eq!(
+            TrackerFailureKind::RemoteTemporary.as_str(),
+            "remoteTemporary"
+        );
+        assert_eq!(
+            TrackerFailureKind::TrackerRejected.as_str(),
+            "trackerRejected"
+        );
+        assert_eq!(
+            TrackerFailureKind::MalformedResponse.as_str(),
+            "malformedResponse"
+        );
+    }
 
     #[test]
     fn test_parse_embedded_list() {

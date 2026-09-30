@@ -85,6 +85,10 @@ impl super::super::RequestGroup {
         for (key, value) in &snapshot {
             let _ = super::rpc_update::apply_rpc_option(typed_options, key, value);
         }
+        self.bt_max_peers_limit.store(
+            typed_options.bt_max_peers,
+            std::sync::atomic::Ordering::Release,
+        );
         self.option_snapshot = Some(snapshot);
     }
 

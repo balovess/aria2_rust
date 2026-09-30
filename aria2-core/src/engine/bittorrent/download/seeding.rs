@@ -36,6 +36,7 @@ impl BtDownloadCommand {
             connections,
             PeerSwarm::new(64),
             upload_counter,
+            std::time::Instant::now(),
             piece_length,
             num_pieces,
             info_hash,
@@ -52,6 +53,7 @@ impl BtDownloadCommand {
         connections: Vec<BtPeerConn>,
         mut swarm: PeerSwarm,
         upload_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        last_pex_send: std::time::Instant,
         piece_length: u32,
         num_pieces: u32,
         info_hash: [u8; 20],
@@ -157,6 +159,7 @@ impl BtDownloadCommand {
             peer_id,
             self.incoming_peers.take(),
             upload_counter,
+            last_pex_send,
         )
         .with_torrent_upload_limiter(self.torrent_upload_limiter.clone())
         .with_peer_storage(std::sync::Arc::clone(&self.peer_storage))
