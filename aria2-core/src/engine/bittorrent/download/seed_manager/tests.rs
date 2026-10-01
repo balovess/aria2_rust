@@ -548,6 +548,24 @@ async fn manager_with_dead_seed_peer(
 }
 
 #[tokio::test]
+async fn seed_manager_keeps_recent_upload_speed_for_the_full_rate_window() {
+    let (mut manager, client) = manager_with_dead_seed_peer(true, false).await;
+    let now = Instant::now();
+    let sample_time = now - Duration::from_secs(5);
+    let actor = manager.swarm.iter_mut().next().expect("seed peer actor");
+    actor.stats.record_upload_rate_at(4096, sample_time);
+    actor.stats.last_upload_time = Some(sample_time);
+
+    assert!(
+        manager.current_upload_speed() > 0,
+        "recent payload remains in aria2's 10-second upload rate window"
+    );
+
+    manager.swarm.shutdown_all().await;
+    drop(client);
+}
+
+#[tokio::test]
 async fn peer_registry_reindexes_surviving_actor_after_dead_peer_removal() {
     let provider = Arc::new(
         crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(1024, 1),

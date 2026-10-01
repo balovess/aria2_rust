@@ -63,6 +63,12 @@ pub(crate) mod tests {
             stats.recent_upload_speed_at(start + Duration::from_secs(11)),
             0
         );
+        let upload_expiration = start + Duration::from_secs(10) + Duration::from_nanos(1);
+        assert_eq!(
+            stats.next_upload_speed_deadline(start),
+            Some(upload_expiration)
+        );
+        assert_eq!(stats.next_upload_speed_deadline(upload_expiration), None);
     }
 
     #[test]

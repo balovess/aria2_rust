@@ -4,11 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::engine::bittorrent::peer::stats::{PEER_RATE_SAMPLE_INTERVAL, PEER_RATE_WINDOW};
 use crate::request::request_group::AtomicProgress;
 
 pub(super) const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
-const SPEED_WINDOW: Duration = Duration::from_secs(10);
-const SPEED_SLOT: Duration = Duration::from_secs(1);
+const SPEED_SLOT: Duration = PEER_RATE_SAMPLE_INTERVAL;
 
 struct DownloadSpeedSampler {
     last_sample: Instant,
@@ -42,7 +42,7 @@ impl DownloadSpeedSampler {
 
     fn speed_at(&mut self, now: Instant) -> u64 {
         while self.samples.front().is_some_and(|(sampled_at, _)| {
-            now.saturating_duration_since(*sampled_at) > SPEED_WINDOW
+            now.saturating_duration_since(*sampled_at) > PEER_RATE_WINDOW
         }) {
             if let Some((_, bytes)) = self.samples.pop_front() {
                 self.window_bytes = self.window_bytes.saturating_sub(bytes);

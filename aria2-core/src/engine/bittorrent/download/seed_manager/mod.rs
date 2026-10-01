@@ -91,7 +91,6 @@ pub(super) struct SeedPeerConnectionAttempt {
 
 /// Interval between choke rounds (seconds). Matches C++ rotation interval.
 const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
-const PEER_UPLOAD_SPEED_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ===========================================================================
 // BtSeedManager — top-level seeding phase manager
@@ -244,15 +243,26 @@ impl BtSeedManager {
 
     pub(super) fn current_upload_speed(&self) -> u64 {
         let now = Instant::now();
-        self.swarm
-            .iter()
-            .filter(|actor| {
-                actor.stats.last_upload_time.is_some_and(|last_upload| {
-                    now.saturating_duration_since(last_upload) < PEER_UPLOAD_SPEED_IDLE_TIMEOUT
-                })
-            })
-            .map(|actor| actor.stats.upload_speed.max(0.0) as u64)
-            .sum()
+        let (window_bytes, oldest_sample) = self.swarm.iter().fold(
+            (0u64, None::<Instant>),
+            |(window_bytes, oldest_sample), actor| {
+                let (peer_bytes, peer_oldest_sample) = actor.stats.recent_upload_window_at(now);
+                let oldest_sample = match (oldest_sample, peer_oldest_sample) {
+                    (Some(current), Some(peer)) => Some(current.min(peer)),
+                    (None, peer) => peer,
+                    (current, None) => current,
+                };
+                (window_bytes.saturating_add(peer_bytes), oldest_sample)
+            },
+        );
+        let Some(oldest_sample) = oldest_sample else {
+            return 0;
+        };
+        let elapsed_millis = now
+            .saturating_duration_since(oldest_sample)
+            .as_millis()
+            .max(1);
+        ((u128::from(window_bytes) * 1000) / elapsed_millis).min(u128::from(u64::MAX)) as u64
     }
 
     /// Return the duration of the seeding phase.

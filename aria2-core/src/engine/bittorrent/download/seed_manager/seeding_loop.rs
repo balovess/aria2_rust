@@ -204,13 +204,7 @@ impl BtSeedManager {
         if let Some(upload_speed_deadline) = self
             .swarm
             .iter()
-            .filter_map(|actor| {
-                actor
-                    .stats
-                    .last_upload_time
-                    .map(|last_upload| last_upload + super::PEER_UPLOAD_SPEED_IDLE_TIMEOUT)
-            })
-            .filter(|deadline| *deadline > now)
+            .filter_map(|actor| actor.stats.next_upload_speed_deadline(now))
             .min()
         {
             deadline = deadline.min(upload_speed_deadline);

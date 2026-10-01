@@ -17,8 +17,8 @@ use crate::constants;
 /// Controls responsiveness vs. smoothness of speed estimates.
 /// 0.5 provides balanced behavior: responsive to changes while filtering noise.
 const EMA_ALPHA: f64 = constants::PEER_STATS_EMA_ALPHA;
-const PEER_RATE_WINDOW: Duration = Duration::from_secs(10);
-const PEER_RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const PEER_RATE_WINDOW: Duration = Duration::from_secs(10);
+pub(crate) const PEER_RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Threshold for banning peers that send too many invalid pieces.
 ///
@@ -30,21 +30,11 @@ pub const BAD_DATA_THRESHOLD: u32 = constants::PEER_STATS_BAD_DATA_THRESHOLD as 
 #[derive(Clone, Default)]
 struct PeerSpeedWindow {
     samples: VecDeque<(Instant, u64)>,
-    window_bytes: u64,
 }
 
 impl PeerSpeedWindow {
     fn speed_at(&self, now: Instant) -> u64 {
-        let mut expired_bytes = 0u64;
-        let mut oldest_sample = None;
-        for (sample_time, bytes) in &self.samples {
-            if now.saturating_duration_since(*sample_time) > PEER_RATE_WINDOW {
-                expired_bytes = expired_bytes.saturating_add(*bytes);
-            } else {
-                oldest_sample = Some(*sample_time);
-                break;
-            }
-        }
+        let (bytes_in_window, oldest_sample) = self.totals_at(now);
         let Some(oldest_sample) = oldest_sample else {
             return 0;
         };
@@ -52,8 +42,19 @@ impl PeerSpeedWindow {
             .saturating_duration_since(oldest_sample)
             .as_millis()
             .max(1);
-        let bytes_in_window = self.window_bytes.saturating_sub(expired_bytes);
-        ((bytes_in_window as u128 * 1000) / elapsed_millis).min(u64::MAX as u128) as u64
+        ((u128::from(bytes_in_window) * 1000) / elapsed_millis).min(u128::from(u64::MAX)) as u64
+    }
+
+    fn totals_at(&self, now: Instant) -> (u64, Option<Instant>) {
+        let mut bytes_in_window = 0u64;
+        let mut oldest_sample = None;
+        for (sample_time, bytes) in &self.samples {
+            if now.saturating_duration_since(*sample_time) <= PEER_RATE_WINDOW {
+                bytes_in_window = bytes_in_window.saturating_add(*bytes);
+                oldest_sample.get_or_insert(*sample_time);
+            }
+        }
+        (bytes_in_window, oldest_sample)
     }
 
     fn record(&mut self, bytes: u64, at: Instant) {
@@ -68,16 +69,23 @@ impl PeerSpeedWindow {
         } else {
             self.samples.push_back((at, bytes));
         }
-        self.window_bytes = self.window_bytes.saturating_add(bytes);
+    }
+
+    fn next_expiration_after(&self, now: Instant) -> Option<Instant> {
+        self.samples.iter().find_map(|(sample_time, _)| {
+            sample_time
+                .checked_add(PEER_RATE_WINDOW)?
+                .checked_add(Duration::from_nanos(1))
+                .filter(|deadline| *deadline > now)
+        })
     }
 
     fn remove_expired(&mut self, now: Instant) {
-        while let Some((sample_time, bytes)) = self.samples.front().copied() {
+        while let Some((sample_time, _)) = self.samples.front().copied() {
             if now.saturating_duration_since(sample_time) <= PEER_RATE_WINDOW {
                 break;
             }
             self.samples.pop_front();
-            self.window_bytes = self.window_bytes.saturating_sub(bytes);
         }
     }
 }
@@ -315,6 +323,14 @@ impl PeerStats {
     /// `SpeedCalc::calculateSpeed`, for seeder-state choke ranking.
     pub(crate) fn recent_upload_speed_at(&self, now: Instant) -> u64 {
         self.upload_rate_window.speed_at(now)
+    }
+
+    pub(crate) fn recent_upload_window_at(&self, now: Instant) -> (u64, Option<Instant>) {
+        self.upload_rate_window.totals_at(now)
+    }
+
+    pub(crate) fn next_upload_speed_deadline(&self, now: Instant) -> Option<Instant> {
+        self.upload_rate_window.next_expiration_after(now)
     }
 
     /// Return download throughput over the same rolling window used by aria2's

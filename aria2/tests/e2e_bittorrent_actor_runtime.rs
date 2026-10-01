@@ -1912,6 +1912,34 @@ async fn cli_uploads_a_verified_piece_before_torrent_completion() {
         "the upload event must not revert the peer's NotInterested state: {peer_details}"
     );
 
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    let sustained_upload_status = rpc(
+        &client,
+        31,
+        "aria2.tellStatus",
+        json!([
+            gid,
+            [
+                "status",
+                "completedLength",
+                "totalLength",
+                "uploadLength",
+                "uploadSpeed"
+            ]
+        ]),
+    );
+    assert_eq!(sustained_upload_status["status"], "active");
+    assert_eq!(sustained_upload_status["completedLength"], "16");
+    assert_eq!(sustained_upload_status["totalLength"], "32");
+    assert_eq!(sustained_upload_status["uploadLength"], "16");
+    assert!(
+        sustained_upload_status["uploadSpeed"]
+            .as_str()
+            .and_then(|speed| speed.parse::<u64>().ok())
+            .is_some_and(|speed| speed > 0),
+        "recent upload must remain visible in the 10-second task rate window: {sustained_upload_status}"
+    );
+
     peer.release_tail_piece();
     tokio::time::timeout(Duration::from_secs(5), peer.peer_interested.notified())
         .await
