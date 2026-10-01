@@ -17,6 +17,7 @@ use super::BtStopTimeoutState;
 use crate::engine::bittorrent::download::execute::peer_session::TorrentSession;
 
 mod availability;
+mod download_speed;
 mod initialization;
 pub(in crate::engine::bittorrent::download::execute) mod peer_dials;
 mod piece;
@@ -36,8 +37,6 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) last_pex_send: &'a mut Instant,
     pub(super) writer: Box<dyn SeekableDiskWriter>,
     pub(super) start_time: Instant,
-    pub(super) last_speed_update: Instant,
-    pub(super) last_completed: u64,
     pub(super) last_upload_speed_update: Instant,
     pub(super) last_uploaded: u64,
     pub(super) upload_counter: Arc<std::sync::atomic::AtomicU64>,

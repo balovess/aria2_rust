@@ -9,13 +9,11 @@ use tracing::{trace, warn};
 use crate::engine::bittorrent::download::execute::{EndgameState, types::PeerKey};
 use crate::engine::bittorrent::peer::choking_algorithm::ChokingAlgorithm;
 use crate::error::{Aria2Error, FatalError, Result};
-use crate::request::request_group::AtomicProgress;
 
 use super::super::types::{
     ActorAwarePieceDownloadResult, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST,
     MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceDownloadResult,
 };
-use super::download_speed::DownloadSpeedSampler;
 use super::endgame_requests::{
     PendingRequest, cancel_attempt_requests, cancel_completed_block_duplicates,
     fill_request_windows, record_failed_peer, take_peer_pending,
@@ -37,7 +35,6 @@ pub(crate) async fn download_piece_blocks_endgame(
     piece_length: u32,
     num_blocks: u32,
     endgame_state: &mut EndgameState,
-    network_activity: Option<&AtomicProgress>,
     request_timeout: Duration,
     max_attempts: u32,
     mut choking_algo: Option<&mut ChokingAlgorithm>,
@@ -67,7 +64,6 @@ pub(crate) async fn download_piece_blocks_endgame(
     let mut tracker_peers = Vec::new();
     let mut peers = PeerSchedulingSnapshot::capture(swarm);
     let mut workers = PeerGeneration::from_swarm(swarm, &[piece_index]);
-    let mut download_speed = DownloadSpeedSampler::new();
     let Some(mut event_rx) = swarm.lease_event_receiver() else {
         return Err(Aria2Error::Fatal(FatalError::Config(
             "torrent peer event receiver is already leased".to_string(),
@@ -145,13 +141,6 @@ pub(crate) async fn download_piece_blocks_endgame(
                     wake_deadline.map_or(choke_deadline, |deadline| deadline.min(choke_deadline)),
                 );
             }
-            if network_activity.is_some()
-                && let Some(deadline) = download_speed.next_deadline()
-            {
-                wake_deadline =
-                    Some(wake_deadline.map_or(deadline, |current| current.min(deadline)));
-            }
-
             tokio::select! {
                 event = event_rx.recv() => {
                     let Some(event) = event else { break };
@@ -297,12 +286,6 @@ pub(crate) async fn download_piece_blocks_endgame(
                                         continue;
                                     }
 
-                                    if !data.is_empty()
-                                        && let Some(progress) = network_activity
-                                    {
-                                        progress.record_network_activity();
-                                        download_speed.record(data.len() as u64);
-                                    }
                                     let start = request.offset as usize;
                                     piece_data[start..start + data.len()].copy_from_slice(&data);
                                     completed[block_index as usize] = true;
@@ -408,11 +391,6 @@ pub(crate) async fn download_piece_blocks_endgame(
                 Some(_) = queue_ready.next(), if !queue_ready.is_empty() => {}
                 _ = wait_for_deadline(wake_deadline) => {
                     let now = Instant::now();
-                    if let Some(progress) = network_activity
-                        && download_speed.next_deadline().is_some_and(|deadline| now >= deadline)
-                    {
-                        progress.set_download_speed(download_speed.sample(now));
-                    }
                     if choking_algo
                         .as_deref()
                         .is_some_and(|algo| algo.choke_rotation_due(now))

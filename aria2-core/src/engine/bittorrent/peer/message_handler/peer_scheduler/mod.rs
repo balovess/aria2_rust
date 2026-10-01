@@ -16,7 +16,6 @@ pub(super) async fn wait_for_deadline(deadline: Option<Instant>) {
     }
 }
 
-mod download_speed;
 mod endgame_pipeline;
 mod endgame_requests;
 mod normal;

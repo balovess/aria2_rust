@@ -200,6 +200,7 @@ dependencies = [
  "futures",
  "libc",
  "mimalloc",
+ "rand 0.8.5",
  "ratatui",
  "reqwest",
  "serde",

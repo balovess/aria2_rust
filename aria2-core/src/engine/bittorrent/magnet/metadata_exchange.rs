@@ -158,7 +158,7 @@ impl MetadataExchangeConfig {
     }
 }
 
-/// Compatibility interface for fetching BEP 9 metadata from a peer list.
+/// Standalone public interface for fetching BEP 9 metadata from a peer list.
 ///
 /// Connections are owned by the same peer actors used for payload transfer;
 /// this standalone interface shuts its temporary swarm down after collection.

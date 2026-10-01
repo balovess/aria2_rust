@@ -29,15 +29,18 @@ fn instant_from_activity_ticks(ticks: u64) -> Instant {
 ///
 /// Extracted from `RequestGroup` so that the hot-path download code can
 /// update progress via `Arc<AtomicProgress>` without acquiring the outer
-/// `RwLock<RequestGroup>`. All fields are atomic — no locking required.
+/// `RwLock<RequestGroup>`. Progress counters use atomics; callers do not need
+/// to lock the containing `RequestGroup` on the transfer hot path.
 pub struct AtomicProgress {
     completed_length: AtomicU64,
     total_length: AtomicU64,
     /// Total uploaded bytes (BT only). Mirrors C++ `RequestGroup::getUploadLength()`.
     upload_length: AtomicU64,
+    download_payload_bytes: AtomicU64,
     download_speed: AtomicU64,
     upload_speed: AtomicU64,
     last_network_activity: AtomicU64,
+    download_rate_signal: Arc<tokio::sync::Notify>,
     activity_signal: OnceLock<Arc<ActivitySignal>>,
 }
 
@@ -54,9 +57,11 @@ impl AtomicProgress {
             completed_length: AtomicU64::new(0),
             total_length: AtomicU64::new(0),
             upload_length: AtomicU64::new(0),
+            download_payload_bytes: AtomicU64::new(0),
             download_speed: AtomicU64::new(0),
             upload_speed: AtomicU64::new(0),
             last_network_activity: AtomicU64::new(now),
+            download_rate_signal: Arc::new(tokio::sync::Notify::new()),
             activity_signal: OnceLock::new(),
         }
     }
@@ -85,6 +90,25 @@ impl AtomicProgress {
     pub(crate) fn record_network_activity(&self) {
         self.last_network_activity
             .fetch_max(current_activity_ticks(), Ordering::AcqRel);
+    }
+
+    pub(crate) fn download_rate_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.download_rate_signal)
+    }
+
+    /// Record payload bytes for the task-level BitTorrent rate window.
+    pub(crate) fn record_download_payload(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        self.download_payload_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.record_network_activity();
+        self.download_rate_signal.notify_one();
+    }
+
+    pub(crate) fn take_download_payload_bytes(&self) -> u64 {
+        self.download_payload_bytes.swap(0, Ordering::AcqRel)
     }
 
     pub(crate) fn last_network_activity(&self) -> Instant {

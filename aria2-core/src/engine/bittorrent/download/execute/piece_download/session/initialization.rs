@@ -104,8 +104,6 @@ impl<'a> PieceDownloadSession<'a> {
             raw_writer
         };
         let start_time = Instant::now();
-        let last_speed_update = Instant::now();
-        let last_completed = 0u64;
 
         // P1 integration: progress save time tracking
         let last_progress_save = Instant::now();
@@ -418,8 +416,6 @@ impl<'a> PieceDownloadSession<'a> {
             last_pex_send,
             writer,
             start_time,
-            last_speed_update,
-            last_completed,
             last_upload_speed_update: Instant::now(),
             last_uploaded,
             upload_counter,

@@ -8,12 +8,10 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tracing::{debug, trace, warn};
 
 use crate::engine::bittorrent::peer::choking_algorithm::ChokingAlgorithm;
-use crate::request::request_group::AtomicProgress;
 
 use super::super::types::{
     BLOCK_SIZE, MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceRequestPlan,
 };
-use super::download_speed::DownloadSpeedSampler;
 use super::peer_actor::{
     PeerEvent, PeerGeneration, TryRequestError, apply_choke_round, apply_interest_change,
     rebalance_upload_slots_after_peer_disconnect,
@@ -308,7 +306,6 @@ pub(super) async fn run_attempt_batch(
     plans: &[PieceRequestPlan],
     peers: &mut PeerSchedulingSnapshot,
     mut choking_algo: Option<&mut ChokingAlgorithm>,
-    network_activity: Option<&AtomicProgress>,
     request_timeout: Duration,
 ) -> BatchAttemptOutcome {
     let mut pieces = HashMap::<u32, BatchPieceState>::with_capacity(plans.len());
@@ -350,7 +347,6 @@ pub(super) async fn run_attempt_batch(
     };
     let mut completed = HashMap::<u32, AttemptOutcome>::with_capacity(plans.len());
     let mut tracker_peers = Vec::new();
-    let mut download_speed = DownloadSpeedSampler::new();
 
     loop {
         let queue_waiters = fill_batch_request_windows(workers, &mut schedule, peers);
@@ -378,15 +374,10 @@ pub(super) async fn run_attempt_batch(
         let choke_deadline = choking_algo
             .as_deref()
             .and_then(ChokingAlgorithm::next_choke_rotation_deadline);
-        let mut next_deadline = [choke_deadline, next_request_deadline]
+        let next_deadline = [choke_deadline, next_request_deadline]
             .into_iter()
             .flatten()
             .min();
-        if network_activity.is_some()
-            && let Some(deadline) = download_speed.next_deadline()
-        {
-            next_deadline = Some(next_deadline.map_or(deadline, |current| current.min(deadline)));
-        }
         tokio::select! {
             event = event_rx.recv() => {
                 let Some(event) = event else { break };
@@ -514,12 +505,6 @@ pub(super) async fn run_attempt_batch(
                                 if end > state.piece_data.len() || state.completed.get(block_index).copied().unwrap_or(true) {
                                     continue;
                                 }
-                                if !data.is_empty()
-                                    && let Some(progress) = network_activity
-                                {
-                                    progress.record_network_activity();
-                                    download_speed.record(data.len() as u64);
-                                }
                                 state.piece_data[start..end].copy_from_slice(&data);
                                 state.completed[block_index] = true;
                                 state.completed_blocks += 1;
@@ -612,11 +597,6 @@ pub(super) async fn run_attempt_batch(
             Some(_) = queue_ready.next(), if !queue_ready.is_empty() => {}
             _ = wait_for_deadline(next_deadline) => {
                 let now = Instant::now();
-                if let Some(progress) = network_activity
-                    && download_speed.next_deadline().is_some_and(|deadline| now >= deadline)
-                {
-                    progress.set_download_speed(download_speed.sample(now));
-                }
                 if choking_algo
                     .as_deref()
                     .is_some_and(|algo| algo.choke_rotation_due(now))

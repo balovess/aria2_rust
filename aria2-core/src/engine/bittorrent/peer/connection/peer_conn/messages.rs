@@ -403,6 +403,9 @@ impl BtPeerConn {
         })) = &result
         {
             self.stats.on_data_received(data.len() as u64);
+            if let Some(progress) = self.upload_progress.as_ref() {
+                progress.record_download_payload(data.len() as u64);
+            }
         }
         result
     }

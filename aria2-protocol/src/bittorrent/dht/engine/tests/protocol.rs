@@ -1,7 +1,7 @@
 use super::super::{DhtEngine, DhtEngineConfig};
 use crate::bittorrent::dht::modern::{MutableValue, StoredItem};
 use crate::bittorrent::dht::node::DhtNode;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 #[tokio::test]
@@ -167,9 +167,33 @@ async fn run_public_dht_find_peers_smoke(listen_addr: IpAddr) {
         IpAddr::V4(_) => "IPv4",
         IpAddr::V6(_) => "IPv6",
     };
+    let bootstrap_nodes = std::env::var("ARIA2_TEST_DHT_BOOTSTRAP_NODES")
+        .ok()
+        .map(|raw| {
+            let nodes = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(|endpoint| {
+                    endpoint.parse::<SocketAddr>().unwrap_or_else(|error| {
+                        panic!(
+                            "invalid ARIA2_TEST_DHT_BOOTSTRAP_NODES endpoint {endpoint:?}: {error}"
+                        )
+                    })
+                })
+                .filter(|endpoint| endpoint.is_ipv6() == listen_addr.is_ipv6())
+                .collect::<Vec<_>>();
+            assert!(
+                !nodes.is_empty(),
+                "ARIA2_TEST_DHT_BOOTSTRAP_NODES has no endpoints for {family}"
+            );
+            nodes
+        })
+        .unwrap_or_default();
     let engine = DhtEngine::start(DhtEngineConfig {
         port: 0,
         listen_addr: Some(listen_addr),
+        bootstrap_nodes,
         bootstrap_timeout: Duration::from_secs(15),
         ..DhtEngineConfig::default()
     })

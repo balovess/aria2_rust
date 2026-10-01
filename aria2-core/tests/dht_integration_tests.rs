@@ -11,7 +11,7 @@
 mod fixtures;
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use fixtures::mock_dht_server::MockDhtServer;
@@ -764,96 +764,6 @@ fn test_mock_dht_server_returns_ipv6_peers() {
     assert!(
         result.is_ok(),
         "MockDHT should return IPv6 peer: {:?}",
-        result.err()
-    );
-}
-
-// =========================================================================
-// Enhancement Tests: Async Concurrent (2 tests)
-// =========================================================================
-
-/// Requires real DHT network; may hang without connectivity.
-/// Run with `cargo test -- --ignored` to include network-dependent tests.
-#[test]
-#[ignore]
-fn test_concurrent_query_faster_than_sequential() {
-    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
-
-    let config = DhtEngineConfig {
-        query_timeout: Duration::from_millis(200), // short timeout for speed test
-        max_concurrent_lookups: 8,
-        ..DhtEngineConfig::local()
-    };
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
-        let start = Instant::now();
-
-        // Query with 8 concurrent targets — should complete in ~1 timeout (not 8)
-        let discovery = engine.find_peers(&[0xFFu8; 20]).await;
-        let elapsed = start.elapsed();
-
-        // Even with no real peers, the concurrent batch should finish quickly.
-        // With sequential: 8 × 200ms = 1600ms minimum.
-        // With concurrent: ~200ms (all queries run in parallel).
-        // We allow generous margin but check it's under 5 seconds.
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "concurrent batch took {:?}, expected < 5s",
-            elapsed
-        );
-
-        let _ = discovery;
-        engine.shutdown_async().await;
-        Ok(())
-    });
-
-    assert!(
-        result.is_ok(),
-        "Concurrent query test failed: {:?}",
-        result.err()
-    );
-}
-
-/// Requires real DHT network; may hang without connectivity.
-/// Run with `cargo test -- --ignored` to include network-dependent tests.
-#[test]
-#[ignore]
-fn test_concurrent_announce_multiple_nodes() {
-    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
-
-    let config = DhtEngineConfig::local();
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
-        let start = Instant::now();
-
-        // announce_peer now uses join_all internally — should not hang or error
-        let result = engine.announce_peer(&[0xAAu8; 20], 9999).await;
-
-        let elapsed = start.elapsed();
-        assert!(
-            result.is_ok(),
-            "announce_peer should succeed: {:?}",
-            result.err()
-        );
-
-        // Should be fast (concurrent), not slow (sequential)
-        assert!(
-            elapsed < Duration::from_secs(30),
-            "concurrent announce took {:?}",
-            elapsed
-        );
-
-        engine.shutdown_async().await;
-        Ok(())
-    });
-
-    assert!(
-        result.is_ok(),
-        "Concurrent announce test failed: {:?}",
         result.err()
     );
 }

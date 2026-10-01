@@ -207,7 +207,16 @@ facade.
    settings. Core establishes the policy-approved TCP stream and passes it to
    the protocol handshake. Plain and MSE handshakes both return the same
    `PeerConnection`; it owns message framing and applies MSE encryption when
-    negotiated. `BtPeerConn` then adds engine peer state and statistics.
+   negotiated. `BtPeerConn` then adds engine peer state and statistics. Once
+   initialized, it is moved into a long-lived `PeerActor`; that actor is the
+   sole runtime owner of the connection and performs its socket reads/writes.
+   Coordinators send peer commands and consume peer events rather than doing
+   parallel socket I/O. `BtPeerConn` therefore remains the actor-owned
+   connection/state object at runtime; only pre-actor ownership is temporary.
+   The torrent-scoped `TorrentSession` owns the `PeerSwarm`, which the
+   piece-download coordinator borrows and then transfers into seeding. Magnet
+   metadata actors are activated for payload in place, preserving the same
+   connections and registry across that transition.
 6. `TrackerAnnouncer` selects one tracker URL from `BtAnnounce`, resolves UDP
    tracker addresses through the outbound policy, and calls the core UDP
    client. The retained `AnnounceList` manages multi-tier URL order and failure

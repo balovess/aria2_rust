@@ -5,10 +5,6 @@ use std::time::Duration;
 
 use tracing::info;
 
-use crate::engine::bittorrent::peer::choking_algorithm::ChokingAlgorithm;
-use crate::error::{Aria2Error, FatalError, Result};
-use crate::request::request_group::AtomicProgress;
-
 use super::super::types::{
     ActorAwarePieceBatchEntry, ActorAwarePieceBatchResult, ActorAwarePieceDownloadResult,
     PieceDownloadResult, PieceRequestPlan,
@@ -17,6 +13,8 @@ use super::normal_pipeline::run_attempt_batch;
 use super::peer_actor::PeerGeneration;
 use super::peer_registry::PeerSwarm;
 use super::peer_snapshot::PeerSchedulingSnapshot;
+use crate::engine::bittorrent::peer::choking_algorithm::ChokingAlgorithm;
+use crate::error::{Aria2Error, FatalError, Result};
 
 #[cfg(test)]
 #[path = "pipelined/tests.rs"]
@@ -48,7 +46,6 @@ pub(crate) async fn download_piece_blocks(
     piece_index: u32,
     piece_length: u32,
     num_blocks: u32,
-    network_activity: Option<&AtomicProgress>,
     request_timeout: Duration,
     max_attempts: u32,
     choking_algo: Option<&mut ChokingAlgorithm>,
@@ -60,7 +57,6 @@ pub(crate) async fn download_piece_blocks(
             piece_length,
             num_blocks,
         }],
-        network_activity,
         request_timeout,
         max_attempts,
         choking_algo,
@@ -83,7 +79,6 @@ pub(crate) async fn download_piece_blocks(
 pub(crate) async fn download_piece_blocks_batch(
     swarm: &mut PeerSwarm,
     plans: &[PieceRequestPlan],
-    network_activity: Option<&AtomicProgress>,
     request_timeout: Duration,
     max_attempts: u32,
     mut choking_algo: Option<&mut ChokingAlgorithm>,
@@ -157,7 +152,6 @@ pub(crate) async fn download_piece_blocks_batch(
             &pending_plans,
             &mut peers,
             choking_algo.as_deref_mut(),
-            network_activity,
             request_timeout,
         )
         .await;

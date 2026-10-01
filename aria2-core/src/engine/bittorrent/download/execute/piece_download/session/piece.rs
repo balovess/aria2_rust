@@ -188,7 +188,6 @@ impl PieceDownloadSession<'_> {
                     actual_piece_len,
                     num_blocks,
                     &mut self.endgame_state,
-                    Some(self.command.progress.as_ref()),
                     self.request_timeout,
                     max_attempts,
                     self.command.choking_algo.as_mut(),
@@ -200,7 +199,6 @@ impl PieceDownloadSession<'_> {
                     next_piece_idx as u32,
                     actual_piece_len,
                     num_blocks,
-                    Some(self.command.progress.as_ref()),
                     self.request_timeout,
                     max_attempts,
                     self.command.choking_algo.as_mut(),
@@ -305,7 +303,6 @@ impl PieceDownloadSession<'_> {
         let batch_download = download_piece_blocks_batch(
             self.swarm,
             &plans,
-            Some(self.command.progress.as_ref()),
             self.request_timeout,
             max_attempts,
             self.command.choking_algo.as_mut(),

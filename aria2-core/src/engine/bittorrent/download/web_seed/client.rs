@@ -233,7 +233,7 @@ impl WebSeedClient {
             if !chunk.is_empty()
                 && let Some(progress) = network_activity
             {
-                progress.record_network_activity();
+                progress.record_download_payload(chunk.len() as u64);
             }
             let next = received + chunk.len();
             destination[received..next].copy_from_slice(&chunk);

@@ -119,7 +119,16 @@ impl PieceDownloadSession<'_> {
             .min(memory_limited)
     }
 
-    pub(super) async fn run(mut self) -> Result<()> {
+    pub(super) async fn run(self) -> Result<()> {
+        let speed_reporter =
+            super::download_speed::spawn(std::sync::Arc::clone(&self.command.progress));
+        let result = self.run_loop().await;
+        speed_reporter.abort();
+        let _ = speed_reporter.await;
+        result
+    }
+
+    async fn run_loop(mut self) -> Result<()> {
         let mut peer_dials = PeerDialQueue::default();
         let peer_dial_config = PeerDialConfig::new(
             self.command,
@@ -861,17 +870,6 @@ impl PieceDownloadSession<'_> {
             .progress
             .set_completed_length(self.command.completed_bytes);
 
-        let elapsed = self.last_speed_update.elapsed();
-        if elapsed.as_millis() >= 500 {
-            let delta = self
-                .command
-                .completed_bytes
-                .saturating_sub(self.last_completed);
-            let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-            self.command.progress.set_download_speed(speed);
-            self.last_speed_update = Instant::now();
-            self.last_completed = self.command.completed_bytes;
-        }
         self.refresh_upload_stats();
     }
 
