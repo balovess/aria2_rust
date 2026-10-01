@@ -241,6 +241,7 @@ pub(crate) async fn download_piece_blocks_endgame(
                         PeerEvent::PexPeers { peers, .. } => workers.record_pex_peers(peers),
                         PeerEvent::TrackerPeers { peers } => tracker_peers.extend(peers),
                         PeerEvent::ExtensionHandshakeReceived { .. } => {}
+                        PeerEvent::MetadataMessage { .. } => {}
                         PeerEvent::InterestChanged { actor_id, snapshot } => {
                             if peers.peer_index_by_actor_id(actor_id).is_none() {
                                 continue;
@@ -376,7 +377,8 @@ pub(crate) async fn download_piece_blocks_endgame(
                             record_failed_peer(peer_index, &mut live, &peers, &mut failed_peers);
                             last_activity = Instant::now();
                         }
-                        PeerEvent::Disconnected { actor_id } => {
+                        PeerEvent::Disconnected { actor_id }
+                        | PeerEvent::GracefulDisconnected { actor_id } => {
                             let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
                                 continue;
                             };

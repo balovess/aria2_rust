@@ -521,10 +521,14 @@ impl BtDownloadCommand {
         output_dir: Option<&str>,
         policy: &crate::network::OutboundNetworkPolicy,
     ) -> Result<Self> {
-        let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
-            .map_err(|e| {
-            Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {}", e)))
-        })?;
+        let (meta, local_metadata) =
+            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse_with_info_bytes(
+                torrent_bytes,
+            )
+            .map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {error}")))
+            })?;
+        let local_metadata: Arc<[u8]> = local_metadata.into();
 
         // BEP 0027 (Private Torrent): capture the private flag at parse time.
         // When true, the engine must disable DHT, PEX, LPD and public tracker
@@ -711,6 +715,7 @@ impl BtDownloadCommand {
             started_at: None,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
+            local_metadata,
             // An explicit seed-time=0 is the original way to disable
             // seeding, even though seed-ratio has a positive default.
             seed_enabled: options.seed_time != Some(0.0)
@@ -726,6 +731,7 @@ impl BtDownloadCommand {
                 options.bt_max_peers,
                 10,
             ),
+            initial_peer_swarm: None,
             dht_engines: crate::engine::bittorrent::dht::engine_set::DhtEngineSet::default(),
             public_trackers: None,
             choking_algo,

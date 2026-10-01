@@ -23,7 +23,42 @@ pub(super) use super::peer_request::RequestGeneration;
 use super::peer_snapshot::PeerSchedulingSnapshot;
 use super::pipelined::BlockRequest;
 
+const MUTUAL_UNINTEREST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const PEER_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const METADATA_PIECE_SIZE: usize = 16 * 1024;
+
+fn local_metadata_response(
+    metadata: Option<&[u8]>,
+    piece: u32,
+) -> aria2_protocol::bittorrent::message::extension::UtMetadataMessage {
+    use aria2_protocol::bittorrent::message::extension::UtMetadataMessage;
+
+    metadata
+        .and_then(|metadata| {
+            let total_size = u32::try_from(metadata.len()).ok()?;
+            let start = usize::try_from(piece)
+                .ok()?
+                .checked_mul(METADATA_PIECE_SIZE)?;
+            if start >= metadata.len() {
+                return None;
+            }
+            let end = start
+                .saturating_add(METADATA_PIECE_SIZE)
+                .min(metadata.len());
+            Some(UtMetadataMessage::Data {
+                piece,
+                total_size,
+                data: metadata[start..end].to_vec(),
+            })
+        })
+        .unwrap_or(UtMetadataMessage::Reject { piece })
+}
+
 pub(crate) enum PeerCommand {
+    RequestMetadata {
+        piece: u32,
+    },
+    ActivatePayload(Arc<PeerActorPayloadConfig>),
     Request {
         generation: RequestGeneration,
         piece_index: u32,
@@ -40,6 +75,21 @@ pub(crate) enum PeerCommand {
     SendPex(Vec<u8>),
     AnnounceAvailability,
     Shutdown,
+}
+
+pub(crate) struct PeerActorPayloadConfig {
+    pub(crate) network_info_hash: [u8; 20],
+    pub(crate) local_metadata: Arc<[u8]>,
+    pub(crate) piece_length: u32,
+    pub(crate) num_pieces: u32,
+    pub(crate) total_length: u64,
+    pub(crate) upload_config: crate::engine::bittorrent::peer::upload_session::BtSeedingConfig,
+    pub(crate) upload_limiter: crate::rate_limiter::RateLimiter,
+    pub(crate) auto_unchoke: bool,
+    pub(crate) upload_counter: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) upload_progress: Arc<crate::request::request_group::AtomicProgress>,
+    pub(crate) provider:
+        Arc<dyn crate::engine::bittorrent::peer::upload_session::PieceDataProvider>,
 }
 
 pub(crate) enum PeerEvent {
@@ -82,7 +132,13 @@ pub(crate) enum PeerEvent {
     ExtensionHandshakeReceived {
         actor_id: PeerActorId,
         ut_pex_id: Option<u8>,
+        ut_metadata_id: Option<u8>,
+        metadata_size: Option<u32>,
         remote_listen_port: Option<u16>,
+    },
+    MetadataMessage {
+        actor_id: PeerActorId,
+        message: aria2_protocol::bittorrent::message::extension::UtMetadataMessage,
     },
     PexPeers {
         peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
@@ -107,6 +163,9 @@ pub(crate) enum PeerEvent {
     Disconnected {
         actor_id: PeerActorId,
     },
+    GracefulDisconnected {
+        actor_id: PeerActorId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -125,6 +184,7 @@ pub(crate) enum PeerGenerationUpdate {
 struct PeerActorDesiredState {
     wanted_pieces: Arc<[u8]>,
     choke_upload: bool,
+    local_seeder: bool,
 }
 
 pub(crate) struct PeerActorCommandReceiver {
@@ -162,6 +222,7 @@ impl PeerActorControl {
         let (desired_state, desired_state_updates) = watch::channel(PeerActorDesiredState {
             wanted_pieces: Arc::from([]),
             choke_upload,
+            local_seeder: false,
         });
         let (capacity_updates, _) = watch::channel(0);
         (
@@ -308,6 +369,20 @@ impl PeerActorControl {
                 return false;
             }
             state.choke_upload = choked;
+            true
+        });
+        true
+    }
+
+    pub(crate) fn set_local_seeder(&self, local_seeder: bool) -> bool {
+        if self.desired_state.receiver_count() == 0 {
+            return false;
+        }
+        self.desired_state.send_if_modified(|state| {
+            if state.local_seeder == local_seeder {
+                return false;
+            }
+            state.local_seeder = local_seeder;
             true
         });
         true
@@ -589,7 +664,7 @@ pub(crate) async fn run_peer_actor(
     command_rx: PeerActorCommandReceiver,
     event_tx: mpsc::Sender<PeerEvent>,
     dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-    upload_provider: Option<
+    mut upload_provider: Option<
         Arc<dyn crate::engine::bittorrent::peer::upload_session::PieceDataProvider>,
     >,
     pending_download_requests: Arc<AtomicUsize>,
@@ -603,19 +678,28 @@ pub(crate) async fn run_peer_actor(
     desired_state_updates.mark_changed();
     let mut availability_sent = false;
     let mut wanted_pieces: Arc<[u8]> = Arc::from([]);
+    let mut extension_handshake_info = None;
     if let Some(startup) = connection.actor_startup.take() {
+        extension_handshake_info = Some((startup.peer_agent.clone(), startup.listen_port));
         let startup_result = async {
             if connection.remote_supports_extended_messaging() {
+                let metadata_size = connection
+                    .local_metadata
+                    .as_ref()
+                    .and_then(|metadata| u32::try_from(metadata.len()).ok())
+                    .filter(|size| *size > 0);
                 connection
-                    .send_extension_handshake_with_port(&startup.peer_agent, startup.listen_port)
+                    .send_extension_handshake_with_metadata(
+                        &startup.peer_agent,
+                        startup.listen_port,
+                        metadata_size,
+                    )
                     .await?;
             }
-            let provider = upload_provider.as_deref().ok_or_else(|| {
-                crate::error::Aria2Error::DownloadFailed(
-                    "peer actor started without an upload provider".into(),
-                )
-            })?;
-            connection.announce_upload_availability(provider).await?;
+            if let Some(provider) = upload_provider.as_deref() {
+                connection.announce_upload_availability(provider).await?;
+                availability_sent = true;
+            }
             if connection.remote_supports_dht()
                 && let Some(engine) = dht_engine.as_ref()
             {
@@ -641,13 +725,18 @@ pub(crate) async fn run_peer_actor(
             let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
             return actor_id;
         }
-        availability_sent = true;
     }
     let mut requests = PeerRequestLedger::default();
     let mut active_generations = HashMap::<u32, RequestGeneration>::new();
     let mut upload_flush_deadline: Option<tokio::time::Instant> = None;
     let mut upload_rate_changes = connection.upload_rate_change_receivers();
     let mut shutdown_requested = false;
+    let mut last_peer_progress = tokio::time::Instant::now();
+    let mut local_seeder = false;
+    let local_ut_metadata_id =
+        aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new()
+            .ut_metadata_id()
+            .unwrap_or(1);
     loop {
         pending_download_requests.store(requests.len(), Ordering::Relaxed);
         if shutdown_requested && !connection.has_pending_upload_messages() {
@@ -669,8 +758,22 @@ pub(crate) async fn run_peer_actor(
         let keepalive_deadline = tokio::time::Instant::from_std(connection.keepalive_deadline());
         let peer_timeout_deadline =
             tokio::time::Instant::from_std(connection.peer_timeout_deadline());
+        let interaction_idle_timeout =
+            if !connection.stats.am_interested && !connection.stats.peer_interested {
+                MUTUAL_UNINTEREST_IDLE_TIMEOUT
+            } else {
+                PEER_PROGRESS_IDLE_TIMEOUT
+            };
+        let interaction_idle_deadline = last_peer_progress + interaction_idle_timeout;
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(interaction_idle_deadline) => {
+                tracing::debug!(actor_id = actor_id.0, ?interaction_idle_timeout, "BT peer interaction idle deadline elapsed");
+                let _ = event_tx
+                    .send(PeerEvent::GracefulDisconnected { actor_id })
+                    .await;
+                break;
+            }
             _ = tokio::time::sleep_until(peer_timeout_deadline) => {
                 tracing::debug!(actor_id = actor_id.0, "BT peer inactivity timeout elapsed");
                 let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
@@ -738,6 +841,7 @@ pub(crate) async fn run_peer_actor(
                     latest_desired_state.clone()
                 };
                 wanted_pieces = Arc::clone(&desired_state.wanted_pieces);
+                local_seeder = desired_state.local_seeder;
                 match reconcile_peer_interest(
                     actor_id,
                     connection,
@@ -766,12 +870,155 @@ pub(crate) async fn run_peer_actor(
                         break;
                     }
                 }
+                if local_seeder && connection.is_seeder() {
+                    tracing::debug!(actor_id = actor_id.0, "Closing BT connection between seeders");
+                    let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                    break;
+                }
             }
             command = commands.recv(), if !shutdown_requested => {
                 if command.is_some() {
                     notify_queue_capacity(&capacity_updates);
                 }
                 match command {
+                    Some(PeerCommand::RequestMetadata { piece }) => {
+                        if !connection.is_metadata_pending() {
+                            continue;
+                        }
+                        let Some(ext_id) = connection.peer_extension_id("ut_metadata") else {
+                            continue;
+                        };
+                        let message = aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+                            ext_id,
+                            payload: aria2_protocol::bittorrent::message::extension::UtMetadataMessage::Request { piece }
+                                .to_payload(),
+                        };
+                        if let Err(error) = connection.send_bt_message(&message).await {
+                            tracing::debug!(actor_id = actor_id.0, %error, piece, "Failed to request BEP 9 metadata piece");
+                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                            break;
+                        }
+                        connection.record_outbound_activity();
+                    }
+                    Some(PeerCommand::ActivatePayload(config)) => {
+                        if !connection.activate_payload_session(
+                            config.piece_length,
+                            config.num_pieces,
+                            config.total_length,
+                        ) {
+                            tracing::debug!(actor_id = actor_id.0, "Dropping metadata peer after availability state exceeded its bounded buffer");
+                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                            break;
+                        }
+                        connection.local_metadata = Some(Arc::clone(&config.local_metadata));
+                        if connection.remote_supports_extended_messaging()
+                            && let Some((peer_agent, listen_port)) =
+                                extension_handshake_info.as_ref()
+                        {
+                            let metadata_size = u32::try_from(config.local_metadata.len())
+                                .ok()
+                                .filter(|size| *size > 0);
+                            if let Err(error) = connection
+                                .send_extension_handshake_with_metadata(
+                                    peer_agent,
+                                    *listen_port,
+                                    metadata_size,
+                                )
+                                .await
+                            {
+                                tracing::debug!(actor_id = actor_id.0, %error, "Failed to advertise local BEP 9 metadata after magnet activation");
+                                let _ = event_tx
+                                    .send(PeerEvent::Disconnected { actor_id })
+                                    .await;
+                                break;
+                            }
+                            connection.record_outbound_activity();
+                        }
+                        let allowed_fast = connection
+                            .peer_allowed_fast_set()
+                            .iter()
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let mut event_stream_closed = false;
+                        for piece_index in allowed_fast {
+                            if event_tx
+                                .send(PeerEvent::AllowedFast {
+                                    actor_id,
+                                    piece_index,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                event_stream_closed = true;
+                                break;
+                            }
+                        }
+                        if event_stream_closed {
+                            break;
+                        }
+                        connection.configure_upload_with_auto_unchoke(
+                            &config.upload_config,
+                            config.upload_limiter.clone(),
+                            config.num_pieces,
+                            config.piece_length,
+                            config.auto_unchoke,
+                        );
+                        connection.set_upload_counter(Arc::clone(&config.upload_counter));
+                        connection.set_upload_progress(Arc::clone(&config.upload_progress));
+                        let allowed_fast = if connection.remote_supports_fast_extension() {
+                            aria2_protocol::bittorrent::fast_set::compute_fast_set(
+                                connection.remote_ip(),
+                                config.num_pieces,
+                                &config.network_info_hash,
+                                10,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                        let mut activation_failed = false;
+                        for piece_index in allowed_fast {
+                            if let Err(error) = connection
+                                .send_bt_message(
+                                    &aria2_protocol::bittorrent::message::types::BtMessage::AllowedFast {
+                                        index: piece_index,
+                                    },
+                                )
+                                .await
+                            {
+                                tracing::debug!(actor_id = actor_id.0, %error, "Failed to send post-metadata AllowedFast");
+                                let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                                activation_failed = true;
+                                break;
+                            }
+                            connection.add_am_allowed_fast(piece_index);
+                        }
+                        if activation_failed {
+                            break;
+                        }
+                        upload_provider = Some(Arc::clone(&config.provider));
+                        if let Err(error) = connection
+                            .announce_upload_availability(config.provider.as_ref())
+                            .await
+                        {
+                            tracing::debug!(actor_id = actor_id.0, %error, "Failed to announce availability after metadata resolution");
+                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                            break;
+                        }
+                        availability_sent = true;
+                        if let Some(resource) = connection.session_resource.as_ref()
+                            && event_tx
+                                .send(PeerEvent::PeerAvailabilitySnapshot {
+                                    actor_id,
+                                    bitfield: resource.bitfield().to_vec(),
+                                    seeder: connection.seeder,
+                                })
+                                .await
+                                .is_err()
+                        {
+                            break;
+                        }
+                        connection.record_outbound_activity();
+                    }
                     Some(PeerCommand::Request { generation, piece_index, request }) => {
                         if active_generations.get(&piece_index) != Some(&generation)
                             || requests.contains(piece_index, request)
@@ -829,9 +1076,7 @@ pub(crate) async fn run_peer_actor(
                             continue;
                         }
                         let Some(provider) = upload_provider.as_deref() else {
-                            tracing::debug!(actor_id = actor_id.0, "Peer actor has no upload provider for availability announcement");
-                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
-                            break;
+                            continue;
                         };
                         if let Err(error) = connection.announce_upload_availability(provider).await {
                             tracing::debug!(actor_id = actor_id.0, %error, "Failed to announce BT peer availability");
@@ -861,6 +1106,43 @@ pub(crate) async fn run_peer_actor(
             message = connection.read_message() => {
                 match message {
                     Ok(Some(message)) => {
+                        use aria2_protocol::bittorrent::message::types::BtMessage;
+                        let remote_extension_handshake = match &message {
+                            BtMessage::Extended {
+                                ext_id: 0,
+                                payload,
+                            } => aria2_protocol::bittorrent::message::extension::
+                                ExtensionHandshake::from_bytes(payload)
+                                .ok(),
+                            _ => None,
+                        };
+                        let metadata_message = match &message {
+                            BtMessage::Extended { ext_id, payload }
+                                if *ext_id == local_ut_metadata_id =>
+                            {
+                                match aria2_protocol::bittorrent::message::extension::
+                                    UtMetadataMessage::from_payload(payload)
+                                {
+                                    Ok(parsed) => Some(parsed),
+                                    Err(error) => {
+                                        tracing::debug!(actor_id = actor_id.0, %error, "Invalid BEP 9 metadata message");
+                                        let _ = event_tx
+                                            .send(PeerEvent::Disconnected { actor_id })
+                                            .await;
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => None,
+                        };
+                        if matches!(
+                            &message,
+                            BtMessage::Request { .. } | BtMessage::Piece { .. }
+                        ) || (connection.is_metadata_pending()
+                            && matches!(&message, BtMessage::Extended { .. }))
+                        {
+                            last_peer_progress = tokio::time::Instant::now();
+                        }
                         let was_interested = connection.stats.peer_interested;
                         let was_peer_choking = connection.stats.peer_choking;
                         let was_seeder = connection.seeder;
@@ -868,15 +1150,16 @@ pub(crate) async fn run_peer_actor(
                         let peer_availability_change = match &message {
                             aria2_protocol::bittorrent::message::types::BtMessage::Have {
                                 piece_index,
-                            } => Some(*piece_index),
+                            } if !connection.is_metadata_pending() => Some(*piece_index),
                             _ => None,
                         };
-                        let full_availability_change = matches!(
-                            message,
-                            aria2_protocol::bittorrent::message::types::BtMessage::Bitfield { .. }
-                                | aria2_protocol::bittorrent::message::types::BtMessage::HaveAll
-                                | aria2_protocol::bittorrent::message::types::BtMessage::HaveNone
-                        );
+                        let full_availability_change = !connection.is_metadata_pending()
+                            && matches!(
+                                message,
+                                aria2_protocol::bittorrent::message::types::BtMessage::Bitfield { .. }
+                                    | aria2_protocol::bittorrent::message::types::BtMessage::HaveAll
+                                    | aria2_protocol::bittorrent::message::types::BtMessage::HaveNone
+                            );
                         let received_extension_handshake = matches!(
                             &message,
                             aria2_protocol::bittorrent::message::types::BtMessage::Extended {
@@ -887,7 +1170,7 @@ pub(crate) async fn run_peer_actor(
                         let allowed_fast_piece = match &message {
                             aria2_protocol::bittorrent::message::types::BtMessage::AllowedFast {
                                 index,
-                            } => Some(*index),
+                            } if !connection.is_metadata_pending() => Some(*index),
                             _ => None,
                         };
                         let (message, uploaded_bytes) = match process_peer_message(
@@ -905,6 +1188,11 @@ pub(crate) async fn run_peer_actor(
                                 break;
                             }
                         };
+                        if local_seeder && connection.is_seeder() {
+                            tracing::debug!(actor_id = actor_id.0, "Closing BT connection between seeders");
+                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                            break;
+                        }
                         if let Some(piece_index) = allowed_fast_piece
                             && event_tx
                                 .send(PeerEvent::AllowedFast {
@@ -921,12 +1209,57 @@ pub(crate) async fn run_peer_actor(
                                 .send(PeerEvent::ExtensionHandshakeReceived {
                                     actor_id,
                                     ut_pex_id: connection.peer_extension_id("ut_pex"),
+                                    ut_metadata_id: remote_extension_handshake
+                                        .as_ref()
+                                        .and_then(|handshake| handshake.ut_metadata_id())
+                                        .filter(|id| *id != 0),
+                                    metadata_size: remote_extension_handshake
+                                        .as_ref()
+                                        .and_then(|handshake| handshake.metadata_size())
+                                        .filter(|size| *size > 0),
                                     remote_listen_port: connection.remote_listen_port,
                                 })
                                 .await
                                 .is_err()
                         {
                             break;
+                        }
+                        if let Some(metadata_message) = metadata_message {
+                            use aria2_protocol::bittorrent::message::extension::UtMetadataMessage;
+                            match metadata_message {
+                                UtMetadataMessage::Request { piece } => {
+                                    if let Some(ext_id) = connection.peer_extension_id("ut_metadata") {
+                                        let response = local_metadata_response(
+                                            connection.local_metadata.as_deref(),
+                                            piece,
+                                        );
+                                        let message = BtMessage::Extended {
+                                            ext_id,
+                                            payload: response.to_payload(),
+                                        };
+                                        if connection.send_bt_message(&message).await.is_err() {
+                                            let _ = event_tx
+                                                .send(PeerEvent::Disconnected { actor_id })
+                                                .await;
+                                            break;
+                                        }
+                                        connection.record_outbound_activity();
+                                    }
+                                }
+                                metadata_message => {
+                                    if connection.is_metadata_pending()
+                                        && event_tx
+                                            .send(PeerEvent::MetadataMessage {
+                                                actor_id,
+                                                message: metadata_message,
+                                            })
+                                            .await
+                                            .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         let discovered_pex_peers = connection.drain_pex_peers();
                         if !discovered_pex_peers.is_empty()
@@ -1041,7 +1374,6 @@ pub(crate) async fn run_peer_actor(
                             }
                             continue;
                         };
-                        use aria2_protocol::bittorrent::message::types::BtMessage;
                         let generation = match &message {
                             BtMessage::Piece { index, begin, .. }
                             | BtMessage::Reject {
@@ -1091,7 +1423,7 @@ pub(crate) async fn run_peer_actor(
                     Ok(None) => {
                         tracing::debug!(actor_id = actor_id.0, "BT peer closed its connection");
                         let _ = event_tx
-                            .send(PeerEvent::Disconnected { actor_id })
+                            .send(PeerEvent::GracefulDisconnected { actor_id })
                             .await;
                         break;
                     }
@@ -1377,6 +1709,36 @@ mod tests {
     };
     use aria2_protocol::bittorrent::message::types::{BtMessage, PieceBlockRequest};
     use aria2_protocol::bittorrent::peer::connection::PeerConnection;
+
+    #[test]
+    fn local_metadata_response_serves_bep9_chunks_and_rejects_out_of_range_pieces() {
+        let metadata = vec![0x5a; METADATA_PIECE_SIZE + 7];
+
+        assert_eq!(
+            local_metadata_response(Some(&metadata), 0),
+            aria2_protocol::bittorrent::message::extension::UtMetadataMessage::Data {
+                piece: 0,
+                total_size: metadata.len() as u32,
+                data: vec![0x5a; METADATA_PIECE_SIZE],
+            }
+        );
+        assert_eq!(
+            local_metadata_response(Some(&metadata), 1),
+            aria2_protocol::bittorrent::message::extension::UtMetadataMessage::Data {
+                piece: 1,
+                total_size: metadata.len() as u32,
+                data: vec![0x5a; 7],
+            }
+        );
+        assert_eq!(
+            local_metadata_response(Some(&metadata), 2),
+            aria2_protocol::bittorrent::message::extension::UtMetadataMessage::Reject { piece: 2 }
+        );
+        assert_eq!(
+            local_metadata_response(None, 0),
+            aria2_protocol::bittorrent::message::extension::UtMetadataMessage::Reject { piece: 0 }
+        );
+    }
 
     #[test]
     fn generation_end_updates_snapshot_when_bounded_peer_mailbox_is_full() {

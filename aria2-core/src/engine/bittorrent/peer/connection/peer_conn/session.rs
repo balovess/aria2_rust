@@ -201,3 +201,47 @@ impl BtPeerConn {
         }
     }
 }
+
+#[cfg(test)]
+mod metadata_transition_tests {
+    use super::BtPeerConn;
+    use aria2_protocol::bittorrent::message::types::BtMessage;
+
+    #[test]
+    fn metadata_availability_is_replayed_after_payload_geometry_is_known() {
+        let mut peer = BtPeerConn::new_stub(&[1; 20]);
+        peer.enter_metadata_mode();
+        peer.apply_peer_state_message(&BtMessage::Bitfield {
+            data: vec![0x80, 0x40],
+        });
+        peer.apply_peer_state_message(&BtMessage::Have { piece_index: 9 });
+        peer.apply_peer_state_message(&BtMessage::AllowedFast { index: 9 });
+
+        assert!(peer.activate_payload_session(16 * 1024, 10, 160 * 1024));
+        assert!(peer.has_piece(0));
+        assert!(peer.has_piece(9));
+        assert!(peer.peer_allowed_fast_set().contains(&9));
+        assert!(!peer.is_metadata_pending());
+    }
+
+    #[test]
+    fn metadata_availability_with_out_of_range_piece_is_rejected_at_transition() {
+        let mut peer = BtPeerConn::new_stub(&[2; 20]);
+        peer.enter_metadata_mode();
+        peer.apply_peer_state_message(&BtMessage::Have {
+            piece_index: u32::MAX,
+        });
+        peer.apply_peer_state_message(&BtMessage::AllowedFast { index: 10 });
+
+        assert!(!peer.activate_payload_session(16 * 1024, 10, 160 * 1024));
+        assert!(peer.is_metadata_pending());
+        assert!(
+            peer.session_resource
+                .as_ref()
+                .unwrap()
+                .bitfield()
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+}

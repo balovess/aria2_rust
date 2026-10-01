@@ -129,13 +129,28 @@ impl BtDownloadCommand {
             );
         }
 
-        let swarm = PeerSwarm::new(64);
+        let mut swarm = self
+            .initial_peer_swarm
+            .take()
+            .unwrap_or_else(|| PeerSwarm::new(64));
+        swarm.set_local_metadata(Arc::clone(&self.local_metadata));
+        tracing::debug!(
+            retained_peer_actors = swarm.len(),
+            "Preparing payload session with retained torrent swarm"
+        );
         let peer_event_tx = swarm
             .event_sender()
             .expect("new torrent swarm must own an event sender");
-        let peers = self
+        let peers = match self
             .discover_peers_with_events(meta, total_size, &network_info_hash, Some(peer_event_tx))
-            .await?;
+            .await
+        {
+            Ok(peers) => peers,
+            Err(error) => {
+                swarm.shutdown_all().await;
+                return Err(error);
+            }
+        };
 
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
         // BEP 0027 (Private Torrent): PEX must be disabled for private torrents

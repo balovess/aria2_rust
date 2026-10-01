@@ -115,6 +115,7 @@ struct ControlledSeeder {
 #[derive(Clone)]
 struct ControlledPeerSession {
     info_hash: [u8; 20],
+    initial_bitfield: u8,
     request_count: Arc<AtomicUsize>,
     choked_request_count: Arc<AtomicUsize>,
     unchoke_delay: Duration,
@@ -168,6 +169,34 @@ impl ControlledSeeder {
         fast_extension_message: Option<BtMessage>,
         negotiate_fast_extension: bool,
     ) -> Self {
+        Self::start_with_initial_bitfield_and_behavior(
+            info_hash,
+            0x80,
+            unchoke_delay,
+            fast_extension_message,
+            negotiate_fast_extension,
+        )
+        .await
+    }
+
+    async fn start_with_initial_bitfield(info_hash: [u8; 20], initial_bitfield: u8) -> Self {
+        Self::start_with_initial_bitfield_and_behavior(
+            info_hash,
+            initial_bitfield,
+            Duration::ZERO,
+            None,
+            false,
+        )
+        .await
+    }
+
+    async fn start_with_initial_bitfield_and_behavior(
+        info_hash: [u8; 20],
+        initial_bitfield: u8,
+        unchoke_delay: Duration,
+        fast_extension_message: Option<BtMessage>,
+        negotiate_fast_extension: bool,
+    ) -> Self {
         let listener = TokioTcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind controlled seeder");
@@ -179,6 +208,7 @@ impl ControlledSeeder {
         let fast_message_sent = Arc::new(Notify::new());
         let peer_session = ControlledPeerSession {
             info_hash,
+            initial_bitfield,
             request_count: Arc::clone(&request_count),
             choked_request_count: Arc::clone(&choked_request_count),
             unchoke_delay,
@@ -362,6 +392,7 @@ async fn read_bt_message(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Resu
 async fn serve_peer(stream: &mut TcpStream, session: ControlledPeerSession) {
     let ControlledPeerSession {
         info_hash,
+        initial_bitfield,
         request_count,
         choked_request_count,
         unchoke_delay,
@@ -389,7 +420,10 @@ async fn serve_peer(stream: &mut TcpStream, session: ControlledPeerSession) {
     response[28..48].copy_from_slice(&info_hash);
     response[48..68].copy_from_slice(b"ActorSeeder-00000001");
     if stream.write_all(&response).await.is_err()
-        || stream.write_all(&[0, 0, 0, 2, 5, 0x80]).await.is_err()
+        || stream
+            .write_all(&[0, 0, 0, 2, 5, initial_bitfield])
+            .await
+            .is_err()
     {
         return;
     }
@@ -867,7 +901,7 @@ async fn read_peer_message_or_disconnect(stream: &mut TcpStream) -> Option<Vec<u
 }
 
 #[tokio::test]
-async fn cli_seeding_reports_tracker_source_for_a_peer_discovered_after_completion() {
+async fn cli_seeding_reports_tracker_source_for_a_leecher_discovered_after_completion() {
     let output_dir = tempfile::tempdir().expect("temporary download directory");
     std::fs::write(output_dir.path().join("actor-runtime.bin"), b"abc")
         .expect("preseed the fully verified torrent payload");
@@ -876,7 +910,7 @@ async fn cli_seeding_reports_tracker_source_for_a_peer_discovered_after_completi
     let placeholder = test_torrent(&placeholder_tracker.announce_url());
     let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
         .expect("test torrent metadata parses");
-    let peer = ControlledSeeder::start(meta.info_hash.bytes).await;
+    let peer = ControlledSeeder::start_with_initial_bitfield(meta.info_hash.bytes, 0).await;
     drop(placeholder_tracker);
 
     let tracker =
@@ -951,9 +985,9 @@ async fn cli_seeding_reports_tracker_source_for_a_peer_discovered_after_completi
         peer_details.as_array().is_some_and(|peers| {
             peers
                 .iter()
-                .any(|peer| peer["source"] == "tracker" && peer["seeder"].as_bool() == Some(true))
+                .any(|peer| peer["source"] == "tracker" && peer["seeder"].as_bool() == Some(false))
         }),
-        "seeding-phase RPC snapshot must preserve both source and peer availability: {peer_details}"
+        "seeding-phase RPC snapshot must preserve tracker source and the leecher bitfield: {peer_details}"
     );
 }
 
@@ -1157,6 +1191,17 @@ async fn cli_download_keeps_live_peer_visible_during_actor_transfer() {
                         .is_some_and(|bytes| bytes.parse::<u64>().unwrap_or(0) >= 3)
             })),
         "incoming upload counters are visible through peer RPC: {details}"
+    );
+
+    let status = rpc(
+        &client,
+        7,
+        "aria2.tellStatus",
+        json!([gid, ["status", "uploadLength"]]),
+    );
+    assert_eq!(
+        status["uploadLength"], "3",
+        "task RPC uploadLength must include payload bytes served by the seeding actor: {status}"
     );
 }
 
@@ -1895,22 +1940,18 @@ async fn cli_uploads_a_verified_piece_before_torrent_completion() {
     tokio::time::timeout(Duration::from_secs(5), peer.peer_not_interested.notified())
         .await
         .expect("completed torrent did not withdraw Interested from its peer");
-    let seeding_snapshot_deadline = Instant::now() + Duration::from_secs(1);
-    let seeding_peer_details = loop {
+    let seed_pair_disconnect_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
         let peer_details = rpc(&client, 5, "aria2.getPeerDetails", json!([gid]));
-        if peer_details[0]["flags"]["amInterested"] == false {
-            break peer_details;
+        if peer_details.as_array().is_some_and(Vec::is_empty) {
+            break;
         }
         assert!(
-            Instant::now() < seeding_snapshot_deadline,
-            "RPC did not publish the post-download NotInterested state within one second: {peer_details}"
+            Instant::now() < seed_pair_disconnect_deadline,
+            "a seed-to-seed peer should leave the active RPC snapshot after torrent completion: {peer_details}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    assert_eq!(
-        seeding_peer_details[0]["flags"]["amInterested"], false,
-        "RPC snapshot reflects the post-download NotInterested state: {seeding_peer_details}"
-    );
+    }
     assert_eq!(
         std::fs::read(output_dir.path().join("active-upload.bin")).unwrap(),
         *payload

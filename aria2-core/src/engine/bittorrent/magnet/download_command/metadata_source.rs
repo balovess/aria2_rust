@@ -1,9 +1,8 @@
 //! Resolve magnet metadata from exact sources, trackers, DHT, and BEP 9 peers.
 
-use super::{MAX_MAGNET_METADATA_PEERS_TO_TRY, MagnetDownloadCommand};
-use crate::engine::bittorrent::magnet::metadata_exchange::{
-    MetadataExchangeConfig, MetadataExchangeSession,
-};
+use super::{MAX_MAGNET_METADATA_PEERS_PER_SOURCE, MagnetDownloadCommand};
+use crate::engine::bittorrent::magnet::metadata_exchange::MetadataExchangeConfig;
+use crate::engine::bittorrent::magnet::metadata_swarm::MetadataPeerSwarm;
 use crate::engine::http::client_config::{ProxyTarget, add_reqwest_proxy};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::client_identity::ClientTlsConfig;
@@ -272,17 +271,13 @@ impl MagnetDownloadCommand {
             return Ok(metadata);
         }
 
-        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
-        let metadata_session = |max_peers_to_try| {
-            MetadataExchangeSession::new(MetadataExchangeConfig {
-                max_peers_to_try,
-                connect_timeout: Duration::from_secs(15),
-                request_timeout: Duration::from_secs(10),
-                piece_size: 16 * 1024,
-                ..MetadataExchangeConfig::default()
-            })
-            .with_outbound_network_policy(Arc::clone(&outbound_network_policy))
-        };
+        let mut metadata_swarm = MetadataPeerSwarm::new(MetadataExchangeConfig {
+            max_peers_to_try: MAX_MAGNET_METADATA_PEERS_PER_SOURCE * 2,
+            connect_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(10),
+            piece_size: 16 * 1024,
+            ..MetadataExchangeConfig::default()
+        });
 
         // Magnet links commonly carry tracker URLs, and tracker discovery is
         // available even when DHT bootstrap is blocked by NAT or a firewall.
@@ -291,11 +286,36 @@ impl MagnetDownloadCommand {
         let tracker_peers = self.discover_magnet_tracker_peers(magnet, &options).await;
         let mut last_error = None;
         if !tracker_peers.is_empty() {
-            match metadata_session(tracker_peers.len().min(MAX_MAGNET_METADATA_PEERS_TO_TRY))
-                .fetch_metadata(&magnet.info_hash, &tracker_peers)
+            let peers = tracker_peers
+                .iter()
+                .take(MAX_MAGNET_METADATA_PEERS_PER_SOURCE)
+                .copied()
+                .map(|endpoint| {
+                    (
+                        endpoint,
+                        crate::request::request_group::BtPeerSource::Tracker,
+                    )
+                })
+                .collect::<Vec<_>>();
+            match metadata_swarm
+                .add_peers(
+                    &peers,
+                    &magnet.info_hash,
+                    self.local_peer_id,
+                    &options,
+                    &self.dht_engines,
+                    Arc::clone(&self.outbound_network_policy),
+                )
                 .await
             {
-                Ok(metadata) => return Ok(metadata),
+                Ok(count) => info!(count, "Magnet: tracker peers admitted to metadata swarm"),
+                Err(error) => warn!(%error, "Magnet: tracker peers could not join metadata swarm"),
+            }
+            match metadata_swarm.fetch_metadata().await {
+                Ok(metadata) => {
+                    self.initial_peer_swarm = Some(metadata_swarm.into_swarm());
+                    return Ok(metadata);
+                }
                 Err(error) => {
                     warn!(
                         "Magnet: metadata fetch from tracker peers failed: {}",
@@ -318,14 +338,38 @@ impl MagnetDownloadCommand {
         };
 
         if !dht_peers.is_empty() {
-            match metadata_session(dht_peers.len().min(MAX_MAGNET_METADATA_PEERS_TO_TRY))
-                .fetch_metadata(&magnet.info_hash, &dht_peers)
+            let peers = dht_peers
+                .iter()
+                .take(MAX_MAGNET_METADATA_PEERS_PER_SOURCE)
+                .copied()
+                .map(|endpoint| (endpoint, crate::request::request_group::BtPeerSource::Dht))
+                .collect::<Vec<_>>();
+            match metadata_swarm
+                .add_peers(
+                    &peers,
+                    &magnet.info_hash,
+                    self.local_peer_id,
+                    &options,
+                    &self.dht_engines,
+                    Arc::clone(&self.outbound_network_policy),
+                )
                 .await
             {
-                Ok(metadata) => return Ok(metadata),
+                Ok(count) => info!(count, "Magnet: DHT peers admitted to metadata swarm"),
+                Err(error) => {
+                    warn!(%error, "Magnet: DHT peers could not join metadata swarm");
+                }
+            }
+            match metadata_swarm.fetch_metadata().await {
+                Ok(metadata) => {
+                    self.initial_peer_swarm = Some(metadata_swarm.into_swarm());
+                    return Ok(metadata);
+                }
                 Err(error) => last_error = Some(error.to_string()),
             }
         }
+
+        metadata_swarm.shutdown().await;
 
         let message = last_error.map_or_else(
             || "No peers found via trackers or DHT".to_string(),

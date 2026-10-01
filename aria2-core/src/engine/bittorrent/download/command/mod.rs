@@ -114,6 +114,8 @@ pub struct BtDownloadCommand {
     pub(crate) started_at: Option<Instant>,
     pub(crate) completed_bytes: u64,
     pub(crate) torrent_data: Vec<u8>,
+    /// Canonical bencoded `info` dictionary shared with peers through BEP 9.
+    pub(crate) local_metadata: Arc<[u8]>,
     pub(crate) seed_enabled: bool,
     pub(crate) seed_time: Option<std::time::Duration>,
     pub(crate) seed_ratio: Option<f64>,
@@ -125,6 +127,9 @@ pub struct BtDownloadCommand {
     pub(crate) listen_port: u16,
     pub(crate) bt_runtime: std::sync::Arc<BtRuntimeState>,
     pub(crate) peer_coordinator: crate::engine::bittorrent::peer::coordinator::BtPeerCoordinator,
+    /// Magnet metadata actors handed into the payload session without redial.
+    pub(crate) initial_peer_swarm:
+        Option<crate::engine::bittorrent::peer::message_handler::PeerSwarm>,
     pub(crate) dht_engines: DhtEngineSet,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
@@ -264,6 +269,9 @@ impl BtDownloadCommand {
     /// the task so tracker stopped announcements and DHT routing-table
     /// persistence are not lost.
     pub async fn shutdown(&mut self) {
+        if let Some(mut swarm) = self.initial_peer_swarm.take() {
+            swarm.shutdown_all().await;
+        }
         // The DHT engine owns background receive/maintenance tasks and its
         // final routing-table snapshot. Shut it down before the command is
         // dropped; DhtEngine::Drop only aborts tasks and cannot persist state.

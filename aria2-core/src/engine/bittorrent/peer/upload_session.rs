@@ -23,6 +23,7 @@ pub trait PieceDataProvider: Send + Sync {
     fn piece_length(&self) -> u32;
 }
 
+#[derive(Clone)]
 pub struct BtSeedingConfig {
     pub max_upload_bytes_per_sec: Option<u64>,
     /// Process-wide limiter shared by all download/seeding commands.

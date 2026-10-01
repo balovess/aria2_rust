@@ -60,6 +60,7 @@ impl BtDownloadCommand {
         info_hash_v2: Option<[u8; 32]>,
         total_size: u64,
     ) -> Result<()> {
+        swarm.set_local_metadata(std::sync::Arc::clone(&self.local_metadata));
         let file_provider: std::sync::Arc<
             dyn crate::engine::bittorrent::peer::upload_session::PieceDataProvider,
         > = std::sync::Arc::new(FileBackedPieceProvider::new(
@@ -77,6 +78,8 @@ impl BtDownloadCommand {
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };
+
+        swarm.set_local_seeder(true);
 
         // Promote the completed download's still-connected peers into the
         // TorrentSession-owned registry before transferring that same

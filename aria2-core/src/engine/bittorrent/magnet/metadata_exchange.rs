@@ -1,26 +1,20 @@
-use futures::{StreamExt, stream};
+//! Public BEP 9 metadata exchange interface backed by torrent peer actors.
+
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
-use aria2_protocol::bittorrent::extension::ut_metadata_tracker::UTMetadataRequestTracker;
-use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
-use aria2_protocol::bittorrent::message::serializer::serialize_extended;
-use aria2_protocol::bittorrent::message::types::BtMessage;
-use aria2_protocol::bittorrent::peer::connection::PeerConnection;
-use aria2_protocol::bittorrent::peer::id;
-
-use super::metadata_collector::MetadataCollector;
+use crate::engine::bittorrent::dht::engine_set::DhtEngineSet;
+use crate::engine::bittorrent::magnet::metadata_swarm::MetadataPeerSwarm;
 use crate::network::OutboundNetworkPolicy;
+use crate::request::request_group::{BtPeerSource, DownloadOptions};
 
-const METADATA_MAX_SIZE: u64 = 100 * 1024 * 1024;
+pub(super) const METADATA_MAX_SIZE: u64 = 8 * 1024 * 1024;
 const PIECE_SIZE_MIN: u32 = 1024;
 const PIECE_SIZE_MAX: u32 = 65536;
 const DEFAULT_MAX_ATTEMPTS: usize = 3;
-const MAX_CONCURRENT_PEER_EXCHANGES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub enum MetadataExchangeError {
@@ -72,15 +66,11 @@ pub enum MetadataExchangeError {
 }
 
 impl MetadataExchangeError {
-    fn is_fatal(&self) -> bool {
-        matches!(self, MetadataExchangeError::NoPeersAvailable)
-    }
-
     pub fn addr(&self) -> Option<&str> {
         match self {
-            MetadataExchangeError::PeerConnectFailed { addr, .. } => Some(addr),
-            MetadataExchangeError::PeerTimeout { addr } => Some(addr),
-            MetadataExchangeError::UnsupportedPeer { addr, .. } => Some(addr),
+            Self::PeerConnectFailed { addr, .. }
+            | Self::PeerTimeout { addr }
+            | Self::UnsupportedPeer { addr, .. } => Some(addr),
             _ => None,
         }
     }
@@ -89,69 +79,46 @@ impl MetadataExchangeError {
 impl fmt::Display for MetadataExchangeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MetadataExchangeError::NoPeersAvailable => {
-                write!(f, "No peers available for metadata fetch")
-            }
-            MetadataExchangeError::AllPeersFailed {
+            Self::NoPeersAvailable => write!(f, "No peers available for metadata fetch"),
+            Self::AllPeersFailed {
                 attempts,
                 last_error,
-            } => {
-                write!(
-                    f,
-                    "All {} peers failed, last error: {}",
-                    attempts, last_error
-                )
+            } => write!(f, "All {attempts} peers failed, last error: {last_error}"),
+            Self::PeerConnectFailed { addr, reason } => {
+                write!(f, "Connect to {addr} failed: {reason}")
             }
-            MetadataExchangeError::PeerConnectFailed { addr, reason } => {
-                write!(f, "Connect to {} failed: {}", addr, reason)
+            Self::PeerTimeout { addr } => write!(f, "Connect to {addr} timed out"),
+            Self::UnsupportedPeer { addr, reason } => {
+                write!(f, "Peer {addr} unsupported: {reason}")
             }
-            MetadataExchangeError::PeerTimeout { addr } => {
-                write!(f, "Connect to {} timed out", addr)
+            Self::InvalidMetadataSize { size } => write!(f, "Invalid metadata_size: {size}"),
+            Self::InvalidPieceSize { size } => write!(f, "Invalid metadata piece size: {size}"),
+            Self::MetadataTooLarge { size, max } => {
+                write!(f, "metadata_size too large: {size} (max {max})")
             }
-            MetadataExchangeError::UnsupportedPeer { addr, reason } => {
-                write!(f, "Peer {} unsupported: {}", addr, reason)
-            }
-            MetadataExchangeError::InvalidMetadataSize { size } => {
-                write!(f, "Invalid metadata_size: {}", size)
-            }
-            MetadataExchangeError::InvalidPieceSize { size } => {
-                write!(f, "Invalid metadata piece size: {}", size)
-            }
-            MetadataExchangeError::MetadataTooLarge { size, max } => {
-                write!(f, "metadata_size too large: {} (max {})", size, max)
-            }
-            MetadataExchangeError::InvalidMetadataPiece {
+            Self::InvalidMetadataPiece {
                 piece,
                 size,
                 expected,
             } => write!(
                 f,
-                "Invalid metadata piece {} length: {} bytes (expected {})",
-                piece, size, expected
+                "Invalid metadata piece {piece} length: {size} bytes (expected {expected})"
             ),
-            MetadataExchangeError::BencodeDecodeFailed { detail } => {
-                write!(f, "Bencode decode failed: {}", detail)
-            }
-            MetadataExchangeError::PieceRejected { piece } => {
-                write!(f, "Piece {} rejected by peer", piece)
-            }
-            MetadataExchangeError::PieceTimeout { piece } => {
-                write!(f, "ut_metadata timeout for piece {}", piece)
-            }
-            MetadataExchangeError::IncompleteMetadata { expected, received } => {
-                write!(
-                    f,
-                    "Incomplete metadata collection: expected {} bytes, received {}",
-                    expected, received
-                )
-            }
-            MetadataExchangeError::IoError(msg) => write!(f, "IO error: {}", msg),
+            Self::BencodeDecodeFailed { detail } => write!(f, "Bencode decode failed: {detail}"),
+            Self::PieceRejected { piece } => write!(f, "Piece {piece} rejected by peer"),
+            Self::PieceTimeout { piece } => write!(f, "ut_metadata timeout for piece {piece}"),
+            Self::IncompleteMetadata { expected, received } => write!(
+                f,
+                "Incomplete metadata collection: expected {expected} bytes, received {received}"
+            ),
+            Self::IoError(message) => write!(f, "IO error: {message}"),
         }
     }
 }
 
 impl std::error::Error for MetadataExchangeError {}
 
+#[derive(Clone, Copy)]
 pub struct MetadataExchangeConfig {
     pub max_peers_to_try: usize,
     pub connect_timeout: Duration,
@@ -176,8 +143,7 @@ impl MetadataExchangeConfig {
     pub fn with_piece_size(mut self, size: u32) -> Self {
         if !(PIECE_SIZE_MIN..=PIECE_SIZE_MAX).contains(&size) {
             warn!(
-                "piece_size={} is out of valid range [{}-{}], clamping",
-                size, PIECE_SIZE_MIN, PIECE_SIZE_MAX
+                "piece_size={size} is out of valid range [{PIECE_SIZE_MIN}-{PIECE_SIZE_MAX}], clamping"
             );
             self.piece_size = size.clamp(PIECE_SIZE_MIN, PIECE_SIZE_MAX);
         } else {
@@ -192,6 +158,10 @@ impl MetadataExchangeConfig {
     }
 }
 
+/// Compatibility interface for fetching BEP 9 metadata from a peer list.
+///
+/// Connections are owned by the same peer actors used for payload transfer;
+/// this standalone interface shuts its temporary swarm down after collection.
 pub struct MetadataExchangeSession {
     config: MetadataExchangeConfig,
     outbound_network_policy: Arc<OutboundNetworkPolicy>,
@@ -210,10 +180,6 @@ impl MetadataExchangeSession {
         self
     }
 
-    fn can_retry_piece(&self, retry_count: usize) -> bool {
-        retry_count.saturating_add(1) < self.config.max_attempts
-    }
-
     pub async fn fetch_metadata(
         &self,
         info_hash: &[u8; 20],
@@ -224,357 +190,35 @@ impl MetadataExchangeSession {
                 size: self.config.piece_size,
             });
         }
-
         if peers.is_empty() {
             return Err(MetadataExchangeError::NoPeersAvailable);
         }
 
-        let max_peers = peers.len().min(self.config.max_peers_to_try);
-        let mut attempt_count = 0usize;
-        let mut last_error = String::new();
-
-        let mut exchanges = stream::iter(peers.iter().take(max_peers).copied().map(
-            |peer_addr| async move {
-                let result = self.exchange_with_peer(info_hash, &peer_addr).await;
-                (peer_addr, result)
-            },
-        ))
-        .buffer_unordered(MAX_CONCURRENT_PEER_EXCHANGES);
-
-        while let Some((peer_addr, result)) = exchanges.next().await {
-            match result {
-                Ok(torrent_bytes) => {
-                    info!(
-                        "Metadata fetched successfully from {} ({} bytes)",
-                        peer_addr,
-                        torrent_bytes.len()
-                    );
-                    return Ok(torrent_bytes);
-                }
-                Err(e) => {
-                    attempt_count += 1;
-                    last_error = e.to_string();
-
-                    if e.is_fatal() {
-                        warn!("Fatal metadata exchange error with {}: {}", peer_addr, e);
-                        return Err(e);
-                    }
-
-                    warn!(
-                        "Recoverable metadata exchange error with {} (peer {}/{}): {}",
-                        peer_addr, attempt_count, max_peers, e
-                    );
-                }
-            }
+        let mut bootstrap = MetadataPeerSwarm::new(self.config);
+        let peer_sources = peers
+            .iter()
+            .take(self.config.max_peers_to_try)
+            .copied()
+            .map(|endpoint| (endpoint, BtPeerSource::Unknown))
+            .collect::<Vec<_>>();
+        let options = DownloadOptions::default();
+        let peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        let result = async {
+            bootstrap
+                .add_peers(
+                    &peer_sources,
+                    info_hash,
+                    peer_id,
+                    &options,
+                    &DhtEngineSet::default(),
+                    Arc::clone(&self.outbound_network_policy),
+                )
+                .await?;
+            bootstrap.fetch_metadata().await
         }
-
-        Err(MetadataExchangeError::AllPeersFailed {
-            attempts: attempt_count,
-            last_error,
-        })
-    }
-
-    async fn exchange_with_peer(
-        &self,
-        info_hash: &[u8; 20],
-        peer_addr: &SocketAddr,
-    ) -> Result<Vec<u8>, MetadataExchangeError> {
-        let addr_str = peer_addr.to_string();
-
-        let conn_result = timeout(self.config.connect_timeout, async {
-            let stream = self
-                .outbound_network_policy
-                .connect(*peer_addr)
-                .await
-                .map_err(|error| format!("Peer connection failed: {error}"))?;
-            PeerConnection::connect_with_stream(
-                stream,
-                *peer_addr,
-                info_hash,
-                None,
-                &id::generate_peer_id(),
-                self.config.connect_timeout,
-                false,
-            )
-            .await
-        })
         .await;
-        let mut conn = match conn_result {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                return Err(MetadataExchangeError::PeerConnectFailed {
-                    addr: addr_str.clone(),
-                    reason: e.to_string(),
-                });
-            }
-            Err(_) => {
-                return Err(MetadataExchangeError::PeerTimeout {
-                    addr: addr_str.clone(),
-                });
-            }
-        };
-
-        if !conn.remote_supports_extended_messaging() {
-            return Err(MetadataExchangeError::UnsupportedPeer {
-                addr: addr_str,
-                reason: "Remote did not advertise extended messaging in the BitTorrent handshake"
-                    .to_string(),
-            });
-        }
-
-        debug!("Connected to {}, sending extension handshake", peer_addr);
-
-        let local_hs = ExtensionHandshake::new();
-        let hs_payload = local_hs.to_bytes();
-        let hs_encoded = serialize_extended(0, hs_payload);
-
-        conn.send_serialized(&hs_encoded).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("send extension handshake failed: {e}"))
-        })?;
-
-        debug!("Extension handshake sent to {}", peer_addr);
-
-        let remote_hs_data = timeout(
-            self.config.request_timeout,
-            self.read_extension_message(&mut conn),
-        )
-        .await
-        .map_err(|_| MetadataExchangeError::PeerTimeout {
-            addr: addr_str.clone(),
-        })??;
-        let remote_hs = ExtensionHandshake::from_bytes(&remote_hs_data)
-            .map_err(|detail| MetadataExchangeError::BencodeDecodeFailed { detail })?;
-
-        let metadata_ext_id = remote_hs
-            .ut_metadata_id()
-            .filter(|id| *id != 0)
-            .ok_or_else(|| MetadataExchangeError::UnsupportedPeer {
-                addr: addr_str.clone(),
-                reason: "Remote did not advertise a valid ut_metadata extension ID".to_string(),
-            })?;
-
-        let metadata_size = match remote_hs.metadata_size().map(u64::from) {
-            Some(size) => size,
-            None => {
-                warn!(
-                    "Peer {} reported metadata_size=None, skipping...",
-                    peer_addr
-                );
-                return Err(MetadataExchangeError::UnsupportedPeer {
-                    addr: addr_str,
-                    reason: "Remote did not provide metadata_size".to_string(),
-                });
-            }
-        };
-
-        if metadata_size == 0 {
-            warn!("Peer {} reported metadata_size=0, skipping...", peer_addr);
-            return Err(MetadataExchangeError::InvalidMetadataSize { size: 0 });
-        }
-
-        if metadata_size > METADATA_MAX_SIZE {
-            return Err(MetadataExchangeError::MetadataTooLarge {
-                size: metadata_size,
-                max: METADATA_MAX_SIZE,
-            });
-        }
-
-        debug!("Remote reports metadata_size={} bytes", metadata_size);
-
-        let num_pieces = metadata_size.div_ceil(self.config.piece_size as u64) as u32;
-        let mut collector =
-            MetadataCollector::new(metadata_size, self.config.piece_size).map_err(|_| {
-                MetadataExchangeError::InvalidPieceSize {
-                    size: self.config.piece_size,
-                }
-            })?;
-
-        // Track in-flight metadata requests with timeout (C++ UTMetadataRequestTracker)
-        let mut tracker = UTMetadataRequestTracker::with_timeout(self.config.request_timeout);
-
-        // Collect pieces while treating max_attempts as the total attempts per piece.
-        let mut retry_counts: std::collections::HashMap<u32, usize> =
-            std::collections::HashMap::new();
-        let mut pending_pieces: Vec<u32> = (0..num_pieces).rev().collect();
-
-        while !pending_pieces.is_empty() && !collector.is_complete() {
-            // Check for timed-out requests and requeue them
-            let timed_out = tracker.remove_timeout_entries();
-            for idx in timed_out {
-                let retries = retry_counts.entry(idx).or_insert(0);
-                if self.can_retry_piece(*retries) {
-                    *retries += 1;
-                    debug!(
-                        piece = idx,
-                        retry = *retries,
-                        max = self.config.max_attempts,
-                        "Retrying timed-out ut_metadata piece"
-                    );
-                    pending_pieces.push(idx);
-                } else {
-                    warn!(
-                        piece = idx,
-                        retries = *retries,
-                        "ut_metadata piece exceeded max retries, giving up"
-                    );
-                    return Err(MetadataExchangeError::PieceTimeout { piece: idx });
-                }
-            }
-
-            // Request next pending piece if tracker has capacity
-            if tracker.avail() > 0 {
-                let piece_idx = match pending_pieces.pop() {
-                    Some(idx) => idx,
-                    None => break,
-                };
-
-                // Skip already-collected pieces (could be from retries)
-                if collector.is_complete() {
-                    break;
-                }
-
-                let req_msg = UtMetadataMessage::Request { piece: piece_idx };
-                let encoded = serialize_extended(metadata_ext_id, req_msg.to_payload());
-
-                conn.send_serialized(&encoded).await.map_err(|e| {
-                    MetadataExchangeError::IoError(format!("send metadata request failed: {e}"))
-                })?;
-
-                tracker.add(piece_idx);
-            }
-
-            // Wait for a response (with timeout)
-            match timeout(
-                self.config.request_timeout,
-                self.read_ut_metadata_response(&mut conn, metadata_ext_id),
-            )
-            .await
-            {
-                Ok(Ok(UtMetadataMessage::Data {
-                    piece: recv_piece,
-                    data,
-                    total_size,
-                })) => {
-                    if u64::from(total_size) != metadata_size {
-                        return Err(MetadataExchangeError::InvalidMetadataSize {
-                            size: u64::from(total_size),
-                        });
-                    }
-                    if !tracker.tracks(recv_piece) {
-                        debug!(
-                            piece = recv_piece,
-                            "Ignoring unsolicited ut_metadata data piece"
-                        );
-                        continue;
-                    }
-                    tracker.remove(recv_piece);
-                    if !collector.add_piece(recv_piece, &data) {
-                        let offset = u64::from(recv_piece) * u64::from(self.config.piece_size);
-                        let expected = metadata_size
-                            .saturating_sub(offset)
-                            .min(u64::from(self.config.piece_size));
-                        return Err(MetadataExchangeError::InvalidMetadataPiece {
-                            piece: recv_piece,
-                            size: data.len() as u64,
-                            expected,
-                        });
-                    }
-                    debug!(
-                        "Received piece {}/{} ({} bytes)",
-                        recv_piece + 1,
-                        num_pieces,
-                        data.len()
-                    );
-                }
-                Ok(Ok(UtMetadataMessage::Reject { piece })) => {
-                    tracker.remove(piece);
-                    debug!("Piece {} rejected by {}", piece, peer_addr);
-                    // Requeue for retry
-                    let retries = retry_counts.entry(piece).or_insert(0);
-                    if self.can_retry_piece(*retries) {
-                        *retries += 1;
-                        pending_pieces.push(piece);
-                    } else {
-                        return Err(MetadataExchangeError::PieceRejected { piece });
-                    }
-                }
-                Ok(Ok(UtMetadataMessage::Request { .. })) => {
-                    // Peer is requesting metadata from us; ignore for now
-                    // (we're in metadata fetch mode, not serving mode)
-                    debug!("Ignoring unexpected ut_metadata Request from peer");
-                }
-                Ok(Err(inner_err)) => {
-                    return Err(MetadataExchangeError::BencodeDecodeFailed {
-                        detail: format!("ut_metadata decode error: {}", inner_err),
-                    });
-                }
-                Err(_) => {
-                    // The tracker will handle timeout detection on the next
-                    // iteration via remove_timeout_entries()
-                    debug!("Read timeout waiting for ut_metadata response");
-                }
-            }
-        }
-
-        if collector.is_complete() {
-            collector
-                .into_bytes()
-                .ok_or(MetadataExchangeError::IncompleteMetadata {
-                    expected: metadata_size,
-                    received: 0,
-                })
-        } else {
-            let received = (collector.progress() * metadata_size as f64) as u64;
-            Err(MetadataExchangeError::IncompleteMetadata {
-                expected: metadata_size,
-                received,
-            })
-        }
-    }
-
-    async fn read_extension_message(
-        &self,
-        conn: &mut PeerConnection,
-    ) -> Result<Vec<u8>, MetadataExchangeError> {
-        loop {
-            match conn.read_message().await.map_err(|error| {
-                MetadataExchangeError::IoError(format!("Read extension message failed: {error}"))
-            })? {
-                Some(BtMessage::Extended { ext_id: 0, payload }) => return Ok(payload),
-                Some(_) => continue,
-                None => {
-                    return Err(MetadataExchangeError::IoError(
-                        "Peer closed before extension handshake".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-
-    async fn read_ut_metadata_response(
-        &self,
-        conn: &mut PeerConnection,
-        metadata_ext_id: u8,
-    ) -> Result<UtMetadataMessage, MetadataExchangeError> {
-        loop {
-            match conn.read_message().await.map_err(|error| {
-                MetadataExchangeError::IoError(format!("Read ut_metadata message failed: {error}"))
-            })? {
-                Some(BtMessage::Extended { ext_id, payload }) if ext_id == metadata_ext_id => {
-                    return UtMetadataMessage::from_payload(&payload).map_err(|error| {
-                        MetadataExchangeError::BencodeDecodeFailed {
-                            detail: format!("ut_metadata decode failed: {error}"),
-                        }
-                    });
-                }
-                Some(_) => continue,
-                None => {
-                    return Err(MetadataExchangeError::IoError(
-                        "Peer closed before ut_metadata response".to_string(),
-                    ));
-                }
-            }
-        }
+        bootstrap.shutdown().await;
+        result
     }
 }
 
@@ -594,51 +238,26 @@ mod tests {
     fn test_fetch_metadata_no_peers() {
         let session = MetadataExchangeSession::new(MetadataExchangeConfig::default());
         let target_hash = [0u8; 20];
-        let peers: Vec<SocketAddr> = vec![];
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(session.fetch_metadata(&target_hash, &[]));
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(session.fetch_metadata(&target_hash, &peers));
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            MetadataExchangeError::NoPeersAvailable => {}
-            other => panic!("Expected NoPeersAvailable, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_fatal_vs_recoverable_errors() {
-        let peer_specific_size_error = MetadataExchangeError::MetadataTooLarge {
-            size: 200_000_000,
-            max: METADATA_MAX_SIZE,
-        };
-        assert!(!peer_specific_size_error.is_fatal());
-
-        let peer_specific_decode_error = MetadataExchangeError::BencodeDecodeFailed {
-            detail: "bad".to_string(),
-        };
-        assert!(!peer_specific_decode_error.is_fatal());
-
-        let recoverable = MetadataExchangeError::PeerTimeout {
-            addr: "1.2.3.4:6881".to_string(),
-        };
-        assert!(!recoverable.is_fatal());
-
-        let recoverable2 = MetadataExchangeError::InvalidMetadataSize { size: 0 };
-        assert!(!recoverable2.is_fatal());
-
-        assert!(MetadataExchangeError::NoPeersAvailable.is_fatal());
+        assert!(matches!(
+            result,
+            Err(MetadataExchangeError::NoPeersAvailable)
+        ));
     }
 
     #[test]
     fn test_extension_handshake_uses_complete_bep10_frame() {
-        let handshake = ExtensionHandshake::new();
-        let frame = serialize_extended(0, handshake.to_bytes());
+        use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
+        use aria2_protocol::bittorrent::message::serializer::serialize_extended;
+
+        let frame = serialize_extended(0, ExtensionHandshake::new().to_bytes());
         let frame_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
 
         assert_eq!(frame_len, frame.len() - 4);
         assert_eq!(&frame[4..6], &[20, 0]);
-
         let parsed = ExtensionHandshake::from_bytes(&frame[6..]).unwrap();
         assert_eq!(parsed.ut_metadata_id(), Some(1));
         assert_eq!(parsed.metadata_size(), None);
@@ -646,6 +265,9 @@ mod tests {
 
     #[test]
     fn test_ut_metadata_request_uses_negotiated_extension_id() {
+        use aria2_protocol::bittorrent::message::extension::UtMetadataMessage;
+        use aria2_protocol::bittorrent::message::serializer::serialize_extended;
+
         let frame = serialize_extended(7, UtMetadataMessage::Request { piece: 3 }.to_payload());
         let frame_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
 
@@ -659,37 +281,56 @@ mod tests {
 
     #[test]
     fn test_display_impl() {
-        let err = MetadataExchangeError::NoPeersAvailable;
-        assert!(err.to_string().contains("No peers"));
-
-        let err = MetadataExchangeError::MetadataTooLarge {
+        assert!(
+            MetadataExchangeError::NoPeersAvailable
+                .to_string()
+                .contains("No peers")
+        );
+        let too_large = MetadataExchangeError::MetadataTooLarge {
             size: 200_000_000,
             max: METADATA_MAX_SIZE,
         };
-        let display = err.to_string();
+        let display = too_large.to_string();
         assert!(display.contains("too large"));
         assert!(display.contains("200000000"));
     }
 
     #[test]
     fn test_with_piece_size_builder() {
-        let cfg = MetadataExchangeConfig::default().with_piece_size(8192);
-        assert_eq!(cfg.piece_size, 8192);
-
-        let cfg_clamped_low = MetadataExchangeConfig::default().with_piece_size(512);
-        assert_eq!(cfg_clamped_low.piece_size, PIECE_SIZE_MIN);
-
-        let cfg_clamped_high = MetadataExchangeConfig::default().with_piece_size(128_000);
-        assert_eq!(cfg_clamped_high.piece_size, PIECE_SIZE_MAX);
+        assert_eq!(
+            MetadataExchangeConfig::default()
+                .with_piece_size(8192)
+                .piece_size,
+            8192
+        );
+        assert_eq!(
+            MetadataExchangeConfig::default()
+                .with_piece_size(512)
+                .piece_size,
+            PIECE_SIZE_MIN
+        );
+        assert_eq!(
+            MetadataExchangeConfig::default()
+                .with_piece_size(128_000)
+                .piece_size,
+            PIECE_SIZE_MAX
+        );
     }
 
     #[test]
     fn test_with_max_attempts_builder() {
-        let cfg = MetadataExchangeConfig::default().with_max_attempts(5);
-        assert_eq!(cfg.max_attempts, 5);
-
-        let cfg_zero = MetadataExchangeConfig::default().with_max_attempts(0);
-        assert_eq!(cfg_zero.max_attempts, 1);
+        assert_eq!(
+            MetadataExchangeConfig::default()
+                .with_max_attempts(5)
+                .max_attempts,
+            5
+        );
+        assert_eq!(
+            MetadataExchangeConfig::default()
+                .with_max_attempts(0)
+                .max_attempts,
+            1
+        );
     }
 
     #[test]
@@ -707,18 +348,5 @@ mod tests {
             result,
             Err(MetadataExchangeError::InvalidPieceSize { size: 0 })
         ));
-    }
-
-    #[test]
-    fn test_piece_retry_budget_uses_total_attempts() {
-        let one_attempt =
-            MetadataExchangeSession::new(MetadataExchangeConfig::default().with_max_attempts(1));
-        assert!(!one_attempt.can_retry_piece(0));
-
-        let three_attempts =
-            MetadataExchangeSession::new(MetadataExchangeConfig::default().with_max_attempts(3));
-        assert!(three_attempts.can_retry_piece(0));
-        assert!(three_attempts.can_retry_piece(1));
-        assert!(!three_attempts.can_retry_piece(2));
     }
 }

@@ -131,6 +131,16 @@ pub struct BtPeerConn {
     /// Per-session resource. `Some` while the peer is active, `None` when
     /// disconnected or not yet fully initialised.
     pub(crate) session_resource: Option<PeerSessionResource>,
+    /// True while this actor owns a connection whose torrent geometry is not
+    /// known yet (magnet BEP 9 bootstrap).
+    pub(crate) metadata_pending: bool,
+    /// Canonical local torrent info dictionary served through BEP 9.
+    pub(crate) local_metadata: Option<Arc<[u8]>>,
+    /// Availability messages received before the metadata-defined piece
+    /// layout can be applied.
+    pub(crate) pending_peer_availability:
+        Vec<aria2_protocol::bittorrent::message::types::BtMessage>,
+    pub(crate) metadata_pending_availability_overflow: bool,
 
     // -----------------------------------------------------------------------
     // Send buffering (C++ SocketBuffer)
@@ -187,6 +197,40 @@ impl BtPeerConn {
     ) {
         use aria2_protocol::bittorrent::message::types::BtMessage;
 
+        if self.metadata_pending {
+            const MAX_PENDING_AVAILABILITY_MESSAGES: usize = 8192;
+            if matches!(
+                message,
+                BtMessage::Bitfield { .. } | BtMessage::HaveAll | BtMessage::HaveNone
+            ) {
+                self.pending_peer_availability.clear();
+                self.metadata_pending_availability_overflow = false;
+            }
+            if matches!(
+                message,
+                BtMessage::Bitfield { .. }
+                    | BtMessage::Have { .. }
+                    | BtMessage::AllowedFast { .. }
+                    | BtMessage::HaveAll
+                    | BtMessage::HaveNone
+            ) {
+                if self.pending_peer_availability.len() >= MAX_PENDING_AVAILABILITY_MESSAGES {
+                    self.pending_peer_availability.clear();
+                    self.metadata_pending_availability_overflow = true;
+                } else if !self.metadata_pending_availability_overflow {
+                    self.pending_peer_availability.push(message.clone());
+                }
+            }
+            match message {
+                BtMessage::Interested => self.stats.peer_interested = true,
+                BtMessage::NotInterested => self.stats.peer_interested = false,
+                BtMessage::Choke => self.stats.peer_choking = true,
+                BtMessage::Unchoke => self.stats.peer_choking = false,
+                _ => {}
+            }
+            return;
+        }
+
         match message {
             BtMessage::AllowedFast { index } => self.add_peer_allowed_fast(*index),
             BtMessage::Have { piece_index } => {
@@ -198,9 +242,56 @@ impl BtPeerConn {
                 self.seeder = false;
                 self.set_peer_bitfield(&[]);
             }
+            BtMessage::Interested => self.stats.peer_interested = true,
+            BtMessage::NotInterested => self.stats.peer_interested = false,
             BtMessage::Choke => self.stats.peer_choking = true,
             BtMessage::Unchoke => self.stats.peer_choking = false,
             _ => {}
+        }
+    }
+
+    pub(crate) fn is_metadata_pending(&self) -> bool {
+        self.metadata_pending
+    }
+
+    pub(crate) fn activate_payload_session(
+        &mut self,
+        piece_length: u32,
+        num_pieces: u32,
+        total_length: u64,
+    ) -> bool {
+        if self.metadata_pending_availability_overflow {
+            return false;
+        }
+        if self.session_resource.is_none() {
+            self.allocate_session_resource(piece_length, num_pieces, total_length);
+        } else if let Some(resource) = self.session_resource.as_mut() {
+            resource.reconfigure(piece_length, num_pieces, total_length);
+        }
+        let pending = std::mem::take(&mut self.pending_peer_availability);
+        let valid_pending = self.session_resource.as_ref().is_some_and(|resource| {
+            pending
+                .iter()
+                .all(|message| resource.validate_message(message).is_ok())
+        });
+        if !valid_pending {
+            return false;
+        }
+        self.metadata_pending = false;
+        for message in pending {
+            self.apply_peer_state_message(&message);
+        }
+        true
+    }
+
+    pub(crate) fn enter_metadata_mode(&mut self) {
+        self.metadata_pending = true;
+        self.metadata_pending_availability_overflow = false;
+        self.pending_peer_availability.clear();
+        if self.session_resource.is_none() {
+            self.allocate_session_resource(0, 0, 0);
+        } else if let Some(resource) = self.session_resource.as_mut() {
+            resource.reconfigure(0, 0, 0);
         }
     }
 
@@ -230,25 +321,9 @@ impl BtPeerConn {
         let Some(mut state) = self.upload_state.take() else {
             return Ok(0);
         };
-        let message_for_stats = message.clone();
         let result = state.handle_message(self, message, provider).await;
         self.upload_state = Some(state);
         if let Ok(bytes) = result {
-            match message_for_stats {
-                aria2_protocol::bittorrent::message::types::BtMessage::Interested => {
-                    self.stats.peer_interested = true;
-                }
-                aria2_protocol::bittorrent::message::types::BtMessage::NotInterested => {
-                    self.stats.peer_interested = false;
-                }
-                aria2_protocol::bittorrent::message::types::BtMessage::Choke => {
-                    self.stats.peer_choking = true;
-                }
-                aria2_protocol::bittorrent::message::types::BtMessage::Unchoke => {
-                    self.stats.peer_choking = false;
-                }
-                _ => {}
-            }
             self.record_uploaded_bytes(bytes);
         }
         result

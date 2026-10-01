@@ -65,6 +65,12 @@ impl TorrentMeta {
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, String> {
+        Self::parse_with_info_bytes(data).map(|(meta, _)| meta)
+    }
+
+    /// Parse metainfo and also return the canonical encoded `info` dictionary
+    /// used for its v1 and v2 info-hashes. This is the BEP 9 payload.
+    pub fn parse_with_info_bytes(data: &[u8]) -> Result<(Self, Vec<u8>), String> {
         info!("Starting torrent file parsing ({} bytes)", data.len());
         let (root, _) =
             BencodeValue::decode(data).map_err(|e| format!("Bencode decoding failed: {}", e))?;
@@ -78,7 +84,8 @@ impl TorrentMeta {
 
         let info = root.dict_get(b"info").ok_or("Missing info dictionary")?;
 
-        let info_hash = InfoHash::from_info_value(info);
+        let info_bytes = info.encode();
+        let info_hash = InfoHash::from_info_bytes(&info_bytes);
         let meta_version = Self::parse_meta_version(info);
         if meta_version.is_some_and(|version| version > 2) {
             return Err(format!(
@@ -86,7 +93,8 @@ impl TorrentMeta {
                 meta_version.unwrap_or_default()
             ));
         }
-        let info_hash_v2 = (meta_version == Some(2)).then(|| InfoHash::from_info_value_v2(info));
+        let info_hash_v2 =
+            (meta_version == Some(2)).then(|| InfoHash::from_info_bytes_v2(&info_bytes));
         debug!("info_hash: {}", info_hash.as_hex());
 
         let info_dict = Self::parse_info_dict(info)?;
@@ -116,20 +124,23 @@ impl TorrentMeta {
             web_seeds.len()
         );
 
-        Ok(Self {
-            announce,
-            announce_list,
-            info: info_dict,
-            info_hash,
-            info_hash_v2,
-            piece_layers,
-            creation_date,
-            comment,
-            created_by,
-            encoding,
-            web_seeds,
-            nodes,
-        })
+        Ok((
+            Self {
+                announce,
+                announce_list,
+                info: info_dict,
+                info_hash,
+                info_hash_v2,
+                piece_layers,
+                creation_date,
+                comment,
+                created_by,
+                encoding,
+                web_seeds,
+                nodes,
+            },
+            info_bytes,
+        ))
     }
 
     fn parse_announce_list(root: &BencodeValue) -> Vec<Vec<String>> {
@@ -932,6 +943,15 @@ mod tests {
         let t1 = TorrentMeta::parse(&data).unwrap();
         let t2 = TorrentMeta::parse(&data).unwrap();
         assert_eq!(t1.info_hash.as_hex(), t2.info_hash.as_hex());
+
+        let (parsed, info_bytes) = TorrentMeta::parse_with_info_bytes(&data).unwrap();
+        assert_eq!(parsed.info_hash, t1.info_hash);
+        assert_eq!(
+            parsed.info_hash.bytes,
+            super::super::info_hash::InfoHash::from_info_bytes(&info_bytes).bytes
+        );
+        let (root, _) = BencodeValue::decode(&data).unwrap();
+        assert_eq!(info_bytes, root.dict_get(b"info").unwrap().encode());
     }
 
     #[test]

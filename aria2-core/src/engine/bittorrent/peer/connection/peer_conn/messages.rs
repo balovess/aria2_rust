@@ -52,6 +52,16 @@ impl BtPeerConn {
         peer_agent: &str,
         port: Option<u16>,
     ) -> Result<()> {
+        self.send_extension_handshake_with_metadata(peer_agent, port, None)
+            .await
+    }
+
+    pub(crate) async fn send_extension_handshake_with_metadata(
+        &mut self,
+        peer_agent: &str,
+        port: Option<u16>,
+        metadata_size: Option<u32>,
+    ) -> Result<()> {
         use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
         use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
@@ -60,6 +70,9 @@ impl BtPeerConn {
         handshake.with_version(peer_agent);
         if let Some(port) = port.filter(|port| *port != 0) {
             handshake.with_port(port);
+        }
+        if let Some(metadata_size) = metadata_size {
+            handshake.with_metadata_size(metadata_size);
         }
         self.write_raw(&serialize(&BtMessage::Extended {
             ext_id: 0,
@@ -334,6 +347,8 @@ impl BtPeerConn {
                 }
                 let validation = if let Some(validator) = validator {
                     validator.validate(message_ref)
+                } else if self.metadata_pending {
+                    Ok(())
                 } else if let Some(resource) = &self.session_resource {
                     resource.validate_message(message_ref)
                 } else {

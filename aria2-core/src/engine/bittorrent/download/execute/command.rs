@@ -15,6 +15,14 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::checkpoint::{completed_piece_bytes, legacy_progress_piece_indices};
 use super::state::IntegrityPreparation;
 
+impl BtDownloadCommand {
+    async fn shutdown_unclaimed_peer_swarm(&mut self) {
+        if let Some(mut swarm) = self.initial_peer_swarm.take() {
+            swarm.shutdown_all().await;
+        }
+    }
+}
+
 #[async_trait]
 impl Command for BtDownloadCommand {
     async fn shutdown(&mut self) {
@@ -61,6 +69,7 @@ impl Command for BtDownloadCommand {
             checkpoint.remove().await?;
             self.group.recover_mut().complete()?;
             info!("BT zero-length download completed without peer discovery");
+            self.shutdown_unclaimed_peer_swarm().await;
             return Ok(());
         }
 
@@ -89,6 +98,7 @@ impl Command for BtDownloadCommand {
                 }
                 self.group.recover_mut().complete()?;
                 info!("hash-check-only completed successfully");
+                self.shutdown_unclaimed_peer_swarm().await;
                 return Ok(());
             }
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -105,6 +115,7 @@ impl Command for BtDownloadCommand {
             );
             let started_at = self.started_at.unwrap_or_else(Instant::now);
             self.finalize_download(started_at, &meta).await?;
+            self.shutdown_unclaimed_peer_swarm().await;
             return Ok(());
         }
 
@@ -220,6 +231,7 @@ impl Command for BtDownloadCommand {
             .await;
         self.group.recover().clear_bt_peer_snapshots();
         if let Err(error) = piece_result {
+            session.swarm.shutdown_all().await;
             if let Some(actor) = self.tracker_actor.as_ref() {
                 let _ = actor.stop().await;
             }
@@ -234,15 +246,23 @@ impl Command for BtDownloadCommand {
             let seeding_connections = if session.initial_peers.is_empty() {
                 Vec::new()
             } else {
-                self.connect_to_peers(
-                    &session.initial_peers,
-                    &network_info_hash,
-                    meta.info_hash_v2,
-                    num_pieces,
-                    piece_length,
-                    total_size,
-                )
-                .await?
+                match self
+                    .connect_to_peers(
+                        &session.initial_peers,
+                        &network_info_hash,
+                        meta.info_hash_v2,
+                        num_pieces,
+                        piece_length,
+                        total_size,
+                    )
+                    .await
+                {
+                    Ok(connections) => connections,
+                    Err(error) => {
+                        session.swarm.shutdown_all().await;
+                        return Err(error);
+                    }
+                }
             };
             info!(
                 "Starting seeding phase with {} connected peers ({} new connections, {} retained actors)...",

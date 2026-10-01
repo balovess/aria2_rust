@@ -68,6 +68,48 @@ fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
     response["result"].clone()
 }
 
+async fn send_bep10_handshake(peer: &mut TcpStream, port: Option<i64>) {
+    let extensions = BTreeMap::from([(b"ut_pex".to_vec(), BencodeValue::Int(19))]);
+    let mut payload = BTreeMap::from([(b"m".to_vec(), BencodeValue::Dict(extensions))]);
+    if let Some(port) = port {
+        payload.insert(b"p".to_vec(), BencodeValue::Int(port));
+    }
+    let frame = serialize(&BtMessage::Extended {
+        ext_id: 0,
+        payload: BencodeValue::Dict(payload).encode(),
+    });
+    peer.write_all(&frame)
+        .await
+        .expect("send BEP 10 extension handshake");
+}
+
+async fn wait_for_rpc_peer_port(client: &RunningAria2, gid: &str, port: u16) {
+    let expected_string = port.to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let details = rpc(client, 20, "aria2.getPeerDetails", json!([gid]));
+        let details_match = details.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["ip"] == "127.0.0.1" && peer["port"] == port)
+        });
+        let peers = rpc(client, 21, "aria2.getPeers", json!([gid]));
+        let peers_match = peers.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["ip"] == "127.0.0.1" && peer["port"] == expected_string)
+        });
+        if details_match && peers_match {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "RPC did not publish the current BEP 10 port {port}: details={details}, peers={peers}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
     let output_dir = tempfile::tempdir().expect("temporary download directory");
@@ -109,6 +151,14 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
     let mut peer = TcpStream::connect(("127.0.0.1", listen_port))
         .await
         .expect("connect an incoming test peer");
+    let transport_endpoint = peer
+        .local_addr()
+        .expect("incoming peer has a temporary TCP source endpoint");
+    assert_ne!(
+        transport_endpoint.port(),
+        6881,
+        "the fixture must distinguish its ephemeral TCP source port from BEP 10 p"
+    );
     let mut handshake = [0u8; 68];
     handshake[0] = 19;
     handshake[1..20].copy_from_slice(b"BitTorrent protocol");
@@ -125,17 +175,7 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
         .expect("read incoming handshake response");
     assert_eq!(&response[28..48], &info_hash);
 
-    let mut extensions = BTreeMap::new();
-    extensions.insert(b"ut_pex".to_vec(), BencodeValue::Int(19));
-    let payload = BencodeValue::Dict(BTreeMap::from([
-        (b"m".to_vec(), BencodeValue::Dict(extensions)),
-        (b"p".to_vec(), BencodeValue::Int(6881)),
-    ]))
-    .encode();
-    let frame = serialize(&BtMessage::Extended { ext_id: 0, payload });
-    peer.write_all(&frame)
-        .await
-        .expect("send BEP 10 extension handshake with the advertised port");
+    send_bep10_handshake(&mut peer, Some(6881)).await;
 
     let details_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let details = loop {
@@ -157,6 +197,7 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
         details["port"], 6881,
         "RPC should report the BEP 10 listen port, not the TCP source port"
     );
+    assert_eq!(details["ip"], "127.0.0.1");
     assert_eq!(
         details["flags"]["incoming"], false,
         "aria2 clears the incoming-peer flag once the peer advertises its listen port"
@@ -168,6 +209,13 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
             .any(|peer| { peer["ip"] == "127.0.0.1" && peer["port"] == "6881" })),
         "aria2.getPeers should serialize the advertised BEP 10 port: {peers}"
     );
+
+    send_bep10_handshake(&mut peer, Some(6882)).await;
+    wait_for_rpc_peer_port(&client, &gid, 6882).await;
+    send_bep10_handshake(&mut peer, None).await;
+    wait_for_rpc_peer_port(&client, &gid, 6882).await;
+    send_bep10_handshake(&mut peer, Some(0)).await;
+    wait_for_rpc_peer_port(&client, &gid, 6882).await;
 
     drop(peer);
     let disconnect_deadline = tokio::time::Instant::now() + Duration::from_secs(3);

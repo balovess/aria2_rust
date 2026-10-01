@@ -12,7 +12,6 @@
 
 mod announce_list;
 mod bt_announce;
-mod health_tracking;
 mod tracker_announce;
 mod types;
 
@@ -22,9 +21,8 @@ mod tests;
 pub use announce_list::{AnnounceList, AnnounceTier};
 pub use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 pub use bt_announce::{BtAnnounce, is_udp_tracker, urlencode_infohash};
-pub use health_tracking::HealthTrackingAnnounceList;
 pub use tracker_announce::{
     AnnounceResult, SharedTrackerRuntime, TrackerAnnouncer, TrackerRuntimeInfo,
     TrackerRuntimeSnapshot,
 };
-pub use types::{AnnounceEvent, TrackerEntry, TrackerTier};
+pub use types::AnnounceEvent;

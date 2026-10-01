@@ -17,7 +17,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_MAGNET_TRACKERS_TO_TRY: usize = 10;
 const MAX_MAGNET_TRACKER_PEERS: usize = 50;
-const MAX_MAGNET_METADATA_PEERS_TO_TRY: usize = 20;
+const MAX_MAGNET_METADATA_PEERS_PER_SOURCE: usize = 20;
 
 pub struct MagnetDownloadCommand {
     group: Arc<std::sync::RwLock<RequestGroup>>,
@@ -26,6 +26,9 @@ pub struct MagnetDownloadCommand {
     started: bool,
     completed_bytes: u64,
     metadata_complete: bool,
+    local_peer_id: [u8; 20],
+    #[cfg(feature = "bittorrent")]
+    initial_peer_swarm: Option<crate::engine::bittorrent::peer::message_handler::PeerSwarm>,
     dht_engines: DhtEngineSet,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// Carried through to the internally-created `BtDownloadCommand`.
@@ -129,6 +132,11 @@ impl MagnetDownloadCommand {
             started: false,
             completed_bytes: 0,
             metadata_complete: false,
+            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
+                &options.peer_id_prefix,
+            ),
+            #[cfg(feature = "bittorrent")]
+            initial_peer_swarm: None,
             dht_engines: DhtEngineSet::default(),
             global_limiter: None,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
@@ -237,6 +245,10 @@ fn sanitize_magnet_display_name(name: &str) -> Option<String> {
 #[async_trait]
 impl Command for MagnetDownloadCommand {
     async fn shutdown(&mut self) {
+        #[cfg(feature = "bittorrent")]
+        if let Some(mut swarm) = self.initial_peer_swarm.take() {
+            swarm.shutdown_all().await;
+        }
         self.shutdown_dht_engine().await;
     }
 
@@ -323,6 +335,10 @@ impl Command for MagnetDownloadCommand {
         }
 
         if metadata_only {
+            #[cfg(feature = "bittorrent")]
+            if let Some(mut swarm) = self.initial_peer_swarm.take() {
+                swarm.shutdown_all().await;
+            }
             self.shutdown_dht_engine().await;
             self.group.recover_mut().complete()?;
             self.metadata_complete = true;
@@ -344,6 +360,8 @@ impl Command for MagnetDownloadCommand {
             &[],
             &self.outbound_network_policy,
         )?;
+        bt_cmd.local_peer_id = self.local_peer_id;
+        bt_cmd.initial_peer_swarm = self.initial_peer_swarm.take();
         self.group.recover_mut().set_bt_metadata_data(torrent_bytes);
         DownloadEventHooks::shared()
             .notify_metadata_resolved(MetadataResolvedEvent::new(gid, vec![gid]));
@@ -366,7 +384,11 @@ impl Command for MagnetDownloadCommand {
 
         self.handoff_dht_engine_to_bt(&mut bt_cmd).await;
 
-        bt_cmd.execute().await?;
+        let download_result = bt_cmd.execute().await;
+        if download_result.is_err() {
+            bt_cmd.shutdown().await;
+        }
+        download_result?;
 
         self.shutdown_dht_engine().await;
 

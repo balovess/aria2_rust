@@ -418,6 +418,7 @@ impl BtSeedManager {
             | PeerEvent::AllowedFast { .. }
             | PeerEvent::ExtensionHandshakeReceived { .. }
             | PeerEvent::Disconnected { .. }
+            | PeerEvent::GracefulDisconnected { .. }
             | PeerEvent::RequestFailed { .. } => {}
             PeerEvent::PexPeers { peers } => {
                 if self
@@ -442,6 +443,7 @@ impl BtSeedManager {
                     "Ignoring block message while seeding"
                 );
             }
+            PeerEvent::MetadataMessage { .. } => {}
         }
     }
 

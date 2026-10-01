@@ -25,6 +25,8 @@ use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+const PIECE_LENGTH: usize = 4;
+
 fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
@@ -53,19 +55,26 @@ fn reserve_loopback_port() -> u16 {
 }
 
 fn torrent_bytes(tracker_url: &str, payload: &[u8]) -> Vec<u8> {
-    assert_eq!(payload, b"seed", "fixed piece hash is for the seed payload");
+    assert_eq!(
+        payload, b"seeddata",
+        "fixed piece hashes are for this payload"
+    );
     let mut info = BTreeMap::new();
     info.insert(b"length".to_vec(), BencodeValue::Int(payload.len() as i64));
     info.insert(
         b"name".to_vec(),
         BencodeValue::Bytes(b"seed-counter.bin".to_vec()),
     );
-    info.insert(b"piece length".to_vec(), BencodeValue::Int(16 * 1024));
+    info.insert(
+        b"piece length".to_vec(),
+        BencodeValue::Int(PIECE_LENGTH as i64),
+    );
     info.insert(
         b"pieces".to_vec(),
         BencodeValue::Bytes(vec![
             0x92, 0x71, 0x3d, 0x47, 0x09, 0x37, 0x71, 0x11, 0xcf, 0x31, 0xf2, 0xa7, 0x19, 0x86,
-            0xc4, 0x11, 0xbd, 0x6c, 0xb5, 0xb0,
+            0xc4, 0x11, 0xbd, 0x6c, 0xb5, 0xb0, 0xa1, 0x7c, 0x9a, 0xaa, 0x61, 0xe8, 0x0a, 0x1b,
+            0xf7, 0x1d, 0x0d, 0x85, 0x0a, 0xf4, 0xe5, 0xba, 0xa9, 0x80, 0x0b, 0xbd,
         ]),
     );
 
@@ -91,7 +100,13 @@ struct UploadPeer {
 }
 
 impl UploadPeer {
-    async fn start(info_hash: [u8; 20], payload: Arc<Vec<u8>>) -> Self {
+    async fn start(
+        info_hash: [u8; 20],
+        payload: Arc<Vec<u8>>,
+        advertised_bitfield: u8,
+        upload_piece: Option<u32>,
+        peer_id: [u8; 20],
+    ) -> Self {
         let listener = TokioTcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind controlled BitTorrent peer");
@@ -106,6 +121,7 @@ impl UploadPeer {
         let observed_handshake = Arc::new(StdMutex::new(Vec::new()));
         let session = PeerSession {
             info_hash,
+            peer_id,
             payload: Arc::clone(&payload),
             request_upload: Arc::clone(&request_upload),
             uploaded_bytes: Arc::clone(&uploaded_bytes),
@@ -113,6 +129,8 @@ impl UploadPeer {
             observed_handshake: Arc::clone(&observed_handshake),
             download_requests: Arc::clone(&download_requests),
             download_request_length: Arc::clone(&download_request_length),
+            advertised_bitfield,
+            upload_piece,
         };
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -161,6 +179,7 @@ async fn read_bt_message(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 
 struct PeerSession {
     info_hash: [u8; 20],
+    peer_id: [u8; 20],
     payload: Arc<Vec<u8>>,
     request_upload: Arc<Notify>,
     uploaded_bytes: Arc<AtomicUsize>,
@@ -168,6 +187,8 @@ struct PeerSession {
     observed_handshake: Arc<StdMutex<Vec<u8>>>,
     download_requests: Arc<AtomicUsize>,
     download_request_length: Arc<AtomicUsize>,
+    advertised_bitfield: u8,
+    upload_piece: Option<u32>,
 }
 
 async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
@@ -198,9 +219,12 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
     handshake[0] = 19;
     handshake[1..20].copy_from_slice(b"BitTorrent protocol");
     handshake[28..48].copy_from_slice(&peer.info_hash);
-    handshake[48..68].copy_from_slice(b"SeedLifecyclePeer001");
+    handshake[48..68].copy_from_slice(&peer.peer_id);
     if stream.write_all(&handshake).await.is_err()
-        || stream.write_all(&[0, 0, 0, 2, 5, 0x80]).await.is_err()
+        || stream
+            .write_all(&[0, 0, 0, 2, 5, peer.advertised_bitfield])
+            .await
+            .is_err()
         || stream.write_all(&[0, 0, 0, 1, 1]).await.is_err()
     {
         return true;
@@ -219,27 +243,35 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
                         let begin = u32::from_be_bytes(message[5..9].try_into().unwrap()) as usize;
                         let length = u32::from_be_bytes(message[9..13].try_into().unwrap()) as usize;
                         peer.download_request_length.store(length, Ordering::SeqCst);
-                        let Some(end) = begin.checked_add(length) else { return true };
-                        if index != 0 || end > peer.payload.len() {
+                        let Some(piece_offset) = (index as usize).checked_mul(PIECE_LENGTH) else {
                             return true;
+                        };
+                        let Some(start) = piece_offset.checked_add(begin) else { return true };
+                        let Some(end) = start.checked_add(length) else { return true };
+                        let Some(piece_end) = begin.checked_add(length) else { return true };
+                        let piece_is_available = index < 2
+                            && peer.advertised_bitfield & (0x80 >> index) != 0;
+                        if !piece_is_available || piece_end > PIECE_LENGTH || end > peer.payload.len() {
+                            continue;
                         }
                         let mut piece = Vec::with_capacity(13 + length);
                         piece.extend_from_slice(&((9 + length) as u32).to_be_bytes());
                         piece.push(7);
                         piece.extend_from_slice(&index.to_be_bytes());
                         piece.extend_from_slice(&(begin as u32).to_be_bytes());
-                        piece.extend_from_slice(&peer.payload[begin..end]);
+                        piece.extend_from_slice(&peer.payload[start..end]);
                         if stream.write_all(&piece).await.is_err() {
                             return true;
                         }
                     }
                     Some(1) if upload_request_sent && !upload_block_requested => {
+                        let Some(upload_piece) = peer.upload_piece else { continue };
                         let mut request = Vec::with_capacity(17);
                         request.extend_from_slice(&13u32.to_be_bytes());
                         request.push(6);
+                        request.extend_from_slice(&upload_piece.to_be_bytes());
                         request.extend_from_slice(&0u32.to_be_bytes());
-                        request.extend_from_slice(&0u32.to_be_bytes());
-                        request.extend_from_slice(&(peer.payload.len() as u32).to_be_bytes());
+                        request.extend_from_slice(&(PIECE_LENGTH as u32).to_be_bytes());
                         if stream.write_all(&request).await.is_err() {
                             return true;
                         }
@@ -251,7 +283,16 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
                         }
                         let index = u32::from_be_bytes(message[1..5].try_into().unwrap());
                         let begin = u32::from_be_bytes(message[5..9].try_into().unwrap());
-                        if index != 0 || begin != 0 || message.len() != 9 + peer.payload.len() {
+                        let Some(upload_piece) = peer.upload_piece else { return true };
+                        let expected_offset = upload_piece as usize * PIECE_LENGTH;
+                        let Some(expected_end) = expected_offset.checked_add(PIECE_LENGTH) else {
+                            return true;
+                        };
+                        if index != upload_piece
+                            || begin != 0
+                            || message.len() != 9 + PIECE_LENGTH
+                            || message[9..] != peer.payload[expected_offset..expected_end]
+                        {
                             return true;
                         }
                         peer.uploaded_bytes
@@ -261,7 +302,7 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
                     _ => {}
                 }
             }
-            _ = peer.request_upload.notified(), if !upload_request_sent => {
+            _ = peer.request_upload.notified(), if !upload_request_sent && peer.upload_piece.is_some() => {
                 if stream.write_all(&[0, 0, 0, 1, 2]).await.is_err() {
                     return true;
                 }
@@ -274,13 +315,33 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
 #[tokio::test]
 async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
     let output_dir = tempfile::tempdir().expect("temporary download directory");
-    let payload = Arc::new(b"seed".to_vec());
+    let payload = Arc::new(b"seeddata".to_vec());
     let torrent_meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(
         &torrent_bytes("http://127.0.0.1/placeholder", &payload),
     )
     .expect("generated torrent parses");
-    let peer = UploadPeer::start(torrent_meta.info_hash.bytes, Arc::clone(&payload)).await;
-    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    // Keep the upload target a partial leecher after our download completes.
+    // A separate full seeder supplies the remaining Piece; aria2 correctly
+    // closes peer connections when both endpoints have the complete torrent.
+    let peer = UploadPeer::start(
+        torrent_meta.info_hash.bytes,
+        Arc::clone(&payload),
+        0x80,
+        Some(1),
+        *b"SeedLifecyclePeer001",
+    )
+    .await;
+    let full_seeder = UploadPeer::start(
+        torrent_meta.info_hash.bytes,
+        Arc::clone(&payload),
+        0xc0,
+        None,
+        *b"SeedLifecyclePeer002",
+    )
+    .await;
+    let tracker =
+        MockTrackerServer::start_with_peers(vec![peer.addr.port(), full_seeder.addr.port()], false)
+            .await;
     let torrent = torrent_bytes(&tracker.announce_url(), &payload);
     let listen_port = reserve_loopback_port();
     let args = [
@@ -293,7 +354,7 @@ async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
         "--enable-public-trackers=false".to_owned(),
         "--enable-peer-exchange=false".to_owned(),
         "--bt-enable-web-seed=false".to_owned(),
-        "--seed-ratio=1".to_owned(),
+        "--seed-ratio=0.5".to_owned(),
     ];
     let client = RunningAria2::start_rpc(&args);
     let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
@@ -319,7 +380,7 @@ async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
                 ["status", "completedLength", "totalLength", "errorMessage"]
             ]),
         );
-        if status["completedLength"] == "4" {
+        if status["completedLength"].as_str() == Some("8") {
             break;
         }
         assert!(
@@ -345,7 +406,7 @@ async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if peer.uploaded_bytes.load(Ordering::SeqCst) == payload.len() {
+            if peer.uploaded_bytes.load(Ordering::SeqCst) == PIECE_LENGTH {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -369,6 +430,6 @@ async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
         "aria2.tellStatus",
         json!([gid, ["status", "uploadLength", "completedLength"]]),
     );
-    assert_eq!(status["completedLength"], "4");
+    assert_eq!(status["completedLength"], "8");
     assert_eq!(status["uploadLength"], "4");
 }

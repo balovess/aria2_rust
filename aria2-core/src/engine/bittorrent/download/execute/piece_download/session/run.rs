@@ -268,6 +268,7 @@ impl PieceDownloadSession<'_> {
                 if self.endgame_state.is_endgame_active() {
                     self.endgame_state.exit_endgame();
                 }
+                self.swarm.set_local_seeder(true);
                 break;
             }
 
@@ -717,6 +718,7 @@ impl PieceDownloadSession<'_> {
             }
             PeerEvent::AllowedFast { .. } => false,
             PeerEvent::ExtensionHandshakeReceived { .. } => false,
+            PeerEvent::MetadataMessage { .. } => false,
             PeerEvent::Message {
                 actor_id,
                 message: aria2_protocol::bittorrent::message::types::BtMessage::Piece { .. },
@@ -731,6 +733,7 @@ impl PieceDownloadSession<'_> {
                 false
             }
             PeerEvent::Disconnected { .. }
+            | PeerEvent::GracefulDisconnected { .. }
             | PeerEvent::RequestFailed { .. }
             | PeerEvent::Message { .. } => false,
         }

@@ -206,9 +206,7 @@ impl MagnetDownloadCommand {
             return Vec::new();
         }
 
-        let peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
-            &options.peer_id_prefix,
-        );
+        let peer_id = self.local_peer_id;
         let tracker_tls = ClientTlsConfig::from_download_options(options);
         let max_tracker_timeout = Duration::from_secs(options.bt_tracker_timeout.max(1));
         let connect_timeout = Duration::from_secs(options.bt_tracker_connect_timeout.max(1));

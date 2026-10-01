@@ -35,6 +35,24 @@ impl<'a> PieceDownloadSession<'a> {
         last_pex_send: &'a mut Instant,
         verified_piece_indices: &[usize],
     ) -> Result<Self> {
+        swarm.remove_dead().await;
+        let discovered_peer_count = initial_peers.len();
+        let initial_peers = initial_peers
+            .into_iter()
+            .filter(|peer| {
+                peer.address
+                    .to_socket_addr()
+                    .ok()
+                    .is_none_or(|endpoint| !swarm.has_endpoint(endpoint))
+            })
+            .collect::<Vec<_>>();
+        tracing::debug!(
+            discovered_peer_count,
+            already_connected_peer_count =
+                discovered_peer_count.saturating_sub(initial_peers.len()),
+            retained_actor_count = swarm.len(),
+            "Reconciled initial peer candidates with retained swarm"
+        );
         // Single-file torrents are written with a positioned + cached writer:
         // BT downloads pieces out of order (RarestFirst etc.), so writes must
         // target the piece offset — the old sequential `write()` appended
@@ -263,6 +281,31 @@ impl<'a> PieceDownloadSession<'a> {
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };
+        let payload_config = Arc::new(
+            crate::engine::bittorrent::peer::message_handler::PeerActorPayloadConfig {
+                network_info_hash,
+                local_metadata: Arc::clone(&command.local_metadata),
+                piece_length,
+                num_pieces,
+                total_length: total_size,
+                upload_config: upload_config.clone(),
+                upload_limiter: command.torrent_upload_limiter.clone(),
+                auto_unchoke: command.choking_algo.is_none(),
+                upload_counter: Arc::clone(&upload_counter),
+                upload_progress: Arc::clone(&command.progress),
+                provider: Arc::clone(&upload_provider),
+            },
+        );
+        let activated_metadata_peers = swarm.activate_payload_actors(payload_config).await;
+        if activated_metadata_peers > 0 {
+            info!(
+                peers = activated_metadata_peers,
+                "Reused magnet metadata peer actors for payload transfer"
+            );
+        }
+        for actor in swarm.iter().filter(|actor| !actor.dead) {
+            command.track_peer_for_upload_choking(&actor.stats);
+        }
         for connection in active_connections.iter_mut() {
             connection.configure_upload_with_auto_unchoke(
                 &upload_config,
@@ -301,7 +344,6 @@ impl<'a> PieceDownloadSession<'a> {
             }
         }
 
-        let initial_peer_count = active_connections.len();
         let initial_endpoints = active_connections
             .iter()
             .filter_map(BtPeerConn::remote_endpoint)
@@ -351,8 +393,13 @@ impl<'a> PieceDownloadSession<'a> {
             let group = command.group.recover();
             swarm.attach_peer_snapshot_store(group.bt_peer_snapshot_store());
         }
-        if initial_peer_count > 0 {
-            command.bt_runtime.set_connections(swarm.len());
+        let live_peer_count = swarm.iter().filter(|actor| !actor.dead).count();
+        command.bt_runtime.set_connections(live_peer_count);
+        command
+            .group
+            .recover()
+            .set_bt_connection_count(live_peer_count);
+        if live_peer_count > 0 {
             let group = command.group.recover();
             super::super::sync_peer_snapshots_with_swarm(&group, swarm);
         }

@@ -149,6 +149,70 @@ async fn test_tracker_udp_e2e_uses_connect_and_announce() {
 }
 
 #[tokio::test]
+async fn test_e2e_bt_peer_serves_local_metadata_from_initial_extension_handshake() {
+    let template = build_test_torrent(
+        "metadata_upload.bin",
+        512,
+        256,
+        "http://tracker.invalid/announce",
+    );
+    let template_meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&template).unwrap();
+    let metadata_peer = MockBtPeerServer::start_requesting_metadata_upload(
+        template_meta.info_hash.bytes,
+        vec![
+            expected_piece_data(0, 256, 512),
+            expected_piece_data(1, 256, 512),
+        ],
+        template.clone(),
+    )
+    .await;
+    let tracker = MockUdpTracker::start_with_peers(vec![metadata_peer.addr()]).await;
+    let torrent_data = build_test_torrent("metadata_upload.bin", 512, 256, &tracker.url());
+    let metadata = aria2_protocol::bittorrent::bencode::codec::BencodeValue::decode(&torrent_data)
+        .unwrap()
+        .0
+        .dict_get(b"info")
+        .unwrap()
+        .encode();
+    let dir = tmp_dir();
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(103),
+        &torrent_data,
+        &DownloadOptions {
+            enable_dht: false,
+            disable_ipv6: true,
+            enable_public_trackers: false,
+            seed_time: Some(0.0),
+            bt_tracker_timeout: 3,
+            bt_tracker_connect_timeout: 3,
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), command.execute())
+        .await
+        .expect("torrent download and metadata upload should finish")
+        .expect("torrent download should succeed");
+
+    assert_eq!(
+        metadata_peer
+            .wait_for_metadata_size(std::time::Duration::from_secs(1))
+            .await,
+        Some(metadata.len() as u32),
+        "ordinary torrent peers must advertise the local info dictionary size at startup"
+    );
+    let uploaded_metadata = metadata_peer
+        .wait_for_metadata_upload(std::time::Duration::from_secs(1))
+        .await
+        .expect("peer should receive local BEP 9 metadata");
+    assert_eq!(uploaded_metadata, (0, metadata.len() as u32, metadata));
+    assert_eq!(metadata_peer.completed_handshake_count(), 1);
+}
+
+#[tokio::test]
 async fn test_e2e_bt_halt_sends_stopped_announce() {
     let dir = tmp_dir();
     let torrent_data = build_test_torrent(

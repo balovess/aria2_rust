@@ -1,6 +1,7 @@
 use super::*;
-use crate::engine::bittorrent::peer::message_handler::PeerCommand;
+use crate::engine::bittorrent::peer::message_handler::{PeerCommand, PeerEvent};
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -1097,7 +1098,12 @@ async fn seeding_does_not_end_just_because_all_peers_disconnect() {
 #[tokio::test]
 async fn seeding_actor_sends_periodic_pex_with_recently_dropped_peers() {
     let live_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let live_remote_stream = TcpStream::connect(live_listener.local_addr().unwrap())
+    let live_remote_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    live_remote_socket
+        .bind(SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 0))
+        .unwrap();
+    let live_remote_stream = live_remote_socket
+        .connect(live_listener.local_addr().unwrap())
         .await
         .unwrap();
     let (live_local_stream, live_endpoint) = live_listener.accept().await.unwrap();
@@ -1106,19 +1112,26 @@ async fn seeding_actor_sends_periodic_pex_with_recently_dropped_peers() {
             PeerConnection::from_stream_with_peer(live_local_stream, [0x71; 20], false, false),
             live_endpoint,
         );
+    live_connection.incoming = false;
     live_connection.allocate_session_resource(16, 1, 16);
     live_connection.register_peer_extension("ut_pex", 19);
 
     let dropped_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let dropped_remote_stream = TcpStream::connect(dropped_listener.local_addr().unwrap())
+    let dropped_remote_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    dropped_remote_socket
+        .bind(SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), 0))
+        .unwrap();
+    let dropped_remote_stream = dropped_remote_socket
+        .connect(dropped_listener.local_addr().unwrap())
         .await
         .unwrap();
     let (dropped_local_stream, dropped_endpoint) = dropped_listener.accept().await.unwrap();
-    let dropped_connection =
+    let mut dropped_connection =
         crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
             PeerConnection::from_stream_with_peer(dropped_local_stream, [0x72; 20], false, false),
             dropped_endpoint,
         );
+    dropped_connection.incoming = false;
 
     let provider = Arc::new(
         crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1),
@@ -1137,7 +1150,9 @@ async fn seeding_actor_sends_periodic_pex_with_recently_dropped_peers() {
             .spawn_peer(dropped_connection, None, Arc::clone(&provider_dyn))
             .is_ok()
     );
-    swarm.mark_dead(dropped_actor_id);
+    swarm.apply_event(&PeerEvent::GracefulDisconnected {
+        actor_id: dropped_actor_id,
+    });
     swarm.remove_dead().await;
 
     let options = crate::request::request_group::DownloadOptions {
