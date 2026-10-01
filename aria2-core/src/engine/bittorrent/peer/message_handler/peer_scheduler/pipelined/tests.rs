@@ -331,6 +331,8 @@ async fn endgame_piece_retry_does_not_add_a_fixed_batch_delay() {
             Duration::from_millis(1),
             2,
             None,
+            &[],
+            None,
         ),
     )
     .await
@@ -428,6 +430,8 @@ async fn swarm_actor_endgame_uses_the_same_peer_across_piece_generations() {
                 Duration::from_secs(2),
                 1,
                 None,
+                &[],
+                None,
             ),
         )
         .await
@@ -518,6 +522,8 @@ async fn failed_endgame_piece_preserves_tracker_and_pex_discovery() {
             &mut endgame_state,
             Duration::from_millis(50),
             1,
+            None,
+            &[],
             None,
         ),
     )
@@ -791,6 +797,8 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
             Duration::from_secs(3),
             1,
             Some(&mut choking_algo),
+            &[],
+            None,
         ),
     )
     .await
@@ -908,6 +916,8 @@ async fn swarm_endgame_actors_duplicate_requests_and_cancel_loser() {
             &mut endgame_state,
             Duration::from_secs(2),
             1,
+            None,
+            &[],
             None,
         ),
     )

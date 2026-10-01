@@ -34,4 +34,6 @@ pub(crate) use peer_actor::{
     PeerActorControl, PeerActorPayloadConfig, PeerActorTask, PeerCommand, PeerEvent,
 };
 pub(crate) use peer_registry::{PeerSwarm, PeerSwarmEventLease};
-pub(crate) use pipelined::{download_piece_blocks, download_piece_blocks_batch};
+#[cfg(test)]
+pub(crate) use pipelined::download_piece_blocks;
+pub(crate) use pipelined::download_piece_blocks_batch;

@@ -41,6 +41,10 @@ pub struct PiecePicker {
     priority_mode: PiecePriorityMode,
     /// Per-piece availability frequency (from peer bitfields)
     frequencies: Vec<u32>,
+    /// Whether `frequencies` came from an authoritative swarm snapshot.
+    /// Before the first snapshot, callers may use the picker without peer
+    /// availability; afterwards, zero means no connected peer has the piece.
+    has_availability_snapshot: bool,
     /// Piece indexes sorted by availability, then by index for stable ties.
     rarest_order: Vec<u32>,
     /// Cursor into `rarest_order` for unrestricted normal-mode selection.
@@ -87,6 +91,7 @@ impl PiecePicker {
             strategy: PieceSelectionStrategy::RarestFirst,
             priority_mode: PiecePriorityMode::RarestFirst,
             frequencies: vec![0; n],
+            has_availability_snapshot: false,
             rarest_order: (0..num_pieces).collect(),
             rarest_cursor: 0,
             completed: Bitfield::new(n),
@@ -260,6 +265,7 @@ impl PiecePicker {
 
     /// Update per-piece frequency data from a peer frequency slice.
     pub fn set_frequencies_from_peers(&mut self, freqs: &[usize]) {
+        self.has_availability_snapshot = true;
         self.frequencies.fill(0);
         let len = freqs.len().min(self.frequencies.len());
         for (dst, src) in self.frequencies.iter_mut().zip(freqs.iter()).take(len) {

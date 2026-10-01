@@ -12,7 +12,7 @@ use crate::error::{Aria2Error, FatalError, Result};
 
 use super::super::types::{
     ActorAwarePieceDownloadResult, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST,
-    MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceDownloadResult,
+    MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceDownloadResult, ReceivedPieceBlock,
 };
 use super::endgame_requests::{
     PendingRequest, cancel_attempt_requests, cancel_completed_block_duplicates,
@@ -38,6 +38,8 @@ pub(crate) async fn download_piece_blocks_endgame(
     request_timeout: Duration,
     max_attempts: u32,
     mut choking_algo: Option<&mut ChokingAlgorithm>,
+    resume_blocks: &[Option<bytes::Bytes>],
+    block_sink: Option<&tokio::sync::mpsc::Sender<ReceivedPieceBlock>>,
 ) -> Result<ActorAwarePieceDownloadResult> {
     let block_count = piece_length.div_ceil(BLOCK_SIZE);
     if num_blocks != block_count {
@@ -88,6 +90,18 @@ pub(crate) async fn download_piece_blocks_endgame(
             .map(|_| HashSet::<u32>::new())
             .collect::<Vec<_>>();
         let mut completed = vec![false; block_count as usize];
+        let mut completed_blocks = 0u32;
+        for block_index in 0..block_count as usize {
+            let offset = block_index as u32 * BLOCK_SIZE;
+            let length = (piece_length - offset).min(BLOCK_SIZE) as usize;
+            if let Some(Some(data)) = resume_blocks.get(block_index)
+                && data.len() == length
+            {
+                piece_data[offset as usize..offset as usize + length].copy_from_slice(data);
+                completed[block_index] = true;
+                completed_blocks += 1;
+            }
+        }
         let mut next_block = (0..peers.len())
             .map(|peer_index| {
                 peer_index.saturating_mul(DEFAULT_MAX_OUTSTANDING_REQUEST)
@@ -95,7 +109,6 @@ pub(crate) async fn download_piece_blocks_endgame(
             })
             .collect::<Vec<_>>();
         let mut responses_since_window_growth = vec![0usize; peers.len()];
-        let mut completed_blocks = 0u32;
         let mut last_activity = Instant::now();
         let mut complete = false;
 
@@ -287,9 +300,20 @@ pub(crate) async fn download_piece_blocks_endgame(
                                     }
 
                                     let start = request.offset as usize;
+                                    let data = bytes::Bytes::from(data);
                                     piece_data[start..start + data.len()].copy_from_slice(&data);
                                     completed[block_index as usize] = true;
                                     completed_blocks += 1;
+                                    if let Some(block_sink) = block_sink {
+                                        let _ = block_sink
+                                            .send(ReceivedPieceBlock {
+                                                piece_index,
+                                                block_index,
+                                                offset: request.offset,
+                                                data: data.clone(),
+                                            })
+                                            .await;
+                                    }
                                     cancel_completed_block_duplicates(
                                         block_index,
                                         peer_index,

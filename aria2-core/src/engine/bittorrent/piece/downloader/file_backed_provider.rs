@@ -108,6 +108,45 @@ impl FileBackedPieceProvider {
     }
 }
 
+pub(crate) async fn read_piece_range_from_files(
+    layout: &MultiFileLayout,
+    piece_index: u32,
+    offset_in_piece: u32,
+    length: u32,
+) -> Option<Vec<u8>> {
+    let mut result = Vec::with_capacity(length as usize);
+    let mut current_offset = offset_in_piece;
+    let mut remaining = length;
+    while remaining > 0 {
+        if let Some((file_index, file_offset)) =
+            layout.resolve_file_offset(piece_index, current_offset)
+        {
+            let file_info = layout.get_file_info(file_index)?;
+            let bytes_to_read = remaining.min(file_info.length.saturating_sub(file_offset) as u32);
+            if bytes_to_read == 0 {
+                return None;
+            }
+            let file_path = layout.file_absolute_path(file_index)?;
+            let bytes =
+                FileBackedPieceProvider::read_file_range(file_path, file_offset, bytes_to_read)
+                    .await?;
+            result.extend_from_slice(&bytes);
+            current_offset = current_offset.saturating_add(bytes_to_read);
+            remaining -= bytes_to_read;
+        } else {
+            let next_content = layout.next_content_offset(piece_index, current_offset);
+            let skipped = next_content.saturating_sub(current_offset).min(remaining);
+            if skipped == 0 {
+                return None;
+            }
+            result.resize(result.len() + skipped as usize, 0);
+            current_offset = current_offset.saturating_add(skipped);
+            remaining -= skipped;
+        }
+    }
+    Some(result)
+}
+
 impl FileBackedPieceProvider {
     async fn read_file_range(
         file_path: &std::path::Path,

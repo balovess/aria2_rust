@@ -28,6 +28,18 @@ pub(super) fn snapshot_completed_bitfield(
         .clone()
 }
 
+pub(super) fn mark_piece_completed(
+    bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+    piece_index: u32,
+) {
+    let mut bitfield = bitfield
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(byte) = bitfield.get_mut(piece_index as usize / 8) {
+        *byte |= 1 << (7 - piece_index % 8);
+    }
+}
+
 pub(super) fn legacy_progress_piece_indices(
     progress: &BtProgress,
     piece_length: u32,
@@ -95,6 +107,7 @@ impl BtDownloadCommand {
         writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
         bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
         piece_bytes: u64,
+        in_flight_pieces: &[crate::filesystem::control_file::ControlFileInFlightPiece],
     ) -> Result<()> {
         let save_requested = self.group.recover().is_save_control_file_requested();
         let Some(checkpoint) = self.checkpoint.as_mut() else {
@@ -129,7 +142,7 @@ impl BtDownloadCommand {
 
         let save_started = std::time::Instant::now();
         match checkpoint
-            .save(&bitfield_snapshot, self.completed_bytes)
+            .save_with_in_flight_pieces(&bitfield_snapshot, self.completed_bytes, in_flight_pieces)
             .await
         {
             Ok(()) => {

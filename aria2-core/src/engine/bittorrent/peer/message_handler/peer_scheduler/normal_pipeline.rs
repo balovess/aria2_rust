@@ -10,7 +10,7 @@ use tracing::{debug, trace, warn};
 use crate::engine::bittorrent::peer::choking_algorithm::ChokingAlgorithm;
 
 use super::super::types::{
-    BLOCK_SIZE, MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceRequestPlan,
+    BLOCK_SIZE, MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceRequestPlan, ReceivedPieceBlock,
 };
 use super::peer_actor::{
     PeerEvent, PeerGeneration, TryRequestError, apply_choke_round, apply_interest_change,
@@ -31,23 +31,35 @@ struct BatchPieceState {
 }
 
 impl BatchPieceState {
-    fn new(plan: PieceRequestPlan) -> Self {
+    fn new(plan: &PieceRequestPlan) -> Self {
         let block_count = plan.piece_length.div_ceil(BLOCK_SIZE);
-        let remaining = (0..block_count)
-            .map(|block_index| {
-                let offset = block_index * BLOCK_SIZE;
-                BlockRequest {
+        let mut remaining = VecDeque::with_capacity(block_count as usize);
+        let mut completed = vec![false; block_count as usize];
+        let mut piece_data = vec![0; plan.piece_length as usize];
+        let mut completed_blocks = 0;
+        for block_index in 0..block_count {
+            let offset = block_index * BLOCK_SIZE;
+            let length = (plan.piece_length - offset).min(BLOCK_SIZE);
+            if let Some(Some(data)) = plan.resume_blocks.get(block_index as usize)
+                && data.len() == length as usize
+            {
+                let start = offset as usize;
+                piece_data[start..start + data.len()].copy_from_slice(data);
+                completed[block_index as usize] = true;
+                completed_blocks += 1;
+            } else {
+                remaining.push_back(BlockRequest {
                     block_index,
                     offset,
-                    length: (plan.piece_length - offset).min(BLOCK_SIZE),
-                }
-            })
-            .collect::<VecDeque<_>>();
+                    length,
+                });
+            }
+        }
         Self {
             remaining,
-            completed: vec![false; block_count as usize],
-            piece_data: vec![0; plan.piece_length as usize],
-            completed_blocks: 0,
+            completed,
+            piece_data,
+            completed_blocks,
             peer_bytes: Vec::new(),
             failed_peers: Vec::new(),
         }
@@ -307,9 +319,11 @@ pub(super) async fn run_attempt_batch(
     peers: &mut PeerSchedulingSnapshot,
     mut choking_algo: Option<&mut ChokingAlgorithm>,
     request_timeout: Duration,
+    block_sink: Option<&tokio::sync::mpsc::Sender<ReceivedPieceBlock>>,
 ) -> BatchAttemptOutcome {
     let mut pieces = HashMap::<u32, BatchPieceState>::with_capacity(plans.len());
     let mut piece_order = Vec::with_capacity(plans.len());
+    let mut completed = HashMap::<u32, AttemptOutcome>::with_capacity(plans.len());
     for plan in plans {
         let actual_blocks = plan.piece_length.div_ceil(BLOCK_SIZE);
         if plan.num_blocks != actual_blocks {
@@ -320,16 +334,23 @@ pub(super) async fn run_attempt_batch(
                 "BT block count disagrees with piece length; using the actual layout"
             );
         }
-        if pieces
-            .insert(plan.piece_index, BatchPieceState::new(*plan))
-            .is_none()
-        {
+        let state = BatchPieceState::new(plan);
+        if state.completed_blocks as usize == state.completed.len() {
+            completed.insert(
+                plan.piece_index,
+                AttemptOutcome {
+                    data: Some(state.piece_data),
+                    peer_bytes: state.peer_bytes,
+                    failed_peers: state.failed_peers,
+                },
+            );
+        } else if pieces.insert(plan.piece_index, state).is_none() {
             piece_order.push(plan.piece_index);
         }
     }
     if pieces.is_empty() {
         return BatchAttemptOutcome {
-            completed: HashMap::new(),
+            completed,
             failed_peers: HashMap::new(),
             tracker_peers: Vec::new(),
         };
@@ -345,7 +366,6 @@ pub(super) async fn run_attempt_batch(
         peer_cursor: 0,
         piece_cursor: 0,
     };
-    let mut completed = HashMap::<u32, AttemptOutcome>::with_capacity(plans.len());
     let mut tracker_peers = Vec::new();
 
     loop {
@@ -505,6 +525,7 @@ pub(super) async fn run_attempt_batch(
                                 if end > state.piece_data.len() || state.completed.get(block_index).copied().unwrap_or(true) {
                                     continue;
                                 }
+                                let data = bytes::Bytes::from(data);
                                 state.piece_data[start..end].copy_from_slice(&data);
                                 state.completed[block_index] = true;
                                 state.completed_blocks += 1;
@@ -527,6 +548,15 @@ pub(super) async fn run_attempt_batch(
                                     schedule.responses_since_window_growth[peer_index] = 0;
                                 }
                                 let piece_complete = state.completed_blocks as usize == state.completed.len();
+                                let received_block = ReceivedPieceBlock {
+                                    piece_index: index,
+                                    block_index: entry.request.block_index,
+                                    offset: entry.request.offset,
+                                    data,
+                                };
+                                if let Some(block_sink) = block_sink {
+                                    let _ = block_sink.send(received_block).await;
+                                }
                                 if piece_complete {
                                     let state = schedule.pieces.remove(&index).expect("completed batch piece must remain registered");
                                     workers.finish_piece_generation(index).await;
@@ -654,9 +684,10 @@ mod tests {
             piece_index,
             piece_length: 1,
             num_blocks: 1,
+            resume_blocks: Vec::new(),
         };
         BatchSchedule {
-            pieces: HashMap::from([(piece_index, BatchPieceState::new(plan))]),
+            pieces: HashMap::from([(piece_index, BatchPieceState::new(&plan))]),
             piece_order: vec![piece_index],
             pending: HashMap::new(),
             in_flight: vec![0; peer_count],

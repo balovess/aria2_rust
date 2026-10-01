@@ -208,7 +208,11 @@ impl PieceDownloadSession<'_> {
                         &self.completed_bitfield,
                     );
                     checkpoint
-                        .save(&bitfield, self.command.completed_bytes)
+                        .save_with_in_flight_pieces(
+                            &bitfield,
+                            self.command.completed_bytes,
+                            &super::piece::in_flight_snapshot(&self.in_flight_pieces),
+                        )
                         .await
                         .map_err(|error| {
                             Aria2Error::FileIo(format!(
@@ -689,12 +693,14 @@ impl PieceDownloadSession<'_> {
             } => {
                 if let Some(actor) = self.swarm.actor(*actor_id) {
                     let peer = actor.endpoint.to_string();
-                    if self
-                        .peer_tracker
-                        .update_peer_piece(&peer, *piece_index, *has_piece)
-                    {
+                    let availability_changed =
+                        self.peer_tracker
+                            .update_peer_piece(&peer, *piece_index, *has_piece);
+                    if availability_changed {
                         self.peer_last_data_time
                             .insert(PeerKey::new(actor.endpoint), Instant::now());
+                        self.piece_picker
+                            .set_frequencies_from_peers(&self.peer_tracker.piece_frequencies());
                     }
                 }
                 false
@@ -712,6 +718,8 @@ impl PieceDownloadSession<'_> {
                         bitfield.clone()
                     };
                     self.peer_tracker.update_peer_bitfield(&peer, &bitfield);
+                    self.piece_picker
+                        .set_frequencies_from_peers(&self.peer_tracker.piece_frequencies());
                     self.peer_last_data_time
                         .insert(PeerKey::new(actor.endpoint), Instant::now());
                 }
@@ -788,6 +796,8 @@ impl PieceDownloadSession<'_> {
             self.peer_tracker.remove_peer(&endpoint.to_string());
             self.peer_last_data_time.remove(peer_key);
         }
+        self.piece_picker
+            .set_frequencies_from_peers(&self.peer_tracker.piece_frequencies());
 
         let removed = self.swarm.remove_dead().await;
         let mut peer_storage = self

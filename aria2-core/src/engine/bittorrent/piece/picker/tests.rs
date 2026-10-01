@@ -92,7 +92,7 @@ fn test_piece_picker_set_priority_mode() {
 fn test_explicit_priority_pieces_precede_base_selector() {
     let mut picker = PiecePicker::new(5);
     picker.set_strategy(PieceSelectionStrategy::RarestFirst);
-    picker.set_frequencies_from_peers(&[0, 0, 0, 9, 0]);
+    picker.set_frequencies_from_peers(&[0, 1, 0, 9, 0]);
     picker.set_priority_pieces(vec![3, 1, 3]);
 
     assert_eq!(picker.priority_pieces().len(), 2);
@@ -252,7 +252,16 @@ fn test_set_frequencies_replaces_short_snapshot() {
 
     assert_eq!(picker.get_piece_info(1).unwrap().frequency, 0);
     assert_eq!(picker.get_piece_info(2).unwrap().frequency, 0);
-    assert_eq!(picker.pick_next_without_endgame(), Some(1));
+    assert_eq!(picker.pick_next_without_endgame(), Some(0));
+}
+
+#[test]
+fn zero_availability_snapshot_does_not_select_a_peerless_piece() {
+    let mut picker = PiecePicker::new(2);
+    picker.set_frequencies_from_peers(&[0, 0]);
+
+    assert_eq!(picker.pick_next(), None);
+    assert_eq!(picker.pick_next_without_endgame(), None);
 }
 
 // ── Selection behaviour ──────────────────────────────────────────────

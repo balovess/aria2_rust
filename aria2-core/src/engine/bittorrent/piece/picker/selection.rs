@@ -58,6 +58,14 @@ impl PiecePicker {
         }
     }
 
+    /// In an authoritative swarm snapshot, a zero count means no connected
+    /// peer can provide this piece. Standalone picker users without a snapshot
+    /// keep the historical unrestricted selection behavior.
+    #[inline]
+    fn has_known_source(&self, peer_bitfield: Option<&[u8]>, i: usize) -> bool {
+        peer_bitfield.is_some() || !self.has_availability_snapshot || self.frequencies[i] > 0
+    }
+
     /// Move `head_cursor` up to the first globally available piece.
     fn advance_head(&mut self) {
         let n = self.num_pieces as usize;
@@ -119,6 +127,7 @@ impl PiecePicker {
                 && !self.completed.test(index)
                 && !self.reserved.test(index)
                 && (allow_in_progress || !self.in_progress.test(index))
+                && self.has_known_source(bitfield, index)
                 && Self::peer_has(bitfield, index)
             {
                 return Some(piece);
@@ -134,7 +143,7 @@ impl PiecePicker {
             while self.rarest_cursor < self.rarest_order.len() {
                 let i = self.rarest_order[self.rarest_cursor] as usize;
                 self.rarest_cursor += 1;
-                if i < n && self.is_available(i) {
+                if i < n && self.is_available(i) && self.has_known_source(None, i) {
                     return Some(i as u32);
                 }
             }
@@ -148,7 +157,10 @@ impl PiecePicker {
                 ScanOrder::Forward => {
                     self.advance_head();
                     for i in self.head_cursor..n {
-                        if self.is_available(i) && Self::peer_has(bitfield, i) {
+                        if self.is_available(i)
+                            && self.has_known_source(bitfield, i)
+                            && Self::peer_has(bitfield, i)
+                        {
                             return Some(i as u32);
                         }
                     }
@@ -159,7 +171,10 @@ impl PiecePicker {
                     let mut i = self.tail_cursor.min(n);
                     while i > 0 {
                         i -= 1;
-                        if self.is_available(i) && Self::peer_has(bitfield, i) {
+                        if self.is_available(i)
+                            && self.has_known_source(bitfield, i)
+                            && Self::peer_has(bitfield, i)
+                        {
                             return Some(i as u32);
                         }
                     }
@@ -174,6 +189,7 @@ impl PiecePicker {
                 && !p.completed.test(i)
                 && !p.reserved.test(i)
                 && (allow_in_progress || !p.in_progress.test(i))
+                && p.has_known_source(bitfield, i)
                 && Self::peer_has(bitfield, i)
         };
 

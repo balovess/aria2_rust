@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use tracing::info;
 
+#[cfg(test)]
+use super::super::types::ActorAwarePieceDownloadResult;
 use super::super::types::{
-    ActorAwarePieceBatchEntry, ActorAwarePieceBatchResult, ActorAwarePieceDownloadResult,
-    PieceDownloadResult, PieceRequestPlan,
+    ActorAwarePieceBatchEntry, ActorAwarePieceBatchResult, PieceDownloadResult, PieceRequestPlan,
+    ReceivedPieceBlock,
 };
 use super::normal_pipeline::run_attempt_batch;
 use super::peer_actor::PeerGeneration;
@@ -41,6 +43,7 @@ impl BlockRequest {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn download_piece_blocks(
     swarm: &mut PeerSwarm,
     piece_index: u32,
@@ -56,10 +59,12 @@ pub(crate) async fn download_piece_blocks(
             piece_index,
             piece_length,
             num_blocks,
+            resume_blocks: Vec::new(),
         }],
         request_timeout,
         max_attempts,
         choking_algo,
+        None,
     )
     .await?;
     let entry = batch
@@ -82,6 +87,7 @@ pub(crate) async fn download_piece_blocks_batch(
     request_timeout: Duration,
     max_attempts: u32,
     mut choking_algo: Option<&mut ChokingAlgorithm>,
+    block_sink: Option<&tokio::sync::mpsc::Sender<ReceivedPieceBlock>>,
 ) -> Result<ActorAwarePieceBatchResult> {
     let piece_indices = plans
         .iter()
@@ -103,7 +109,7 @@ pub(crate) async fn download_piece_blocks_batch(
     loop {
         let pending_plans = plans
             .iter()
-            .copied()
+            .cloned()
             .filter(|plan| {
                 !completed.contains_key(&plan.piece_index)
                     && !errors.contains_key(&plan.piece_index)
@@ -153,6 +159,7 @@ pub(crate) async fn download_piece_blocks_batch(
             &mut peers,
             choking_algo.as_deref_mut(),
             request_timeout,
+            block_sink,
         )
         .await;
         tracker_peers.extend(outcome.tracker_peers);

@@ -83,6 +83,8 @@ pub(super) async fn try_web_seed_fallback(
                         .await?;
                 }
 
+                super::checkpoint::mark_piece_completed(completed_bitfield, next_piece_idx as u32);
+
                 cmd.group
                     .recover()
                     .update_bt_bitfield_piece(next_piece_idx as u32, num_pieces);
@@ -91,6 +93,7 @@ pub(super) async fn try_web_seed_fallback(
                     writer,
                     completed_bitfield,
                     accounted_piece_bytes,
+                    &[],
                 )
                 .await?;
                 Ok(true)

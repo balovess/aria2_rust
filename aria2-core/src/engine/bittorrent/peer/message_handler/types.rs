@@ -22,7 +22,7 @@ pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize = constants::BT_DEFAULT_MAX_OUT
 pub const MAX_OUTSTANDING_REQUEST: usize = 256;
 
 /// Bytes supplied by a peer during a piece download.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDownloadBytes {
     pub peer_index: usize,
     pub peer: SocketAddr,
@@ -39,11 +39,21 @@ pub struct PieceDownloadResult {
     pub failed_peers: Vec<SocketAddr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PieceRequestPlan {
     pub(crate) piece_index: u32,
     pub(crate) piece_length: u32,
     pub(crate) num_blocks: u32,
+    /// Blocks already durable in the payload and represented in the control file.
+    pub(crate) resume_blocks: Vec<Option<bytes::Bytes>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReceivedPieceBlock {
+    pub(crate) piece_index: u32,
+    pub(crate) block_index: u32,
+    pub(crate) offset: u32,
+    pub(crate) data: bytes::Bytes,
 }
 
 /// Internal result carrying stable peer identities alongside the public

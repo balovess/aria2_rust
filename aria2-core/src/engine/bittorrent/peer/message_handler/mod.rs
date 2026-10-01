@@ -12,7 +12,7 @@ pub mod types;
 
 pub(crate) use peer_scheduler::{
     PeerActorPayloadConfig, PeerCommand, PeerEvent, PeerSwarm, PeerSwarmEventLease,
-    download_piece_blocks, download_piece_blocks_batch, download_piece_blocks_endgame,
+    download_piece_blocks_batch, download_piece_blocks_endgame,
 };
 pub use types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES,

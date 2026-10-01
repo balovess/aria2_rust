@@ -32,6 +32,13 @@ const EXT_KNOWN_FLAGS: u16 = EXT_HAS_COMPLETED_LENGTH
     | EXT_HAS_INFO_HASH
     | EXT_HAS_PIECE_LENGTH;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFileInFlightPiece {
+    pub index: u32,
+    pub length: u32,
+    pub bitfield: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ControlFile {
     path: PathBuf,
@@ -39,6 +46,7 @@ pub struct ControlFile {
     completed_length: u64,
     upload_length: u64,
     bitfield: Vec<u8>,
+    in_flight_pieces: Vec<ControlFileInFlightPiece>,
     num_pieces: usize,
     checksum_algo: u8,
     checksum_value: Vec<u8>,
@@ -69,6 +77,14 @@ impl ControlFile {
     }
     pub fn bitfield(&self) -> &[u8] {
         &self.bitfield
+    }
+
+    pub fn in_flight_pieces(&self) -> &[ControlFileInFlightPiece] {
+        &self.in_flight_pieces
+    }
+
+    pub fn set_in_flight_pieces(&mut self, pieces: Vec<ControlFileInFlightPiece>) {
+        self.in_flight_pieces = pieces;
     }
     pub fn set_checksum(&mut self, algo: u8, value: Vec<u8>) {
         self.checksum_algo = algo;
@@ -206,6 +222,7 @@ impl ControlFile {
             completed_length: 0,
             upload_length: 0,
             bitfield: vec![0u8; bitfield_len],
+            in_flight_pieces: Vec::new(),
             num_pieces: actual_num_pieces,
             checksum_algo: 0,
             checksum_value: Vec::new(),
@@ -374,6 +391,7 @@ impl ControlFile {
             completed_length,
             upload_length,
             bitfield,
+            in_flight_pieces: Vec::new(),
             num_pieces,
             checksum_algo,
             checksum_value,
@@ -410,6 +428,13 @@ impl ControlFile {
                 "Control file bitfield has set bits outside the piece count".to_string(),
             ));
         }
+        validate_in_flight_pieces(
+            &self.in_flight_pieces,
+            self.total_length,
+            piece_length,
+            num_pieces,
+            &self.bitfield,
+        )?;
 
         let is_torrent = self.torrent_checkpoint
             || self.torrent_info_hash.is_some()
@@ -460,11 +485,29 @@ impl ControlFile {
         file.write_all(&self.bitfield)
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        // Block-level in-flight state is not exposed by ControlFile, so the
-        // official record count is deliberately zero.
-        file.write_all(&0u32.to_be_bytes())
+        let in_flight_count = u32::try_from(self.in_flight_pieces.len()).map_err(|_| {
+            Aria2Error::InvalidArgument("Too many in-flight torrent pieces".to_string())
+        })?;
+        file.write_all(&in_flight_count.to_be_bytes())
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
+        for piece in &self.in_flight_pieces {
+            file.write_all(&piece.index.to_be_bytes())
+                .await
+                .map_err(|e| Aria2Error::Io(e.to_string()))?;
+            file.write_all(&piece.length.to_be_bytes())
+                .await
+                .map_err(|e| Aria2Error::Io(e.to_string()))?;
+            let bitfield_length = u32::try_from(piece.bitfield.len()).map_err(|_| {
+                Aria2Error::InvalidArgument("In-flight block bitfield is too large".to_string())
+            })?;
+            file.write_all(&bitfield_length.to_be_bytes())
+                .await
+                .map_err(|e| Aria2Error::Io(e.to_string()))?;
+            file.write_all(&piece.bitfield)
+                .await
+                .map_err(|e| Aria2Error::Io(e.to_string()))?;
+        }
         file.write_all(&extension)
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
@@ -483,6 +526,8 @@ impl ControlFile {
         let bit_index = index % 8;
         if index < self.num_pieces && byte_index < self.bitfield.len() {
             self.bitfield[byte_index] |= 1 << (7 - bit_index);
+            self.in_flight_pieces
+                .retain(|piece| piece.index as usize != index);
             self.completed_length = self.calculate_completed();
         }
     }
@@ -603,6 +648,65 @@ fn piece_count(total_length: u64, piece_length: u32) -> Result<usize> {
     }
     usize::try_from(total_length.div_ceil(piece_length as u64))
         .map_err(|_| Aria2Error::InvalidArgument("Control file has too many pieces".to_string()))
+}
+
+fn validate_in_flight_pieces(
+    pieces: &[ControlFileInFlightPiece],
+    total_length: u64,
+    piece_length: u32,
+    num_pieces: usize,
+    _completed_bitfield: &[u8],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(pieces.len());
+    for piece in pieces {
+        let index = piece.index as usize;
+        if index >= num_pieces {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight torrent piece index is out of range: {}",
+                piece.index
+            )));
+        }
+        if !seen.insert(piece.index) {
+            return Err(Aria2Error::FileIo(format!(
+                "Duplicate in-flight torrent piece index: {}",
+                piece.index
+            )));
+        }
+        if piece.length == 0 || piece.length > piece_length {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight torrent piece length is out of range: {}",
+                piece.length
+            )));
+        }
+        let block_count = (piece.length as usize).div_ceil(16 * 1024);
+        let expected_bitfield_length = block_count.div_ceil(8);
+        if piece.bitfield.len() != expected_bitfield_length {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight block bitfield length mismatch: expected {}, actual {}",
+                expected_bitfield_length,
+                piece.bitfield.len()
+            )));
+        }
+        let unused_bits = (8 - block_count % 8) % 8;
+        if unused_bits != 0
+            && piece
+                .bitfield
+                .last()
+                .is_some_and(|byte| byte & ((1u8 << unused_bits) - 1) != 0)
+        {
+            return Err(Aria2Error::FileIo(
+                "In-flight block bitfield has set trailing bits".to_string(),
+            ));
+        }
+        let piece_offset = u64::from(piece.index) * u64::from(piece_length);
+        if piece_offset >= total_length {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight torrent piece offset is out of range: {}",
+                piece.index
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -804,7 +908,9 @@ fn parse_native_control_file(path: &Path, data: &[u8]) -> Result<Option<ControlF
     let version = u16::from_be_bytes([data[0], data[1]]);
     let native = NativeReader::new(data, version == 1);
     let mut reader = native;
-    let extension = reader.u32("extension")?;
+    // aria2 stores extension flags as a network-order byte mask even in v0;
+    // only the following numeric fields use the host byte order in that version.
+    let extension = reader.u32_be("extension")?;
     let is_torrent = extension & 1 != 0;
     let info_hash_length = usize::try_from(reader.u32("info hash length")?).map_err(|_| {
         Aria2Error::FileIo("Native control file info hash length is too large".to_string())
@@ -869,9 +975,10 @@ fn parse_native_control_file(path: &Path, data: &[u8]) -> Result<Option<ControlF
     let in_flight_count = usize::try_from(reader.u32("in-flight piece count")?).map_err(|_| {
         Aria2Error::FileIo("Native control file in-flight count is too large".to_string())
     })?;
+    let mut in_flight_pieces = Vec::with_capacity(in_flight_count);
     for _ in 0..in_flight_count {
-        let index = reader.u32("in-flight piece index")? as usize;
-        if index >= num_pieces {
+        let index = reader.u32("in-flight piece index")?;
+        if index as usize >= num_pieces {
             return Err(Aria2Error::FileIo(format!(
                 "Native control file piece index out of range: {}",
                 index
@@ -897,8 +1004,22 @@ fn parse_native_control_file(path: &Path, data: &[u8]) -> Result<Option<ControlF
                 expected_block_bitfield_length, block_bitfield_length
             )));
         }
-        let _ = reader.bytes(block_bitfield_length, "in-flight bitfield")?;
+        let bitfield = reader
+            .bytes(block_bitfield_length, "in-flight bitfield")?
+            .to_vec();
+        in_flight_pieces.push(ControlFileInFlightPiece {
+            index,
+            length,
+            bitfield,
+        });
     }
+    validate_in_flight_pieces(
+        &in_flight_pieces,
+        total_length,
+        piece_length,
+        num_pieces,
+        &bitfield,
+    )?;
 
     let project_extension = parse_project_extension(reader.remaining())?;
     let mut completed_length =
@@ -958,6 +1079,7 @@ fn parse_native_control_file(path: &Path, data: &[u8]) -> Result<Option<ControlF
         completed_length,
         upload_length,
         bitfield,
+        in_flight_pieces,
         num_pieces,
         checksum_algo,
         checksum_value,
@@ -1019,6 +1141,13 @@ impl<'a> NativeReader<'a> {
         })
     }
 
+    fn u32_be(&mut self, field: &str) -> Result<u32> {
+        let bytes = self.bytes(4, field)?;
+        Ok(u32::from_be_bytes(
+            bytes.try_into().expect("four-byte native field"),
+        ))
+    }
+
     fn u64(&mut self, field: &str) -> Result<u64> {
         let bytes = self.bytes(8, field)?;
         Ok(if self.network_order {
@@ -1062,6 +1191,85 @@ fn u64_from_le(b: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn original_aria2_bt_control_file_fixtures_restore_verified_progress() {
+        const INFO_HASH: [u8; 20] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00, 0xff, 0xff, 0xff, 0xff,
+        ];
+        let fixtures: [(&str, &[u8]); 2] = [
+            (
+                "v0000",
+                include_bytes!("../../../aria2_original/test/load.aria2"),
+            ),
+            (
+                "v0001",
+                include_bytes!("../../../aria2_original/test/load-v0001.aria2"),
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+
+        for (version, bytes) in fixtures {
+            let path = dir.path().join(format!("original-{version}.aria2"));
+            tokio::fs::write(&path, bytes).await.unwrap();
+            let loaded = ControlFile::load(&path).await.unwrap().unwrap();
+
+            assert!(loaded.uses_native_layout(), "version {version}");
+            assert!(loaded.is_torrent_checkpoint(), "version {version}");
+            assert_eq!(
+                loaded.torrent_info_hash(),
+                Some(INFO_HASH),
+                "version {version}"
+            );
+            assert_eq!(loaded.piece_length(), Some(1024), "version {version}");
+            assert_eq!(loaded.total_length(), 80 * 1024, "version {version}");
+            assert_eq!(loaded.upload_length(), 1024, "version {version}");
+            assert_eq!(loaded.completed_length(), 79 * 1024, "version {version}");
+            assert_eq!(
+                loaded.bitfield(),
+                &[0xff; 9].into_iter().chain([0xfe]).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                loaded.in_flight_pieces(),
+                &[
+                    ControlFileInFlightPiece {
+                        index: 1,
+                        length: 1024,
+                        bitfield: vec![0],
+                    },
+                    ControlFileInFlightPiece {
+                        index: 2,
+                        length: 512,
+                        bitfield: vec![0],
+                    },
+                ],
+                "version {version}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_control_file_roundtrips_in_flight_block_bitfields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial-piece.bin.aria2");
+        let mut control =
+            ControlFile::open_or_create_with_piece_length(&path, 64 * 1024, 64 * 1024)
+                .await
+                .unwrap();
+        control.mark_torrent_checkpoint();
+        control.set_torrent_info_hash([0x31; 20]);
+        control.set_in_flight_pieces(vec![ControlFileInFlightPiece {
+            index: 0,
+            length: 64 * 1024,
+            bitfield: vec![0b1010_0000],
+        }]);
+        control.save().await.unwrap();
+
+        let restored = ControlFile::load(&path).await.unwrap().unwrap();
+        assert_eq!(restored.in_flight_pieces(), control.in_flight_pieces());
+        assert_eq!(restored.bitfield(), &[0]);
+    }
 
     #[test]
     fn test_control_path_uses_aria2_suffix() {

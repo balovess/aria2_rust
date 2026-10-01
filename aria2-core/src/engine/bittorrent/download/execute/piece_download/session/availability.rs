@@ -7,14 +7,17 @@ use crate::engine::bittorrent::download::execute::types::PeerKey;
 use crate::engine::bittorrent::peer::connection::PeerActorId;
 use crate::engine::bittorrent::peer::message_handler::PeerSwarm;
 use crate::engine::bittorrent::piece::PeerBitfieldTracker;
+use crate::engine::bittorrent::piece::PiecePicker;
 
 pub(super) fn sync_swarm_actor_availability(
     swarm: &PeerSwarm,
     changed_actor_ids: &[PeerActorId],
     peer_tracker: &mut PeerBitfieldTracker,
+    piece_picker: &mut PiecePicker,
     peer_last_data_time: &mut HashMap<PeerKey, Instant>,
 ) {
     let changed: HashSet<_> = changed_actor_ids.iter().copied().collect();
+    let mut availability_changed = false;
     for actor in swarm.iter() {
         if actor.dead || !changed.contains(&actor.actor_id) || !actor.has_bitfield {
             continue;
@@ -23,7 +26,11 @@ pub(super) fn sync_swarm_actor_availability(
         if peer_tracker.get_peer_bitfield_raw(&peer) != Some(actor.bitfield.as_slice()) {
             peer_tracker.update_peer_bitfield(&peer, &actor.bitfield);
             peer_last_data_time.insert(PeerKey::new(actor.endpoint), Instant::now());
+            availability_changed = true;
         }
+    }
+    if availability_changed {
+        piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
     }
 }
 
@@ -59,6 +66,7 @@ mod tests {
         let endpoint = swarm.actor(actor_id).unwrap().endpoint;
         let tracker_key = endpoint.to_string();
         let mut tracker = PeerBitfieldTracker::new(8);
+        let mut picker = PiecePicker::new(8);
         tracker.update_peer_bitfield(&tracker_key, &[0x80]);
         let mut last_data_time = HashMap::new();
 
@@ -78,7 +86,13 @@ mod tests {
             matches!(event_lease.recv().await, Some(PeerEvent::PeerAvailabilityChanged { actor_id: event_actor, .. }) if event_actor == actor_id)
         );
         drop(event_lease);
-        sync_swarm_actor_availability(&swarm, &[actor_id], &mut tracker, &mut last_data_time);
+        sync_swarm_actor_availability(
+            &swarm,
+            &[actor_id],
+            &mut tracker,
+            &mut picker,
+            &mut last_data_time,
+        );
 
         assert_eq!(tracker.piece_frequencies()[..3], [1, 1, 0]);
         assert_eq!(last_data_time.len(), 1);

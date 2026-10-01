@@ -39,7 +39,10 @@ impl BtDownloadCommand {
         let bitfield = bitfield
             .or_else(|| checkpoint.bitfield().map(ToOwned::to_owned))
             .unwrap_or_default();
-        checkpoint.save(&bitfield, self.completed_bytes).await
+        let in_flight_pieces = checkpoint.in_flight_pieces().to_vec();
+        checkpoint
+            .save_with_in_flight_pieces(&bitfield, self.completed_bytes, &in_flight_pieces)
+            .await
     }
 
     async fn announce_stopped_for_halt(&mut self) {

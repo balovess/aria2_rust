@@ -1,21 +1,90 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::engine::bittorrent::download::command::BtDownloadCommand;
 use crate::engine::bittorrent::peer::message_handler::types::{
-    BLOCK_SIZE, PieceDownloadResult, PieceRequestPlan,
+    BLOCK_SIZE, PieceDownloadResult, PieceRequestPlan, ReceivedPieceBlock,
 };
 use crate::engine::bittorrent::peer::message_handler::{
-    download_piece_blocks, download_piece_blocks_batch, download_piece_blocks_endgame,
+    download_piece_blocks_batch, download_piece_blocks_endgame,
 };
 use crate::engine::bittorrent::piece::selector::BtPieceSelector;
 use crate::error::{Aria2Error, Result};
+use crate::filesystem::control_file::ControlFileInFlightPiece;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::request::request_group::DownloadResultCode;
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::info;
 
 use super::{PieceDownloadSession, PieceLoopAction};
 use crate::engine::bittorrent::download::execute::types::PeerKey;
+
+async fn persist_received_block(
+    writer: &mut Box<dyn SeekableDiskWriter>,
+    layout: Option<&crate::engine::bittorrent::torrent::file_layout::MultiFileLayout>,
+    piece_lengths: &HashMap<u32, u32>,
+    in_flight: &mut HashMap<u32, ControlFileInFlightPiece>,
+    max_open_files: usize,
+    block: ReceivedPieceBlock,
+) -> Result<()> {
+    let Some(&piece_length) = piece_lengths.get(&block.piece_index) else {
+        return Ok(());
+    };
+    let block_count = piece_length.div_ceil(BLOCK_SIZE);
+    let expected_offset = block.block_index.saturating_mul(BLOCK_SIZE);
+    let expected_length = (piece_length.saturating_sub(expected_offset)).min(BLOCK_SIZE);
+    if block.block_index >= block_count
+        || block.offset != expected_offset
+        || block.data.len() != expected_length as usize
+    {
+        return Err(Aria2Error::Network(format!(
+            "Invalid received block layout for piece {} block {}",
+            block.piece_index, block.block_index
+        )));
+    }
+
+    if let Some(layout) = layout {
+        crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
+            layout,
+            block.piece_index,
+            block.offset,
+            &block.data,
+            max_open_files,
+        )
+        .await?;
+    } else {
+        let global_offset =
+            u64::from(block.piece_index) * u64::from(piece_length) + u64::from(block.offset);
+        writer.write_bytes_at(global_offset, block.data).await?;
+    }
+
+    let bitfield_len = (block_count as usize).div_ceil(8);
+    let record = in_flight
+        .entry(block.piece_index)
+        .or_insert_with(|| ControlFileInFlightPiece {
+            index: block.piece_index,
+            length: piece_length,
+            bitfield: vec![0; bitfield_len],
+        });
+    if record.length != piece_length || record.bitfield.len() != bitfield_len {
+        *record = ControlFileInFlightPiece {
+            index: block.piece_index,
+            length: piece_length,
+            bitfield: vec![0; bitfield_len],
+        };
+    }
+    record.bitfield[block.block_index as usize / 8] |= 1 << (7 - block.block_index % 8);
+    Ok(())
+}
+
+pub(super) fn in_flight_snapshot(
+    in_flight: &HashMap<u32, ControlFileInFlightPiece>,
+) -> Vec<ControlFileInFlightPiece> {
+    let mut pieces = in_flight.values().cloned().collect::<Vec<_>>();
+    pieces.sort_unstable_by_key(|piece| piece.index);
+    pieces
+}
 
 impl PieceDownloadSession<'_> {
     pub(super) async fn complete_web_seed_piece(
@@ -77,9 +146,14 @@ impl PieceDownloadSession<'_> {
         };
         self.piece_manager.mark_piece_complete(piece_index);
         self.piece_picker.mark_completed(piece_index);
+        super::super::super::checkpoint::mark_piece_completed(
+            &self.completed_bitfield,
+            piece_index,
+        );
         self.swarm
             .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()));
         self.command.completed_bytes = self.command.completed_bytes.saturating_add(accounted_bytes);
+        self.in_flight_pieces.remove(&piece_index);
         self.command
             .group
             .recover()
@@ -89,6 +163,7 @@ impl PieceDownloadSession<'_> {
                 &mut self.writer,
                 &self.completed_bitfield,
                 accounted_bytes,
+                &in_flight_snapshot(&self.in_flight_pieces),
             )
             .await?;
         self.swarm.broadcast_have(piece_index).await;
@@ -147,6 +222,75 @@ impl PieceDownloadSession<'_> {
         }
     }
 
+    async fn load_resumed_blocks(
+        &mut self,
+        piece_index: u32,
+        piece_length: u32,
+    ) -> Result<Vec<Option<bytes::Bytes>>> {
+        let block_count = piece_length.div_ceil(BLOCK_SIZE) as usize;
+        let mut blocks = vec![None; block_count];
+        let Some(mut record) = self.in_flight_pieces.get(&piece_index).cloned() else {
+            return Ok(blocks);
+        };
+        let expected_bitfield_len = block_count.div_ceil(8);
+        if self.piece_picker.is_completed(piece_index)
+            || record.length != piece_length
+            || record.bitfield.len() != expected_bitfield_len
+        {
+            self.in_flight_pieces.remove(&piece_index);
+            return Ok(blocks);
+        }
+
+        for block_index in 0..block_count {
+            let mask = 1 << (7 - block_index % 8);
+            if record.bitfield[block_index / 8] & mask == 0 {
+                continue;
+            }
+            let offset = block_index as u32 * BLOCK_SIZE;
+            let length = (piece_length - offset).min(BLOCK_SIZE) as usize;
+            let bytes = if let Some(layout) = self.command.multi_file_layout.as_ref() {
+                crate::engine::bittorrent::piece::downloader::read_piece_range_from_files(
+                    layout,
+                    piece_index,
+                    offset,
+                    length as u32,
+                )
+                .await
+            } else {
+                let mut data = vec![0; length];
+                let mut read = 0;
+                while read < data.len() {
+                    match self
+                        .writer
+                        .read_at(
+                            u64::from(piece_index) * u64::from(piece_length)
+                                + u64::from(offset)
+                                + read as u64,
+                            &mut data[read..],
+                        )
+                        .await
+                    {
+                        Ok(0) | Err(_) => break,
+                        Ok(bytes_read) => read += bytes_read,
+                    }
+                }
+                (read == data.len()).then_some(data)
+            };
+            if let Some(bytes) = bytes {
+                blocks[block_index] = Some(bytes::Bytes::from(bytes));
+            } else {
+                record.bitfield[block_index / 8] &= !mask;
+            }
+        }
+
+        if record.bitfield.iter().all(|byte| *byte == 0) {
+            self.in_flight_pieces.remove(&piece_index);
+        } else {
+            self.in_flight_pieces.insert(piece_index, record);
+        }
+        Ok(blocks)
+    }
+
     pub(super) async fn download_piece(
         &mut self,
         next_piece_idx: usize,
@@ -165,6 +309,17 @@ impl PieceDownloadSession<'_> {
             actual_piece_len
         );
         let max_attempts = self.command.group.recover().options().max_retries;
+        let piece_index = next_piece_idx as u32;
+        let resume_blocks = self
+            .load_resumed_blocks(piece_index, actual_piece_len)
+            .await?;
+        let block_tx = tokio::sync::mpsc::channel(64);
+        let (block_sender, mut block_receiver) = block_tx;
+        let piece_lengths = HashMap::from([(piece_index, actual_piece_len)]);
+        let max_open_files = self.command.group.recover().options().bt_max_open_files;
+        let request_timeout = self.request_timeout;
+        let endgame_active = self.endgame_state.is_endgame_active();
+        let swarm_len = self.swarm.len();
 
         // Phase 14 - B1: Use endgame-aware download when in endgame mode
         // A block read can otherwise wait for the full protocol timeout
@@ -175,76 +330,132 @@ impl PieceDownloadSession<'_> {
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
         lifecycle_wait.as_mut().enable();
-        let piece_download = async {
-            if self.endgame_state.is_endgame_active() {
-                info!(
-                    "[BT] Endgame: downloading piece {} with duplicate requests ({} swarm peers available)",
-                    next_piece_idx,
-                    self.swarm.len()
-                );
-                download_piece_blocks_endgame(
-                    self.swarm,
-                    next_piece_idx as u32,
-                    actual_piece_len,
-                    num_blocks,
-                    &mut self.endgame_state,
-                    self.request_timeout,
-                    max_attempts,
-                    self.command.choking_algo.as_mut(),
+        let download_result = {
+            let writer = &mut self.writer;
+            let layout = self.command.multi_file_layout.as_ref();
+            let in_flight = &mut self.in_flight_pieces;
+            let swarm = &mut self.swarm;
+            let choking_algo = &mut self.command.choking_algo;
+            let endgame_state = &mut self.endgame_state;
+            let piece_download = async {
+                if endgame_active {
+                    info!(
+                        "[BT] Endgame: downloading piece {} with duplicate requests ({} swarm peers available)",
+                        next_piece_idx, swarm_len
+                    );
+                    download_piece_blocks_endgame(
+                        swarm,
+                        piece_index,
+                        actual_piece_len,
+                        num_blocks,
+                        endgame_state,
+                        request_timeout,
+                        max_attempts,
+                        choking_algo.as_mut(),
+                        &resume_blocks,
+                        Some(&block_sender),
+                    )
+                    .await
+                } else {
+                    let mut batch = download_piece_blocks_batch(
+                        swarm,
+                        &[PieceRequestPlan {
+                            piece_index,
+                            piece_length: actual_piece_len,
+                            num_blocks,
+                            resume_blocks,
+                        }],
+                        request_timeout,
+                        max_attempts,
+                        choking_algo.as_mut(),
+                        Some(&block_sender),
+                    )
+                    .await?;
+                    let entry = batch
+                        .pieces
+                        .pop()
+                        .expect("single-piece scheduler returns its requested piece");
+                    Ok(crate::engine::bittorrent::peer::message_handler::types::ActorAwarePieceDownloadResult {
+                        piece: entry.result.map_err(Aria2Error::Network),
+                        peer_actor_ids: entry.peer_actor_ids,
+                        availability_changed_actor_ids: batch.availability_changed_actor_ids,
+                        pex_peers: batch.pex_peers,
+                        tracker_peers: batch.tracker_peers,
+                    })
+                }
+            };
+            tokio::pin!(piece_download);
+            let result = loop {
+                tokio::select! {
+                    result = &mut piece_download => break Some(result),
+                    block = block_receiver.recv() => {
+                        if let Some(block) = block {
+                            persist_received_block(
+                                writer,
+                                layout,
+                                &piece_lengths,
+                                in_flight,
+                                max_open_files,
+                                block,
+                            ).await?;
+                        }
+                    }
+                    _ = &mut lifecycle_wait => break None,
+                }
+            };
+            while let Ok(block) = block_receiver.try_recv() {
+                persist_received_block(
+                    writer,
+                    layout,
+                    &piece_lengths,
+                    in_flight,
+                    max_open_files,
+                    block,
                 )
-                .await
-            } else {
-                download_piece_blocks(
-                    self.swarm,
-                    next_piece_idx as u32,
-                    actual_piece_len,
-                    num_blocks,
-                    self.request_timeout,
-                    max_attempts,
-                    self.command.choking_algo.as_mut(),
-                )
-                .await
+                .await?;
             }
+            result
         };
-        let download_result = tokio::select! {
-            result = piece_download => result,
-            _ = &mut lifecycle_wait => {
+        let download_result = match download_result {
+            Some(result) => result,
+            None => {
                 let halt_requested = {
                     let group = self.command.group.recover();
                     group.is_force_halt_requested() || group.is_halt_requested()
                 };
-                if !halt_requested {
-                    // Save-session and other non-terminal lifecycle
-                    // updates share this notifier. Retry the interrupted
-                    // piece so its normal completion boundary can consume
-                    // the requested checkpoint.
-                    return Ok(PieceLoopAction::Retry);
-                }
-
                 self.writer.flush().await.map_err(|error| {
                     Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
                 })?;
-                self.writer.close().await.map_err(|error| {
-                    Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
-                })?;
                 if let Some(checkpoint) = self.command.checkpoint.as_mut() {
-                    let bitfield =
-                        super::super::super::checkpoint::snapshot_completed_bitfield(
-                            &self.completed_bitfield,
-                        );
+                    let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
+                        &self.completed_bitfield,
+                    );
                     checkpoint
-                        .save(&bitfield, self.command.completed_bytes)
+                        .save_with_in_flight_pieces(
+                            &bitfield,
+                            self.command.completed_bytes,
+                            &in_flight_snapshot(&self.in_flight_pieces),
+                        )
                         .await
                         .map_err(|error| {
                             Aria2Error::FileIo(format!(
                                 "Failed to save halted BT checkpoint: {error}"
                             ))
                         })?;
-                    self.command.group.recover().take_save_control_file_request();
+                    self.command
+                        .group
+                        .recover()
+                        .take_save_control_file_request();
                 }
-                return Err(Aria2Error::DownloadFailed(
-                    "BitTorrent download halted".into(),
-                ));
+                if halt_requested {
+                    self.writer.close().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                    })?;
+                    return Err(Aria2Error::DownloadFailed(
+                        "BitTorrent download halted".into(),
+                    ));
+                }
+                return Ok(PieceLoopAction::Retry);
             }
         };
         let (piece_result, peer_actor_ids) = match download_result {
@@ -256,6 +467,7 @@ impl PieceDownloadSession<'_> {
                     self.swarm,
                     &actor_result.availability_changed_actor_ids,
                     &mut self.peer_tracker,
+                    &mut self.piece_picker,
                     &mut self.peer_last_data_time,
                 );
                 (actor_result.piece, actor_result.peer_actor_ids)
@@ -284,67 +496,121 @@ impl PieceDownloadSession<'_> {
 
         self.swarm
             .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()));
-        let plans = piece_indices
+        let mut plans = Vec::with_capacity(piece_indices.len());
+        for &piece_index in piece_indices {
+            let piece_length = self.actual_piece_length(piece_index);
+            let resume_blocks = self
+                .load_resumed_blocks(piece_index as u32, piece_length)
+                .await?;
+            plans.push(PieceRequestPlan {
+                piece_index: piece_index as u32,
+                piece_length,
+                num_blocks: BtPieceSelector::calculate_num_blocks(piece_length, BLOCK_SIZE),
+                resume_blocks,
+            });
+        }
+        let piece_lengths = plans
             .iter()
-            .map(|&piece_index| {
-                let piece_length = self.actual_piece_length(piece_index);
-                PieceRequestPlan {
-                    piece_index: piece_index as u32,
-                    piece_length,
-                    num_blocks: BtPieceSelector::calculate_num_blocks(piece_length, BLOCK_SIZE),
-                }
-            })
-            .collect::<Vec<_>>();
+            .map(|plan| (plan.piece_index, plan.piece_length))
+            .collect::<HashMap<_, _>>();
         let max_attempts = self.command.group.recover().options().max_retries;
+        let max_open_files = self.command.group.recover().options().bt_max_open_files;
         let lifecycle_notify = self.command.group.recover().lifecycle_notifier();
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
         lifecycle_wait.as_mut().enable();
-        let batch_download = download_piece_blocks_batch(
-            self.swarm,
-            &plans,
-            self.request_timeout,
-            max_attempts,
-            self.command.choking_algo.as_mut(),
-        );
-        let batch_result = tokio::select! {
-            result = batch_download => result?,
-            _ = &mut lifecycle_wait => {
+        let (block_sender, mut block_receiver) = tokio::sync::mpsc::channel(64);
+        let request_timeout = self.request_timeout;
+        let batch_result = {
+            let writer = &mut self.writer;
+            let layout = self.command.multi_file_layout.as_ref();
+            let in_flight = &mut self.in_flight_pieces;
+            let swarm = &mut self.swarm;
+            let choking_algo = &mut self.command.choking_algo;
+            let batch_download = download_piece_blocks_batch(
+                swarm,
+                &plans,
+                request_timeout,
+                max_attempts,
+                choking_algo.as_mut(),
+                Some(&block_sender),
+            );
+            tokio::pin!(batch_download);
+            let result = loop {
+                tokio::select! {
+                    result = &mut batch_download => break Some(result),
+                    block = block_receiver.recv() => {
+                        if let Some(block) = block {
+                            persist_received_block(
+                                writer,
+                                layout,
+                                &piece_lengths,
+                                in_flight,
+                                max_open_files,
+                                block,
+                            ).await?;
+                        }
+                    }
+                    _ = &mut lifecycle_wait => break None,
+                }
+            };
+            while let Ok(block) = block_receiver.try_recv() {
+                persist_received_block(
+                    writer,
+                    layout,
+                    &piece_lengths,
+                    in_flight,
+                    max_open_files,
+                    block,
+                )
+                .await?;
+            }
+            result
+        };
+        let batch_result = match batch_result {
+            Some(result) => result?,
+            None => {
                 let halt_requested = {
                     let group = self.command.group.recover();
                     group.is_force_halt_requested() || group.is_halt_requested()
                 };
-                if !halt_requested {
-                    return Ok(piece_indices
-                        .iter()
-                        .copied()
-                        .map(|piece_index| (piece_index, PieceLoopAction::Retry))
-                        .collect());
-                }
-
                 self.writer.flush().await.map_err(|error| {
                     Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
-                })?;
-                self.writer.close().await.map_err(|error| {
-                    Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                 })?;
                 if let Some(checkpoint) = self.command.checkpoint.as_mut() {
                     let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
                         &self.completed_bitfield,
                     );
                     checkpoint
-                        .save(&bitfield, self.command.completed_bytes)
+                        .save_with_in_flight_pieces(
+                            &bitfield,
+                            self.command.completed_bytes,
+                            &in_flight_snapshot(&self.in_flight_pieces),
+                        )
                         .await
                         .map_err(|error| {
                             Aria2Error::FileIo(format!(
                                 "Failed to save halted BT checkpoint: {error}"
                             ))
                         })?;
-                    self.command.group.recover().take_save_control_file_request();
+                    self.command
+                        .group
+                        .recover()
+                        .take_save_control_file_request();
                 }
-                return Err(Aria2Error::DownloadFailed(
-                    "BitTorrent download halted".into(),
-                ));
+                if halt_requested {
+                    self.writer.close().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                    })?;
+                    return Err(Aria2Error::DownloadFailed(
+                        "BitTorrent download halted".into(),
+                    ));
+                }
+                return Ok(piece_indices
+                    .iter()
+                    .copied()
+                    .map(|piece_index| (piece_index, PieceLoopAction::Retry))
+                    .collect());
             }
         };
 
@@ -355,6 +621,7 @@ impl PieceDownloadSession<'_> {
             self.swarm,
             &batch_result.availability_changed_actor_ids,
             &mut self.peer_tracker,
+            &mut self.piece_picker,
             &mut self.peer_last_data_time,
         );
 
@@ -462,6 +729,11 @@ impl PieceDownloadSession<'_> {
                             .await?;
                     }
 
+                    super::super::super::checkpoint::mark_piece_completed(
+                        &self.completed_bitfield,
+                        next_piece_idx as u32,
+                    );
+
                     let accounted_piece_len =
                         if self.meta.info.meta_version == Some(2) && self.has_v1_piece_hashes {
                             self.command
@@ -473,6 +745,7 @@ impl PieceDownloadSession<'_> {
                             piece_data_len as u64
                         };
                     self.command.completed_bytes += accounted_piece_len;
+                    self.in_flight_pieces.remove(&(next_piece_idx as u32));
 
                     self.command
                         .group
@@ -483,6 +756,7 @@ impl PieceDownloadSession<'_> {
                             &mut self.writer,
                             &self.completed_bitfield,
                             accounted_piece_len,
+                            &in_flight_snapshot(&self.in_flight_pieces),
                         )
                         .await?;
 
@@ -503,6 +777,7 @@ impl PieceDownloadSession<'_> {
                         next_piece_idx,
                     );
                 } else {
+                    self.in_flight_pieces.remove(&(next_piece_idx as u32));
                     tracing::warn!(
                         "[BT] SHA1 mismatch on piece {}, retrying...",
                         next_piece_idx

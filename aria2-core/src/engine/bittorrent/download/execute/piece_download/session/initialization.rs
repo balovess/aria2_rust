@@ -272,7 +272,19 @@ impl<'a> PieceDownloadSession<'a> {
                 total_size,
             )
             .await?;
-        let peer_tracker = crate::engine::bittorrent::piece::PeerBitfieldTracker::new(num_pieces);
+        let mut peer_tracker =
+            crate::engine::bittorrent::piece::PeerBitfieldTracker::new(num_pieces);
+        for actor in swarm
+            .iter()
+            .filter(|actor| !actor.dead && actor.has_bitfield)
+        {
+            let bitfield = if actor.seeder {
+                vec![0xff; (num_pieces as usize).div_ceil(8)]
+            } else {
+                actor.bitfield.clone()
+            };
+            peer_tracker.update_peer_bitfield(&actor.endpoint.to_string(), &bitfield);
+        }
         let upload_config = crate::engine::bittorrent::peer::upload_session::BtSeedingConfig {
             max_upload_bytes_per_sec: command.group.recover().options().max_upload_limit,
             global_limiter: command.global_limiter.clone(),
@@ -401,6 +413,18 @@ impl<'a> PieceDownloadSession<'a> {
             let group = command.group.recover();
             super::super::sync_peer_snapshots_with_swarm(&group, swarm);
         }
+        let in_flight_pieces = command
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                checkpoint
+                    .in_flight_pieces()
+                    .iter()
+                    .cloned()
+                    .map(|piece| (piece.index, piece))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             command,
@@ -432,6 +456,7 @@ impl<'a> PieceDownloadSession<'a> {
             peer_last_data_time,
             last_snub_check,
             stop_timeout,
+            in_flight_pieces,
         })
     }
 }

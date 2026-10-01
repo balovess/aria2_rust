@@ -194,6 +194,41 @@ pub async fn write_piece_to_multi_files_coalesced_with_limit(
     _piece_length: u32,
     max_open_files: usize,
 ) -> Result<()> {
+    write_piece_range_to_multi_files_coalesced_with_limit(
+        layout,
+        piece_idx,
+        0,
+        piece_data,
+        max_open_files,
+    )
+    .await
+}
+
+/// Writes one received block at its offset within a torrent piece.
+pub(crate) async fn write_piece_block_to_multi_files(
+    layout: &MultiFileLayout,
+    piece_idx: u32,
+    block_offset: u32,
+    block_data: &bytes::Bytes,
+    max_open_files: usize,
+) -> Result<()> {
+    write_piece_range_to_multi_files_coalesced_with_limit(
+        layout,
+        piece_idx,
+        block_offset,
+        block_data,
+        max_open_files,
+    )
+    .await
+}
+
+async fn write_piece_range_to_multi_files_coalesced_with_limit(
+    layout: &MultiFileLayout,
+    piece_idx: u32,
+    start_offset: u32,
+    piece_data: &bytes::Bytes,
+    max_open_files: usize,
+) -> Result<()> {
     // ------------------------------------------------------------------
     // Phase 1: Collect all raw write operations
     // ------------------------------------------------------------------
@@ -203,7 +238,7 @@ pub async fn write_piece_to_multi_files_coalesced_with_limit(
     let mut data_offset = 0usize;
 
     while data_offset < piece_data.len() {
-        let piece_offset = data_offset as u32;
+        let piece_offset = start_offset.saturating_add(data_offset as u32);
         if let Some((file_idx, file_offset)) = layout.resolve_file_offset(piece_idx, piece_offset) {
             let file_info = layout.get_file_info(file_idx).ok_or_else(|| {
                 Aria2Error::Fatal(FatalError::Config("invalid file index".to_string()))
@@ -224,7 +259,14 @@ pub async fn write_piece_to_multi_files_coalesced_with_limit(
                 break;
             }
         } else {
-            break;
+            let next_content = layout.next_content_offset(piece_idx, piece_offset);
+            let skip = next_content
+                .saturating_sub(piece_offset)
+                .min((piece_data.len() - data_offset) as u32) as usize;
+            if skip == 0 {
+                break;
+            }
+            data_offset += skip;
         }
     }
 

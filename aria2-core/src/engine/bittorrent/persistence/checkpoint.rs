@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::filesystem::control_file::ControlFile;
+use crate::filesystem::control_file::{ControlFile, ControlFileInFlightPiece};
 
 pub(crate) struct BtCheckpoint {
     control_file: Option<ControlFile>,
@@ -111,7 +111,24 @@ impl BtCheckpoint {
             .sum()
     }
 
+    pub(crate) fn in_flight_pieces(&self) -> &[ControlFileInFlightPiece] {
+        self.control_file
+            .as_ref()
+            .map(ControlFile::in_flight_pieces)
+            .unwrap_or_default()
+    }
+
     pub(crate) async fn save(&mut self, bitfield: &[u8], completed_length: u64) -> Result<()> {
+        self.save_with_in_flight_pieces(bitfield, completed_length, &[])
+            .await
+    }
+
+    pub(crate) async fn save_with_in_flight_pieces(
+        &mut self,
+        bitfield: &[u8],
+        completed_length: u64,
+        in_flight_pieces: &[ControlFileInFlightPiece],
+    ) -> Result<()> {
         if bitfield.len() != self.num_pieces.div_ceil(8) {
             return Err(crate::error::Aria2Error::FileIo(format!(
                 "BitTorrent checkpoint bitfield length mismatch: expected {}, got {}",
@@ -143,6 +160,7 @@ impl BtCheckpoint {
         // newer than the checkpoint that can actually be restored.
         let mut next = control_file.clone();
         next.set_bitfield(bitfield.to_vec());
+        next.set_in_flight_pieces(in_flight_pieces.to_vec());
         next.update_completed_length(completed_length.min(self.total_length));
         next.save().await?;
         *control_file = next;
@@ -206,7 +224,7 @@ async fn remove_stale(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::BtCheckpoint;
-    use crate::filesystem::control_file::ControlFile;
+    use crate::filesystem::control_file::{ControlFile, ControlFileInFlightPiece};
 
     #[tokio::test]
     async fn checkpoint_restores_piece_sized_completed_length() {
@@ -231,6 +249,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(control.torrent_piece_length(), Some(4));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_restores_only_durable_in_flight_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        std::fs::write(&output, vec![0xA5; 64 * 1024]).unwrap();
+        let info_hash = [0x29; 20];
+        let mut checkpoint = BtCheckpoint::open(&output, true, 64 * 1024, 64 * 1024, 1, info_hash)
+            .await
+            .unwrap();
+        let partial = ControlFileInFlightPiece {
+            index: 0,
+            length: 64 * 1024,
+            bitfield: vec![0b1010_0000],
+        };
+
+        checkpoint
+            .save_with_in_flight_pieces(&[0], 0, &[partial.clone()])
+            .await
+            .unwrap();
+
+        let restored = BtCheckpoint::open(&output, true, 64 * 1024, 64 * 1024, 1, info_hash)
+            .await
+            .unwrap();
+        assert_eq!(restored.bitfield(), Some([0].as_slice()));
+        assert_eq!(restored.in_flight_pieces(), &[partial]);
     }
 
     #[tokio::test]
