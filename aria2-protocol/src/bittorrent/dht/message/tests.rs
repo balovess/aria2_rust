@@ -33,6 +33,31 @@ fn test_error_message() {
 }
 
 #[test]
+fn test_all_krpc_message_kinds_encode_aria2_version() {
+    use std::collections::BTreeMap;
+
+    let response = BencodeValue::Dict(BTreeMap::from([(
+        b"id".to_vec(),
+        BencodeValue::Bytes(vec![0x11; 20]),
+    )]));
+    let messages = [
+        DhtMessageBuilder::ping(1, &[0x11; 20]),
+        DhtMessage::new_response(vec![0, 0, 0, 2], response),
+        DhtMessage::new_error(vec![0, 0, 0, 3], 203, "Server Error"),
+    ];
+
+    for message in messages {
+        let encoded = message.encode();
+        let (root, consumed) = BencodeValue::decode(&encoded).unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(
+            root.dict_get(b"v").and_then(BencodeValue::as_bytes),
+            Some(b"A2\x00\x03".as_slice())
+        );
+    }
+}
+
+#[test]
 fn test_response_message() {
     let mut result = std::collections::BTreeMap::new();
     result.insert(b"id".to_vec(), BencodeValue::Bytes(vec![0u8; 20]));

@@ -1,8 +1,72 @@
 use super::super::{DhtEngine, DhtEngineConfig};
+use crate::bittorrent::bencode::codec::BencodeValue;
+use crate::bittorrent::dht::message::{DhtMessage, DhtMessageBuilder};
 use crate::bittorrent::dht::modern::{MutableValue, StoredItem};
 use crate::bittorrent::dht::node::DhtNode;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
+use tokio::net::UdpSocket;
+
+#[tokio::test]
+async fn test_krpc_loopback_messages_include_aria2_version() {
+    let engine_id = [0x41; 20];
+    let remote_id = [0x42; 20];
+    let engine = DhtEngine::start(DhtEngineConfig {
+        self_id: engine_id,
+        listen_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .unwrap();
+
+    let remote = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let remote_addr = remote.local_addr().unwrap();
+    let add_node_engine = engine.clone();
+    let add_node = tokio::spawn(async move {
+        add_node_engine.add_node(remote_addr).await;
+    });
+
+    let mut packet = [0u8; 2048];
+    let (length, engine_addr) =
+        tokio::time::timeout(Duration::from_secs(2), remote.recv_from(&mut packet))
+            .await
+            .expect("engine should send a ping to the loopback node")
+            .unwrap();
+    assert_aria2_dht_version(&packet[..length]);
+    let query = DhtMessage::decode(&packet[..length]).unwrap();
+    assert!(query.is_query());
+    assert_eq!(
+        query.q.as_ref().map(|method| method.0.as_str()),
+        Some("ping")
+    );
+
+    let response = DhtMessageBuilder::ping_response(&query.t, &remote_id).encode();
+    remote.send_to(&response, engine_addr).await.unwrap();
+    add_node.await.unwrap();
+
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let ping = DhtMessageBuilder::ping(0x1234_5678, &remote_id).encode();
+    client.send_to(&ping, engine.local_addr()).await.unwrap();
+    let (length, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut packet))
+        .await
+        .expect("engine should answer the loopback ping")
+        .unwrap();
+    assert_aria2_dht_version(&packet[..length]);
+    let response = DhtMessage::decode(&packet[..length]).unwrap();
+    assert!(response.is_response());
+
+    engine.shutdown_async().await;
+}
+
+fn assert_aria2_dht_version(packet: &[u8]) {
+    let (message, consumed) = BencodeValue::decode(packet).unwrap();
+    assert_eq!(consumed, packet.len());
+    assert_eq!(
+        message.dict_get(b"v").and_then(BencodeValue::as_bytes),
+        Some(b"A2\x00\x03".as_slice()),
+        "KRPC packet must carry the aria2 version field"
+    );
+}
 
 #[tokio::test]
 async fn test_bep44_udp_roundtrip_and_store_restart() {

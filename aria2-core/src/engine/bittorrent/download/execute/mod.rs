@@ -19,6 +19,7 @@ mod runtime_tests;
 mod tests;
 mod tracker_actor;
 pub mod types;
+mod upload_speed;
 
 // Keep the download-execution interface at this module root for its callers.
 pub(crate) use tracker_actor::BtTrackerAnnouncerActor;
@@ -26,6 +27,7 @@ pub use types::EndgameState;
 
 pub(crate) use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
 pub(crate) use pex::{PEX_SEND_INTERVAL, send_periodic_pex_to_swarm};
+pub(crate) use upload_speed::spawn as spawn_upload_speed_reporter;
 
 use std::collections::HashSet;
 

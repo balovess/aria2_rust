@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::engine::bittorrent::peer::connection::{BtPeerConn, PeerActorId};
-use crate::engine::bittorrent::peer::stats::PeerStats;
+use crate::engine::bittorrent::peer::stats::{PeerStats, SwarmUploadRate};
 use crate::engine::bittorrent::peer::upload_session::PieceDataProvider;
 
 use super::super::types::{DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_OUTSTANDING_REQUEST};
@@ -148,6 +148,7 @@ pub(crate) struct PeerSwarm {
         Option<Arc<std::sync::RwLock<Vec<crate::request::request_group::BtPeerSnapshot>>>>,
     last_stats_snapshot_publish: Option<Instant>,
     stats_snapshot_dirty: bool,
+    upload_rate: Arc<SwarmUploadRate>,
     pub(crate) event_tx: Option<mpsc::Sender<PeerEvent>>,
     pub(crate) event_rx: Option<mpsc::Receiver<PeerEvent>>,
 }
@@ -260,6 +261,7 @@ impl PeerSwarm {
             peer_snapshot_store: None,
             last_stats_snapshot_publish: None,
             stats_snapshot_dirty: false,
+            upload_rate: Arc::new(SwarmUploadRate::default()),
             event_tx: Some(event_tx),
             event_rx: Some(event_rx),
         }
@@ -277,6 +279,14 @@ impl PeerSwarm {
 
     pub(crate) fn event_sender(&self) -> Option<mpsc::Sender<PeerEvent>> {
         self.event_tx.as_ref().cloned()
+    }
+
+    pub(crate) fn upload_rate(&self) -> Arc<SwarmUploadRate> {
+        Arc::clone(&self.upload_rate)
+    }
+
+    pub(crate) fn upload_speed_at(&self, now: Instant) -> u64 {
+        self.upload_rate.speed_at(now)
     }
 
     pub(crate) fn lease_event_receiver(&mut self) -> Option<PeerSwarmEventLease<'_>> {
@@ -584,6 +594,12 @@ impl PeerSwarm {
 
     /// Apply one consumed I/O event to the registry-owned peer snapshot.
     pub(crate) fn apply_event(&mut self, event: &PeerEvent) {
+        if let PeerEvent::UploadBytes {
+            bytes, recorded_at, ..
+        } = event
+        {
+            self.upload_rate.record(*bytes, *recorded_at);
+        }
         match event {
             PeerEvent::InterestChanged {
                 actor_id, snapshot, ..

@@ -553,8 +553,17 @@ async fn seed_manager_keeps_recent_upload_speed_for_the_full_rate_window() {
     let now = Instant::now();
     let sample_time = now - Duration::from_secs(5);
     let actor = manager.swarm.iter_mut().next().expect("seed peer actor");
-    actor.stats.record_upload_rate_at(4096, sample_time);
-    actor.stats.last_upload_time = Some(sample_time);
+    let actor_id = actor.actor_id;
+    let mut snapshot = actor.stats.clone();
+    snapshot.uploaded_bytes = 4096;
+    snapshot.record_upload_rate_at(4096, sample_time);
+    snapshot.last_upload_time = Some(sample_time);
+    manager.swarm.apply_event(&PeerEvent::UploadBytes {
+        actor_id,
+        bytes: 4096,
+        recorded_at: sample_time,
+        snapshot: Box::new(snapshot),
+    });
 
     assert!(
         manager.current_upload_speed() > 0,

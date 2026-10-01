@@ -122,9 +122,16 @@ impl PieceDownloadSession<'_> {
     pub(super) async fn run(self) -> Result<()> {
         let speed_reporter =
             super::download_speed::spawn(std::sync::Arc::clone(&self.command.progress));
+        let upload_speed_reporter =
+            crate::engine::bittorrent::download::execute::spawn_upload_speed_reporter(
+                std::sync::Arc::clone(&self.command.progress),
+                self.swarm.upload_rate(),
+            );
         let result = self.run_loop().await;
         speed_reporter.abort();
         let _ = speed_reporter.await;
+        upload_speed_reporter.abort();
+        let _ = upload_speed_reporter.await;
         result
     }
 
@@ -896,12 +903,9 @@ impl PieceDownloadSession<'_> {
             self.last_uploaded = uploaded_by_peers;
         }
 
-        let elapsed = self.last_upload_speed_update.elapsed();
-        if elapsed.as_millis() >= 500 {
-            let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-            self.command.progress.set_upload_speed(speed);
-            self.last_upload_speed_update = Instant::now();
-        }
+        self.command
+            .progress
+            .set_upload_speed(self.swarm.upload_speed_at(Instant::now()));
     }
 }
 

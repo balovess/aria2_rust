@@ -440,7 +440,6 @@ impl<'a> PieceDownloadSession<'a> {
             last_pex_send,
             writer,
             start_time,
-            last_upload_speed_update: Instant::now(),
             last_uploaded,
             upload_counter,
             last_progress_save,

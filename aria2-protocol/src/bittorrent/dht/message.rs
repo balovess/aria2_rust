@@ -69,6 +69,7 @@ impl DhtMessage {
         let mut dict = BTreeMap::new();
 
         dict.insert(b"t".to_vec(), BencodeValue::Bytes(self.t.clone()));
+        dict.insert(b"v".to_vec(), BencodeValue::Bytes(b"A2\x00\x03".to_vec()));
         dict.insert(
             b"y".to_vec(),
             BencodeValue::Bytes(match self.y {

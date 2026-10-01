@@ -35,6 +35,12 @@ impl BtSeedManager {
     /// listener, cancellation, and deadline events instead of scanning on a
     /// fixed interval.
     pub async fn run_seeding_loop(&mut self) -> crate::error::Result<()> {
+        let upload_speed_reporter = self.upload_progress.as_ref().map(|progress| {
+            crate::engine::bittorrent::download::execute::spawn_upload_speed_reporter(
+                Arc::clone(progress),
+                self.swarm.upload_rate(),
+            )
+        });
         info!(
             info_hash = ?self.info_hash,
             "Seeding loop started (ratio={:?}, time={:?}, active_peers={}, pending_connections={})",
@@ -137,6 +143,10 @@ impl BtSeedManager {
         // The swarm closes event delivery, prevents new actors, and joins all
         // peer tasks; the shared atomic remains authoritative for accounting.
         self.swarm.shutdown_all().await;
+        if let Some(reporter) = upload_speed_reporter {
+            reporter.abort();
+            let _ = reporter.await;
+        }
         self.total_uploaded = self
             .upload_counter
             .load(std::sync::atomic::Ordering::Relaxed);

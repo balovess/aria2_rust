@@ -37,7 +37,6 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) last_pex_send: &'a mut Instant,
     pub(super) writer: Box<dyn SeekableDiskWriter>,
     pub(super) start_time: Instant,
-    pub(super) last_upload_speed_update: Instant,
     pub(super) last_uploaded: u64,
     pub(super) upload_counter: Arc<std::sync::atomic::AtomicU64>,
     pub(super) last_progress_save: Instant,

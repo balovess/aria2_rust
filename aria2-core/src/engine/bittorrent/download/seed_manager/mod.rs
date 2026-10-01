@@ -242,27 +242,7 @@ impl BtSeedManager {
     }
 
     pub(super) fn current_upload_speed(&self) -> u64 {
-        let now = Instant::now();
-        let (window_bytes, oldest_sample) = self.swarm.iter().fold(
-            (0u64, None::<Instant>),
-            |(window_bytes, oldest_sample), actor| {
-                let (peer_bytes, peer_oldest_sample) = actor.stats.recent_upload_window_at(now);
-                let oldest_sample = match (oldest_sample, peer_oldest_sample) {
-                    (Some(current), Some(peer)) => Some(current.min(peer)),
-                    (None, peer) => peer,
-                    (current, None) => current,
-                };
-                (window_bytes.saturating_add(peer_bytes), oldest_sample)
-            },
-        );
-        let Some(oldest_sample) = oldest_sample else {
-            return 0;
-        };
-        let elapsed_millis = now
-            .saturating_duration_since(oldest_sample)
-            .as_millis()
-            .max(1);
-        ((u128::from(window_bytes) * 1000) / elapsed_millis).min(u128::from(u64::MAX)) as u64
+        self.swarm.upload_speed_at(Instant::now())
     }
 
     /// Return the duration of the seeding phase.

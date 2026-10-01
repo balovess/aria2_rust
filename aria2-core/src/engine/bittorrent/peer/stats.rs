@@ -17,8 +17,8 @@ use crate::constants;
 /// Controls responsiveness vs. smoothness of speed estimates.
 /// 0.5 provides balanced behavior: responsive to changes while filtering noise.
 const EMA_ALPHA: f64 = constants::PEER_STATS_EMA_ALPHA;
-pub(crate) const PEER_RATE_WINDOW: Duration = Duration::from_secs(10);
-pub(crate) const PEER_RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(10);
+pub(crate) const RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Threshold for banning peers that send too many invalid pieces.
 ///
@@ -26,14 +26,14 @@ pub(crate) const PEER_RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// banned for the remainder of the session.
 pub const BAD_DATA_THRESHOLD: u32 = constants::PEER_STATS_BAD_DATA_THRESHOLD as u32;
 
-/// Bounded byte-rate samples used to match aria2's `SpeedCalc` choke ranking.
+/// Bounded byte-rate samples matching aria2's `SpeedCalc` window and slot width.
 #[derive(Clone, Default)]
-struct PeerSpeedWindow {
+pub(crate) struct SpeedWindow {
     samples: VecDeque<(Instant, u64)>,
 }
 
-impl PeerSpeedWindow {
-    fn speed_at(&self, now: Instant) -> u64 {
+impl SpeedWindow {
+    pub(crate) fn speed_at(&self, now: Instant) -> u64 {
         let (bytes_in_window, oldest_sample) = self.totals_at(now);
         let Some(oldest_sample) = oldest_sample else {
             return 0;
@@ -45,11 +45,17 @@ impl PeerSpeedWindow {
         ((u128::from(bytes_in_window) * 1000) / elapsed_millis).min(u128::from(u64::MAX)) as u64
     }
 
+    pub(crate) fn has_samples_at(&self, now: Instant) -> bool {
+        self.samples
+            .iter()
+            .any(|(sample_time, _)| now.saturating_duration_since(*sample_time) <= RATE_WINDOW)
+    }
+
     fn totals_at(&self, now: Instant) -> (u64, Option<Instant>) {
         let mut bytes_in_window = 0u64;
         let mut oldest_sample = None;
         for (sample_time, bytes) in &self.samples {
-            if now.saturating_duration_since(*sample_time) <= PEER_RATE_WINDOW {
+            if now.saturating_duration_since(*sample_time) <= RATE_WINDOW {
                 bytes_in_window = bytes_in_window.saturating_add(*bytes);
                 oldest_sample.get_or_insert(*sample_time);
             }
@@ -57,13 +63,13 @@ impl PeerSpeedWindow {
         (bytes_in_window, oldest_sample)
     }
 
-    fn record(&mut self, bytes: u64, at: Instant) {
+    pub(crate) fn record(&mut self, bytes: u64, at: Instant) {
         if bytes == 0 {
             return;
         }
         self.remove_expired(at);
         if let Some((last_sample, last_bytes)) = self.samples.back_mut()
-            && at.saturating_duration_since(*last_sample) < PEER_RATE_SAMPLE_INTERVAL
+            && at.saturating_duration_since(*last_sample) < RATE_SAMPLE_INTERVAL
         {
             *last_bytes = last_bytes.saturating_add(bytes);
         } else {
@@ -71,10 +77,10 @@ impl PeerSpeedWindow {
         }
     }
 
-    fn next_expiration_after(&self, now: Instant) -> Option<Instant> {
+    pub(crate) fn next_expiration_after(&self, now: Instant) -> Option<Instant> {
         self.samples.iter().find_map(|(sample_time, _)| {
             sample_time
-                .checked_add(PEER_RATE_WINDOW)?
+                .checked_add(RATE_WINDOW)?
                 .checked_add(Duration::from_nanos(1))
                 .filter(|deadline| *deadline > now)
         })
@@ -82,11 +88,46 @@ impl PeerSpeedWindow {
 
     fn remove_expired(&mut self, now: Instant) {
         while let Some((sample_time, _)) = self.samples.front().copied() {
-            if now.saturating_duration_since(sample_time) <= PEER_RATE_WINDOW {
+            if now.saturating_duration_since(sample_time) <= RATE_WINDOW {
                 break;
             }
             self.samples.pop_front();
         }
+    }
+}
+
+/// Torrent-wide upload samples shared by the downloading and seeding phases.
+#[derive(Default)]
+pub(crate) struct SwarmUploadRate {
+    window: std::sync::Mutex<SpeedWindow>,
+    changed: tokio::sync::Notify,
+}
+
+impl SwarmUploadRate {
+    pub(crate) fn record(&self, bytes: u64, at: Instant) {
+        self.window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(bytes, at);
+        self.changed.notify_one();
+    }
+
+    pub(crate) fn speed_at(&self, now: Instant) -> u64 {
+        self.window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .speed_at(now)
+    }
+
+    pub(crate) fn next_expiration_after(&self, now: Instant) -> Option<Instant> {
+        self.window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_expiration_after(now)
+    }
+
+    pub(crate) fn changed(&self) -> &tokio::sync::Notify {
+        &self.changed
     }
 }
 
@@ -212,9 +253,9 @@ pub struct PeerStats {
     last_download_tick: Instant,
 
     /// Recent sent bytes used by seeder-state choke ranking.
-    upload_rate_window: PeerSpeedWindow,
+    upload_rate_window: SpeedWindow,
     /// Recent received bytes used by leecher-state choke ranking.
-    download_rate_window: PeerSpeedWindow,
+    download_rate_window: SpeedWindow,
 }
 
 impl PeerStats {
@@ -269,8 +310,8 @@ impl PeerStats {
             created_at: now,
             last_upload_tick: now,
             last_download_tick: now,
-            upload_rate_window: PeerSpeedWindow::default(),
-            download_rate_window: PeerSpeedWindow::default(),
+            upload_rate_window: SpeedWindow::default(),
+            download_rate_window: SpeedWindow::default(),
         }
     }
 
@@ -323,10 +364,6 @@ impl PeerStats {
     /// `SpeedCalc::calculateSpeed`, for seeder-state choke ranking.
     pub(crate) fn recent_upload_speed_at(&self, now: Instant) -> u64 {
         self.upload_rate_window.speed_at(now)
-    }
-
-    pub(crate) fn recent_upload_window_at(&self, now: Instant) -> (u64, Option<Instant>) {
-        self.upload_rate_window.totals_at(now)
     }
 
     pub(crate) fn next_upload_speed_deadline(&self, now: Instant) -> Option<Instant> {

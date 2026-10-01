@@ -6,7 +6,7 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crate::engine::bittorrent::peer::stats::{BAD_DATA_THRESHOLD, PeerStats};
+    use crate::engine::bittorrent::peer::stats::{BAD_DATA_THRESHOLD, PeerStats, SwarmUploadRate};
 
     fn make_test_peer() -> PeerStats {
         let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
@@ -69,6 +69,21 @@ pub(crate) mod tests {
             Some(upload_expiration)
         );
         assert_eq!(stats.next_upload_speed_deadline(upload_expiration), None);
+    }
+
+    #[test]
+    fn swarm_upload_rate_uses_one_cross_peer_sample_window() {
+        let start = Instant::now();
+        let rate = SwarmUploadRate::default();
+        rate.record(16, start);
+        rate.record(16, start + Duration::from_millis(850));
+        rate.record(16, start + Duration::from_millis(1650));
+
+        assert_eq!(rate.speed_at(start + Duration::from_millis(10_200)), 1);
+        assert_eq!(
+            rate.next_expiration_after(start + Duration::from_millis(10_200)),
+            Some(start + Duration::from_millis(11_650) + Duration::from_nanos(1))
+        );
     }
 
     #[test]

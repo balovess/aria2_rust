@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -148,6 +148,8 @@ pub(crate) enum PeerEvent {
     },
     UploadBytes {
         actor_id: PeerActorId,
+        bytes: u64,
+        recorded_at: Instant,
         snapshot: Box<crate::engine::bittorrent::peer::stats::PeerStats>,
     },
     UploadQueueChanged {
@@ -1274,12 +1276,16 @@ pub(crate) async fn run_peer_actor(
                         }
                         if uploaded_bytes > 0 {
                             connection.record_outbound_activity();
-                            if event_tx.send(PeerEvent::UploadBytes {
-                                actor_id,
-                                snapshot: Box::new(connection.stats.clone()),
-                            }).await.is_err() {
+                            let Ok(permit) = event_tx.reserve().await else {
                                 break;
-                            }
+                            };
+                            let recorded_at = Instant::now();
+                            permit.send(PeerEvent::UploadBytes {
+                                actor_id,
+                                bytes: uploaded_bytes,
+                                recorded_at,
+                                snapshot: Box::new(connection.stats.clone()),
+                            });
                         } else if connection.stats.outstanding_upload_count != outstanding_upload_count
                             && event_tx.send(PeerEvent::UploadQueueChanged {
                                 actor_id,
@@ -1454,12 +1460,16 @@ pub(crate) async fn run_peer_actor(
                 match connection.flush_upload_messages(provider).await {
                     Ok(bytes) if bytes > 0 => {
                         connection.record_outbound_activity();
-                        if event_tx.send(PeerEvent::UploadBytes {
-                            actor_id,
-                            snapshot: Box::new(connection.stats.clone()),
-                        }).await.is_err() {
+                        let Ok(permit) = event_tx.reserve().await else {
                             break;
-                        }
+                        };
+                        let recorded_at = Instant::now();
+                        permit.send(PeerEvent::UploadBytes {
+                            actor_id,
+                            bytes,
+                            recorded_at,
+                            snapshot: Box::new(connection.stats.clone()),
+                        });
                     }
                     Ok(_) => {
                         if connection.stats.outstanding_upload_count != outstanding_upload_count
