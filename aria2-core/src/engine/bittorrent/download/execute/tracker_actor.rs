@@ -211,18 +211,19 @@ async fn run_tracker_actor(
 
     // Poll independent announces concurrently and return the first source's
     // peers immediately; a slow public tracker must not hold up peer dialing.
+    let left = total_size.saturating_sub(progress.completed_length());
     let mut primary_announce = Box::pin(announce_initial_primary(
         &mut announcer,
         &info_hash,
         &peer_id,
-        total_size,
+        left,
     ));
     let mut public_pending = public_announcers.len();
     let mut public_announces = FuturesUnordered::new();
     for public_announcer in &mut public_announcers {
         public_announces.push(async move {
             public_announcer
-                .announce(&info_hash, &peer_id, 0, total_size, 0)
+                .announce(&info_hash, &peer_id, 0, left, 0)
                 .await
         });
     }

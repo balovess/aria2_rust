@@ -36,17 +36,14 @@ pub(super) async fn announce_initial_primary(
     announcer: &mut TrackerAnnouncer,
     info_hash: &[u8; 20],
     peer_id: &[u8; 20],
-    total_size: u64,
+    left: u64,
 ) -> Vec<AnnounceResult> {
     let mut results = Vec::new();
     for _ in 0..MAX_PUBLIC_TRACKERS_TO_TRY {
         if !announcer.is_announce_ready() {
             break;
         }
-        let Some(result) = announcer
-            .announce(info_hash, peer_id, 0, total_size, 0)
-            .await
-        else {
+        let Some(result) = announcer.announce(info_hash, peer_id, 0, left, 0).await else {
             continue;
         };
         tracing::info!(

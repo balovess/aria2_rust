@@ -185,9 +185,9 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         upload_length > 0,
         "real seeder uploadLength should increase"
     );
-    assert_eq!(
-        upload_speed, 0,
-        "instantaneous uploadSpeed should reset after the seeding actors shut down"
+    assert!(
+        upload_speed > 0,
+        "recent uploadSpeed should remain visible while its 10-second sample is fresh"
     );
 
     // The RPC peer snapshot is seeded with a deterministic live-rate sample;

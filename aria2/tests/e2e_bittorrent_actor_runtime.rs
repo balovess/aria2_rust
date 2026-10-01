@@ -253,6 +253,32 @@ impl Drop for ControlledSeeder {
     }
 }
 
+struct PersistentIdlePeer {
+    addr: SocketAddr,
+    task: JoinHandle<()>,
+}
+
+impl PersistentIdlePeer {
+    async fn start(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind persistent idle peer");
+        let addr = listener.local_addr().expect("idle peer local address");
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve_persistent_idle_peer(stream, info_hash, peer_id));
+            }
+        });
+        Self { addr, task }
+    }
+}
+
+impl Drop for PersistentIdlePeer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 struct WindowedSeeder {
     addr: SocketAddr,
     peak_outstanding: Arc<AtomicUsize>,
@@ -388,6 +414,30 @@ async fn read_bt_message(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Resu
     let mut message = vec![0; length as usize];
     stream.read_exact(&mut message).await?;
     Ok(message)
+}
+
+async fn serve_persistent_idle_peer(mut stream: TcpStream, info_hash: [u8; 20], peer_id: [u8; 20]) {
+    let mut handshake = [0u8; 68];
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut handshake)).await,
+        Ok(Ok(_))
+    ) || handshake[28..48] != info_hash
+    {
+        return;
+    }
+
+    let mut response = [0u8; 68];
+    response[0] = 19;
+    response[1..20].copy_from_slice(b"BitTorrent protocol");
+    response[28..48].copy_from_slice(&info_hash);
+    response[48..68].copy_from_slice(&peer_id);
+    if stream.write_all(&response).await.is_err()
+        || stream.write_all(&[0, 0, 0, 2, 5, 0]).await.is_err()
+    {
+        return;
+    }
+
+    while read_bt_message(&mut stream).await.is_ok() {}
 }
 
 async fn serve_peer(stream: &mut TcpStream, session: ControlledPeerSession) {
@@ -899,6 +949,114 @@ async fn read_peer_message_or_disconnect(stream: &mut TcpStream) -> Option<Vec<u
         stream.read_exact(&mut message).await.ok()?;
         return Some(message);
     }
+}
+
+#[tokio::test]
+async fn cli_applies_runtime_peer_limit_to_outbound_tracker_peers() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = test_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let initial_peer = PersistentIdlePeer::start(meta.info_hash.bytes, [0x61; 20]).await;
+    let additional_peer = PersistentIdlePeer::start(meta.info_hash.bytes, [0x62; 20]).await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start_with_event_peers(
+        vec![initial_peer.addr.port()],
+        vec![additional_peer.addr.port()],
+        1,
+    )
+    .await;
+    let torrent = test_torrent(&tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--bt-max-peers=1".to_owned(),
+    ];
+    let mut client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    assert_eq!(
+        rpc(&client, 2, "aria2.getOption", json!([gid]))["bt-max-peers"],
+        "1"
+    );
+    tracker.wait_for_event("started").await;
+    let initial_peer_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let peers = rpc(&client, 3, "aria2.getPeerDetails", json!([gid]));
+        if peers.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["port"] == initial_peer.addr.port())
+        }) {
+            assert_eq!(
+                peers.as_array().map(Vec::len),
+                Some(1),
+                "before the option change, only the initial peer should be active: {peers}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < initial_peer_deadline,
+            "the started announce peer must occupy the initial one-peer limit: {peers}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        rpc(
+            &client,
+            4,
+            "aria2.changeOption",
+            json!([gid, {"bt-max-peers": "2"}]),
+        ),
+        "OK"
+    );
+    assert_eq!(
+        rpc(&client, 5, "aria2.getOption", json!([gid]))["bt-max-peers"],
+        "2"
+    );
+    assert!(
+        tracker
+            .wait_for_query_count(2, Duration::from_secs(5))
+            .await,
+        "the tracker must return the additional peer on its follow-up announce"
+    );
+
+    let additional_peer_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let peers = rpc(&client, 6, "aria2.getPeerDetails", json!([gid]));
+        if peers.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["port"] == additional_peer.addr.port())
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < additional_peer_deadline,
+            "after bt-max-peers changes from 1 to 2, the outbound tracker peer must be admitted: {peers}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let _ = rpc(&client, 7, "aria2.forceShutdown", json!([]));
+    let exit = client.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "aria2c exits cleanly: {exit}");
 }
 
 #[tokio::test]
@@ -1647,7 +1805,40 @@ async fn cli_restores_bt_metadata_and_verified_pieces_across_process_restart() {
 
     let mut second_args = common_args().to_vec();
     second_args.push(format!("--input-file={}", session_path.display()));
+    let queries_before_restart = tracker.captured_queries().await.len();
     let second = RunningAria2::start_rpc(&second_args);
+    assert!(
+        tracker
+            .wait_for_query_count(queries_before_restart + 1, Duration::from_secs(5))
+            .await,
+        "restored process must send its initial tracker announce"
+    );
+    let queries_after_restart = tracker.captured_queries().await;
+    let resumed_started_announce = queries_after_restart[queries_before_restart..]
+        .iter()
+        .find(|query| query.contains("event=started"))
+        .expect("restored process must send event=started")
+        .as_str();
+    let tracker_parameter = |query: &str, name: &str| {
+        query
+            .split_once('?')
+            .map(|(_, query)| query)
+            .into_iter()
+            .flat_map(|query| query.split('&'))
+            .filter_map(|parameter| parameter.split_once('='))
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.to_owned())
+    };
+    assert_eq!(
+        tracker_parameter(resumed_started_announce, "downloaded"),
+        Some("0".to_owned()),
+        "tracker downloaded is the current process transfer count"
+    );
+    assert_eq!(
+        tracker_parameter(resumed_started_announce, "left"),
+        Some("16".to_owned()),
+        "initial announce must report the 16 bytes remaining after piece restore: {resumed_started_announce}"
+    );
     let restored_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let status = rpc(

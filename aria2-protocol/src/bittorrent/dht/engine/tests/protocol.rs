@@ -58,6 +58,114 @@ async fn test_krpc_loopback_messages_include_aria2_version() {
     engine.shutdown_async().await;
 }
 
+#[tokio::test]
+async fn test_all_public_dht_builders_include_version_over_loopback_udp() {
+    use crate::bittorrent::dht::modern::{
+        MutableValue, SampleInfoHashesResponse, get_query, put_immutable_query, put_query,
+        sample_infohashes_query, sample_infohashes_response,
+    };
+
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let node_id = [0x51; 20];
+    let info_hash = [0x52; 20];
+    let tx = [0x53, 0x54, 0x55, 0x56];
+    let peer: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+
+    let requests = [
+        DhtMessageBuilder::ping(1, &node_id),
+        DhtMessageBuilder::find_node(2, &node_id, &info_hash),
+        DhtMessageBuilder::get_peers(3, &node_id, &info_hash),
+        DhtMessageBuilder::announce_peer_with_token(
+            4,
+            &node_id,
+            &info_hash,
+            6881,
+            b"announce-token",
+        ),
+        sample_infohashes_query(5, &node_id, &info_hash),
+        get_query(6, &node_id, &info_hash, Some(1)),
+        put_query(
+            7,
+            &node_id,
+            b"mutable-token",
+            &MutableValue {
+                public_key: [0x65; 32],
+                signature: [0x66; 64],
+                sequence: 1,
+                salt: Some(b"udp".to_vec()),
+                value: BencodeValue::Bytes(b"mutable value".to_vec()),
+            },
+            Some(0),
+        ),
+        put_immutable_query(
+            8,
+            &node_id,
+            b"immutable-token",
+            &BencodeValue::Bytes(b"immutable value".to_vec()),
+        ),
+    ];
+    for request in requests {
+        assert_message_roundtrips_with_aria2_version(&client, &server, &request).await;
+    }
+
+    let responses = [
+        DhtMessageBuilder::ping_response(&tx, &node_id),
+        DhtMessageBuilder::find_node_response(&tx, &node_id, &[0x61; 26]),
+        DhtMessageBuilder::find_node_response6(&tx, &node_id, &[0x62; 38]),
+        DhtMessageBuilder::get_peers_response_with_peers(&tx, &node_id, b"peer-token", &[peer]),
+        DhtMessageBuilder::get_peers_response_with_nodes(&tx, &node_id, b"node-token", &[0x63; 26]),
+        DhtMessageBuilder::get_peers_response_with_nodes6(
+            &tx,
+            &node_id,
+            b"node-token",
+            &[0x64; 38],
+        ),
+        DhtMessageBuilder::announce_peer_response(&tx, &node_id),
+        DhtMessageBuilder::error_response(&tx, 203, "Protocol Error"),
+        sample_infohashes_response(
+            &tx,
+            &node_id,
+            &SampleInfoHashesResponse {
+                interval: 900,
+                num: 1,
+                samples: vec![info_hash],
+                nodes: vec![0x67; 26],
+                nodes6: vec![0x68; 38],
+            },
+        ),
+    ];
+    for response in responses {
+        assert_message_roundtrips_with_aria2_version(&server, &client, &response).await;
+    }
+}
+
+async fn assert_message_roundtrips_with_aria2_version(
+    sender: &UdpSocket,
+    receiver: &UdpSocket,
+    message: &DhtMessage,
+) {
+    let packet = message.encode();
+    sender
+        .send_to(&packet, receiver.local_addr().unwrap())
+        .await
+        .unwrap();
+
+    let mut received = [0u8; 2048];
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut received))
+            .await
+            .expect("loopback UDP packet should arrive")
+            .unwrap();
+    assert_eq!(source, sender.local_addr().unwrap());
+    assert_aria2_dht_version(&received[..length]);
+
+    let decoded = DhtMessage::decode(&received[..length]).unwrap();
+    assert_eq!(decoded.is_query(), message.is_query());
+    assert_eq!(decoded.is_response(), message.is_response());
+    assert_eq!(decoded.is_error(), message.is_error());
+}
+
 fn assert_aria2_dht_version(packet: &[u8]) {
     let (message, consumed) = BencodeValue::decode(packet).unwrap();
     assert_eq!(consumed, packet.len());

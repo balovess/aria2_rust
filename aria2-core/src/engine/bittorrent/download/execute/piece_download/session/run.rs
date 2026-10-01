@@ -443,27 +443,7 @@ impl PieceDownloadSession<'_> {
                     NoPeerWaitEvent::WebSeed(None) | NoPeerWaitEvent::UriChanged => continue,
                     NoPeerWaitEvent::Peer(event) => event,
                 };
-                let actor_interest_changed = match &event {
-                    super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
-                        self.apply_swarm_peer_event(actor_event)
-                    }
-                    _ => false,
-                };
-                let interest_changed = actor_interest_changed;
-                let incoming = match event {
-                    super::super::peer_events::PeerWaitEvent::Incoming(incoming) => Some(*incoming),
-                    _ => None,
-                };
-                if let Some(incoming) = incoming {
-                    let context = self.peer_actor_admission_context();
-                    self.command
-                        .admit_incoming_peer_to_swarm(self.swarm, incoming, &context);
-                    self.announce_available_pieces().await;
-                }
-                let released_upload_slot = self.remove_dead_swarm_peers().await;
-                if interest_changed || released_upload_slot {
-                    self.apply_upload_choke_round();
-                }
+                self.handle_peer_wait_event(event).await;
                 continue;
             }
 
@@ -476,11 +456,46 @@ impl PieceDownloadSession<'_> {
                 Some(idx) => idx,
                 None => {
                     if !web_seed_tasks.is_empty() {
+                        let peer_deadline = self.command.next_peer_event_deadline(
+                            self.swarm.len(),
+                            self.stop_timeout.deadline(),
+                        );
+                        let protocol_deadline = web_seed_retries
+                            .next_deadline()
+                            .map_or(peer_deadline, |retry_deadline| {
+                                peer_deadline.min(retry_deadline)
+                            });
+                        let choke_deadline = (!self.swarm.is_empty())
+                            .then(|| {
+                                self.command
+                                    .choking_algo
+                                    .as_ref()
+                                    .and_then(|algo| algo.next_choke_rotation_deadline())
+                            })
+                            .flatten();
+                        let deadline = choke_deadline
+                            .map_or(protocol_deadline, |choke_deadline| {
+                                protocol_deadline.min(choke_deadline)
+                            })
+                            .min(self.next_snub_check_deadline());
+                        let (uri_generation, uri_notifier) = {
+                            let group = self.command.group.recover();
+                            (group.uri_generation_handle(), group.uri_notifier())
+                        };
+                        let peer_event =
+                            self.command.wait_for_swarm_peer_event(self.swarm, deadline);
+                        let uri_changed = wait_for_uri_generation(
+                            uri_generation,
+                            uri_notifier,
+                            observed_uri_generation,
+                        );
                         let event = tokio::select! {
+                            event = peer_event => NoPeerWaitEvent::Peer(event),
                             joined = web_seed_tasks.join_next() => NoPeerWaitEvent::WebSeed(joined),
                             joined = peer_dials.join_next(), if peer_dials.has_active_batch() => {
                                 NoPeerWaitEvent::PeerDial(joined)
-                            }
+                            },
+                            _ = uri_changed => NoPeerWaitEvent::UriChanged,
                         };
                         match event {
                             NoPeerWaitEvent::WebSeed(Some(Ok((piece_index, result)))) => {
@@ -506,9 +521,10 @@ impl PieceDownloadSession<'_> {
                                 self.handle_peer_dial_batch_result(result).await;
                                 self.start_next_peer_dial_batch(&mut peer_dials, &peer_dial_config);
                             }
-                            NoPeerWaitEvent::PeerDial(None)
-                            | NoPeerWaitEvent::Peer(_)
-                            | NoPeerWaitEvent::UriChanged => {}
+                            NoPeerWaitEvent::PeerDial(None) | NoPeerWaitEvent::UriChanged => {}
+                            NoPeerWaitEvent::Peer(event) => {
+                                self.handle_peer_wait_event(event).await;
+                            }
                         }
                         continue;
                     }
@@ -551,29 +567,7 @@ impl PieceDownloadSession<'_> {
                         NoPeerWaitEvent::Peer(event) => event,
                         NoPeerWaitEvent::WebSeed(_) | NoPeerWaitEvent::UriChanged => continue,
                     };
-                    let actor_interest_changed = match &event {
-                        super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
-                            self.apply_swarm_peer_event(actor_event)
-                        }
-                        _ => false,
-                    };
-                    let interest_changed = actor_interest_changed;
-                    let incoming = match event {
-                        super::super::peer_events::PeerWaitEvent::Incoming(incoming) => {
-                            Some(*incoming)
-                        }
-                        _ => None,
-                    };
-                    if let Some(incoming) = incoming {
-                        let context = self.peer_actor_admission_context();
-                        self.command
-                            .admit_incoming_peer_to_swarm(self.swarm, incoming, &context);
-                        self.announce_available_pieces().await;
-                    }
-                    let released_upload_slot = self.remove_dead_swarm_peers().await;
-                    if interest_changed || released_upload_slot {
-                        self.apply_upload_choke_round();
-                    }
+                    self.handle_peer_wait_event(event).await;
                     continue;
                 }
             };
@@ -910,6 +904,25 @@ impl PieceDownloadSession<'_> {
 }
 
 impl PieceDownloadSession<'_> {
+    async fn handle_peer_wait_event(&mut self, event: super::super::peer_events::PeerWaitEvent) {
+        let interest_changed = match &event {
+            super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
+                self.apply_swarm_peer_event(actor_event)
+            }
+            _ => false,
+        };
+        if let super::super::peer_events::PeerWaitEvent::Incoming(incoming) = event {
+            let context = self.peer_actor_admission_context();
+            self.command
+                .admit_incoming_peer_to_swarm(self.swarm, *incoming, &context);
+            self.announce_available_pieces().await;
+        }
+        let released_upload_slot = self.remove_dead_swarm_peers().await;
+        if interest_changed || released_upload_slot {
+            self.apply_upload_choke_round();
+        }
+    }
+
     fn queue_discovered_swarm_peers(
         &mut self,
         peers: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
@@ -917,6 +930,9 @@ impl PieceDownloadSession<'_> {
         peer_dials: &mut PeerDialQueue,
         dial_config: &PeerDialConfig,
     ) -> usize {
+        self.command
+            .peer_coordinator
+            .set_max_peers(self.command.bt_runtime.max_peers());
         let active_peers = self
             .swarm
             .iter()
@@ -945,10 +961,13 @@ impl PieceDownloadSession<'_> {
     }
 
     fn start_next_peer_dial_batch(
-        &self,
+        &mut self,
         peer_dials: &mut PeerDialQueue,
         dial_config: &PeerDialConfig,
     ) {
+        self.command
+            .peer_coordinator
+            .set_max_peers(self.command.bt_runtime.max_peers());
         let active_count = self.swarm.iter().filter(|actor| !actor.dead).count();
         let available_slots = self.command.peer_coordinator.available_slots(active_count);
         peer_dials.start_next(available_slots, dial_config);
