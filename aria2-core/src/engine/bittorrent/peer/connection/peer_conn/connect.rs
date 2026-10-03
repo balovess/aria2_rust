@@ -31,11 +31,14 @@ impl BtPeerConn {
     // -----------------------------------------------------------------------
 
     fn from_outgoing_transport(
-        inner: InnerConnection,
+        mut inner: InnerConnection,
         ip_addr: String,
         endpoint: std::net::SocketAddr,
         connection_type: ConnectionType,
     ) -> Self {
+        if let InnerConnection::Tcp(connection) = &mut inner {
+            connection.set_write_timeout(std::time::Duration::from_secs(PEER_TIMEOUT_SECS));
+        }
         let now = Instant::now();
         Self {
             actor_id: super::PeerActorId::allocate(),
@@ -74,10 +77,13 @@ impl BtPeerConn {
     }
 
     fn from_incoming_transport(
-        inner: InnerConnection,
+        mut inner: InnerConnection,
         endpoint: std::net::SocketAddr,
         peer_id: Option<[u8; 20]>,
     ) -> Self {
+        if let InnerConnection::Tcp(connection) = &mut inner {
+            connection.set_write_timeout(std::time::Duration::from_secs(PEER_TIMEOUT_SECS));
+        }
         let now = Instant::now();
         Self {
             actor_id: super::PeerActorId::allocate(),

@@ -121,14 +121,20 @@ impl DhtEngine {
         // Load routing table from disk or start empty
         let mut routing_table = RoutingTable::new(self_id);
         if let Some(data) = persisted_data {
-            info!(
-                count = data.nodes.len(),
-                "Loaded DHT routing table from disk"
-            );
+            let is_ipv6 = listen_addr.is_ipv6();
+            let mut loaded_nodes = 0;
             for pnode in data.nodes {
+                if pnode.addr.is_ipv6() != is_ipv6 {
+                    continue;
+                }
                 let node = DhtNode::unverified(pnode.id, pnode.addr);
                 routing_table.insert(node);
+                loaded_nodes += 1;
             }
+            info!(
+                count = loaded_nodes,
+                is_ipv6, "Loaded DHT routing table from disk"
+            );
         }
 
         let routing_table = Arc::new(RwLock::new(routing_table));
@@ -184,22 +190,22 @@ impl DhtEngine {
         let engine = Arc::new(Self {
             context: engine_context,
             shutdown_tx,
-            background_tasks: std::sync::Mutex::new(Vec::new()),
+            background_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             task_queue,
         });
 
         // Spawn the background receive loop
-        engine.spawn_receive_loop(shutdown_rx);
+        engine.spawn_receive_loop(shutdown_rx).await;
 
         // Spawn periodic tasks
-        engine.spawn_periodic_tasks();
+        engine.spawn_periodic_tasks().await;
 
         // Bootstrap runs in the background so `start` never blocks on network
         // I/O. Without a bootstrap the engine is immediately usable for
         // inbound queries and for peers added manually (e.g. from a torrent's
         // `nodes` list), so we move straight to `Running`.
         if config.bootstrap_on_start {
-            engine.spawn_bootstrap();
+            engine.spawn_bootstrap().await;
         } else {
             engine.context.inner.write().await.state = DhtEngineState::Running;
             let _ = engine.context.state_updates.send(DhtEngineState::Running);

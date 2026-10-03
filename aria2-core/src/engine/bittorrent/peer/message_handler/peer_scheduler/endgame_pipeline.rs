@@ -91,14 +91,14 @@ pub(crate) async fn download_piece_blocks_endgame(
             .collect::<Vec<_>>();
         let mut completed = vec![false; block_count as usize];
         let mut completed_blocks = 0u32;
-        for block_index in 0..block_count as usize {
+        for (block_index, block_is_completed) in completed.iter_mut().enumerate() {
             let offset = block_index as u32 * BLOCK_SIZE;
             let length = (piece_length - offset).min(BLOCK_SIZE) as usize;
             if let Some(Some(data)) = resume_blocks.get(block_index)
                 && data.len() == length
             {
                 piece_data[offset as usize..offset as usize + length].copy_from_slice(data);
-                completed[block_index] = true;
+                *block_is_completed = true;
                 completed_blocks += 1;
             }
         }
@@ -300,7 +300,6 @@ pub(crate) async fn download_piece_blocks_endgame(
                                     }
 
                                     let start = request.offset as usize;
-                                    let data = bytes::Bytes::from(data);
                                     piece_data[start..start + data.len()].copy_from_slice(&data);
                                     completed[block_index as usize] = true;
                                     completed_blocks += 1;

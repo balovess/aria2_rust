@@ -1,6 +1,7 @@
 mod checkpoint;
 mod command;
 mod dht_periodic_lookup;
+mod download_speed;
 mod environment;
 mod finalization;
 mod hash_verification;
@@ -26,6 +27,7 @@ pub(crate) use tracker_actor::BtTrackerAnnouncerActor;
 pub use types::EndgameState;
 
 pub(crate) use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
+pub(crate) use download_speed::spawn as spawn_download_speed_reporter;
 pub(crate) use pex::{PEX_SEND_INTERVAL, send_periodic_pex_to_swarm};
 pub(crate) use upload_speed::spawn as spawn_upload_speed_reporter;
 

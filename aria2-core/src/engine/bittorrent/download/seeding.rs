@@ -151,6 +151,7 @@ impl BtDownloadCommand {
             enable_peer_exchange: group_options.enable_peer_exchange && !self.is_private,
         };
 
+        let upload_rate = swarm.upload_rate();
         let mut manager = BtSeedManager::new_with_swarm(
             info_hash,
             swarm,
@@ -168,28 +169,48 @@ impl BtDownloadCommand {
         .with_peer_storage(std::sync::Arc::clone(&self.peer_storage))
         .with_peer_discovery(discovery);
         self.attach_seed_observers(&mut manager);
+        let upload_speed_reporter =
+            crate::engine::bittorrent::download::execute::spawn_upload_speed_reporter(
+                std::sync::Arc::clone(&self.progress),
+                upload_rate,
+            );
         let lifecycle_notifier = self.group.recover().lifecycle_notifier();
+        let cancellation_token = manager.cancellation_token();
+        let mut seeding_loop = Box::pin(manager.run_seeding_loop());
+        let mut lifecycle_error = None;
         let seeding_result = loop {
-            if let Some(error) = self.seeding_lifecycle_error() {
-                manager.cancel();
-                if let Err(cleanup_error) = manager.run_seeding_loop().await {
-                    tracing::warn!(%cleanup_error, "BitTorrent seeding cleanup failed after lifecycle cancellation");
-                }
-                break Err(error);
+            if lifecycle_error.is_none()
+                && let Some(error) = self.seeding_lifecycle_error()
+            {
+                lifecycle_error = Some(error);
+                cancellation_token.cancel();
             }
 
             let lifecycle_changed = lifecycle_notifier.notified();
             tokio::pin!(lifecycle_changed);
             tokio::select! {
-                result = manager.run_seeding_loop() => {
+                result = &mut seeding_loop => {
+                    if let Some(error) = lifecycle_error.take() {
+                        break Err(error);
+                    }
                     if let Some(error) = self.seeding_lifecycle_error() {
                         break Err(error);
                     }
                     break result;
                 }
-                _ = &mut lifecycle_changed => {}
+                _ = &mut lifecycle_changed => {
+                    if lifecycle_error.is_none()
+                        && let Some(error) = self.seeding_lifecycle_error()
+                    {
+                        lifecycle_error = Some(error);
+                        cancellation_token.cancel();
+                    }
+                }
             }
         };
+        drop(seeding_loop);
+        upload_speed_reporter.abort();
+        let _ = upload_speed_reporter.await;
         let _ = manager.take_announcer();
         seeding_result?;
 

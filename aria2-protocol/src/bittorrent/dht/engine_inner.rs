@@ -84,7 +84,7 @@ impl DhtEngine {
     /// Periodic maintenance is submitted to the DHT task queue. Network
     /// maintenance ticks are coalesced while the lane is busy; persistence
     /// checkpoints are queued so a busy lane cannot silently lose a save.
-    pub(super) fn spawn_periodic_tasks(self: &Arc<Self>) {
+    pub(super) async fn spawn_periodic_tasks(self: &Arc<Self>) {
         let context = Arc::clone(&self.context);
         let config = context.config.clone();
         let task_queue = Arc::clone(&self.task_queue);
@@ -93,7 +93,7 @@ impl DhtEngine {
 
         // Timer ownership stays in this small coordinator; task execution is
         // owned by the independent scheduling lanes in DhtTaskQueue.
-        let handle = tokio::spawn(async move {
+        self.register_background_task(async move {
             let mut token_interval = tokio::time::interval(config.token_rotation_interval);
             let mut refresh_check_interval = tokio::time::interval(config.refresh_check_interval);
             let mut node_contact_interval = tokio::time::interval(config.node_contact_interval);
@@ -144,8 +144,8 @@ impl DhtEngine {
                     }
                 }
             }
-        });
-        self.register_background_task(handle);
+        })
+        .await;
     }
 }
 

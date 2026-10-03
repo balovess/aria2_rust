@@ -27,6 +27,14 @@ impl BtDownloadCommand {
                 incoming.connection,
                 endpoint,
             );
+        let (keep_alive_interval, peer_timeout) = {
+            let group = self.group.recover();
+            (
+                std::time::Duration::from_secs(group.options().bt_keep_alive_interval),
+                std::time::Duration::from_secs(group.options().bt_timeout),
+            )
+        };
+        connection.set_timeouts(keep_alive_interval, peer_timeout);
         self.apply_peer_exchange_policy(&mut connection);
 
         let remote_peer_id = connection.remote_peer_id();

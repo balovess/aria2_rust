@@ -70,6 +70,46 @@ async fn test_add_announce_request() {
 }
 
 #[tokio::test]
+async fn udp_connection_id_is_reacquired_after_one_minute() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback UDP tracker");
+    let tracker_addr = tracker.local_addr().unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
+    client.conn_cache.insert(
+        tracker_addr,
+        ConnectionState {
+            id: 0x1234_5678_9abc_def0,
+            updated_at: Instant::now() - Duration::from_secs(61),
+        },
+    );
+    client.add_announce(
+        &tracker_addr,
+        &[0x12; 20],
+        &[0x34; 20],
+        0,
+        1,
+        0,
+        UdpEvent::Started,
+        50,
+        6881,
+    );
+
+    assert!(client.process_one().await);
+    let mut packet = [0u8; 1500];
+    let (length, _) = tokio::time::timeout(Duration::from_secs(1), tracker.recv_from(&mut packet))
+        .await
+        .expect("client should send a UDP request")
+        .expect("receive UDP request");
+    assert_eq!(length, 16, "expired IDs require a CONNECT packet");
+    assert_eq!(
+        i32::from_be_bytes(packet[8..12].try_into().unwrap()),
+        UdpAction::Connect as i32,
+        "client must reacquire its expired connection ID before ANNOUNCE"
+    );
+}
+
+#[tokio::test]
 async fn test_process_one_needs_connection() {
     let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
@@ -116,6 +156,126 @@ async fn test_handle_connect_response() {
         client.conn_cache.contains_key(&addr),
         "Should cache connection after CONNECT response"
     );
+}
+
+#[tokio::test]
+async fn connect_response_from_unexpected_udp_source_is_ignored() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind expected tracker endpoint");
+    let tracker_addr = tracker.local_addr().unwrap();
+    let impostor = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind unexpected response source");
+    let impostor_addr = impostor.local_addr().unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
+
+    client.send_connect(tracker_addr).await;
+    let mut request = [0u8; 64];
+    let (request_len, request_source) = tracker.recv_from(&mut request).await.unwrap();
+    assert_eq!(request_len, 16);
+    assert_eq!(request_source.ip(), std::net::Ipv4Addr::LOCALHOST);
+    let txn_id = u32::from_be_bytes(request[12..16].try_into().unwrap());
+
+    let mut response = Vec::with_capacity(16);
+    response.extend_from_slice(&0i32.to_be_bytes());
+    response.extend_from_slice(&txn_id.to_be_bytes());
+    response.extend_from_slice(&0x1020_3040_5060_7080u64.to_be_bytes());
+    impostor.send_to(&response, request_source).await.unwrap();
+    assert!(
+        client
+            .receive_next_with_timeout(Duration::from_secs(1))
+            .await
+    );
+
+    assert_eq!(
+        client.inflight.len(),
+        1,
+        "foreign source must not consume the request"
+    );
+    assert!(client.txn_map.contains_key(&txn_id));
+    assert!(!client.conn_cache.contains_key(&impostor_addr));
+
+    tracker.send_to(&response, request_source).await.unwrap();
+    assert!(
+        client
+            .receive_next_with_timeout(Duration::from_secs(1))
+            .await
+    );
+    assert!(client.inflight.is_empty());
+    assert_eq!(
+        client.conn_cache.get(&tracker_addr).unwrap().id,
+        0x1020_3040_5060_7080
+    );
+    assert!(!client.conn_cache.contains_key(&impostor_addr));
+}
+
+#[tokio::test]
+async fn malformed_or_mismatched_connect_response_does_not_consume_transaction() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind local UDP tracker");
+    let tracker_addr = tracker.local_addr().unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
+
+    client.send_connect(tracker_addr).await;
+    let mut request = [0u8; 64];
+    let (request_len, request_source) = tracker.recv_from(&mut request).await.unwrap();
+    assert_eq!(request_len, 16);
+    let txn_id = u32::from_be_bytes(request[12..16].try_into().unwrap());
+
+    let mut malformed_connect = Vec::with_capacity(17);
+    malformed_connect.extend_from_slice(&0i32.to_be_bytes());
+    malformed_connect.extend_from_slice(&txn_id.to_be_bytes());
+    malformed_connect.extend_from_slice(&0x1020_3040_5060_7080u64.to_be_bytes());
+    malformed_connect.push(0);
+    tracker
+        .send_to(&malformed_connect, request_source)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .receive_next_with_timeout(Duration::from_secs(1))
+            .await
+    );
+    assert_eq!(
+        client.inflight.len(),
+        1,
+        "CONNECT response must be exactly 16 bytes"
+    );
+    assert!(client.txn_map.contains_key(&txn_id));
+
+    let mut mismatched_action = vec![0u8; 20];
+    mismatched_action[0..4].copy_from_slice(&1i32.to_be_bytes());
+    mismatched_action[4..8].copy_from_slice(&txn_id.to_be_bytes());
+    tracker
+        .send_to(&mismatched_action, request_source)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .receive_next_with_timeout(Duration::from_secs(1))
+            .await
+    );
+    assert_eq!(
+        client.inflight.len(),
+        1,
+        "ANNOUNCE cannot complete a CONNECT transaction"
+    );
+    assert!(client.txn_map.contains_key(&txn_id));
+
+    let valid_connect = &malformed_connect[..16];
+    tracker
+        .send_to(valid_connect, request_source)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .receive_next_with_timeout(Duration::from_secs(1))
+            .await
+    );
+    assert!(client.inflight.is_empty());
+    assert!(client.conn_cache.contains_key(&tracker_addr));
 }
 
 #[tokio::test]
@@ -239,12 +399,88 @@ async fn test_timeout_cleaning() {
 }
 
 #[tokio::test]
+async fn udp_retry_uses_five_then_ten_second_deadlines_and_two_attempts() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback UDP tracker");
+    let addr = tracker.local_addr().unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
+    client.conn_cache.insert(
+        addr,
+        ConnectionState {
+            id: 0x1234_5678_9abc_def0,
+            updated_at: Instant::now(),
+        },
+    );
+    client.add_announce(
+        &addr,
+        &[0x77; 20],
+        &[0x88; 20],
+        0,
+        1000,
+        0,
+        UdpEvent::Started,
+        50,
+        6881,
+    );
+    assert!(client.process_one().await);
+    assert_eq!(client.inflight.len(), 1);
+
+    client.inflight[0].dispatched_at = Some(Instant::now() - Duration::from_secs(6));
+    client
+        .handle_timeouts_with_timeout(Duration::from_secs(60))
+        .await;
+    assert!(
+        client.inflight.is_empty(),
+        "first attempt expires at five seconds"
+    );
+    assert_eq!(client.pending.front().unwrap().fail_count, 1);
+
+    assert!(
+        client.process_one().await,
+        "the request should be retransmitted"
+    );
+    client.inflight[0].dispatched_at = Some(Instant::now() - Duration::from_secs(11));
+    client
+        .handle_timeouts_with_timeout(Duration::from_secs(60))
+        .await;
+    assert!(client.inflight.is_empty());
+    assert_eq!(
+        client.pending.front().and_then(|request| request.error),
+        Some(UdpError::Timeout),
+        "the retransmission expires after ten seconds without a third send"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn udp_receive_wait_is_cut_short_by_the_retry_deadline() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind silent loopback UDP tracker");
+    let mut client = new_direct_client(0).await.unwrap();
+    assert!(client.send_connect(tracker.local_addr().unwrap()).await);
+    let started = tokio::time::Instant::now();
+
+    assert!(
+        !client
+            .receive_next_with_timeout(Duration::from_secs(60))
+            .await
+    );
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_secs(5),
+        "a 60-second tracker timeout must not postpone the first UDP retry"
+    );
+}
+
+#[tokio::test]
 async fn test_txn_id_generation() {
     let mut client = new_direct_client(0).await.unwrap();
     let mut txn_ids = Vec::new();
-    for _ in 0..5 {
-        txn_ids.push(client.next_txn());
-        client.next_txn();
+    for index in 0..5 {
+        let txn_id = client.next_txn();
+        txn_ids.push(txn_id);
+        client.txn_map.insert(txn_id, index);
     }
     let unique: std::collections::HashSet<_> = txn_ids.iter().cloned().collect();
     assert_eq!(

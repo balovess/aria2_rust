@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::error::Result;
 
-use super::BtPeerConn;
+use super::{BtPeerConn, InnerConnection};
 
 impl BtPeerConn {
     // -----------------------------------------------------------------------
@@ -47,6 +47,9 @@ impl BtPeerConn {
     pub(crate) fn set_timeouts(&mut self, keep_alive: Duration, peer_timeout: Duration) {
         self.keep_alive_interval = keep_alive;
         self.peer_timeout = peer_timeout;
+        if let InnerConnection::Tcp(connection) = &mut self.inner {
+            connection.set_write_timeout(peer_timeout);
+        }
     }
 
     // -----------------------------------------------------------------------

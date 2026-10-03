@@ -98,6 +98,7 @@ fn acquire_process_file_lock(path: &Path) -> Result<ProcessFileLock, String> {
 
 const DHT_MAGIC: &[u8] = &[0xA1, 0xA2];
 const DHT_FORMAT_ID: u8 = 0x02;
+const DHT_VERSION_2: u8 = 0x02;
 const DHT_VERSION_3: u8 = 0x03;
 const NODE_ENTRY_SIZE: usize = 56;
 
@@ -357,39 +358,41 @@ impl DhtPersistence {
             return Err("dht.dat data too short".into());
         }
 
-        let header_v3: [u8; 8] = [
-            DHT_MAGIC[0],
-            DHT_MAGIC[1],
-            DHT_FORMAT_ID,
-            0,
-            0,
-            0,
-            0,
-            DHT_VERSION_3,
-        ];
-        if data[..8] != header_v3[..] {
+        let header = |version| {
+            [
+                DHT_MAGIC[0],
+                DHT_MAGIC[1],
+                DHT_FORMAT_ID,
+                0,
+                0,
+                0,
+                0,
+                version,
+            ]
+        };
+        let saved_at_secs = if data[..8] == header(DHT_VERSION_3) {
+            u64::from_be_bytes(
+                data[8..16]
+                    .try_into()
+                    .map_err(|_| "dht.dat timestamp truncated")?,
+            )
+        } else if data[..8] == header(DHT_VERSION_2) {
+            u32::from_be_bytes(
+                data[8..12]
+                    .try_into()
+                    .map_err(|_| "dht.dat timestamp truncated")?,
+            ) as u64
+        } else {
             return Err(format!(
                 "dht.dat invalid magic/version: {:02x?}",
                 &data[..8]
             ));
-        }
+        };
 
-        let mut offset = 8;
-
-        if offset + 8 > data.len() {
-            return Err("dht.dat timestamp truncated".into());
-        }
-        let saved_at_secs = u64::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]);
-        offset += 8;
+        // Both supported versions place the local-node record after a
+        // 8-byte timestamp slot: v2 stores a 32-bit timestamp plus 4 reserved
+        // bytes, while v3 stores a 64-bit timestamp.
+        let mut offset = 16;
 
         if offset + 32 > data.len() {
             return Err("dht.dat localnode truncated".into());

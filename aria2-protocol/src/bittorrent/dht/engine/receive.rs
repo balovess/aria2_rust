@@ -20,7 +20,7 @@ type InboundPacket = (Vec<u8>, SocketAddr);
 
 impl DhtEngine {
     /// Spawn the sole UDP reader and its bounded inbound workers.
-    pub(super) fn spawn_receive_loop(
+    pub(super) async fn spawn_receive_loop(
         self: &Arc<Self>,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
@@ -30,7 +30,7 @@ impl DhtEngine {
         let tracker_notify = tracker.change_notifier();
         let handler_self_id = context.task_context.self_id;
 
-        let handle = tokio::spawn(async move {
+        self.register_background_task(async move {
             // Independent receivers keep packet processing concurrent without
             // serializing `recv().await` behind a shared receiver mutex.
             let worker_capacity = INBOUND_QUEUE_CAPACITY.div_ceil(INBOUND_WORKERS);
@@ -135,8 +135,8 @@ impl DhtEngine {
             drop(worker_txs);
             drain_inbound_workers(workers).await;
             info!("DHT receive loop exited");
-        });
-        self.register_background_task(handle);
+        })
+        .await;
     }
 }
 

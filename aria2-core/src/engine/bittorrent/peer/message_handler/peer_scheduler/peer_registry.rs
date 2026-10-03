@@ -17,6 +17,7 @@ use super::{PeerActorControl, PeerActorPayloadConfig, PeerActorTask, PeerCommand
 
 const PEER_STATS_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_RECENTLY_DROPPED_PEERS: usize = 50;
+const MAX_KNOWN_SEEDER_ENDPOINTS: usize = 1024;
 
 /// One long-lived I/O owner for a handshaken BitTorrent connection.
 pub(crate) struct PeerActorEntry {
@@ -141,6 +142,8 @@ pub(crate) struct PeerSwarm {
     peer_id_counts: HashMap<[u8; 20], usize>,
     endpoint_counts: HashMap<SocketAddr, usize>,
     recently_dropped_endpoints: VecDeque<(SocketAddr, Instant)>,
+    known_seeders: HashSet<SocketAddr>,
+    known_seeder_order: VecDeque<SocketAddr>,
     wanted_pieces: Arc<[u8]>,
     local_seeder: bool,
     local_metadata: Option<Arc<[u8]>>,
@@ -255,6 +258,8 @@ impl PeerSwarm {
             peer_id_counts: HashMap::new(),
             endpoint_counts: HashMap::new(),
             recently_dropped_endpoints: VecDeque::new(),
+            known_seeders: HashSet::new(),
+            known_seeder_order: VecDeque::new(),
             wanted_pieces: Arc::from([]),
             local_seeder: false,
             local_metadata: None,
@@ -393,6 +398,22 @@ impl PeerSwarm {
 
     pub(crate) fn has_endpoint(&self, endpoint: SocketAddr) -> bool {
         self.endpoint_counts.contains_key(&endpoint)
+    }
+
+    pub(crate) fn is_known_seeder(&self, endpoint: SocketAddr) -> bool {
+        self.known_seeders.contains(&endpoint)
+    }
+
+    fn remember_known_seeder(&mut self, endpoint: SocketAddr) {
+        if !self.known_seeders.insert(endpoint) {
+            return;
+        }
+        self.known_seeder_order.push_back(endpoint);
+        while self.known_seeder_order.len() > MAX_KNOWN_SEEDER_ENDPOINTS {
+            if let Some(expired) = self.known_seeder_order.pop_front() {
+                self.known_seeders.remove(&expired);
+            }
+        }
     }
 
     pub(crate) fn recently_dropped_endpoints(
@@ -643,6 +664,16 @@ impl PeerSwarm {
                 bitfield,
                 seeder,
             } => {
+                if *seeder
+                    && let Some((endpoint, advertised_endpoint)) = self
+                        .actor(*actor_id)
+                        .map(|actor| (actor.endpoint, actor.advertised_endpoint))
+                {
+                    self.remember_known_seeder(endpoint);
+                    if let Some(advertised_endpoint) = advertised_endpoint {
+                        self.remember_known_seeder(advertised_endpoint);
+                    }
+                }
                 if let Some(actor) = self.actor_mut(*actor_id) {
                     actor.bitfield.clone_from(bitfield);
                     actor.has_bitfield = true;
@@ -809,9 +840,7 @@ impl PeerSwarm {
         // actors from being admitted while existing tasks are joined.
         self.close_event_receiver();
         self.close_event_sender();
-        for actor in &mut self.actors {
-            actor.shutdown().await;
-        }
+        futures::future::join_all(self.actors.iter_mut().map(PeerActorEntry::shutdown)).await;
         self.actors.clear();
         self.indices.clear();
         self.peer_id_counts.clear();

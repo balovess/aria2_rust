@@ -241,7 +241,7 @@ impl PieceDownloadSession<'_> {
             return Ok(blocks);
         }
 
-        for block_index in 0..block_count {
+        for (block_index, block) in blocks.iter_mut().enumerate() {
             let mask = 1 << (7 - block_index % 8);
             if record.bitfield[block_index / 8] & mask == 0 {
                 continue;
@@ -277,7 +277,7 @@ impl PieceDownloadSession<'_> {
                 (read == data.len()).then_some(data)
             };
             if let Some(bytes) = bytes {
-                blocks[block_index] = Some(bytes::Bytes::from(bytes));
+                *block = Some(bytes::Bytes::from(bytes));
             } else {
                 record.bitfield[block_index / 8] &= !mask;
             }
@@ -330,6 +330,10 @@ impl PieceDownloadSession<'_> {
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
         lifecycle_wait.as_mut().enable();
+        let dht_notify = self.command.dht_periodic_lookup.completion_notifier();
+        let dht_wait = dht_notify.notified();
+        tokio::pin!(dht_wait);
+        dht_wait.as_mut().enable();
         let download_result = {
             let writer = &mut self.writer;
             let layout = self.command.multi_file_layout.as_ref();
@@ -401,6 +405,10 @@ impl PieceDownloadSession<'_> {
                         }
                     }
                     _ = &mut lifecycle_wait => break None,
+                    _ = &mut dht_wait => {
+                        tracing::debug!(piece_index, "DHT lookup completed during piece download; yielding to peer discovery");
+                        break None;
+                    }
                 }
             };
             while let Ok(block) = block_receiver.try_recv() {
@@ -519,6 +527,10 @@ impl PieceDownloadSession<'_> {
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
         lifecycle_wait.as_mut().enable();
+        let dht_notify = self.command.dht_periodic_lookup.completion_notifier();
+        let dht_wait = dht_notify.notified();
+        tokio::pin!(dht_wait);
+        dht_wait.as_mut().enable();
         let (block_sender, mut block_receiver) = tokio::sync::mpsc::channel(64);
         let request_timeout = self.request_timeout;
         let batch_result = {
@@ -552,6 +564,10 @@ impl PieceDownloadSession<'_> {
                         }
                     }
                     _ = &mut lifecycle_wait => break None,
+                    _ = &mut dht_wait => {
+                        tracing::debug!(pieces = piece_indices.len(), "DHT lookup completed during piece batch; yielding to peer discovery");
+                        break None;
+                    }
                 }
             };
             while let Ok(block) = block_receiver.try_recv() {

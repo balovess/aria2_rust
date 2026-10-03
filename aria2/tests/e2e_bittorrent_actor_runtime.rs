@@ -287,10 +287,20 @@ struct WindowedSeeder {
 
 impl WindowedSeeder {
     async fn start(info_hash: [u8; 20], piece_data: Arc<Vec<u8>>) -> Self {
+        Self::start_with_response_delay(info_hash, piece_data, Duration::from_millis(80)).await
+    }
+
+    async fn start_with_response_delay(
+        info_hash: [u8; 20],
+        piece_data: Arc<Vec<u8>>,
+        response_delay: Duration,
+    ) -> Self {
         let listener = TokioTcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind delayed seeder");
         let addr = listener.local_addr().expect("seeder local address");
+        let mut peer_id = *b"WindowSeed0000000000";
+        peer_id[18..].copy_from_slice(&addr.port().to_be_bytes());
         let peak_outstanding = Arc::new(AtomicUsize::new(0));
         let peak = Arc::clone(&peak_outstanding);
         let task = tokio::spawn(async move {
@@ -302,8 +312,10 @@ impl WindowedSeeder {
                         connections.spawn(serve_windowed_peer(
                             stream,
                             info_hash,
+                            peer_id,
                             Arc::clone(&piece_data),
                             Arc::clone(&peak),
+                            response_delay,
                         ));
                     }
                     Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -331,8 +343,10 @@ impl Drop for WindowedSeeder {
 async fn serve_windowed_peer(
     mut stream: TcpStream,
     info_hash: [u8; 20],
+    peer_id: [u8; 20],
     piece_data: Arc<Vec<u8>>,
     peak_outstanding: Arc<AtomicUsize>,
+    response_delay: Duration,
 ) {
     let mut handshake = [0u8; 68];
     if tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut handshake))
@@ -350,7 +364,7 @@ async fn serve_windowed_peer(
     response[1..20].copy_from_slice(b"BitTorrent protocol");
     response[27] |= 0x04;
     response[28..48].copy_from_slice(&info_hash);
-    response[48..68].copy_from_slice(b"WindowSeeder-0000000");
+    response[48..68].copy_from_slice(&peer_id);
     if stream.write_all(&response).await.is_err()
         || stream.write_all(&[0, 0, 0, 2, 5, 0x80]).await.is_err()
         || stream.write_all(&[0, 0, 0, 1, 1]).await.is_err()
@@ -382,7 +396,7 @@ async fn serve_windowed_peer(
                 let writer = Arc::clone(&writer);
                 let outstanding = Arc::clone(&outstanding);
                 responses.spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    tokio::time::sleep(response_delay).await;
                     let mut response = Vec::with_capacity(13 + block.len());
                     response.extend_from_slice(&((9 + block.len()) as u32).to_be_bytes());
                     response.push(7);
@@ -917,6 +931,102 @@ async fn cli_expands_peer_request_window_after_successful_block_responses() {
             .expect("completed payload is readable"),
         *piece,
         "complete piece bytes are persisted after verification"
+    );
+}
+
+#[tokio::test]
+async fn cli_fills_aggregate_request_window_across_unchoked_peers() {
+    const PEER_COUNT: usize = 4;
+    const PIECE_LENGTH: usize = 524_288;
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let piece = Arc::new(vec![0x4a; PIECE_LENGTH]);
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = request_window_torrent(&placeholder_tracker.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("request-window torrent metadata parses");
+    let mut peers = Vec::with_capacity(PEER_COUNT);
+    for _ in 0..PEER_COUNT {
+        peers.push(
+            WindowedSeeder::start_with_response_delay(
+                meta.info_hash.bytes,
+                Arc::clone(&piece),
+                Duration::from_secs(5),
+            )
+            .await,
+        );
+    }
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start_with_peers(
+        peers.iter().map(|peer| peer.addr.port()).collect(),
+        false,
+    )
+    .await;
+    let torrent = request_window_torrent(&tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        format!("--bt-max-peers={PEER_COUNT}"),
+        "--seed-time=1".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (peer_details, total_outstanding, peers_with_requests) = loop {
+        let details = rpc(&client, 2, "aria2.getPeerDetails", json!([gid]));
+        let Some(active_peers) = details.as_array() else {
+            panic!("getPeerDetails should return an array: {details}");
+        };
+        let all_ready = peers.iter().all(|expected| {
+            active_peers.iter().any(|actual| {
+                actual["port"].as_u64() == Some(u64::from(expected.addr.port()))
+                    && actual["flags"]["peerChoking"] == false
+            })
+        });
+        let total_outstanding = active_peers
+            .iter()
+            .filter_map(|peer| peer["outstandingRequestsToPeer"].as_u64())
+            .sum::<u64>();
+        let peers_with_requests = active_peers
+            .iter()
+            .filter(|peer| {
+                peer["outstandingRequestsToPeer"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+            })
+            .count();
+        if all_ready && total_outstanding >= 12 && peers_with_requests >= 3 {
+            break (details, total_outstanding, peers_with_requests);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the scheduler should promptly distribute requests across unchoked peers; expected ports {:?}, observed requests {total_outstanding} across {peers_with_requests} peers: {details}",
+            peers
+                .iter()
+                .map(|peer| peer.addr.port())
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    assert!(
+        total_outstanding >= 12 && peers_with_requests >= 3,
+        "controlled slow seeders should expose aggregate request occupancy: {peer_details}"
     );
 }
 
@@ -2894,12 +3004,9 @@ async fn cli_admits_and_uploads_to_an_incoming_peer_during_piece_download() {
         json!([gid, ["status", "uploadLength", "uploadSpeed"]]),
     );
     assert_eq!(completed_status["uploadLength"], "16");
-    assert!(
-        completed_status["uploadSpeed"]
-            .as_str()
-            .and_then(|speed| speed.parse::<u64>().ok())
-            .is_some_and(|speed| speed > 0),
-        "recent upload speed must survive the leech-to-seed lifecycle handoff: {completed_status}"
+    assert_eq!(
+        completed_status["uploadSpeed"], "0",
+        "the completed snapshot must zero speeds even though the active-download snapshot recorded the recent upload: {completed_status}"
     );
     assert_eq!(
         std::fs::read(output_dir.path().join("active-upload.bin")).unwrap(),

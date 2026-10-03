@@ -43,13 +43,7 @@ async fn test_dht_engine_start_shutdown() {
     engine.shutdown_async().await;
     assert_eq!(engine.state().await, DhtEngineState::ShuttingDown);
     assert_eq!(engine.stats().await.state, DhtEngineState::ShuttingDown);
-    assert!(
-        engine
-            .background_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-    );
+    assert!(engine.background_tasks.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -110,6 +104,93 @@ async fn save_state_does_not_restore_a_node_removed_from_the_live_routing_table(
     );
 
     engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn startup_restores_a_fresh_aria2_v2_routing_snapshot() {
+    use crate::bittorrent::dht::persistence::DhtPersistence;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("dht.dat");
+    let self_id = [0xA8; 20];
+    let node_id = [0x27; 20];
+    let addr = "127.0.0.1:6881".parse().unwrap();
+    let node = DhtNode::new(node_id, addr);
+    let mut snapshot = DhtPersistence::serialize(&self_id, &[node]);
+    let saved_at_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    snapshot[7] = 0x02;
+    snapshot[8..12].copy_from_slice(&saved_at_secs.to_be_bytes());
+    snapshot[12..16].fill(0);
+    std::fs::write(&path, snapshot).unwrap();
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        dht_file_path: Some(path),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("fresh aria2 v2 routing snapshots should load at engine startup");
+    let routing_table = engine.context.task_context.routing_table.read().await;
+    assert_eq!(routing_table.total_node_count(), 1);
+    assert_eq!(routing_table.find_closest(&node_id, 1)[0].addr(), addr);
+    assert_eq!(routing_table.find_closest(&node_id, 1)[0].id(), &node_id);
+    drop(routing_table);
+
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn startup_restores_only_nodes_matching_the_bound_ip_family() {
+    use crate::bittorrent::dht::persistence::DhtPersistence;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("shared-dht.dat");
+    let self_id = [0xA8; 20];
+    let ipv4_id = [0x11; 20];
+    let ipv6_id = [0x22; 20];
+    let ipv4_addr = "192.0.2.11:6881".parse().unwrap();
+    let ipv6_addr = "[2001:db8::22]:6881".parse().unwrap();
+    let nodes = [
+        DhtNode::new(ipv4_id, ipv4_addr),
+        DhtNode::new(ipv6_id, ipv6_addr),
+    ];
+    DhtPersistence::save_to_file_sync(&path, &self_id, &nodes)
+        .expect("mixed-family fixture snapshot should be written");
+
+    let engine4 = DhtEngine::start(DhtEngineConfig {
+        dht_file_path: Some(path.clone()),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("IPv4 DHT engine should start");
+    let engine6 = DhtEngine::start(DhtEngineConfig {
+        listen_addr: Some("::1".parse().unwrap()),
+        dht_file_path: Some(path),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("IPv6 DHT engine should start");
+
+    let routing_table4 = engine4.context.task_context.routing_table.read().await;
+    assert_eq!(routing_table4.total_node_count(), 1);
+    assert_eq!(
+        routing_table4.find_closest(&ipv4_id, 1)[0].addr(),
+        ipv4_addr
+    );
+    drop(routing_table4);
+
+    let routing_table6 = engine6.context.task_context.routing_table.read().await;
+    assert_eq!(routing_table6.total_node_count(), 1);
+    assert_eq!(
+        routing_table6.find_closest(&ipv6_id, 1)[0].addr(),
+        ipv6_addr
+    );
+    drop(routing_table6);
+
+    tokio::join!(engine4.shutdown_async(), engine6.shutdown_async());
 }
 
 #[tokio::test]

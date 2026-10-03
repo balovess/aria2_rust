@@ -23,9 +23,8 @@ pub(super) use super::peer_request::RequestGeneration;
 use super::peer_snapshot::PeerSchedulingSnapshot;
 use super::pipelined::BlockRequest;
 
-const MUTUAL_UNINTEREST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const PEER_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const METADATA_PIECE_SIZE: usize = 16 * 1024;
+const PEER_ACTOR_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 fn local_metadata_response(
     metadata: Option<&[u8]>,
@@ -436,13 +435,26 @@ impl PeerActorTask {
     }
 
     pub(crate) async fn shutdown(&mut self) -> std::result::Result<(), tokio::task::JoinError> {
-        let _ = self.control.send(PeerCommand::Shutdown).await;
+        let _ = self.control.try_send(PeerCommand::Shutdown);
         let Some(task) = self.task.as_mut() else {
             return Ok(());
         };
-        let result = task.await;
-        self.task = None;
-        result
+        let joined = match tokio::time::timeout(PEER_ACTOR_SHUTDOWN_GRACE, &mut *task).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    "BitTorrent peer actor exceeded its shutdown grace; aborting stalled socket I/O"
+                );
+                task.abort();
+                task.await
+            }
+        };
+        self.task.take();
+        match joined {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -733,7 +745,6 @@ pub(crate) async fn run_peer_actor(
     let mut upload_flush_deadline: Option<tokio::time::Instant> = None;
     let mut upload_rate_changes = connection.upload_rate_change_receivers();
     let mut shutdown_requested = false;
-    let mut last_peer_progress = tokio::time::Instant::now();
     let mut local_seeder = false;
     let local_ut_metadata_id =
         aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new()
@@ -760,22 +771,8 @@ pub(crate) async fn run_peer_actor(
         let keepalive_deadline = tokio::time::Instant::from_std(connection.keepalive_deadline());
         let peer_timeout_deadline =
             tokio::time::Instant::from_std(connection.peer_timeout_deadline());
-        let interaction_idle_timeout =
-            if !connection.stats.am_interested && !connection.stats.peer_interested {
-                MUTUAL_UNINTEREST_IDLE_TIMEOUT
-            } else {
-                PEER_PROGRESS_IDLE_TIMEOUT
-            };
-        let interaction_idle_deadline = last_peer_progress + interaction_idle_timeout;
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(interaction_idle_deadline) => {
-                tracing::debug!(actor_id = actor_id.0, ?interaction_idle_timeout, "BT peer interaction idle deadline elapsed");
-                let _ = event_tx
-                    .send(PeerEvent::GracefulDisconnected { actor_id })
-                    .await;
-                break;
-            }
             _ = tokio::time::sleep_until(peer_timeout_deadline) => {
                 tracing::debug!(actor_id = actor_id.0, "BT peer inactivity timeout elapsed");
                 let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
@@ -1137,14 +1134,6 @@ pub(crate) async fn run_peer_actor(
                             }
                             _ => None,
                         };
-                        if matches!(
-                            &message,
-                            BtMessage::Request { .. } | BtMessage::Piece { .. }
-                        ) || (connection.is_metadata_pending()
-                            && matches!(&message, BtMessage::Extended { .. }))
-                        {
-                            last_peer_progress = tokio::time::Instant::now();
-                        }
                         let was_interested = connection.stats.peer_interested;
                         let was_peer_choking = connection.stats.peer_choking;
                         let was_seeder = connection.seeder;
@@ -1191,6 +1180,18 @@ pub(crate) async fn run_peer_actor(
                             }
                         };
                         if local_seeder && connection.is_seeder() {
+                            if let Some(resource) = connection.session_resource.as_ref()
+                                && event_tx
+                                    .send(PeerEvent::PeerAvailabilitySnapshot {
+                                        actor_id,
+                                        bitfield: resource.bitfield().to_vec(),
+                                        seeder: true,
+                                    })
+                                    .await
+                                    .is_err()
+                            {
+                                break;
+                            }
                             tracing::debug!(actor_id = actor_id.0, "Closing BT connection between seeders");
                             let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
                             break;
@@ -2415,6 +2416,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_actor_shutdown_is_bounded_when_io_never_completes() {
+        let (control, _receiver) = PeerActorControl::channel(1);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let mut actor = PeerActorTask {
+            control,
+            task: Some(task),
+        };
+        let started = Instant::now();
+
+        tokio::time::timeout(Duration::from_secs(2), actor.shutdown())
+            .await
+            .expect("peer actor shutdown must be bounded")
+            .expect("aborting a stalled peer actor is successful cleanup");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(actor.task.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_peer_actor_shutdown_retains_join_handle_for_retry() {
+        let (control, _receiver) = PeerActorControl::channel(1);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let mut actor = PeerActorTask {
+            control,
+            task: Some(task),
+        };
+
+        {
+            let shutdown = actor.shutdown();
+            tokio::pin!(shutdown);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut shutdown)
+                    .await
+                    .is_err()
+            );
+        }
+
+        assert!(
+            actor.task.is_some(),
+            "cancelling the shutdown future must not detach the peer task"
+        );
+        actor.task.as_ref().unwrap().abort();
+        actor
+            .shutdown()
+            .await
+            .expect("a retried shutdown must join the aborted task");
+        assert!(actor.task.is_none());
+    }
+
+    #[tokio::test]
     async fn peer_actor_survives_piece_generation_rollover_and_drops_late_blocks() {
         use tokio::time::{Duration, timeout};
 
@@ -2639,6 +2690,78 @@ mod tests {
 
         command_tx.send(PeerCommand::Shutdown).await.unwrap();
         let _connection = worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_actor_keeps_connection_on_keepalive_without_piece_progress() {
+        use tokio::time::{Duration, advance, timeout};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (local_stream, endpoint) = listener.accept().await.unwrap();
+        let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
+        let mut connection = BtPeerConn::from_incoming_tcp(local, endpoint);
+        connection.set_timeouts(Duration::from_secs(120), Duration::from_secs(80));
+        let actor_id = connection.actor_id;
+        let (command_tx, command_rx) = PeerActorControl::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let worker = tokio::spawn(async move {
+            run_peer_actor(
+                actor_id,
+                &mut connection,
+                command_rx,
+                event_tx,
+                None,
+                None,
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .await;
+        });
+        let mut remote =
+            PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
+
+        remote.send_message(&BtMessage::Interested).await.unwrap();
+        loop {
+            if matches!(
+                timeout(Duration::from_secs(1), event_rx.recv())
+                    .await
+                    .unwrap()
+                    .expect("peer actor event channel closed"),
+                PeerEvent::InterestChanged { actor_id: event_actor_id, .. }
+                    if event_actor_id == actor_id
+            ) {
+                break;
+            }
+        }
+
+        advance(Duration::from_secs(50)).await;
+        remote.send_message(&BtMessage::KeepAlive).await.unwrap();
+        remote.send_message(&BtMessage::Unchoke).await.unwrap();
+        loop {
+            if matches!(
+                timeout(Duration::from_secs(1), event_rx.recv())
+                    .await
+                    .unwrap()
+                    .expect("peer actor event channel closed"),
+                PeerEvent::PeerChokingChanged {
+                    actor_id: event_actor_id,
+                    peer_choking: false,
+                } if event_actor_id == actor_id
+            ) {
+                break;
+            }
+        }
+
+        advance(Duration::from_secs(15)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !worker.is_finished(),
+            "valid keepalive/control traffic must keep the connection alive until bt-timeout"
+        );
+
+        command_tx.send(PeerCommand::Shutdown).await.unwrap();
+        worker.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

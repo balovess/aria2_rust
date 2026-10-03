@@ -78,6 +78,95 @@ fn torrent_bytes(tracker_url: &str) -> Vec<u8> {
     BencodeValue::Dict(root).encode()
 }
 
+fn torrent_bytes_with_tiers(announce_url: &str, tiers: &[Vec<String>]) -> Vec<u8> {
+    let mut info = BTreeMap::new();
+    info.insert(b"length".to_vec(), BencodeValue::Int(PAYLOAD.len() as i64));
+    info.insert(
+        b"name".to_vec(),
+        BencodeValue::Bytes(b"udp-tracker-failover.bin".to_vec()),
+    );
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(16 * 1024));
+    info.insert(
+        b"pieces".to_vec(),
+        BencodeValue::Bytes(vec![
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+        ]),
+    );
+    let mut root = BTreeMap::new();
+    root.insert(
+        b"announce".to_vec(),
+        BencodeValue::Bytes(announce_url.as_bytes().to_vec()),
+    );
+    root.insert(
+        b"announce-list".to_vec(),
+        BencodeValue::List(
+            tiers
+                .iter()
+                .map(|tier| {
+                    BencodeValue::List(
+                        tier.iter()
+                            .map(|url| BencodeValue::Bytes(url.as_bytes().to_vec()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ),
+    );
+    root.insert(b"info".to_vec(), BencodeValue::Dict(info));
+    BencodeValue::Dict(root).encode()
+}
+
+struct SilentUdpTracker {
+    addr: SocketAddr,
+    connect_count: watch::Receiver<usize>,
+    task: JoinHandle<()>,
+}
+
+impl SilentUdpTracker {
+    async fn start() -> Self {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent UDP tracker");
+        let addr = socket.local_addr().expect("read UDP tracker address");
+        let (connect_count_tx, connect_count) = watch::channel(0usize);
+        let task = tokio::spawn(async move {
+            let mut packet = [0u8; 1500];
+            while let Ok((length, _)) = socket.recv_from(&mut packet).await {
+                if length >= 12 && i32::from_be_bytes(packet[8..12].try_into().unwrap()) == 0 {
+                    connect_count_tx.send_modify(|count| *count += 1);
+                }
+                // Deliberately remain silent: retries and tracker failover are
+                // the behavior under test.
+            }
+        });
+        Self {
+            addr,
+            connect_count,
+            task,
+        }
+    }
+
+    async fn wait_for_connects(&mut self, expected: usize, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            while *self.connect_count.borrow_and_update() < expected {
+                if self.connect_count.changed().await.is_err() {
+                    return false;
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+}
+
+impl Drop for SilentUdpTracker {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 struct SlowSeeder {
     addr: SocketAddr,
     request_seen: watch::Receiver<bool>,
@@ -393,4 +482,85 @@ async fn cli_uses_tracker_tier_returned_by_http_announce_and_reports_it_over_rpc
         status["completedLength"], "0",
         "tracker failover should be verified while the peer's piece response is still pending"
     );
+}
+
+#[tokio::test]
+async fn cli_fails_over_from_silent_udp_tracker_to_http_tracker_and_reports_rpc_state() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let mut udp_tracker = SilentUdpTracker::start().await;
+    let udp_url = format!("udp://{}/announce", udp_tracker.addr);
+    let placeholder = torrent_bytes_with_tiers(&udp_url, &[vec![udp_url.clone()]]);
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let mut peer = SlowSeeder::start(meta.info_hash.bytes).await;
+    let http_tracker =
+        MockTrackerServer::start_with_peers_and_interval(vec![peer.addr.port()], false, 300).await;
+    let torrent = torrent_bytes_with_tiers(
+        &udp_url,
+        &[vec![udp_url.clone()], vec![http_tracker.announce_url()]],
+    );
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--bt-tracker-timeout=60".to_owned(),
+        "--bt-request-timeout=10".to_owned(),
+        "--seed-time=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let started = tokio::time::Instant::now();
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    assert!(
+        udp_tracker
+            .wait_for_connects(2, Duration::from_secs(9))
+            .await,
+        "the silent UDP tracker should receive the original CONNECT and its one retry"
+    );
+    assert!(
+        http_tracker
+            .wait_for_query_count(1, Duration::from_secs(17))
+            .await,
+        "the failed UDP tier should advance to the HTTP tracker instead of waiting for the 60-second cap"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(24),
+        "fallback exceeded the original UDP retry schedule: {:?}",
+        started.elapsed()
+    );
+
+    let trackers = rpc(&client, 2, "aria2.getTrackers", json!([gid]));
+    let trackers = trackers.as_array().expect("getTrackers returns a list");
+    let udp_state = trackers
+        .iter()
+        .find(|tracker| tracker["uri"] == udp_url)
+        .expect("silent UDP tracker remains visible in RPC");
+    assert_eq!(udp_state["status"], "failed");
+    assert_eq!(udp_state["lastFailureKind"], "timeout");
+    let http_state = trackers
+        .iter()
+        .find(|tracker| tracker["uri"] == http_tracker.announce_url())
+        .expect("fallback HTTP tracker remains visible in RPC");
+    assert_eq!(http_state["status"], "succeeded");
+
+    peer.wait_for_request().await;
+    http_tracker.wait_for_event("completed").await;
+    assert_eq!(
+        std::fs::read(output_dir.path().join("udp-tracker-failover.bin"))
+            .expect("downloaded payload is readable"),
+        PAYLOAD
+    );
+    http_tracker.wait_for_event("stopped").await;
 }

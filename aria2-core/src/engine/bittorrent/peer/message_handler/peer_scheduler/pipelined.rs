@@ -106,10 +106,10 @@ pub(crate) async fn download_piece_blocks_batch(
     let mut failures = HashMap::<u32, Vec<std::net::SocketAddr>>::with_capacity(plans.len());
     let mut errors = HashMap::<u32, String>::new();
     let mut tracker_peers = Vec::new();
+    let mut pex_peers = Vec::new();
     loop {
         let pending_plans = plans
             .iter()
-            .cloned()
             .filter(|plan| {
                 !completed.contains_key(&plan.piece_index)
                     && !errors.contains_key(&plan.piece_index)
@@ -118,6 +118,7 @@ pub(crate) async fn download_piece_blocks_batch(
                 max_attempts == 0
                     || attempts.get(&plan.piece_index).copied().unwrap_or_default() < max_attempts
             })
+            .cloned()
             .collect::<Vec<_>>();
         for plan in &pending_plans {
             let count = attempts.entry(plan.piece_index).or_default();
@@ -162,7 +163,9 @@ pub(crate) async fn download_piece_blocks_batch(
             block_sink,
         )
         .await;
+        let discovery_pending = outcome.discovery_pending;
         tracker_peers.extend(outcome.tracker_peers);
+        pex_peers.extend(workers.take_pex_peers());
         for (piece_index, peer_failures) in outcome.failed_peers {
             let accumulated = failures.entry(piece_index).or_default();
             for peer in peer_failures {
@@ -195,6 +198,9 @@ pub(crate) async fn download_piece_blocks_batch(
         }) {
             break;
         }
+        if discovery_pending {
+            break;
+        }
         workers.advance_generations();
     }
 
@@ -203,7 +209,7 @@ pub(crate) async fn download_piece_blocks_batch(
         .take_availability_changes()
         .into_iter()
         .collect::<Vec<_>>();
-    let pex_peers = workers.take_pex_peers();
+    pex_peers.extend(workers.take_pex_peers());
     let pieces = plans
         .iter()
         .map(|plan| {

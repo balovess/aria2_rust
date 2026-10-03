@@ -78,6 +78,8 @@ impl PeerAddr {
 
 pub struct PeerConnection {
     stream: TcpStream,
+    write_timeout: Option<std::time::Duration>,
+    write_failed: bool,
     remote_addr: Option<std::net::SocketAddr>,
     state: PeerState,
     remote_peer_id: Option<[u8; 20]>,
@@ -180,6 +182,8 @@ impl PeerConnection {
         let remote_addr = stream.peer_addr().ok();
         Ok(Self {
             stream,
+            write_timeout: None,
+            write_failed: false,
             remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(remote_hs.peer_id),
@@ -221,6 +225,8 @@ impl PeerConnection {
         let remote_addr = stream.peer_addr().ok();
         Self {
             stream,
+            write_timeout: None,
+            write_failed: false,
             remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(peer_id),
@@ -269,24 +275,59 @@ impl PeerConnection {
     /// the frame at the caller avoids rebuilding the same nine bytes once per
     /// connection while preserving the connection's write/flush boundary.
     pub async fn send_serialized(&mut self, data: &[u8]) -> Result<(), String> {
-        if let Some(crypto) = &mut self.crypto {
+        if self.write_failed {
+            return Err("Peer socket is unusable after a failed write".to_owned());
+        }
+        let result = if let Some(crypto) = &mut self.crypto {
             let mut encrypted = data.to_vec();
             crypto.encrypt(&mut encrypted);
-            self.stream
-                .write_all(&encrypted)
-                .await
-                .map_err(|e| format!("Failed to send message: {}", e))?;
+            self.write_with_progress_timeout(&encrypted).await
         } else {
+            self.write_with_progress_timeout(data).await
+        };
+        if result.is_err() {
+            // A failed write may have emitted only a prefix of a wire frame;
+            // never append another frame to that potentially corrupt stream.
+            self.write_failed = true;
+        }
+        result
+    }
+
+    /// Bound a period with no socket write progress. Each successful partial
+    /// write starts a fresh interval, so slow but advancing peers are not
+    /// penalized for the total size of a queued upload.
+    async fn write_with_progress_timeout(&mut self, data: &[u8]) -> Result<(), String> {
+        let Some(write_timeout) = self.write_timeout else {
             self.stream
                 .write_all(data)
                 .await
-                .map_err(|e| format!("Failed to send message: {}", e))?;
+                .map_err(|error| format!("Failed to send message: {error}"))?;
+            return self
+                .stream
+                .flush()
+                .await
+                .map_err(|error| format!("Failed to flush buffer: {error}"));
+        };
+        let mut written = 0;
+        while written < data.len() {
+            let count = tokio::time::timeout(write_timeout, self.stream.write(&data[written..]))
+                .await
+                .map_err(|_| "Timed out waiting for peer socket write progress".to_owned())?
+                .map_err(|error| format!("Failed to send message: {error}"))?;
+            if count == 0 {
+                return Err("Failed to send message: peer socket closed".to_owned());
+            }
+            written += count;
         }
-        self.stream
-            .flush()
+        tokio::time::timeout(write_timeout, self.stream.flush())
             .await
-            .map_err(|e| format!("Failed to flush buffer: {}", e))?;
-        Ok(())
+            .map_err(|_| "Timed out flushing peer socket".to_owned())?
+            .map_err(|error| format!("Failed to flush buffer: {error}"))
+    }
+
+    /// Configure the maximum time a peer socket write may make no progress.
+    pub fn set_write_timeout(&mut self, timeout: std::time::Duration) {
+        self.write_timeout = Some(timeout);
     }
 
     pub async fn read_message(&mut self) -> Result<Option<BtMessage>, String> {

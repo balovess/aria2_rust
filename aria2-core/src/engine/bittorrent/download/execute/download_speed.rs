@@ -6,7 +6,7 @@ use std::{
 use crate::engine::bittorrent::peer::stats::SpeedWindow;
 use crate::request::request_group::AtomicProgress;
 
-pub(super) const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 struct DownloadSpeedSampler {
     last_sample: Instant,
@@ -41,7 +41,7 @@ impl DownloadSpeedSampler {
     }
 }
 
-pub(super) fn spawn(progress: Arc<AtomicProgress>) -> tokio::task::JoinHandle<()> {
+pub(crate) fn spawn(progress: Arc<AtomicProgress>) -> tokio::task::JoinHandle<()> {
     let signal = progress.download_rate_signal();
     tokio::spawn(async move {
         let mut sampler = DownloadSpeedSampler::new(Instant::now());

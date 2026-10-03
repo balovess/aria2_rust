@@ -81,6 +81,7 @@ pub(super) struct BatchAttemptOutcome {
     pub(super) completed: HashMap<u32, AttemptOutcome>,
     pub(super) failed_peers: HashMap<u32, Vec<SocketAddr>>,
     pub(super) tracker_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    pub(super) discovery_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +97,23 @@ pub(super) fn block_request_deadline(sent_at: Instant, timeout: Duration) -> Ins
 
 pub(super) fn piece_attempt_budget_exhausted(attempts: u32, max_attempts: u32) -> bool {
     max_attempts != 0 && attempts >= max_attempts
+}
+
+fn contains_undialed_peer_candidate(
+    candidates: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
+    peers: &PeerSchedulingSnapshot,
+) -> bool {
+    candidates.iter().any(|candidate| {
+        candidate
+            .ip
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .is_some_and(|ip| {
+                peers
+                    .peer_index_at(SocketAddr::new(ip, candidate.port))
+                    .is_none()
+            })
+    })
 }
 
 #[derive(Default)]
@@ -353,6 +371,7 @@ pub(super) async fn run_attempt_batch(
             completed,
             failed_peers: HashMap::new(),
             tracker_peers: Vec::new(),
+            discovery_pending: false,
         };
     }
 
@@ -367,10 +386,19 @@ pub(super) async fn run_attempt_batch(
         piece_cursor: 0,
     };
     let mut tracker_peers = Vec::new();
+    let mut discovery_pending = false;
 
     loop {
-        let queue_waiters = fill_batch_request_windows(workers, &mut schedule, peers);
-        let queue_blocked = !queue_waiters.is_empty();
+        if schedule.pending.is_empty()
+            && (discovery_pending || schedule.dead.iter().all(|dead| *dead))
+        {
+            break;
+        }
+        let queue_waiters = if discovery_pending {
+            Vec::new()
+        } else {
+            fill_batch_request_windows(workers, &mut schedule, peers)
+        };
         let mut queue_ready = FuturesUnordered::new();
         for (actor_id, mut capacity_updates) in queue_waiters {
             queue_ready.push(async move {
@@ -387,10 +415,7 @@ pub(super) async fn run_attempt_batch(
             .pending
             .values()
             .map(|request| block_request_deadline(request.sent_at, request_timeout))
-            .min()
-            .or_else(|| {
-                (!queue_blocked).then(|| block_request_deadline(Instant::now(), request_timeout))
-            });
+            .min();
         let choke_deadline = choking_algo
             .as_deref()
             .and_then(ChokingAlgorithm::next_choke_rotation_deadline);
@@ -459,8 +484,16 @@ pub(super) async fn run_attempt_batch(
                         requeue_batch_requests(&retry, &mut schedule.pieces);
                         cancel_batch_requests(actor_id, &retry, workers);
                     }
-                    PeerEvent::PexPeers { peers, .. } => workers.record_pex_peers(peers),
-                    PeerEvent::TrackerPeers { peers } => tracker_peers.extend(peers),
+                    PeerEvent::PexPeers { peers: discovered } => {
+                        let should_yield = contains_undialed_peer_candidate(&discovered, peers);
+                        workers.record_pex_peers(discovered);
+                        discovery_pending |= should_yield;
+                    }
+                    PeerEvent::TrackerPeers { peers: discovered } => {
+                        let should_yield = contains_undialed_peer_candidate(&discovered, peers);
+                        tracker_peers.extend(discovered);
+                        discovery_pending |= should_yield;
+                    }
                     PeerEvent::ExtensionHandshakeReceived { .. }
                     | PeerEvent::MetadataMessage { .. }
                     | PeerEvent::AmInterestChanged { .. } => {}
@@ -525,7 +558,6 @@ pub(super) async fn run_attempt_batch(
                                 if end > state.piece_data.len() || state.completed.get(block_index).copied().unwrap_or(true) {
                                     continue;
                                 }
-                                let data = bytes::Bytes::from(data);
                                 state.piece_data[start..end].copy_from_slice(&data);
                                 state.completed[block_index] = true;
                                 state.completed_blocks += 1;
@@ -638,9 +670,6 @@ pub(super) async fn run_attempt_batch(
                     .filter(|request| now >= block_request_deadline(request.sent_at, request_timeout))
                     .map(|request| request.peer_index)
                     .collect::<HashSet<_>>();
-                if schedule.pending.is_empty() && !queue_blocked {
-                    break;
-                }
                 for peer_index in expired {
                     warn!(peer_index, "BT block request window timed out");
                     if let Some(actor_id) = peers.actor_id(peer_index) {
@@ -667,6 +696,7 @@ pub(super) async fn run_attempt_batch(
         completed,
         failed_peers,
         tracker_peers,
+        discovery_pending,
     }
 }
 

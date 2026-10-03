@@ -267,7 +267,7 @@ mod tests {
         };
 
         checkpoint
-            .save_with_in_flight_pieces(&[0], 0, &[partial.clone()])
+            .save_with_in_flight_pieces(&[0], 0, std::slice::from_ref(&partial))
             .await
             .unwrap();
 

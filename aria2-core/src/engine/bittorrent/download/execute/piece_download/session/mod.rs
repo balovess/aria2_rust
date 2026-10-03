@@ -17,7 +17,6 @@ use super::BtStopTimeoutState;
 use crate::engine::bittorrent::download::execute::peer_session::TorrentSession;
 
 mod availability;
-mod download_speed;
 mod initialization;
 pub(in crate::engine::bittorrent::download::execute) mod peer_dials;
 mod piece;

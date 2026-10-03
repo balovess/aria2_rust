@@ -219,76 +219,85 @@ impl Command for BtDownloadCommand {
             .prepare_torrent_session(&meta, piece_length, total_size, network_info_hash)
             .await?;
 
-        let piece_result = self
-            .download_pieces_loop(
-                &mut session,
-                &mut meta,
-                piece_length,
-                total_size,
-                num_pieces,
-                &verified_piece_indices,
-            )
-            .await;
-        self.group.recover().clear_bt_peer_snapshots();
-        if let Err(error) = piece_result {
-            session.swarm.shutdown_all().await;
-            if let Some(actor) = self.tracker_actor.as_ref() {
-                let _ = actor.stop().await;
-            }
-            return Err(error);
-        }
-
-        if let Some(actor) = self.tracker_actor.as_ref() {
-            actor.announce_completed().await;
-        }
-
-        if self.seed_enabled {
-            let seeding_connections = if session.initial_peers.is_empty() {
-                Vec::new()
-            } else {
-                match self
-                    .connect_to_peers(
-                        &session.initial_peers,
-                        &network_info_hash,
-                        meta.info_hash_v2,
-                        num_pieces,
-                        piece_length,
-                        total_size,
-                    )
-                    .await
-                {
-                    Ok(connections) => connections,
-                    Err(error) => {
-                        session.swarm.shutdown_all().await;
-                        return Err(error);
-                    }
+        let speed_reporter = super::spawn_download_speed_reporter(Arc::clone(&self.progress));
+        let transfer_result = async {
+            let piece_result = self
+                .download_pieces_loop(
+                    &mut session,
+                    &mut meta,
+                    piece_length,
+                    total_size,
+                    num_pieces,
+                    &verified_piece_indices,
+                )
+                .await;
+            self.group.recover().clear_bt_peer_snapshots();
+            if let Err(error) = piece_result {
+                session.swarm.shutdown_all().await;
+                if let Some(actor) = self.tracker_actor.as_ref() {
+                    let _ = actor.stop().await;
                 }
-            };
-            info!(
-                "Starting seeding phase with {} connected peers ({} new connections, {} retained actors)...",
-                seeding_connections.len() + session.swarm.len(),
-                seeding_connections.len(),
-                session.swarm.len()
-            );
-            self.run_seeding_phase_with_swarm(
-                seeding_connections,
-                session.swarm,
-                session.upload_counter,
-                session.last_pex_send,
-                piece_length,
-                num_pieces,
-                network_info_hash,
-                meta.info_hash_v2,
-                total_size,
-            )
-            .await?;
-        } else {
-            info!("Skipping seeding (enabled={})", self.seed_enabled,);
-            session.swarm.shutdown_all().await;
-            if let Some(actor) = self.tracker_actor.as_ref() {
-                let _ = actor.stop().await;
+                return Err(error);
             }
+
+            if let Some(actor) = self.tracker_actor.as_ref() {
+                actor.announce_completed().await;
+            }
+
+            if self.seed_enabled {
+                let seeding_connections = if session.initial_peers.is_empty() {
+                    Vec::new()
+                } else {
+                    match self
+                        .connect_to_peers(
+                            &session.initial_peers,
+                            &network_info_hash,
+                            meta.info_hash_v2,
+                            num_pieces,
+                            piece_length,
+                            total_size,
+                        )
+                        .await
+                    {
+                        Ok(connections) => connections,
+                        Err(error) => {
+                            session.swarm.shutdown_all().await;
+                            return Err(error);
+                        }
+                    }
+                };
+                info!(
+                    "Starting seeding phase with {} connected peers ({} new connections, {} retained actors)...",
+                    seeding_connections.len() + session.swarm.len(),
+                    seeding_connections.len(),
+                    session.swarm.len()
+                );
+                self.run_seeding_phase_with_swarm(
+                    seeding_connections,
+                    session.swarm,
+                    session.upload_counter,
+                    session.last_pex_send,
+                    piece_length,
+                    num_pieces,
+                    network_info_hash,
+                    meta.info_hash_v2,
+                    total_size,
+                )
+                .await?;
+            } else {
+                info!("Skipping seeding (enabled={})", self.seed_enabled,);
+                session.swarm.shutdown_all().await;
+                if let Some(actor) = self.tracker_actor.as_ref() {
+                    let _ = actor.stop().await;
+                }
+            }
+
+            Ok(())
         }
+        .await;
+        speed_reporter.abort();
+        let _ = speed_reporter.await;
+        transfer_result?;
 
         let started_at = self.started_at.unwrap_or_else(Instant::now);
         self.finalize_download(started_at, &meta).await?;

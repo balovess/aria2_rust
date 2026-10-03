@@ -87,6 +87,7 @@ type WebSeedTaskCompletion = Option<
 enum PieceDownloadWait {
     Completed(Vec<(usize, PieceLoopAction)>),
     Incoming(Option<Box<crate::engine::bittorrent::peer::listener::IncomingPeer>>),
+    PeerDial(Option<std::result::Result<Vec<BtPeerConn>, tokio::task::JoinError>>),
     StopTimeout,
 }
 
@@ -120,16 +121,12 @@ impl PieceDownloadSession<'_> {
     }
 
     pub(super) async fn run(self) -> Result<()> {
-        let speed_reporter =
-            super::download_speed::spawn(std::sync::Arc::clone(&self.command.progress));
         let upload_speed_reporter =
             crate::engine::bittorrent::download::execute::spawn_upload_speed_reporter(
                 std::sync::Arc::clone(&self.command.progress),
                 self.swarm.upload_rate(),
             );
         let result = self.run_loop().await;
-        speed_reporter.abort();
-        let _ = speed_reporter.await;
         upload_speed_reporter.abort();
         let _ = upload_speed_reporter.await;
         result
@@ -596,6 +593,9 @@ impl PieceDownloadSession<'_> {
                 tokio::select! {
                     actions = self.download_piece_batch(&selected_pieces) => PieceDownloadWait::Completed(actions?),
                     incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming.map(Box::new)),
+                    joined = peer_dials.join_next(), if peer_dials.has_active_batch() => {
+                        PieceDownloadWait::PeerDial(joined)
+                    }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                         PieceDownloadWait::StopTimeout
                     }
@@ -604,6 +604,9 @@ impl PieceDownloadSession<'_> {
                 tokio::select! {
                     actions = self.download_piece_batch(&selected_pieces) => PieceDownloadWait::Completed(actions?),
                     incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming.map(Box::new)),
+                    joined = peer_dials.join_next(), if peer_dials.has_active_batch() => {
+                        PieceDownloadWait::PeerDial(joined)
+                    }
                 }
             };
             let action = match wait {
@@ -627,6 +630,16 @@ impl PieceDownloadSession<'_> {
                     }
                     continue;
                 }
+                PieceDownloadWait::PeerDial(Some(result)) => {
+                    self.handle_peer_dial_batch_result(result).await;
+                    self.start_next_peer_dial_batch(&mut peer_dials, &peer_dial_config);
+                    for piece_index in &selected_pieces {
+                        self.piece_picker
+                            .mark_in_progress(*piece_index as u32, false);
+                    }
+                    continue;
+                }
+                PieceDownloadWait::PeerDial(None) => continue,
                 PieceDownloadWait::StopTimeout => {
                     for piece_index in &selected_pieces {
                         self.piece_picker

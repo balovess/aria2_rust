@@ -19,7 +19,17 @@ pub use request::{UdpAnnounceParams, UdpError};
 
 pub use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::AnnounceResponse;
 
-pub(crate) const MAX_RETRIES: u32 = 3;
+pub(crate) const MAX_RETRIES: u32 = 2;
+const INITIAL_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub(crate) fn response_timeout(fail_count: u32) -> std::time::Duration {
+    if fail_count == 0 {
+        INITIAL_RESPONSE_TIMEOUT
+    } else {
+        RETRY_RESPONSE_TIMEOUT
+    }
+}
 
 pub(crate) struct ConnectionState {
     pub(crate) id: u64,
@@ -33,7 +43,6 @@ pub struct UdpTrackerClient {
     pub(crate) inflight: VecDeque<UdpTrackerRequest>,
     pub(crate) waiting_for_conn: VecDeque<UdpTrackerRequest>,
     pub(crate) txn_map: HashMap<u32, usize>,
-    next_txn_id: u32,
 }
 
 impl UdpTrackerClient {
@@ -58,7 +67,6 @@ impl UdpTrackerClient {
             inflight: VecDeque::new(),
             waiting_for_conn: VecDeque::new(),
             txn_map: HashMap::new(),
-            next_txn_id: Self::initial_txn_id(),
         })
     }
 
@@ -84,7 +92,6 @@ impl UdpTrackerClient {
             inflight: VecDeque::new(),
             waiting_for_conn: VecDeque::new(),
             txn_map: HashMap::new(),
-            next_txn_id: Self::initial_txn_id(),
         })
     }
 
@@ -109,20 +116,12 @@ impl UdpTrackerClient {
     }
 
     pub(crate) fn next_txn(&mut self) -> u32 {
-        let id = self.next_txn_id;
-        self.next_txn_id = id.wrapping_add(1);
-        if self.next_txn_id == 0 {
-            self.next_txn_id = 1;
+        loop {
+            let id = rand::random::<u32>();
+            if !self.txn_map.contains_key(&id) {
+                return id;
+            }
         }
-        id
-    }
-
-    fn initial_txn_id() -> u32 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let dur = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        ((dur.as_nanos() & 0xFFFFFFFF) as u32).max(1)
     }
 }
 

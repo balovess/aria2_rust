@@ -86,7 +86,7 @@ impl UdpTrackerClient {
 
                 if let Some(conn) = self.conn_cache.get(&host_key) {
                     if conn.updated_at.elapsed().as_secs()
-                        < aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_TIMEOUT_SECS
+                        < aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_ID_TTL_SECS
                     {
                         if !req.scrape_info_hashes.is_empty() {
                             return self.send_scrape(&mut req, conn.id).await;
@@ -233,7 +233,19 @@ impl UdpTrackerClient {
 
     pub(crate) async fn receive_next_with_timeout(&mut self, timeout: Duration) -> bool {
         let mut buffer = [0u8; 4096];
-        match tokio::time::timeout(timeout, self.socket.recv_from(&mut buffer)).await {
+        let now = std::time::Instant::now();
+        let wait_timeout = self
+            .inflight
+            .iter()
+            .filter_map(|request| {
+                request.dispatched_at.map(|dispatched_at| {
+                    let request_timeout = super::response_timeout(request.fail_count).min(timeout);
+                    request_timeout.saturating_sub(now.saturating_duration_since(dispatched_at))
+                })
+            })
+            .min()
+            .unwrap_or(timeout);
+        match tokio::time::timeout(wait_timeout, self.socket.recv_from(&mut buffer)).await {
             Ok(Ok((len, from))) => {
                 self.handle_response(&buffer[..len], &from).await;
                 true
@@ -263,8 +275,8 @@ impl UdpTrackerClient {
             return;
         };
 
-        let idx = match self.txn_map.remove(&txn_id) {
-            Some(i) => i,
+        let idx = match self.txn_map.get(&txn_id) {
+            Some(&i) => i,
             None => {
                 debug!("Unknown txn_id {} from {}", txn_id, from);
                 return;
@@ -281,6 +293,39 @@ impl UdpTrackerClient {
             return;
         }
 
+        if self.inflight[idx].remote_addr != *from {
+            debug!(
+                txn_id,
+                expected = %self.inflight[idx].remote_addr,
+                received = %from,
+                "Ignoring UDP tracker response from an unexpected source"
+            );
+            return;
+        }
+
+        let request = &self.inflight[idx];
+        let action_matches_request = match UdpAction::from_i32(action_val) {
+            Some(UdpAction::Connect) => request.is_connect && data.len() == 16,
+            Some(UdpAction::Announce) => {
+                !request.is_connect && request.scrape_info_hashes.is_empty()
+            }
+            Some(UdpAction::Scrape) => {
+                !request.is_connect && !request.scrape_info_hashes.is_empty()
+            }
+            Some(UdpAction::Error) => data.len() >= 8,
+            None => false,
+        };
+        if !action_matches_request {
+            debug!(
+                txn_id,
+                action = action_val,
+                length = data.len(),
+                "Ignoring UDP tracker action/request mismatch"
+            );
+            return;
+        }
+
+        self.txn_map.remove(&txn_id);
         let mut req = self.inflight.remove(idx).unwrap_or_else(|| {
             UdpTrackerRequest::new(*from, [0u8; 20], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0)
         });
@@ -381,8 +426,10 @@ impl UdpTrackerClient {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                r.dispatched_at
-                    .is_some_and(|t| now.duration_since(t) > timeout)
+                r.dispatched_at.is_some_and(|dispatched_at| {
+                    now.saturating_duration_since(dispatched_at)
+                        >= super::response_timeout(r.fail_count).min(timeout)
+                })
             })
             .map(|(i, _)| i)
             .collect();
@@ -432,7 +479,7 @@ impl UdpTrackerClient {
             .iter()
             .filter(|(_, s)| {
                 s.updated_at.elapsed().as_secs()
-                    > aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_TIMEOUT_SECS
+                    > aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_ID_TTL_SECS
             })
             .map(|(&a, _)| a)
             .collect();

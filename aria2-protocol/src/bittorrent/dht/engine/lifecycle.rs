@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -13,7 +14,7 @@ impl DhtEngine {
     /// The task is bounded by [`DhtEngineConfig::bootstrap_timeout`]; on
     /// timeout the engine still transitions to `Running` so that lookups are
     /// not blocked indefinitely by an unreachable network.
-    pub(super) fn spawn_bootstrap(self: &Arc<Self>) {
+    pub(super) async fn spawn_bootstrap(self: &Arc<Self>) {
         if self.context.shutdown_requested.load(Ordering::Acquire) {
             return;
         }
@@ -22,7 +23,7 @@ impl DhtEngine {
         let task_queue = Arc::clone(&self.task_queue);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let limit = context.config.bootstrap_timeout;
-        let handle = tokio::spawn(async move {
+        self.register_background_task(async move {
             let bootstrap = async {
                 if tokio::time::timeout(limit, context.bootstrap(&task_queue))
                     .await
@@ -42,8 +43,8 @@ impl DhtEngine {
                 _ = bootstrap => {}
                 _ = shutdown_rx.changed() => {}
             }
-        });
-        self.register_background_task(handle);
+        })
+        .await;
     }
 
     /// Return a snapshot of the current engine state.
@@ -102,13 +103,7 @@ impl DhtEngine {
 
     /// Synchronous shutdown — sets engine state to `ShuttingDown`.
     pub fn shutdown(&self) {
-        let first_shutdown = {
-            let _background_tasks = self
-                .background_tasks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            !self.context.shutdown_requested.swap(true, Ordering::AcqRel)
-        };
+        let first_shutdown = !self.context.shutdown_requested.swap(true, Ordering::AcqRel);
 
         if first_shutdown {
             let _ = self.shutdown_tx.send(true);
@@ -131,25 +126,12 @@ impl DhtEngine {
 
         self.task_queue.shutdown().await;
 
-        let tasks = {
-            let mut background_tasks = self
-                .background_tasks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *background_tasks)
-        };
-
         // Give tasks a bounded opportunity to observe the shared signal before
         // aborting a maintenance operation that is currently awaiting network
-        // I/O. JoinSet removes completed tasks as it drains them, so a timeout
-        // can resume with only the still-running tasks and never double-awaits
-        // a completed JoinHandle.
-        let mut join_set = tokio::task::JoinSet::new();
-        for task in tasks {
-            join_set.spawn(async move {
-                let _ = task.await;
-            });
-        }
+        // I/O. Keep the JoinSet in the engine owner while awaiting it: a
+        // cancelled shutdown future then releases the mutex without detaching
+        // its tasks, and a later shutdown can resume draining the same set.
+        let mut join_set = self.background_tasks.lock().await;
         let wait_for_tasks = async { while join_set.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_millis(100), wait_for_tasks)
             .await
@@ -204,18 +186,13 @@ impl DhtEngine {
     }
 
     /// Register a background task owned by this engine.
-    pub(in crate::bittorrent::dht) fn register_background_task(
-        &self,
-        task: tokio::task::JoinHandle<()>,
-    ) {
-        let mut background_tasks = self
-            .background_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if self.context.shutdown_requested.load(Ordering::Acquire) {
-            task.abort();
-        } else {
-            background_tasks.push(task);
+    pub(in crate::bittorrent::dht) async fn register_background_task<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut background_tasks = self.background_tasks.lock().await;
+        if !self.context.shutdown_requested.load(Ordering::Acquire) {
+            background_tasks.spawn(task);
         }
     }
 }
@@ -223,12 +200,6 @@ impl DhtEngine {
 impl Drop for DhtEngine {
     fn drop(&mut self) {
         self.task_queue.cancel();
-        let mut background_tasks = self
-            .background_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for task in background_tasks.drain(..) {
-            task.abort();
-        }
+        self.background_tasks.get_mut().abort_all();
     }
 }

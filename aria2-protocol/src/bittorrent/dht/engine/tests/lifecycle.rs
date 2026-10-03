@@ -4,6 +4,7 @@ use crate::bittorrent::dht::persistence::DhtPersistence;
 use crate::bittorrent::dht::store::DhtItemStore;
 use crate::bittorrent::dht::task::DhtTask;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[tokio::test]
@@ -57,6 +58,64 @@ async fn test_dht_engine_sync_shutdown_is_immediately_observable() {
     assert_eq!(engine.stats().await.state, DhtEngineState::ShuttingDown);
 
     engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn cancelled_async_shutdown_retains_background_task_ownership_for_retry() {
+    struct TaskLifetime(Arc<AtomicBool>);
+
+    impl Drop for TaskLifetime {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
+    let engine = DhtEngine::start(DhtEngineConfig::local())
+        .await
+        .expect("local DHT engine should start");
+    let task_live = Arc::new(AtomicBool::new(false));
+    let task_started = Arc::new(tokio::sync::Notify::new());
+    let task_live_guard = Arc::clone(&task_live);
+    let task_started_signal = Arc::clone(&task_started);
+    let task = async move {
+        task_live_guard.store(true, Ordering::Release);
+        let _lifetime = TaskLifetime(task_live_guard);
+        task_started_signal.notify_one();
+        std::future::pending::<()>().await;
+    };
+    engine.register_background_task(task).await;
+    task_started.notified().await;
+
+    let shutdown_engine = Arc::clone(&engine);
+    let shutdown = tokio::spawn(async move { shutdown_engine.shutdown_async().await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if engine.background_tasks.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown should transfer its task set to its join owner");
+    assert!(
+        !shutdown.is_finished(),
+        "the synthetic task should keep shutdown inside its bounded join grace"
+    );
+    shutdown.abort();
+    let _ = shutdown.await;
+
+    assert!(
+        task_live.load(Ordering::Acquire),
+        "the synthetic background task must still be running before teardown completes"
+    );
+    tokio::time::timeout(Duration::from_secs(2), engine.shutdown_async())
+        .await
+        .expect("a retried shutdown should finish");
+    assert!(
+        !task_live.load(Ordering::Acquire),
+        "a cancelled shutdown must not detach background tasks from later teardown"
+    );
 }
 
 #[tokio::test]

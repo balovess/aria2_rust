@@ -956,6 +956,25 @@ fn test_download_result_preserves_effective_option_snapshot() {
 }
 
 #[test]
+fn stopped_download_result_zeroes_transfer_speeds() {
+    let group = RequestGroup::new(
+        GroupId::new(44),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_total_length(1024);
+    group.set_download_speed_cached(512);
+    group.set_upload_speed_cached(256);
+    group.mark_complete();
+
+    let result = group.create_download_result();
+
+    assert_eq!(result.status, super::status::DownloadStatus::Complete);
+    assert_eq!(result.download_speed, 0);
+    assert_eq!(result.upload_speed, 0);
+}
+
+#[test]
 fn test_command_counter_does_not_underflow() {
     let group = RequestGroup::new(
         GroupId::new(1),

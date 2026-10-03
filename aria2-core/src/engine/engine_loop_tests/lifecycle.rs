@@ -146,7 +146,17 @@ async fn force_halt_wakes_file_allocation_waiter_before_protocol_timeout() {
 }
 
 #[tokio::test]
-async fn force_halt_accounts_for_aborted_running_task() {
+async fn force_halt_joins_aborted_running_task_before_accounting_completion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TaskLifetime(Arc<AtomicBool>);
+
+    impl Drop for TaskLifetime {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
     let mut ctx = test_ctx(true);
     let gid = ctx
         .group_man
@@ -158,9 +168,17 @@ async fn force_halt_accounts_for_aborted_running_task() {
     let group = ctx.group_man.fill_from_reserver().remove(0);
     group.recover().inc_commands();
 
-    let handle = tokio::spawn(async {
+    let task_live = Arc::new(AtomicBool::new(false));
+    let task_started = Arc::new(tokio::sync::Notify::new());
+    let task_live_guard = Arc::clone(&task_live);
+    let task_started_signal = Arc::clone(&task_started);
+    let handle = tokio::spawn(async move {
+        task_live_guard.store(true, Ordering::Release);
+        let _lifetime = TaskLifetime(task_live_guard);
+        task_started_signal.notify_one();
         std::future::pending::<()>().await;
     });
+    task_started.notified().await;
     let mut running_downloads = vec![(
         gid,
         RunningDownload {
@@ -190,6 +208,11 @@ async fn force_halt_accounts_for_aborted_running_task() {
         &completion_tx,
     )
     .await;
+
+    assert!(
+        !task_live.load(Ordering::Acquire),
+        "force halt must join the aborted command future before releasing its running-task owner"
+    );
 
     let mut completed_generations = HashSet::new();
     let processed = process_task_completions(

@@ -2,7 +2,8 @@ use std::fmt;
 
 pub const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 pub const DEFAULT_ANNOUNCE_INTERVAL: u32 = 300;
-pub const CONNECTION_TIMEOUT_SECS: u64 = 120;
+/// Maximum age at which a client may reuse a UDP tracker connection ID.
+pub const CONNECTION_ID_TTL_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -92,9 +93,9 @@ pub struct ConnectResponse {
 }
 
 pub fn parse_connect_response(data: &[u8]) -> Result<ConnectResponse, String> {
-    if data.len() < 16 {
+    if data.len() != 16 {
         return Err(format!(
-            "CONNECT response too short: {} bytes (min 16)",
+            "CONNECT response must be exactly 16 bytes, got {}",
             data.len()
         ));
     }
@@ -180,6 +181,12 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
         return Err(format!(
             "ANNOUNCE response too short: {} bytes (min 20)",
             data.len()
+        ));
+    }
+    if !(data.len() - 20).is_multiple_of(6) {
+        return Err(format!(
+            "ANNOUNCE compact peer list length {} is not a multiple of 6",
+            data.len() - 20
         ));
     }
     let txn_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
@@ -375,6 +382,11 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_connect_response_rejects_trailing_bytes() {
+        assert!(parse_connect_response(&[0u8; 17]).is_err());
+    }
+
+    #[test]
     fn test_parse_connect_response_wrong_action() {
         let mut data = vec![0u8; 16];
         data[0..4].copy_from_slice(&3i32.to_be_bytes()); // action=error
@@ -420,6 +432,16 @@ mod tests {
     #[test]
     fn test_parse_announce_too_short() {
         assert!(parse_announce_response(&[0u8; 19]).is_err());
+    }
+
+    #[test]
+    fn test_parse_announce_rejects_partial_compact_peer() {
+        let mut data = vec![0u8; 21];
+        data[0..4].copy_from_slice(&(UdpAction::Announce as i32).to_be_bytes());
+
+        let result = parse_announce_response(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a multiple of 6"));
     }
 
     #[test]

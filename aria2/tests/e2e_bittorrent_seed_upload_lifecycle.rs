@@ -414,6 +414,11 @@ async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
     })
     .await
     .expect("retained peer actor did not upload the verified piece");
+    assert_eq!(
+        peer.accepted_handshakes.load(Ordering::SeqCst),
+        1,
+        "download-to-seeding must keep the original peer connection instead of reconnecting"
+    );
 
     tracker.wait_for_event("stopped").await;
     let queries = tracker.captured_queries().await;

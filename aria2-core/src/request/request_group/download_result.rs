@@ -296,15 +296,16 @@ impl DownloadResult {
 
     /// Fill in progress stats from the given `RequestGroup`.
     ///
-    /// Reads `total_length`, `completed_length`, `upload_length`,
-    /// `download_speed`, `upload_speed`, `dir`, and `info_hash`
-    /// from the group's `AtomicProgress` and options.
+    /// Reads completed-byte counters, `dir`, and `info_hash` from the group.
+    /// Transfer speeds are always zero in a stopped result, matching aria2's
+    /// `gatherStoppedDownload` contract; live speeds remain on the active
+    /// `RequestGroup` status path.
     pub fn fill_from_group(&mut self, group: &super::RequestGroup) {
         self.total_length = group.total_length();
         self.completed_length = group.completed_length();
         self.upload_length = group.upload_length();
-        self.download_speed = group.download_speed();
-        self.upload_speed = group.upload_speed();
+        self.download_speed = 0;
+        self.upload_speed = 0;
         self.session_time = group.elapsed_time().map_or(0, |elapsed| elapsed.as_secs());
         self.dir = group.options().dir.clone().unwrap_or_default();
         self.info_hash = group

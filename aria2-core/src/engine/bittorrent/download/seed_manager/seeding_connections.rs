@@ -43,6 +43,7 @@ impl BtSeedManager {
                 let endpoint = peer.to_socket_addr().ok()?;
                 Some((peer.ip, peer.port, endpoint))
             })
+            .filter(|(_, _, endpoint)| !self.swarm.is_known_seeder(*endpoint))
             .collect::<Vec<_>>();
         if peers.is_empty() {
             return;

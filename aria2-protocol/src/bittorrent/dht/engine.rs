@@ -217,7 +217,7 @@ pub struct DhtEngine {
     /// Shared shutdown state observed by every background task.
     pub(super) shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Handles for background tasks owned by this engine.
-    pub(super) background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    pub(super) background_tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
     /// Scheduler owned by the engine rather than by task contexts.
     pub(super) task_queue: Arc<DhtTaskQueue>,
 }

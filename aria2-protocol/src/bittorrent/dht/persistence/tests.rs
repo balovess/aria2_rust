@@ -89,6 +89,27 @@ fn test_deserialize_v3_format() {
 }
 
 #[test]
+fn test_deserialize_aria2_compatible_v2_format() {
+    let self_id = [0x31u8; 20];
+    let node_id = [0x71u8; 20];
+    let addr: std::net::SocketAddr = "203.0.113.17:6881".parse().unwrap();
+    let node = DhtNode::new(node_id, addr);
+    let mut serialized = DhtPersistence::serialize(&self_id, &[node]);
+
+    serialized[7] = 0x02;
+    serialized[8..12].copy_from_slice(&1_700_000_000u32.to_be_bytes());
+    serialized[12..16].fill(0);
+
+    let restored = DhtPersistence::deserialize(&serialized)
+        .expect("aria2 v2 DHT routing-table snapshots should remain readable");
+    assert_eq!(restored.self_id, self_id);
+    assert_eq!(restored.saved_at_secs, 1_700_000_000);
+    assert_eq!(restored.nodes.len(), 1);
+    assert_eq!(restored.nodes[0].id, node_id);
+    assert_eq!(restored.nodes[0].addr, addr);
+}
+
+#[test]
 fn test_repeated_file_save_replaces_existing_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dht.dat");

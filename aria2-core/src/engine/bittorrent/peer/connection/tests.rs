@@ -247,6 +247,54 @@ fn test_bt_peer_conn_uses_configured_timing_values() {
 }
 
 #[tokio::test]
+async fn peer_write_stall_expires_with_the_configured_timeout() {
+    use aria2_protocol::bittorrent::message::types::BtMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let remote = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (local, endpoint) = listener.accept().await.unwrap();
+    let protocol =
+        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+            local, [0u8; 20], false, false,
+        );
+    let mut connection = BtPeerConn::from_incoming_tcp(protocol, endpoint);
+    connection.set_timeouts(Duration::from_secs(120), Duration::from_millis(50));
+
+    let message = BtMessage::Piece {
+        index: 0,
+        begin: 0,
+        data: vec![0x5a; 16 * 1024].into(),
+    };
+    let sends_before_stall = tokio::time::timeout(Duration::from_secs(4), async {
+        let mut sent = 0usize;
+        loop {
+            if connection.send_bt_message(&message).await.is_err() {
+                return sent;
+            }
+            sent += 1;
+        }
+    })
+    .await
+    .expect("a non-reading TCP peer must not hold a write forever");
+
+    assert!(
+        sends_before_stall > 0,
+        "the loopback peer accepted no writes"
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            connection.send_bt_message(&message)
+        )
+        .await
+        .expect("a partially written frame must poison the TCP connection")
+        .is_err()
+    );
+    drop(remote);
+}
+
+#[tokio::test]
 async fn test_bt_peer_conn_sends_configured_peer_agent_on_wire() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
