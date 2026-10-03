@@ -128,6 +128,31 @@ fn test_info_hash_index_cleaned_on_overwrite() {
 }
 
 #[test]
+fn info_hash_index_survives_same_gid_refresh() {
+    let hash = "aaa1111111111111111111111111111111111111";
+    let mut registry = BtRegistry::new();
+
+    registry.put(
+        1,
+        make_bt_object_with_info_hash(1024, 4096, "/tmp/first.bin", hash, false),
+    );
+    registry.put(
+        1,
+        make_bt_object_with_info_hash(2048, 8192, "/tmp/refreshed.bin", hash, false),
+    );
+
+    assert_eq!(registry.info_hash_index.get(hash), Some(&1));
+    assert_eq!(registry.info_hash_index_len(), 1);
+    assert_eq!(
+        registry
+            .get_download_context_by_info_hash(hash)
+            .expect("refreshed context should remain indexed")
+            .get_piece_length(),
+        2048
+    );
+}
+
+#[test]
 fn test_info_hash_index_cleared_on_remove_all() {
     let hash1 = "aaa1111111111111111111111111111111111111";
     let mut registry = BtRegistry::new();

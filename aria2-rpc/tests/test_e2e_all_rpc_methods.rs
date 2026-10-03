@@ -727,6 +727,10 @@ async fn e2e_get_dht_status_returns_runtime_counters() {
     assert!(resp["result"].is_object());
     assert!(resp["result"].get("state").is_some());
     assert!(resp["result"].get("totalNodes").is_some());
+    assert!(resp["result"].get("peerInfoHashes").is_some());
+    assert!(resp["result"].get("storedPeers").is_some());
+    assert!(resp["result"].get("peerStorageEvictions").is_some());
+    assert!(resp["result"].get("maxPeerInfoHashes").is_some());
 }
 
 #[tokio::test]

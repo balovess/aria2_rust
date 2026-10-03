@@ -66,6 +66,10 @@ pub struct BtRegistry {
     /// C++ performs a linear scan over all entries; this index avoids that.
     pub(crate) info_hash_index: HashMap<String, u64>,
 
+    /// Per-download externally reachable IPs advertised by DHT `get_peers`.
+    /// Kept separate from the public `BtObject` shape and removed with its GID.
+    dht_external_ips: HashMap<u64, std::net::IpAddr>,
+
     /// One process-wide DHT engine per address family, matching aria2's
     /// independent IPv4 and IPv6 DHT registries.
     global_dht_engines: DhtEngineSet,
@@ -103,6 +107,7 @@ impl BtRegistry {
         Self {
             pool: HashMap::new(),
             info_hash_index: HashMap::new(),
+            dht_external_ips: HashMap::new(),
             global_dht_engines: DhtEngineSet::default(),
             dht_engine_start_locks: [
                 std::sync::Arc::new(tokio::sync::Mutex::new(())),

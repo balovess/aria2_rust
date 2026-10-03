@@ -165,6 +165,7 @@ impl DhtEngine {
         } else {
             inner.state
         };
+        let peer_storage = self.context.peer_storage.stats();
         DhtEngineStats {
             total_nodes: routing_table.total_node_count(),
             good_nodes: routing_table.good_node_count(),
@@ -177,6 +178,10 @@ impl DhtEngine {
                 .map(|bucket| bucket.cached_nodes().len())
                 .sum(),
             bucket_count: routing_table.num_buckets(),
+            peer_info_hashes: peer_storage.info_hashes,
+            stored_peers: peer_storage.peers,
+            peer_storage_evictions: peer_storage.evictions,
+            max_peer_info_hashes: peer_storage.max_info_hashes,
             persistence_enabled: self.context.config.dht_file_path.is_some(),
             persistence_max_age_secs: self.context.config.persistence_max_age.as_secs(),
             cleanup_interval_secs: self.context.config.cleanup_interval.as_secs(),

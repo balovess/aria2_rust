@@ -84,6 +84,10 @@ const METHOD_HANDLERS: Record<string, (params: unknown[]) => unknown> = {
     totalNodes: '10',
     goodNodes: '8',
     pendingTransactions: '1',
+    peerInfoHashes: '12',
+    storedPeers: '38',
+    peerStorageEvictions: '4',
+    maxPeerInfoHashes: '4096',
   }),
   'aria2.getVersion': () => ({
     version: '0.3.2',

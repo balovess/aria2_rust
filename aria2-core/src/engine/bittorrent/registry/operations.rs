@@ -1,5 +1,6 @@
 //! BtRegistry operations — All method implementations for the BT registry.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tracing::trace;
@@ -69,6 +70,31 @@ impl BtRegistry {
         None
     }
 
+    /// Return the configured local peer endpoint for an active torrent when
+    /// its info hash and the request's address family match.
+    pub fn dht_local_peer(&self, info_hash: &[u8; 20], requester_ip: IpAddr) -> Option<SocketAddr> {
+        if self.tcp_port == 0 {
+            return None;
+        }
+        let gid = self.info_hash_index.get(&hex::encode(info_hash))?;
+        let external_ip = *self.dht_external_ips.get(gid)?;
+        (external_ip.is_ipv4() == requester_ip.is_ipv4())
+            .then(|| SocketAddr::new(external_ip, self.tcp_port))
+    }
+
+    /// Publish or clear the external address associated with one registered
+    /// torrent. Invalid/unconfigured addresses are represented by `None`.
+    pub fn set_dht_external_ip(&mut self, gid: u64, external_ip: Option<IpAddr>) {
+        if !self.pool.contains_key(&gid) {
+            return;
+        }
+        if let Some(external_ip) = external_ip {
+            self.dht_external_ips.insert(gid, external_ip);
+        } else {
+            self.dht_external_ips.remove(&gid);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Pool operations
     // -----------------------------------------------------------------------
@@ -82,17 +108,22 @@ impl BtRegistry {
     pub fn put(&mut self, gid: u64, obj: BtObject) {
         trace!(gid, "BtRegistry::put");
 
-        // Update secondary index if the new object has an info hash
-        if let Some(ref ctx) = obj.download_context
+        // Remove old indexes before adding the replacement. Doing this in the
+        // opposite order would let cleanup erase the replacement's same-hash
+        // index when a GID is refreshed in place.
+        if let Some(old) = self.pool.insert(gid, obj) {
+            self.cleanup_info_hash_index(gid, &old);
+        }
+        self.dht_external_ips.remove(&gid);
+
+        if let Some(ctx) = self
+            .pool
+            .get(&gid)
+            .and_then(|obj| obj.download_context.as_ref())
             && let Some(hash) = ctx.get_bt_info_hash_hex()
         {
             trace!(gid, info_hash = %hash, "BtRegistry::put: updating info_hash index");
             self.info_hash_index.insert(hash, gid);
-        }
-
-        // If replacing an existing entry, clean up its stale info_hash index
-        if let Some(old) = self.pool.insert(gid, obj) {
-            self.cleanup_info_hash_index(gid, &old);
         }
     }
 
@@ -134,6 +165,7 @@ impl BtRegistry {
         self.dht_engines.remove(&gid);
         if let Some(old) = self.pool.remove(&gid) {
             self.cleanup_info_hash_index(gid, &old);
+            self.dht_external_ips.remove(&gid);
             trace!(gid, "BtRegistry::remove: entry removed");
             true
         } else {
@@ -152,6 +184,7 @@ impl BtRegistry {
         );
         self.pool.clear();
         self.info_hash_index.clear();
+        self.dht_external_ips.clear();
         self.dht_engines.clear();
         self.global_dht_engines = DhtEngineSet::default();
     }
@@ -303,7 +336,19 @@ impl BtRegistry {
             return Ok(engine);
         }
 
-        let candidate = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(config).await?;
+        let registry_weak = Arc::downgrade(registry);
+        let candidate =
+            aria2_protocol::bittorrent::dht::engine::DhtEngine::start_with_local_peer_lookup(
+                config,
+                move |info_hash, requester_ip| {
+                    let registry = registry_weak.upgrade()?;
+                    let registry = registry
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    registry.dht_local_peer(info_hash, requester_ip)
+                },
+            )
+            .await?;
         let engine = {
             let mut registry = registry
                 .write()

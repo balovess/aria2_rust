@@ -25,6 +25,7 @@ mod startup;
 #[cfg(test)]
 mod tests;
 
+use super::handler::DhtLocalPeerLookup;
 use super::peer_storage::DhtPeerStorage;
 use super::store::DhtItemStore;
 use super::task::DhtTaskQueue;
@@ -154,6 +155,14 @@ pub struct DhtEngineStats {
     pub cached_nodes: usize,
     /// Number of routing-table buckets currently allocated.
     pub bucket_count: usize,
+    /// Number of live swarm keys held by the local announce-peer store.
+    pub peer_info_hashes: usize,
+    /// Number of peer endpoints held by the local announce-peer store.
+    pub stored_peers: usize,
+    /// Cumulative number of swarms evicted by the local peer-storage cap.
+    pub peer_storage_evictions: u64,
+    /// Maximum swarm keys retained by this address-family engine.
+    pub max_peer_info_hashes: usize,
     /// Whether this engine has a routing-table persistence path.
     pub persistence_enabled: bool,
     /// Configured maximum age for an on-disk routing-table snapshot.
@@ -199,6 +208,8 @@ pub(super) struct DhtEngineContext {
     pub(super) config: DhtEngineConfig,
     pub(super) token_tracker: Arc<std::sync::Mutex<TokenTracker>>,
     pub(super) peer_storage: Arc<DhtPeerStorage>,
+    /// Resolve a locally active BitTorrent peer for inbound `get_peers` replies.
+    pub(super) local_peer_lookup: Option<Arc<DhtLocalPeerLookup>>,
     pub(super) item_store: DhtItemStore,
     pub(super) shutdown_requested: Arc<AtomicBool>,
     pub(super) task_context: DhtTaskContext,

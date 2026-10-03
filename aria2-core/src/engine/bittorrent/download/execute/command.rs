@@ -235,7 +235,7 @@ impl Command for BtDownloadCommand {
             if let Err(error) = piece_result {
                 session.swarm.shutdown_all().await;
                 if let Some(actor) = self.tracker_actor.as_ref() {
-                    let _ = actor.stop().await;
+                    actor.stop().await;
                 }
                 return Err(error);
             }
@@ -288,7 +288,7 @@ impl Command for BtDownloadCommand {
                 info!("Skipping seeding (enabled={})", self.seed_enabled,);
                 session.swarm.shutdown_all().await;
                 if let Some(actor) = self.tracker_actor.as_ref() {
-                    let _ = actor.stop().await;
+                    actor.stop().await;
                 }
             }
 

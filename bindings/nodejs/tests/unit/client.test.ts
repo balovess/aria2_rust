@@ -338,6 +338,10 @@ describe('Aria2Client', () => {
         totalNodes: '10',
         goodNodes: '8',
         pendingTransactions: '1',
+        peerInfoHashes: '12',
+        storedPeers: '38',
+        peerStorageEvictions: '4',
+        maxPeerInfoHashes: '4096',
       };
       mockTransport.sendRequest.mockResolvedValue(status);
       expect(await client.getDhtStatus()).toEqual(status);

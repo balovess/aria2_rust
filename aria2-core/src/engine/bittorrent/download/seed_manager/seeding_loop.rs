@@ -143,10 +143,7 @@ impl BtSeedManager {
         self.publish_upload_stats();
 
         if let Some(actor) = self.tracker_actor.take() {
-            self.announcer = actor
-                .stop()
-                .await
-                .map(|announcer| Arc::new(tokio::sync::Mutex::new(announcer)));
+            actor.stop().await;
         } else if let Some(announcer) = self.announcer.as_ref() {
             announcer
                 .lock()
@@ -409,6 +406,7 @@ impl BtSeedManager {
             | PeerEvent::UploadQueueChanged { .. }
             | PeerEvent::PeerAvailabilityChanged { .. }
             | PeerEvent::PeerAvailabilitySnapshot { .. }
+            | PeerEvent::OutstandingDownloadRequests { .. }
             | PeerEvent::AllowedFast { .. }
             | PeerEvent::ExtensionHandshakeReceived { .. }
             | PeerEvent::Disconnected { .. }

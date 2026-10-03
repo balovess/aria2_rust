@@ -286,11 +286,19 @@ class TestDhtStatus:
                 "totalNodes": "10",
                 "goodNodes": "8",
                 "pendingTransactions": "1",
+                "peerInfoHashes": "12",
+                "storedPeers": "38",
+                "peerStorageEvictions": "4",
+                "maxPeerInfoHashes": "4096",
             }
         )
         assert info.state == "running"
         assert info.total_nodes == "10"
         assert info.pending_transactions == "1"
+        assert info.peer_info_hashes == "12"
+        assert info.stored_peers == "38"
+        assert info.peer_storage_evictions == "4"
+        assert info.max_peer_info_hashes == "4096"
 
 
 class TestDownloadEvent:

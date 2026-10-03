@@ -47,7 +47,7 @@ impl BtDownloadCommand {
 
     async fn announce_stopped_for_halt(&mut self) {
         if let Some(actor) = self.tracker_actor.as_ref() {
-            let _ = actor.stop().await;
+            actor.stop().await;
         }
     }
 

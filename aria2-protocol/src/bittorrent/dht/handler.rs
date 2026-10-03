@@ -3,7 +3,8 @@
 //! Validates and dispatches incoming KRPC queries. BEP 5 peer queries,
 //! BEP 44 item storage, and BEP 51 sampling are handled by focused modules.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use tracing::{debug, trace, warn};
 
@@ -25,6 +26,9 @@ const K: usize = 8;
 /// implementation to avoid path-MTU fragmentation.
 const MAX_PEERS_IN_GET_PEERS_RESPONSE: usize = 25;
 
+/// A core-owned lookup for an active local torrent peer advertised by DHT.
+pub type DhtLocalPeerLookup = dyn Fn(&[u8; 20], IpAddr) -> Option<SocketAddr> + Send + Sync;
+
 /// Result of processing an inbound query.
 pub struct HandleResult {
     /// The response message to send back (if any).
@@ -35,17 +39,28 @@ pub struct HandleResult {
 
 /// Handles inbound DHT query messages and generates responses.
 ///
-/// This is stateless — it takes references to the routing table, token tracker,
-/// and peer storage to construct appropriate responses. Thread-safe because
-/// it only reads from shared state (callers handle writes separately).
+/// The handler does not mutate DHT state. An optional local-peer lookup adds
+/// active torrent endpoints to `get_peers` replies; callers supply that
+/// application-owned lookup without coupling this protocol crate to the core.
 pub struct DhtQueryHandler {
     self_id: [u8; 20],
+    local_peer_lookup: Option<Arc<DhtLocalPeerLookup>>,
 }
 
 impl DhtQueryHandler {
     /// Create a new handler for the given local node ID.
     pub fn new(self_id: [u8; 20]) -> Self {
-        Self { self_id }
+        Self {
+            self_id,
+            local_peer_lookup: None,
+        }
+    }
+
+    /// Attach the active-download lookup used to advertise this client in
+    /// inbound `get_peers` replies.
+    pub fn with_local_peer_lookup(mut self, lookup: Arc<DhtLocalPeerLookup>) -> Self {
+        self.local_peer_lookup = Some(lookup);
+        self
     }
 
     /// Return the local node ID this handler is configured with.
@@ -262,15 +277,49 @@ impl DhtQueryHandler {
         // Check if we know any peers for this info_hash
         let mut peers = peer_storage.get_peers(&info_hash);
         peers.retain(|peer| peer.is_ipv4() == from.is_ipv4());
-        peers.truncate(MAX_PEERS_IN_GET_PEERS_RESPONSE);
+        let local_peer = self
+            .local_peer_lookup
+            .as_deref()
+            .and_then(|lookup| lookup(&info_hash, from.ip()))
+            .filter(|peer| peer.is_ipv4() == from.is_ipv4());
+        if let Some(local_peer) = local_peer.filter(|peer| !peers.contains(peer)) {
+            peers.truncate(MAX_PEERS_IN_GET_PEERS_RESPONSE - 1);
+            peers.push(local_peer);
+        } else {
+            peers.truncate(MAX_PEERS_IN_GET_PEERS_RESPONSE);
+        }
 
         if !peers.is_empty() {
-            Some(DhtMessageBuilder::get_peers_response_with_peers(
-                tx,
-                &self.self_id,
-                &token_bytes,
-                &peers,
-            ))
+            let closest = routing_table.find_closest(&info_hash, K);
+            let compact_nodes = if from.is_ipv6() {
+                Self::encode_compact_nodes6(&closest)
+            } else {
+                Self::encode_compact_nodes(&closest)
+            };
+            if compact_nodes.is_empty() {
+                Some(DhtMessageBuilder::get_peers_response_with_peers(
+                    tx,
+                    &self.self_id,
+                    &token_bytes,
+                    &peers,
+                ))
+            } else if from.is_ipv6() {
+                Some(DhtMessageBuilder::get_peers_response_with_peers_and_nodes6(
+                    tx,
+                    &self.self_id,
+                    &token_bytes,
+                    &peers,
+                    &compact_nodes,
+                ))
+            } else {
+                Some(DhtMessageBuilder::get_peers_response_with_peers_and_nodes(
+                    tx,
+                    &self.self_id,
+                    &token_bytes,
+                    &peers,
+                    &compact_nodes,
+                ))
+            }
         } else {
             // No peers known — return closest nodes instead
             let closest = routing_table.find_closest(&info_hash, K);

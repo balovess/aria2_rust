@@ -12,8 +12,18 @@ impl BtDownloadCommand {
             return;
         };
 
-        let gid = self.group.recover().gid().value();
-        let download_context = self.group.recover().get_download_context();
+        let (gid, download_context, dht_external_ip) = {
+            let group = self.group.recover();
+            (
+                group.gid().value(),
+                group.get_download_context(),
+                group
+                    .options()
+                    .bt_external_ip
+                    .as_deref()
+                    .and_then(|address| address.parse::<std::net::IpAddr>().ok()),
+            )
+        };
         let (announce_list, announce_url) = {
             if let Some(ref ctx) = download_context {
                 if let Some(attr) = ctx.get_attribute(ContextAttributeType::BitTorrent) {
@@ -58,6 +68,7 @@ impl BtDownloadCommand {
             .build();
         if let Ok(mut reg) = registry.write() {
             reg.put(gid, bt_object);
+            reg.set_dht_external_ip(gid, dht_external_ip);
             info!(
                 gid,
                 "Registered BT download into BtRegistry with BtAnnounce"

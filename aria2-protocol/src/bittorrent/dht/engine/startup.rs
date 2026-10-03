@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{RwLock, watch};
 use tracing::{debug, info, warn};
 
+use super::super::handler::DhtLocalPeerLookup;
 use super::super::node::DhtNode;
 use super::super::peer_storage::DhtPeerStorage;
 use super::super::persistence::DhtPersistence;
@@ -36,6 +37,26 @@ impl DhtEngine {
     /// `Bootstrapping` to `Running`, or [`DhtEngineConfig::local`] to skip
     /// bootstrap entirely.
     pub async fn start(config: DhtEngineConfig) -> std::io::Result<Arc<Self>> {
+        Self::start_inner(config, None).await
+    }
+
+    /// Start the engine and include a locally active peer in matching
+    /// inbound `get_peers` replies. The callback must be fast and non-blocking;
+    /// it receives the queried info hash and requester address family.
+    pub async fn start_with_local_peer_lookup<F>(
+        config: DhtEngineConfig,
+        lookup: F,
+    ) -> std::io::Result<Arc<Self>>
+    where
+        F: Fn(&[u8; 20], IpAddr) -> Option<SocketAddr> + Send + Sync + 'static,
+    {
+        Self::start_inner(config, Some(Arc::new(lookup) as Arc<DhtLocalPeerLookup>)).await
+    }
+
+    async fn start_inner(
+        config: DhtEngineConfig,
+        local_peer_lookup: Option<Arc<DhtLocalPeerLookup>>,
+    ) -> std::io::Result<Arc<Self>> {
         let persisted_data = if let Some(ref path) = config.dht_file_path
             && tokio::fs::try_exists(path).await.unwrap_or(false)
         {
@@ -182,6 +203,7 @@ impl DhtEngine {
             config: config.clone(),
             token_tracker: Arc::clone(&token_tracker),
             peer_storage: Arc::clone(&peer_storage),
+            local_peer_lookup,
             item_store,
             shutdown_requested: Arc::clone(&shutdown_requested),
             task_context,

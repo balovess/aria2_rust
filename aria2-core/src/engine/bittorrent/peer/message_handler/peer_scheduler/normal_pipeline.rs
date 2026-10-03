@@ -429,7 +429,8 @@ pub(super) async fn run_attempt_batch(
                 match event {
                     PeerEvent::UploadBytes { actor_id, .. }
                     | PeerEvent::UploadQueueChanged { actor_id, .. }
-                    | PeerEvent::ChokeStateChanged { actor_id, .. } => {
+                    | PeerEvent::ChokeStateChanged { actor_id, .. }
+                    | PeerEvent::OutstandingDownloadRequests { actor_id, .. } => {
                         if peers.peer_index_by_actor_id(actor_id).is_none() {
                             continue;
                         }

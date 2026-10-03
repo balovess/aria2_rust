@@ -182,6 +182,50 @@ fn test_sample_infohashes_counts_peer_store_keys() {
 }
 
 #[test]
+fn sample_infohashes_returns_an_exact_count_and_bounded_unique_sample() {
+    let handler = make_handler();
+    let rt = make_routing_table();
+    let tt = TokenTracker::new();
+    let ps = DhtPeerStorage::new();
+    for value in 0..40u8 {
+        ps.add_peer(
+            [value; 20],
+            format!("127.0.0.1:{}", 7000 + u16::from(value))
+                .parse()
+                .unwrap(),
+        );
+    }
+    let query = super::super::modern::sample_infohashes_query(1, &[0xBB; 20], &[0x44; 20]);
+    let result = handler.handle_query(
+        &query,
+        "10.0.0.1:6881".parse().unwrap(),
+        &rt,
+        &tt,
+        &ps,
+        None,
+    );
+    let response = result.response.unwrap();
+    let body = response.r.unwrap();
+    let samples = body
+        .dict_get(b"samples")
+        .and_then(|value| value.as_bytes())
+        .expect("BEP 51 samples must be present");
+    let (sample_hashes, remainder) = samples.as_chunks::<20>();
+    assert!(remainder.is_empty());
+    let hashes = sample_hashes
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(
+        body.dict_get(b"num").and_then(|value| value.as_int()),
+        Some(40)
+    );
+    assert_eq!(samples.len(), 32 * 20);
+    assert_eq!(hashes.len(), 32, "sampled info hashes must be unique");
+}
+
+#[test]
 fn test_put_rejects_non_bytes_salt() {
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -260,8 +304,12 @@ fn test_handle_get_peers_with_peers() {
     let r = resp.r.as_ref().unwrap();
     // Should have values (peers known)
     assert!(r.dict_get(b"values").is_some());
-    // Should NOT have nodes
-    assert!(r.dict_get(b"nodes").is_none());
+    // Known peers do not suppress the closest IPv4 routing nodes.
+    let nodes = r
+        .dict_get(b"nodes")
+        .and_then(BencodeValue::as_bytes)
+        .expect("closest nodes should accompany known peers");
+    assert!(!nodes.is_empty() && nodes.len().is_multiple_of(26));
 }
 
 #[test]
@@ -329,6 +377,71 @@ fn get_peers_response_filters_family_and_caps_values_for_path_mtu() {
             .iter()
             .all(|value| { value.as_bytes().is_some_and(|compact| compact.len() == 6) })
     );
+}
+
+#[test]
+fn get_peers_advertises_local_peer_without_duplicates_and_preserves_response_cap() {
+    let info_hash = [0xCC; 20];
+    let local_peer: std::net::SocketAddr = "203.0.113.37:6881".parse().unwrap();
+    let lookup = Arc::new(move |hash: &[u8; 20], requester_ip: std::net::IpAddr| {
+        (hash == &info_hash && requester_ip.is_ipv4()).then_some(local_peer)
+    });
+    let handler = make_handler().with_local_peer_lookup(lookup);
+    let rt = make_routing_table();
+    let tt = TokenTracker::new();
+    let ps = DhtPeerStorage::new();
+
+    ps.add_peer(info_hash, local_peer);
+    let duplicate_query = DhtMessageBuilder::get_peers(9999, &[0xBB; 20], &info_hash);
+    let duplicate_reply = handler
+        .handle_query(
+            &duplicate_query,
+            "192.0.2.100:6881".parse().unwrap(),
+            &rt,
+            &tt,
+            &ps,
+            None,
+        )
+        .response
+        .unwrap();
+    let duplicate_values = duplicate_reply
+        .r
+        .as_ref()
+        .and_then(|result| result.dict_get(b"values"))
+        .and_then(BencodeValue::as_list)
+        .unwrap();
+    assert_eq!(duplicate_values.len(), 1);
+
+    for index in 1..=25u16 {
+        ps.add_peer(
+            info_hash,
+            std::net::SocketAddr::new(format!("192.0.2.{index}").parse().unwrap(), 6000 + index),
+        );
+    }
+    let capped_query = DhtMessageBuilder::get_peers(10000, &[0xBC; 20], &info_hash);
+    let capped_reply = handler
+        .handle_query(
+            &capped_query,
+            "192.0.2.100:6881".parse().unwrap(),
+            &rt,
+            &tt,
+            &ps,
+            None,
+        )
+        .response
+        .unwrap();
+    let capped_values = capped_reply
+        .r
+        .as_ref()
+        .and_then(|result| result.dict_get(b"values"))
+        .and_then(BencodeValue::as_list)
+        .unwrap();
+    assert_eq!(capped_values.len(), 25);
+    assert!(capped_values.iter().any(|value| {
+        value
+            .as_bytes()
+            .is_some_and(|bytes| bytes == [203, 0, 113, 37, 0x1A, 0xE1])
+    }));
 }
 
 #[test]

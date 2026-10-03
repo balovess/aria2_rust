@@ -25,13 +25,7 @@ impl DhtQueryHandler {
         };
         // BEP 51 samples the torrent swarm keyspace. BEP 44 item targets are
         // a separate keyspace and must not be advertised as torrent hashes.
-        let mut info_hashes = peer_storage.info_hashes();
-        info_hashes.sort_unstable();
-        info_hashes.dedup();
-        use rand::seq::SliceRandom;
-        info_hashes.shuffle(&mut rand::thread_rng());
-        let num = info_hashes.len();
-        info_hashes.truncate(32);
+        let (num, info_hashes) = peer_storage.sample_info_hashes_with_count(32);
         let mut result = std::collections::BTreeMap::new();
         result.insert(b"id".to_vec(), BencodeValue::Bytes(self.self_id.to_vec()));
         result.insert(b"interval".to_vec(), BencodeValue::Int(900));

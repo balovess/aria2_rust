@@ -489,6 +489,53 @@ async fn bt_peer_conn_accepts_extension_handshake_without_m_dictionary() {
 }
 
 #[tokio::test]
+async fn bt_peer_conn_keeps_other_fields_when_extension_map_has_wrong_type() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+    use aria2_protocol::bittorrent::message::serializer::serialize;
+    use aria2_protocol::bittorrent::message::types::BtMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (server, endpoint) = listener.accept().await.unwrap();
+    let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer_capabilities(
+        server, [0u8; 20], false, false, true,
+    );
+    let mut connection = BtPeerConn::from_incoming_tcp(peer, endpoint);
+    connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
+
+    let payload = BencodeValue::Dict(BTreeMap::from([
+        (b"m".to_vec(), BencodeValue::Int(42)),
+        (b"p".to_vec(), BencodeValue::Int(6881)),
+        (
+            b"v".to_vec(),
+            BencodeValue::Bytes(b"remote-agent/2.3".to_vec()),
+        ),
+    ]))
+    .encode();
+    let frame = serialize(&BtMessage::Extended { ext_id: 0, payload });
+    tokio::io::AsyncWriteExt::write_all(&mut client, &frame)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        connection.read_message().await.unwrap(),
+        Some(BtMessage::Extended { ext_id: 0, .. })
+    ));
+    assert_eq!(connection.remote_listen_port, Some(6881));
+    assert_eq!(
+        *connection
+            .remote_client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        Some("remote-agent/2.3".to_string()),
+        "an invalid optional m field must not suppress valid BEP 10 fields"
+    );
+    assert_eq!(connection.peer_extension_id("ut_metadata"), None);
+    assert_eq!(connection.peer_extension_id("ut_pex"), None);
+}
+
+#[tokio::test]
 async fn bt_peer_conn_enforces_extended_messaging_handshake_capability() {
     use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
     use aria2_protocol::bittorrent::message::handshake::Handshake;

@@ -548,6 +548,10 @@ impl CoreRpcBackend {
             bad_nodes: 0,
             cached_nodes: 0,
             bucket_count: 0,
+            peer_info_hashes: 0,
+            stored_peers: 0,
+            peer_storage_evictions: 0,
+            max_peer_info_hashes: 0,
             persistence_enabled: false,
             persistence_max_age_secs: 0,
             cleanup_interval_secs: 0,
@@ -563,6 +567,10 @@ impl CoreRpcBackend {
             stats.bad_nodes += current.bad_nodes;
             stats.cached_nodes += current.cached_nodes;
             stats.bucket_count += current.bucket_count;
+            stats.peer_info_hashes += current.peer_info_hashes;
+            stats.stored_peers += current.stored_peers;
+            stats.peer_storage_evictions += current.peer_storage_evictions;
+            stats.max_peer_info_hashes += current.max_peer_info_hashes;
             stats.persistence_enabled |= current.persistence_enabled;
             stats.persistence_max_age_secs = stats
                 .persistence_max_age_secs
@@ -585,6 +593,10 @@ impl CoreRpcBackend {
                 bad_nodes: stats.bad_nodes,
                 cached_nodes: stats.cached_nodes,
                 bucket_count: stats.bucket_count,
+                peer_info_hashes: stats.peer_info_hashes,
+                stored_peers: stats.stored_peers,
+                peer_storage_evictions: stats.peer_storage_evictions,
+                max_peer_info_hashes: stats.max_peer_info_hashes,
                 persistence_enabled: stats.persistence_enabled,
                 persistence_max_age_secs: stats.persistence_max_age_secs,
                 cleanup_interval_secs: stats.cleanup_interval_secs,

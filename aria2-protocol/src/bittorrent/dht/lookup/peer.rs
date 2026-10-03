@@ -35,6 +35,7 @@ pub async fn iterative_get_peers(
     let mut all_peers: Vec<SocketAddr> = Vec::new();
     let mut token_nodes: Vec<(SocketAddr, [u8; 20], Vec<u8>)> = Vec::new();
     let mut rounds = 0usize;
+    let use_ipv6 = socket.local_addr().is_ipv6();
     let request = LookupRequest {
         target: info_hash,
         self_id,
@@ -64,7 +65,11 @@ pub async fn iterative_get_peers(
                     );
                 }
 
-                all_peers.extend(extract_compact_peers_from_response(&message));
+                all_peers.extend(
+                    extract_compact_peers_from_response(&message)
+                        .into_iter()
+                        .filter(|addr| addr.is_ipv6() == use_ipv6),
+                );
                 if let Some(token) = message
                     .r
                     .as_ref()
@@ -76,6 +81,9 @@ pub async fn iterative_get_peers(
                 }
 
                 for (addr, node_id) in extract_compact_nodes_from_response(&message) {
+                    if addr.is_ipv6() != use_ipv6 {
+                        continue;
+                    }
                     add_node_to_table(routing_table, DhtNode::unverified(node_id, addr)).await;
                     insert_entry(&mut entries, node_id, addr, info_hash, self_id);
                 }

@@ -1,8 +1,10 @@
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use rand::seq::SliceRandom;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::net::SocketAddr;
 
 fn bench_bencode_encode_dict(c: &mut Criterion) {
     let data: std::collections::BTreeMap<Vec<u8>, BencodeValue> = (0..20)
@@ -132,6 +134,36 @@ fn bench_dht_xor_distance(c: &mut Criterion) {
     );
 }
 
+fn bench_dht_sample_infohashes(c: &mut Criterion) {
+    use aria2_protocol::bittorrent::dht::DhtPeerStorage;
+
+    const SWARM_COUNT: u64 = 4_096;
+    const SAMPLE_LIMIT: usize = 32;
+    let storage = DhtPeerStorage::new();
+    let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+    for value in 0..SWARM_COUNT {
+        let mut info_hash = [0u8; 20];
+        info_hash[..8].copy_from_slice(&value.to_be_bytes());
+        storage.add_peer(info_hash, addr);
+    }
+
+    let mut group = c.benchmark_group("dht_sample_infohashes_4096");
+    group.bench_function("reservoir_sample_32", |b| {
+        b.iter(|| black_box(storage.sample_info_hashes(SAMPLE_LIMIT)))
+    });
+    group.bench_function("full_sort_shuffle_baseline_32", |b| {
+        b.iter(|| {
+            let mut hashes = storage.info_hashes();
+            hashes.sort_unstable();
+            hashes.dedup();
+            hashes.shuffle(&mut rand::thread_rng());
+            hashes.truncate(SAMPLE_LIMIT);
+            black_box(hashes)
+        })
+    });
+    group.finish();
+}
+
 fn bench_serde_json_parse(c: &mut Criterion) {
     let json_str: String = r#"{"version":"2.0","method":"aria2.addUri","params":[["http://example.com/file.zip","http://mirror.com/file.zip"],"options":{"dir":"/downloads","split":4},"id":"req-1"}"#.to_string();
     c.bench_function("serde_json_parse_complex_object", |b| {
@@ -166,6 +198,7 @@ criterion_group!(
     bench_sha1_hash,
     bench_piece_verification,
     bench_dht_xor_distance,
+    bench_dht_sample_infohashes,
     bench_serde_json_parse,
     bench_serde_json_serialize,
 );

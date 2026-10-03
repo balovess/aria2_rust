@@ -188,7 +188,7 @@ async fn cli_isolates_a_backpressured_peer_and_force_removes_the_swarm() {
                     peer["port"].as_u64() == Some(*port)
                         && peer["outstandingRequestsFromPeer"]
                             .as_u64()
-                            .is_some_and(|count| count > 0)
+                            .is_some_and(|count| count >= 32)
                 })
             })
         });
@@ -197,10 +197,18 @@ async fn cli_isolates_a_backpressured_peer_and_force_removes_the_swarm() {
         }
         assert!(
             Instant::now() < peer_details_deadline,
-            "all three stalled peers must retain upload requests in flight before removal: {details}"
+            "each stalled peer must retain at least 32 queued upload requests while another actor makes progress: {details}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(
+        stalled_peers
+            .iter()
+            .map(|peer| peer.completed_handshakes.load(Ordering::SeqCst))
+            .collect::<Vec<_>>(),
+        [1, 1, 1],
+        "backpressured PeerActors must retain their original TCP connections without reconnecting"
+    );
 
     let removal_started = Instant::now();
     rpc(&client, 5, "aria2.forceRemove", json!([gid]));

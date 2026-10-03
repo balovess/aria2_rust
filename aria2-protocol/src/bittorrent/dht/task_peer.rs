@@ -8,7 +8,9 @@ use std::net::SocketAddr;
 
 use tracing::{debug, info, trace};
 
-use super::lookup::{announce_to_token_nodes_and_update_routing_table, iterative_get_peers};
+use super::lookup::{
+    announce_to_token_nodes_and_update_routing_table, iterative_get_peers, result_node_id,
+};
 use super::message::DhtMessageBuilder;
 use super::node::DhtNode;
 use super::task::DhtTask;
@@ -182,13 +184,21 @@ impl DhtTask for ReplaceNodeTask {
             if let Some(response) = response_wait.wait().await
                 && response.from == q_addr
                 && response.message.is_response()
+                && let Some(responding_node_id) = result_node_id(&response.message)
+                && responding_node_id != self.ctx.self_id
             {
                 info!(
-                    "ReplaceNodeTask: ping reply received from {} — node is alive",
-                    hex::encode(q_id)
+                    "ReplaceNodeTask: ping reply received from {}",
+                    hex::encode(responding_node_id)
                 );
                 let mut rt = self.ctx.routing_table.write().await;
-                rt.mark_good(&q_id);
+                if !rt.replace_node_identity(&q_id, DhtNode::new(responding_node_id, q_addr)) {
+                    trace!(
+                        old_node = %hex::encode(q_id),
+                        responding_node = %hex::encode(responding_node_id),
+                        "ReplaceNodeTask: queried node changed identity before the response was applied"
+                    );
+                }
                 return;
             }
             let mut rt = self.ctx.routing_table.write().await;

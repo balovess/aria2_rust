@@ -300,7 +300,7 @@ impl BtDownloadCommand {
             manager.unregister_torrent(&info_hash_hex).await;
         }
         if let Some(actor) = self.tracker_actor.take() {
-            let _ = actor.stop().await;
+            actor.stop().await;
         }
         self.bt_peer_route.take();
     }

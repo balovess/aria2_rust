@@ -164,6 +164,32 @@ fn test_tcp_udp_port() {
     assert_eq!(registry.udp_port(), 6882);
 }
 
+#[test]
+fn dht_local_peer_lookup_obeys_family_and_registry_lifecycle() {
+    let mut registry = BtRegistry::new();
+    let gid = 41;
+    let info_hash = [0x41; 20];
+    registry.pool.insert(gid, BtObject::new());
+    registry.info_hash_index.insert(hex::encode(info_hash), gid);
+    registry.set_tcp_port(51413);
+    registry.set_dht_external_ip(gid, Some("198.51.100.41".parse().unwrap()));
+
+    assert_eq!(
+        registry.dht_local_peer(&info_hash, "192.0.2.1".parse().unwrap()),
+        Some("198.51.100.41:51413".parse().unwrap())
+    );
+    assert_eq!(
+        registry.dht_local_peer(&info_hash, "2001:db8::1".parse().unwrap()),
+        None
+    );
+
+    assert!(registry.remove(gid));
+    assert_eq!(
+        registry.dht_local_peer(&info_hash, "192.0.2.1".parse().unwrap()),
+        None
+    );
+}
+
 // -----------------------------------------------------------------------
 // 8. Overwrite with put
 // -----------------------------------------------------------------------

@@ -680,6 +680,13 @@ impl PeerSwarm {
                     actor.seeder = *seeder;
                 }
             }
+            PeerEvent::OutstandingDownloadRequests { actor_id, count } => {
+                if let Some(actor) = self.actor_mut(*actor_id) {
+                    actor
+                        .pending_download_requests
+                        .store(*count, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             PeerEvent::PeerChokingChanged {
                 actor_id,
                 peer_choking,
@@ -743,6 +750,7 @@ impl PeerSwarm {
             event,
             PeerEvent::UploadBytes { .. }
                 | PeerEvent::UploadQueueChanged { .. }
+                | PeerEvent::OutstandingDownloadRequests { .. }
                 | PeerEvent::Message { stats: Some(_), .. }
         );
         let now = Instant::now();
@@ -1140,10 +1148,15 @@ mod tests {
             .unwrap();
 
         let mut event_lease = swarm.lease_event_receiver().unwrap();
-        let event = timeout(Duration::from_secs(1), event_lease.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let event = loop {
+            let event = timeout(Duration::from_secs(1), event_lease.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if !matches!(event, PeerEvent::OutstandingDownloadRequests { .. }) {
+                break event;
+            }
+        };
         drop(event_lease);
         assert!(matches!(
             event,
@@ -1526,11 +1539,17 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(matches!(
-            timeout(Duration::from_secs(1), event_rx.recv())
+        let event = loop {
+            let event = timeout(Duration::from_secs(1), event_rx.recv())
                 .await
                 .unwrap()
-                .unwrap(),
+                .unwrap();
+            if !matches!(event, PeerEvent::OutstandingDownloadRequests { .. }) {
+                break event;
+            }
+        };
+        assert!(matches!(
+            event,
             PeerEvent::Message {
                 actor_id: received_actor,
                 generation,

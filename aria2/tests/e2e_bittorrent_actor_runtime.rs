@@ -5,6 +5,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
+#[path = "../../aria2-core/tests/fixtures/mock_bt_peer.rs"]
+mod mock_bt_peer;
 #[path = "../../aria2-core/tests/fixtures/mock_tracker.rs"]
 mod mock_tracker;
 
@@ -12,6 +14,7 @@ use aria2_core::checksum::message_digest::{HashType, MessageDigest};
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 use base64::Engine as _;
+use mock_bt_peer::MockBtPeerServer;
 use mock_tracker::MockTrackerServer;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -1013,14 +1016,19 @@ async fn cli_fills_aggregate_request_window_across_unchoked_peers() {
         if all_ready && total_outstanding >= 12 && peers_with_requests >= 3 {
             break (details, total_outstanding, peers_with_requests);
         }
-        assert!(
-            Instant::now() < deadline,
-            "the scheduler should promptly distribute requests across unchoked peers; expected ports {:?}, observed requests {total_outstanding} across {peers_with_requests} peers: {details}",
-            peers
-                .iter()
-                .map(|peer| peer.addr.port())
-                .collect::<Vec<_>>()
-        );
+        if Instant::now() >= deadline {
+            panic!(
+                "the scheduler should promptly distribute requests across unchoked peers; expected ports {:?}, observed requests {total_outstanding} across {peers_with_requests} peers (wire peaks {:?}): {details}",
+                peers
+                    .iter()
+                    .map(|peer| peer.addr.port())
+                    .collect::<Vec<_>>(),
+                peers
+                    .iter()
+                    .map(WindowedSeeder::peak_outstanding)
+                    .collect::<Vec<_>>()
+            );
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
@@ -2149,7 +2157,11 @@ async fn cli_resumes_only_missing_piece_blocks_after_pause_and_restart() {
             "aria2.tellStatus",
             json!([gid, ["status", "completedLength", "totalLength"]]),
         );
-        if status["completedLength"] == PIECE_LENGTH.to_string() {
+        if status["completedLength"]
+            .as_str()
+            .and_then(|completed| completed.parse::<usize>().ok())
+            == Some(PIECE_LENGTH)
+        {
             assert_eq!(
                 status["status"], "active",
                 "the second piece remains unavailable"
@@ -2361,6 +2373,93 @@ async fn cli_magnet_persists_resolved_metadata_for_process_restart() {
     assert!(
         exit.success(),
         "second aria2c process exits cleanly: {exit}"
+    );
+}
+
+#[tokio::test]
+async fn cli_magnet_reuses_metadata_peer_actor_for_payload_download() {
+    let output_dir = tempfile::tempdir().expect("temporary magnet output directory");
+    let placeholder = test_torrent("http://127.0.0.1:1/announce");
+    let (metadata, info_bytes) =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse_with_info_bytes(
+            &placeholder,
+        )
+        .expect("placeholder torrent metadata parses");
+    let peer = MockBtPeerServer::start_with_metadata(
+        metadata.info_hash.bytes,
+        vec![b"abc".to_vec()],
+        Some(info_bytes),
+    )
+    .await;
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let encoded_tracker = tracker
+        .announce_url()
+        .replace(':', "%3A")
+        .replace('/', "%2F");
+    let magnet_uri = format!(
+        "magnet:?xt=urn:btih:{}&tr={encoded_tracker}",
+        metadata.info_hash.as_hex()
+    );
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-dht6=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--bt-metadata-only=false".to_owned(),
+        "--bt-tracker-timeout=3".to_owned(),
+        "--bt-tracker-connect-timeout=2".to_owned(),
+        "--max-tries=1".to_owned(),
+        "--seed-time=30".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let gid = rpc(&client, 1, "aria2.addUri", json!([[magnet_uri], {}]))
+        .as_str()
+        .expect("addUri returns a GID")
+        .to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let status = rpc(
+            &client,
+            2,
+            "aria2.tellStatus",
+            json!([gid, ["status", "completedLength", "totalLength"]]),
+        );
+        if status["completedLength"] == "3" {
+            assert_eq!(
+                status["status"], "active",
+                "torrent should be in its seed phase"
+            );
+            assert_eq!(status["totalLength"], "3");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "magnet should resolve BEP 9 metadata and download its payload: status={status}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        peer.wait_for_handshakes(1, Duration::from_secs(1)).await,
+        "the metadata peer must complete its initial handshake"
+    );
+    assert_eq!(
+        peer.completed_handshake_count(),
+        1,
+        "payload transfer must reuse the metadata-phase connection, not reconnect"
+    );
+    assert!(
+        peer.requested_pieces().await.contains(&0),
+        "the retained peer actor must receive the payload piece request"
+    );
+    assert_eq!(
+        std::fs::read(output_dir.path().join("actor-runtime.bin"))
+            .expect("magnet payload is written"),
+        b"abc"
     );
 }
 

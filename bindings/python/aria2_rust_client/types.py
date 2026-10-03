@@ -318,6 +318,10 @@ class DhtStatus:
     total_nodes: Optional[str] = None
     good_nodes: Optional[str] = None
     pending_transactions: Optional[str] = None
+    peer_info_hashes: Optional[str] = None
+    stored_peers: Optional[str] = None
+    peer_storage_evictions: Optional[str] = None
+    max_peer_info_hashes: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DhtStatus:
@@ -327,6 +331,10 @@ class DhtStatus:
             total_nodes=converted.get("total_nodes"),
             good_nodes=converted.get("good_nodes"),
             pending_transactions=converted.get("pending_transactions"),
+            peer_info_hashes=converted.get("peer_info_hashes"),
+            stored_peers=converted.get("stored_peers"),
+            peer_storage_evictions=converted.get("peer_storage_evictions"),
+            max_peer_info_hashes=converted.get("max_peer_info_hashes"),
         )
 
 

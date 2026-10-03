@@ -118,6 +118,10 @@ export interface DhtStatus {
   totalNodes: string;
   goodNodes: string;
   pendingTransactions: string;
+  peerInfoHashes: string;
+  storedPeers: string;
+  peerStorageEvictions: string;
+  maxPeerInfoHashes: string;
 }
 
 export interface DownloadEvent {

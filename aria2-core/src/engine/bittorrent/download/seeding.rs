@@ -211,7 +211,6 @@ impl BtDownloadCommand {
         drop(seeding_loop);
         upload_speed_reporter.abort();
         let _ = upload_speed_reporter.await;
-        let _ = manager.take_announcer();
         seeding_result?;
 
         if manager.halt_requested() {

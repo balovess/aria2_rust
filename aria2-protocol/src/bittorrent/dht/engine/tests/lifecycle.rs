@@ -158,8 +158,21 @@ async fn test_dht_engine_stats() {
     let engine = DhtEngine::start(config)
         .await
         .expect("start should succeed");
+    let info_hash_limit = engine.context.peer_storage.stats().max_info_hashes;
+    for value in 0..=info_hash_limit {
+        let mut info_hash = [0u8; 20];
+        info_hash[..8].copy_from_slice(&(value as u64).to_be_bytes());
+        engine
+            .context
+            .peer_storage
+            .add_peer(info_hash, "127.0.0.1:6881".parse().unwrap());
+    }
     let stats = engine.stats().await;
     assert_eq!(stats.state, DhtEngineState::Running);
+    assert_eq!(stats.peer_info_hashes, info_hash_limit);
+    assert_eq!(stats.stored_peers, info_hash_limit);
+    assert_eq!(stats.peer_storage_evictions, 1);
+    assert_eq!(stats.max_peer_info_hashes, info_hash_limit);
 
     engine.shutdown_async().await;
 }

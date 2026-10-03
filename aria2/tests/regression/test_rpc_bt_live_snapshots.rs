@@ -21,12 +21,13 @@ use aria2_core::engine::bittorrent::tracker::communication::{
 };
 use aria2_core::request::request_group::{BtPeerSnapshot, BtPeerSource};
 use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig, DhtEngineState};
+use aria2_protocol::bittorrent::dht::message::DhtMessageBuilder;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
 use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use std::sync::Arc;
 use support::rpc::RpcFixture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 fn make_request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
     JsonRpcRequest::new(method, params).with_id(1)
@@ -38,6 +39,44 @@ fn assert_success(resp: &JsonRpcResponse) {
         "Expected success response, got error: {:?}",
         resp.error
     );
+}
+
+async fn announce_peer_to_local_dht(engine: &DhtEngine, info_hash: &[u8; 20]) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dht_addr = std::net::SocketAddr::new(
+        std::net::Ipv4Addr::LOCALHOST.into(),
+        engine.local_addr().port(),
+    );
+    let sender_id = [0xA9; 20];
+    let get_peers = DhtMessageBuilder::get_peers(1, &sender_id, info_hash).encode();
+    socket.send_to(&get_peers, dht_addr).await.unwrap();
+
+    let mut packet = [0u8; 2048];
+    let (length, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut packet),
+    )
+    .await
+    .expect("local DHT get_peers response should arrive")
+    .unwrap();
+    let response =
+        aria2_protocol::bittorrent::dht::message::DhtMessage::decode(&packet[..length]).unwrap();
+    let token = response
+        .r
+        .as_ref()
+        .and_then(|result| result.dict_get(b"token"))
+        .and_then(|value| value.as_bytes())
+        .expect("local DHT should return an announce token");
+    let announce =
+        DhtMessageBuilder::announce_peer_with_token(2, &sender_id, info_hash, 6881, token).encode();
+    socket.send_to(&announce, dht_addr).await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut packet),
+    )
+    .await
+    .expect("local DHT announce_peer response should arrive")
+    .unwrap();
 }
 
 /// Test: real BitTorrent peer, tracker, and DHT runtime state reaches RPC snapshots.
@@ -244,6 +283,7 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         registry.put(gid_value, bt_object);
         registry.set_dht_engine_for_gid(gid_value, Arc::clone(&dht));
     }
+    announce_peer_to_local_dht(&dht, &[0x93; 20]).await;
 
     let peers_resp = engine
         .handle_request(&make_request("aria2.getPeers", serde_json::json!([gid])))
@@ -396,9 +436,13 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_success(&dht_resp);
     let dht_status = dht_resp.result.unwrap();
     assert_eq!(dht_status["state"], "running");
-    assert_eq!(dht_status["totalNodes"], "0");
-    assert_eq!(dht_status["goodNodes"], "0");
+    assert_eq!(dht_status["totalNodes"], "1");
+    assert_eq!(dht_status["goodNodes"], "1");
     assert_eq!(dht_status["pendingTransactions"], "0");
+    assert_eq!(dht_status["peerInfoHashes"], "1");
+    assert_eq!(dht_status["storedPeers"], "1");
+    assert_eq!(dht_status["peerStorageEvictions"], "0");
+    assert_eq!(dht_status["maxPeerInfoHashes"], "4096");
 
     let save_resp = engine
         .handle_request(&make_request("aria2.saveDhtState", serde_json::json!([])))

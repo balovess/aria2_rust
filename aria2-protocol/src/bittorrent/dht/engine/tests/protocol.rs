@@ -58,6 +58,131 @@ async fn test_krpc_loopback_messages_include_aria2_version() {
     engine.shutdown_async().await;
 }
 
+async fn assert_get_peers_returns_peers_and_nodes(use_ipv6: bool) {
+    const INFO_HASH: [u8; 20] = [0x51; 20];
+    let local_ip = if use_ipv6 {
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    } else {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    };
+    let engine = DhtEngine::start(DhtEngineConfig {
+        self_id: [0x41; 20],
+        listen_addr: Some(local_ip),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT engine should start");
+
+    let routing_node = UdpSocket::bind(SocketAddr::new(local_ip, 0))
+        .await
+        .expect("routing node should bind");
+    let routing_node_addr = routing_node.local_addr().unwrap();
+    let add_node_engine = engine.clone();
+    let add_node = tokio::spawn(async move { add_node_engine.add_node(routing_node_addr).await });
+    let mut packet = [0u8; 2048];
+    let (length, engine_addr) =
+        tokio::time::timeout(Duration::from_secs(2), routing_node.recv_from(&mut packet))
+            .await
+            .expect("engine should ping its routing node")
+            .expect("routing node should receive ping");
+    let ping = DhtMessage::decode(&packet[..length]).expect("valid ping");
+    let ping_response = DhtMessageBuilder::ping_response(&ping.t, &[0x42; 20]).encode();
+    routing_node
+        .send_to(&ping_response, engine_addr)
+        .await
+        .expect("routing node should answer ping");
+    add_node.await.expect("node admission should complete");
+
+    let client = UdpSocket::bind(SocketAddr::new(local_ip, 0))
+        .await
+        .expect("DHT client should bind");
+    let first_response = exchange_dht_message(
+        &client,
+        engine.local_addr(),
+        DhtMessageBuilder::get_peers(1, &[0x43; 20], &INFO_HASH),
+    )
+    .await;
+    let token = first_response
+        .r
+        .as_ref()
+        .and_then(|result| result.dict_get(b"token"))
+        .and_then(BencodeValue::as_bytes)
+        .expect("get_peers should return a token")
+        .to_vec();
+
+    let announce_response = exchange_dht_message(
+        &client,
+        engine.local_addr(),
+        DhtMessageBuilder::announce_peer_with_token(2, &[0x43; 20], &INFO_HASH, 6881, &token),
+    )
+    .await;
+    assert!(announce_response.is_response());
+
+    let response = exchange_dht_message(
+        &client,
+        engine.local_addr(),
+        DhtMessageBuilder::get_peers(3, &[0x43; 20], &INFO_HASH),
+    )
+    .await;
+    let result = response.r.as_ref().expect("get_peers response result");
+    let values = result
+        .dict_get(b"values")
+        .and_then(BencodeValue::as_list)
+        .expect("known peer should be returned");
+    assert_eq!(values.len(), 1);
+    let peers = crate::bittorrent::dht::compact::extract_compact_peers_from_response(&response);
+    assert_eq!(
+        peers,
+        vec![SocketAddr::new(client.local_addr().unwrap().ip(), 6881)]
+    );
+    let node_field = if use_ipv6 {
+        b"nodes6".as_slice()
+    } else {
+        b"nodes"
+    };
+    let nodes = result
+        .dict_get(node_field)
+        .and_then(BencodeValue::as_bytes)
+        .expect("known peers must not suppress closest DHT nodes");
+    let node_record_length = if use_ipv6 { 38 } else { 26 };
+    assert!(
+        !nodes.is_empty() && nodes.len().is_multiple_of(node_record_length),
+        "response should include compact routing nodes for its family, got {} bytes",
+        nodes.len(),
+    );
+
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn ipv4_get_peers_returns_known_peers_and_closest_nodes_together() {
+    assert_get_peers_returns_peers_and_nodes(false).await;
+}
+
+#[tokio::test]
+async fn ipv6_get_peers_returns_known_peers_and_closest_nodes_together() {
+    assert_get_peers_returns_peers_and_nodes(true).await;
+}
+
+async fn exchange_dht_message(
+    client: &UdpSocket,
+    engine_addr: SocketAddr,
+    query: DhtMessage,
+) -> DhtMessage {
+    client
+        .send_to(&query.encode(), engine_addr)
+        .await
+        .expect("send DHT query");
+    let mut packet = [0u8; 2048];
+    let (length, source) =
+        tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut packet))
+            .await
+            .expect("DHT response should arrive")
+            .expect("receive DHT response");
+    assert_eq!(source, engine_addr);
+    DhtMessage::decode(&packet[..length]).expect("valid DHT response")
+}
+
 #[tokio::test]
 async fn test_all_public_dht_builders_include_version_over_loopback_udp() {
     use crate::bittorrent::dht::modern::{

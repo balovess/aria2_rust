@@ -200,6 +200,47 @@ fn reserve_udp_port() -> u16 {
         .port()
 }
 
+fn reserve_tcp_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a BitTorrent TCP port")
+        .local_addr()
+        .expect("read reserved TCP port")
+        .port()
+}
+
+async fn query_dht_peer_values(
+    probe: &UdpSocket,
+    target: SocketAddr,
+    info_hash: &[u8; 20],
+    transaction: u32,
+) -> Vec<Vec<u8>> {
+    let query = DhtMessageBuilder::get_peers(transaction, &[0xA5; 20], info_hash);
+    probe
+        .send_to(&query.encode(), target)
+        .await
+        .expect("send loopback get_peers query");
+    let mut buffer = [0u8; 4096];
+    let Ok(Ok((length, _))) =
+        tokio::time::timeout(Duration::from_millis(250), probe.recv_from(&mut buffer)).await
+    else {
+        return Vec::new();
+    };
+    DhtMessage::decode(&buffer[..length])
+        .ok()
+        .and_then(|reply| reply.r)
+        .and_then(|result| {
+            result
+                .dict_get(b"values")
+                .and_then(BencodeValue::as_list)
+                .cloned()
+        })
+        .unwrap_or_default()
+        .iter()
+        .filter_map(BencodeValue::as_bytes)
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dht_peer_wakes_active_batch_and_existing_peer_actor_is_reused() {
     const PIECE_COUNT: usize = 48;
@@ -322,10 +363,13 @@ async fn dht_peer_wakes_active_batch_and_existing_peer_actor_is_reused() {
     let peers = peer_details(&client, &gid);
     assert!(
         peers.as_array().is_some_and(|peers| {
-            peers.iter().any(|peer| peer["source"] == "tracker")
-                && peers.iter().any(|peer| peer["source"] == "dht")
+            peers.iter().any(|peer| {
+                peer["source"] == "tracker"
+                    && peer["flags"]["amInterested"] == true
+                    && peer["flags"]["peerChoking"] == true
+            }) && peers.iter().any(|peer| peer["source"] == "dht")
         }),
-        "the existing tracker actor and newly admitted DHT actor must coexist in RPC: {peers}"
+        "the original interested-but-choked tracker actor must remain live beside the DHT actor: {peers}"
     );
     assert_eq!(
         initial_peer.completed_handshake_count(),
@@ -337,4 +381,160 @@ async fn dht_peer_wakes_active_batch_and_existing_peer_actor_is_reused() {
         1,
         "the admitted DHT peer should establish one long-lived actor connection"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dht_get_peers_advertises_active_torrent_external_ip() {
+    const PIECE_COUNT: usize = 48;
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let torrent = torrent_bytes("http://127.0.0.1:1/announce", PIECE_COUNT);
+    let metadata = TorrentMeta::parse(&torrent).expect("torrent metadata parses");
+    let tcp_port = reserve_tcp_port();
+    let dht_port = reserve_udp_port();
+    let external_ip = "198.51.100.37";
+    let updated_external_ip = "198.51.100.38";
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={tcp_port}"),
+        format!("--dht-listen-port={dht_port}"),
+        format!(
+            "--dht-file-path={}",
+            output_dir.path().join("dht.dat").display()
+        ),
+        "--dht-bootstrap-timeout=1".to_owned(),
+        "--enable-dht=true".to_owned(),
+        "--enable-dht6=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        format!("--bt-external-ip={external_ip}"),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let encoded_torrent = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([encoded_torrent, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+    let options = rpc(&client, 2, "aria2.getOption", json!([gid]));
+    assert_eq!(options["bt-external-ip"], external_ip);
+
+    let expected_peer = {
+        let mut compact = external_ip
+            .parse::<std::net::Ipv4Addr>()
+            .expect("valid fixture IP")
+            .octets()
+            .to_vec();
+        compact.extend_from_slice(&tcp_port.to_be_bytes());
+        compact
+    };
+    let probe = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind DHT query socket");
+    let target = SocketAddr::from(([127, 0, 0, 1], dht_port));
+    let mut last_values = Vec::new();
+    let mut last_reply = None;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        let mut transaction = 1u32;
+        loop {
+            let query = DhtMessageBuilder::get_peers(transaction, &[0xA5; 20], &metadata.info_hash.bytes);
+            probe
+                .send_to(&query.encode(), target)
+                .await
+                .expect("send loopback get_peers query");
+            transaction = transaction.wrapping_add(1);
+
+            let mut buffer = [0u8; 4096];
+            if let Ok(Ok((length, _))) = tokio::time::timeout(
+                Duration::from_millis(250),
+                probe.recv_from(&mut buffer),
+            )
+            .await
+                && let Ok(reply) = DhtMessage::decode(&buffer[..length])
+            {
+                last_reply = Some(format!("type={:?}, response={:?}", reply.y, reply.r));
+                last_values = reply
+                    .r
+                    .as_ref()
+                    .and_then(|result| result.dict_get(b"values"))
+                    .and_then(BencodeValue::as_list)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(BencodeValue::as_bytes)
+                            .map(<[u8]>::to_vec)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if last_values.contains(&expected_peer) {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "DHT get_peers for active torrent {gid} should advertise configured local peer {external_ip}:{tcp_port}; values={last_values:?}; last reply={last_reply:?}"
+        )
+    });
+
+    assert_eq!(
+        rpc(
+            &client,
+            3,
+            "aria2.changeOption",
+            json!([gid, {"bt-external-ip": updated_external_ip}]),
+        ),
+        "OK"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if rpc(&client, 4, "aria2.getOption", json!([gid]))["bt-external-ip"]
+                == updated_external_ip
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the pending active-task option must apply on its restart");
+    let updated_peer = {
+        let mut compact = updated_external_ip
+            .parse::<std::net::Ipv4Addr>()
+            .expect("valid updated fixture IP")
+            .octets()
+            .to_vec();
+        compact.extend_from_slice(&tcp_port.to_be_bytes());
+        compact
+    };
+    let old_peer = expected_peer;
+    let mut last_values = Vec::new();
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let mut transaction = 10_000u32;
+        loop {
+            last_values = query_dht_peer_values(
+                &probe,
+                target,
+                &metadata.info_hash.bytes,
+                transaction,
+            )
+            .await;
+            transaction = transaction.wrapping_add(1);
+            if last_values.contains(&updated_peer) && !last_values.contains(&old_peer) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "DHT must advertise the live bt-external-ip {updated_external_ip}:{tcp_port} and stop advertising {external_ip}:{tcp_port}; values={last_values:?}"
+        )
+    });
 }

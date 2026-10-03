@@ -87,6 +87,26 @@ pub struct DhtStatus {
         deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub bucket_count: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub peer_info_hashes: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub stored_peers: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub peer_storage_evictions: u64,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub max_peer_info_hashes: usize,
     pub persistence_enabled: bool,
     #[serde(
         serialize_with = "wire::serialize_display_as_string",

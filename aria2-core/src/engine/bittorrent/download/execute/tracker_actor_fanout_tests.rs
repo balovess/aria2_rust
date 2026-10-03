@@ -272,7 +272,7 @@ async fn actor_fans_out_to_three_public_trackers_and_aggregates_rpc_state() {
         tracker.wait_for_event("completed").await;
     }
 
-    assert!(actor.stop().await.is_some());
+    actor.stop().await;
     primary.wait_for_event("stopped").await;
     for tracker in &public[..3] {
         tracker.wait_for_event("stopped").await;

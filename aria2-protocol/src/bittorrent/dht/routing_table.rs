@@ -146,6 +146,39 @@ impl RoutingTable {
         bucket.replace_node(node_id, replacement)
     }
 
+    /// Rebind a routed endpoint to the node ID returned by a valid response.
+    ///
+    /// A peer endpoint may begin answering with a different Kademlia ID. The
+    /// old identity must be removed and the responder inserted according to
+    /// its actual ID range; it may not belong to the old node's bucket.
+    pub(crate) fn replace_node_identity(
+        &mut self,
+        old_node_id: &[u8; 20],
+        replacement: DhtNode,
+    ) -> bool {
+        let old_bucket = find_bucket_for(&self.root, old_node_id);
+        if !old_bucket
+            .nodes()
+            .iter()
+            .any(|node| &node.id == old_node_id)
+            || !replacement.is_good()
+        {
+            return false;
+        }
+
+        if old_node_id == replacement.id() {
+            return self.mark_good(old_node_id);
+        }
+
+        let replacement_id = *replacement.id();
+        self.remove(old_node_id);
+        self.root.for_each_bucket_mut(&mut |bucket| {
+            bucket.remove_cached_node(&replacement_id);
+        });
+        self.insert(replacement);
+        true
+    }
+
     /// Find the K closest nodes to the given target ID.
     ///
     /// Uses tree-based traversal to efficiently locate the closest nodes.

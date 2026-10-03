@@ -765,6 +765,7 @@ impl PieceDownloadSession<'_> {
             }
             PeerEvent::Disconnected { .. }
             | PeerEvent::GracefulDisconnected { .. }
+            | PeerEvent::OutstandingDownloadRequests { .. }
             | PeerEvent::RequestFailed { .. }
             | PeerEvent::Message { .. } => false,
         }

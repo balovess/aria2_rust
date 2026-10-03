@@ -102,10 +102,18 @@ pub enum PeerMode {
 
 pub struct FixturePeer {
     pub addr: SocketAddr,
+    pub completed_handshakes: Arc<AtomicUsize>,
     pub requests_sent: Arc<AtomicUsize>,
     pub block_requests_received: Arc<AtomicUsize>,
     pub uploaded_bytes: Arc<AtomicUsize>,
     task: JoinHandle<()>,
+}
+
+struct FixturePeerCounters {
+    completed_handshakes: Arc<AtomicUsize>,
+    requests_sent: Arc<AtomicUsize>,
+    block_requests_received: Arc<AtomicUsize>,
+    uploaded_bytes: Arc<AtomicUsize>,
 }
 
 impl FixturePeer {
@@ -114,12 +122,16 @@ impl FixturePeer {
             .await
             .expect("bind loopback BitTorrent peer");
         let addr = listener.local_addr().expect("peer listener address");
-        let requests_sent = Arc::new(AtomicUsize::new(0));
-        let block_requests_received = Arc::new(AtomicUsize::new(0));
-        let uploaded_bytes = Arc::new(AtomicUsize::new(0));
-        let requests_for_task = Arc::clone(&requests_sent);
-        let block_requests_for_task = Arc::clone(&block_requests_received);
-        let bytes_for_task = Arc::clone(&uploaded_bytes);
+        let counters = Arc::new(FixturePeerCounters {
+            completed_handshakes: Arc::new(AtomicUsize::new(0)),
+            requests_sent: Arc::new(AtomicUsize::new(0)),
+            block_requests_received: Arc::new(AtomicUsize::new(0)),
+            uploaded_bytes: Arc::new(AtomicUsize::new(0)),
+        });
+        let requests_sent = Arc::clone(&counters.requests_sent);
+        let block_requests_received = Arc::clone(&counters.block_requests_received);
+        let uploaded_bytes = Arc::clone(&counters.uploaded_bytes);
+        let completed_handshakes = Arc::clone(&counters.completed_handshakes);
         let task = tokio::spawn(async move {
             let mut sessions = JoinSet::new();
             loop {
@@ -131,9 +143,7 @@ impl FixturePeer {
                             info_hash,
                             peer_id,
                             mode.clone(),
-                            Arc::clone(&requests_for_task),
-                            Arc::clone(&block_requests_for_task),
-                            Arc::clone(&bytes_for_task),
+                            Arc::clone(&counters),
                         ));
                     }
                     Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
@@ -142,6 +152,7 @@ impl FixturePeer {
         });
         Self {
             addr,
+            completed_handshakes,
             requests_sent,
             block_requests_received,
             uploaded_bytes,
@@ -161,9 +172,7 @@ async fn serve_peer(
     info_hash: [u8; 20],
     peer_id: [u8; 20],
     mode: PeerMode,
-    requests_sent: Arc<AtomicUsize>,
-    block_requests_received: Arc<AtomicUsize>,
-    uploaded_bytes: Arc<AtomicUsize>,
+    counters: Arc<FixturePeerCounters>,
 ) {
     let mut held_piece_requests = Vec::new();
     let mut held_corrupt_batch_released = false;
@@ -185,6 +194,7 @@ async fn serve_peer(
     {
         return;
     }
+    counters.completed_handshakes.fetch_add(1, Ordering::SeqCst);
     let mut peer = PeerConnection::from_stream_with_peer(stream, peer_id, false, false);
     let bitfield = match &mode {
         PeerMode::ServePiece { piece_count, .. } => {
@@ -225,7 +235,7 @@ async fn serve_peer(
                     {
                         return;
                     }
-                    requests_sent.fetch_add(1, Ordering::SeqCst);
+                    counters.requests_sent.fetch_add(1, Ordering::SeqCst);
                 }
                 std::future::pending::<()>().await;
             }
@@ -244,7 +254,9 @@ async fn serve_peer(
                     else {
                         continue;
                     };
-                    uploaded_bytes.fetch_add(data.len(), Ordering::SeqCst);
+                    counters
+                        .uploaded_bytes
+                        .fetch_add(data.len(), Ordering::SeqCst);
                     std::future::pending::<()>().await;
                 }
             }
@@ -274,7 +286,9 @@ async fn serve_peer(
                 },
                 BtMessage::Request { request },
             ) => {
-                block_requests_received.fetch_add(1, Ordering::SeqCst);
+                counters
+                    .block_requests_received
+                    .fetch_add(1, Ordering::SeqCst);
                 if *corrupt && !held_corrupt_batch_released && *hold_initial_requests > 0 {
                     held_piece_requests.push(request);
                     if held_piece_requests.len() == *hold_initial_requests {

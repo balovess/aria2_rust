@@ -128,6 +128,10 @@ pub(crate) enum PeerEvent {
         bitfield: Vec<u8>,
         seeder: bool,
     },
+    OutstandingDownloadRequests {
+        actor_id: PeerActorId,
+        count: usize,
+    },
     ExtensionHandshakeReceived {
         actor_id: PeerActorId,
         ut_pex_id: Option<u8>,
@@ -789,6 +793,7 @@ pub(crate) async fn run_peer_actor(
                 if generation_update.is_err() {
                     break;
                 }
+                let previous_request_count = requests.len();
                 let latest_generations = {
                     let active = generation_updates.borrow_and_update();
                     active.clone()
@@ -829,6 +834,18 @@ pub(crate) async fn run_peer_actor(
                         }
                     }
                     active_generations.insert(piece_index, generation);
+                }
+                pending_download_requests.store(requests.len(), Ordering::Relaxed);
+                if requests.len() != previous_request_count
+                    && event_tx
+                        .send(PeerEvent::OutstandingDownloadRequests {
+                            actor_id,
+                            count: requests.len(),
+                        })
+                        .await
+                        .is_err()
+                {
+                    break;
                 }
             }
             desired_state_update = desired_state_updates.changed() => {
@@ -1033,6 +1050,17 @@ pub(crate) async fn run_peer_actor(
                         match connection.send_request(request.message(piece_index)).await {
                             Ok(()) => {
                                 requests.record(generation, piece_index, request);
+                                pending_download_requests.store(requests.len(), Ordering::Relaxed);
+                                if event_tx
+                                    .send(PeerEvent::OutstandingDownloadRequests {
+                                        actor_id,
+                                        count: requests.len(),
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                                 connection.record_outbound_activity();
                             }
                             Err(error) => {
@@ -1048,9 +1076,21 @@ pub(crate) async fn run_peer_actor(
                     Some(PeerCommand::Cancel { generation, piece_index, request }) => {
                         if active_generations.get(&piece_index) == Some(&generation)
                             && requests.cancel(generation, piece_index, request)
-                            && connection.send_cancel(&request.message(piece_index)).await.is_ok()
                         {
-                            connection.record_outbound_activity();
+                            pending_download_requests.store(requests.len(), Ordering::Relaxed);
+                            if event_tx
+                                .send(PeerEvent::OutstandingDownloadRequests {
+                                    actor_id,
+                                    count: requests.len(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            if connection.send_cancel(&request.message(piece_index)).await.is_ok() {
+                                connection.record_outbound_activity();
+                            }
                         }
                     }
                     Some(PeerCommand::HavePiece { piece_index }) => {
@@ -1883,10 +1923,15 @@ mod tests {
     async fn receive_event_while_actor_runs(event_rx: &mut PeerSwarmEventLease<'_>) -> PeerEvent {
         use tokio::time::{Duration, timeout};
 
-        timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .unwrap()
-            .expect("peer event channel closed")
+        loop {
+            let event = timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .unwrap()
+                .expect("peer event channel closed");
+            if !matches!(event, PeerEvent::OutstandingDownloadRequests { .. }) {
+                return event;
+            }
+        }
     }
 
     #[tokio::test]
@@ -2530,6 +2575,23 @@ mod tests {
                 request: PieceBlockRequest::new(3, 0, 16),
             }
         );
+        let request_count_event = loop {
+            let event = timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(
+                event,
+                PeerEvent::OutstandingDownloadRequests { count: 0, .. }
+            ) {
+                break event;
+            }
+        };
+        assert!(matches!(
+            request_count_event,
+            PeerEvent::OutstandingDownloadRequests { actor_id: event_actor, count: 0 }
+                if event_actor == actor_id
+        ));
         remote
             .send_message(&BtMessage::Piece {
                 index: 3,
@@ -2577,11 +2639,17 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(matches!(
-            timeout(Duration::from_secs(1), event_rx.recv())
+        let piece_event = loop {
+            let event = timeout(Duration::from_secs(1), event_rx.recv())
                 .await
                 .unwrap()
-                .unwrap(),
+                .unwrap();
+            if !matches!(event, PeerEvent::OutstandingDownloadRequests { .. }) {
+                break event;
+            }
+        };
+        assert!(matches!(
+            piece_event,
             PeerEvent::Message {
                 actor_id: received_actor,
                 generation,

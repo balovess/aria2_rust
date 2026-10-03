@@ -29,6 +29,7 @@ impl DhtEngine {
         let tracker = Arc::clone(&context.task_context.tracker);
         let tracker_notify = tracker.change_notifier();
         let handler_self_id = context.task_context.self_id;
+        let local_peer_lookup = context.local_peer_lookup.clone();
 
         self.register_background_task(async move {
             // Independent receivers keep packet processing concurrent without
@@ -43,7 +44,10 @@ impl DhtEngine {
                 worker_txs.push(worker_tx);
                 let worker_context = Arc::clone(&context);
                 let worker_tracker = Arc::clone(&tracker);
-                let worker_handler = DhtQueryHandler::new(handler_self_id);
+                let mut worker_handler = DhtQueryHandler::new(handler_self_id);
+                if let Some(lookup) = local_peer_lookup.as_ref() {
+                    worker_handler = worker_handler.with_local_peer_lookup(Arc::clone(lookup));
+                }
                 workers.spawn(async move {
                     while let Some((data, from)) = worker_rx.recv().await {
                         worker_context

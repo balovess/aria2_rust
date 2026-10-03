@@ -34,6 +34,7 @@ pub async fn iterative_find_node(
     let mut entries = initialize_entries(target, routing_table, self_id).await;
     let mut pending = FuturesUnordered::<LookupPendingResponse>::new();
     let mut rounds = 0usize;
+    let use_ipv6 = socket.local_addr().is_ipv6();
     let request = LookupRequest {
         target,
         self_id,
@@ -64,6 +65,9 @@ pub async fn iterative_find_node(
                 }
 
                 for (addr, node_id) in extract_compact_nodes_from_response(&message) {
+                    if addr.is_ipv6() != use_ipv6 {
+                        continue;
+                    }
                     add_node_to_table(routing_table, DhtNode::unverified(node_id, addr)).await;
                     insert_entry(&mut entries, node_id, addr, target, self_id);
                 }

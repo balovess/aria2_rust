@@ -6,6 +6,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
+#[test]
+fn public_seed_manager_keeps_its_independent_tracker_announcer_accessible() {
+    let provider = Arc::new(
+        crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1),
+    );
+    let mut manager = BtSeedManager::new_with_announcer(
+        [0x71; 20],
+        Vec::new(),
+        provider,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        16,
+        Some(TrackerAnnouncer::new(&[], &None)),
+        [0x72; 20],
+    );
+
+    assert!(manager.take_announcer().is_some());
+}
+
 #[tokio::test]
 async fn seeding_discovery_sources_survive_storage_and_actor_admission() {
     let info_hash = [0x71; 20];

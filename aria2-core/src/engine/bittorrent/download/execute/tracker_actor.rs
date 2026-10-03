@@ -1,8 +1,8 @@
 //! Torrent-scoped owner for tracker announce state and its protocol deadlines.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -35,7 +35,6 @@ struct TrackerActorInner {
     stop_command_lock: Mutex<()>,
     task: Mutex<Option<JoinHandle<()>>>,
     stopped: AtomicBool,
-    stopped_announcer: Arc<StdMutex<Option<TrackerAnnouncer>>>,
     runtime: Arc<BtRuntimeState>,
 }
 
@@ -73,13 +72,10 @@ impl BtTrackerAnnouncerActor {
         let (started_tx, started_rx) = oneshot::channel();
         let task_runtime = Arc::clone(&runtime);
         let tracker_runtime = announcer.shared_runtime_snapshot();
-        let stopped_announcer = Arc::new(StdMutex::new(None));
-        let task_stopped_announcer = Arc::clone(&stopped_announcer);
         let task = tokio::spawn(async move {
             run_tracker_actor(
                 announcer,
                 tracker_runtime,
-                task_stopped_announcer,
                 command_rx,
                 started_tx,
                 info_hash,
@@ -98,7 +94,6 @@ impl BtTrackerAnnouncerActor {
                 stop_command_lock: Mutex::new(()),
                 task: Mutex::new(Some(task)),
                 stopped: AtomicBool::new(false),
-                stopped_announcer,
                 runtime,
             }),
         };
@@ -128,9 +123,8 @@ impl BtTrackerAnnouncerActor {
         self.inner.runtime.set_connections(connections);
     }
 
-    /// Send the terminal stopped event and return the state machine for public
-    /// seeding-manager APIs that historically expose `take_announcer`.
-    pub(crate) async fn stop(&self) -> Option<TrackerAnnouncer> {
+    /// Send the terminal stopped event and join the actor task.
+    pub(crate) async fn stop(&self) {
         let (reply_tx, reply_rx) = oneshot::channel();
         let stop_command_sent = {
             let _stop_command_guard = self.inner.stop_command_lock.lock().await;
@@ -157,11 +151,6 @@ impl BtTrackerAnnouncerActor {
             let _ = task_handle.await;
         }
         task.take();
-        self.inner
-            .stopped_announcer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
     }
 }
 
@@ -169,7 +158,6 @@ impl BtTrackerAnnouncerActor {
 async fn run_tracker_actor(
     mut announcer: TrackerAnnouncer,
     tracker_runtime: Option<SharedTrackerRuntime>,
-    stopped_announcer: Arc<StdMutex<Option<TrackerAnnouncer>>>,
     mut command_rx: mpsc::Receiver<TrackerActorCommand>,
     started_tx: oneshot::Sender<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>>,
     info_hash: [u8; 20],
@@ -384,9 +372,6 @@ async fn run_tracker_actor(
                             &public_announcers,
                             &public_urls,
                         );
-                        *stopped_announcer
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(announcer);
                         let _ = reply.send(());
                         return;
                     }
@@ -539,7 +524,7 @@ mod fanout_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        BtTrackerAnnouncerActor, StdMutex, TrackerActorCommand, TrackerActorInner,
+        BtTrackerAnnouncerActor, TrackerActorCommand, TrackerActorInner,
         reserve_tracker_peer_event_slot, wait_for_public_tracker_update,
     };
     use crate::engine::bittorrent::download::command::BtRuntimeState;
@@ -642,10 +627,9 @@ mod tests {
             Some(PeerEvent::TrackerPeers { peers }) if peers.len() == 1
         ));
 
-        let returned_announcer = tokio::time::timeout(Duration::from_secs(2), actor.stop())
+        tokio::time::timeout(Duration::from_secs(2), actor.stop())
             .await
             .expect("actor stop must not wait forever on a full peer-event queue");
-        assert!(returned_announcer.is_some());
         tracker.wait_for_event("stopped").await;
     }
 
@@ -654,18 +638,12 @@ mod tests {
         let (command_tx, mut command_rx) = mpsc::channel(1);
         let stop_received = Arc::new(Notify::new());
         let release_stop = Arc::new(Notify::new());
-        let stopped_announcer = Arc::new(StdMutex::new(None));
         let task_stop_received = Arc::clone(&stop_received);
         let task_release_stop = Arc::clone(&release_stop);
-        let task_stopped_announcer = Arc::clone(&stopped_announcer);
         let task = tokio::spawn(async move {
             if let Some(TrackerActorCommand::Stop(reply)) = command_rx.recv().await {
                 task_stop_received.notify_one();
                 task_release_stop.notified().await;
-                *task_stopped_announcer
-                    .lock()
-                    .expect("stopped announcer slot should not be poisoned") =
-                    Some(TrackerAnnouncer::new(&[], &None));
                 let _ = reply.send(());
             }
         });
@@ -675,7 +653,6 @@ mod tests {
                 stop_command_lock: super::Mutex::new(()),
                 task: super::Mutex::new(Some(task)),
                 stopped: std::sync::atomic::AtomicBool::new(false),
-                stopped_announcer,
                 runtime: Arc::new(BtRuntimeState::new(Arc::new(AtomicUsize::new(64)))),
             }),
         };
@@ -703,13 +680,9 @@ mod tests {
         );
 
         release_stop.notify_one();
-        let returned_announcer = tokio::time::timeout(Duration::from_secs(1), &mut retry_stop)
+        tokio::time::timeout(Duration::from_secs(1), &mut retry_stop)
             .await
             .expect("retry stop should finish after the actor exits");
-        assert!(
-            returned_announcer.is_some(),
-            "a cancelled first stop must leave the returned announcer available to its retry"
-        );
         let task = actor.inner.task.lock().await;
         assert!(task.is_none(), "a joined tracker task should be removed");
     }

@@ -351,6 +351,61 @@ impl DhtMessageBuilder {
         DhtMessage::new_response(tx.to_vec(), BencodeValue::Dict(r_dict))
     }
 
+    /// Build a get_peers response carrying both peers and IPv4 closest nodes.
+    pub fn get_peers_response_with_peers_and_nodes(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        peers: &[std::net::SocketAddr],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        Self::get_peers_response_with_peers_and_nodes_field(
+            tx,
+            self_id,
+            token,
+            peers,
+            b"nodes",
+            compact_nodes,
+        )
+    }
+
+    /// Build a get_peers response carrying both peers and IPv6 closest nodes.
+    pub fn get_peers_response_with_peers_and_nodes6(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        peers: &[std::net::SocketAddr],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        Self::get_peers_response_with_peers_and_nodes_field(
+            tx,
+            self_id,
+            token,
+            peers,
+            b"nodes6",
+            compact_nodes,
+        )
+    }
+
+    fn get_peers_response_with_peers_and_nodes_field(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        peers: &[std::net::SocketAddr],
+        nodes_field: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        let mut response = Self::get_peers_response_with_peers(tx, self_id, token, peers);
+        let Some(BencodeValue::Dict(result)) = response.r.as_mut() else {
+            unreachable!("get_peers response builder always creates a dictionary")
+        };
+        result.insert(
+            nodes_field.to_vec(),
+            BencodeValue::Bytes(compact_nodes.to_vec()),
+        );
+        response
+    }
+
     /// Build a get_peers response carrying closest nodes (no peers known):
     /// `{"t":tx,"y":"r","r":{"id":self_id,"token":token,"nodes":compact_nodes}}`.
     pub fn get_peers_response_with_nodes(

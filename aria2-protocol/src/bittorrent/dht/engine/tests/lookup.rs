@@ -1,6 +1,7 @@
 use super::super::{DhtEngine, DhtEngineConfig};
 use crate::bittorrent::dht::message::{DhtMessage, DhtMessageBuilder};
 use crate::bittorrent::dht::node::DhtNode;
+use crate::bittorrent::dht::persistence::DhtPersistence;
 use crate::bittorrent::dht::task::DhtTask;
 use crate::bittorrent::dht::task_impl::PingTask;
 use std::net::SocketAddr;
@@ -123,6 +124,128 @@ async fn get_peers_replaces_a_node_whose_id_changed_at_the_same_endpoint() {
 
     engine.shutdown_async().await;
     responder_task.await.expect("responder task should finish");
+}
+
+#[tokio::test]
+async fn replacement_ping_persists_the_responding_node_identity() {
+    const SELF_ID: [u8; 20] = [0xFF; 20];
+    const CACHED_REPLACEMENT_ID: [u8; 20] = [0x42; 20];
+    const RESPONDING_NODE_ID: [u8; 20] = [0xC2; 20];
+
+    let temp_dir = tempfile::tempdir().expect("DHT snapshot directory should be created");
+    let snapshot_path = temp_dir.path().join("dht.dat");
+    let old_node = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("old DHT node socket should bind");
+    let old_node_addr = old_node.local_addr().expect("old DHT node address");
+    let replacement_node = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("replacement DHT node socket should bind");
+    let replacement_node_addr = replacement_node
+        .local_addr()
+        .expect("replacement DHT node address");
+
+    let mut persisted_nodes = (1..=8u8)
+        .map(|id| {
+            let addr = if id == 1 {
+                old_node_addr
+            } else {
+                format!("127.0.0.1:{}", 6000 + u16::from(id))
+                    .parse()
+                    .expect("fixture routing endpoint should parse")
+            };
+            DhtNode::new([id; 20], addr)
+        })
+        .collect::<Vec<_>>();
+    DhtPersistence::save_to_file_sync(&snapshot_path, &SELF_ID, &persisted_nodes)
+        .expect("initial DHT routing snapshot should be saved");
+    persisted_nodes.clear();
+
+    let old_node_task = tokio::spawn(async move {
+        let mut packet = [0u8; 1024];
+        let (length, source) =
+            tokio::time::timeout(Duration::from_secs(2), old_node.recv_from(&mut packet))
+                .await
+                .expect("replacement maintenance should ping the questionable node")
+                .expect("old node should receive UDP");
+        let query = DhtMessage::decode(&packet[..length]).expect("valid replacement ping");
+        assert_eq!(
+            query.q.as_ref().map(|method| method.0.as_str()),
+            Some("ping")
+        );
+        let response = DhtMessageBuilder::ping_response(&query.t, &RESPONDING_NODE_ID);
+        old_node
+            .send_to(&response.encode(), source)
+            .await
+            .expect("send replacement ping response");
+    });
+    let replacement_node_task = tokio::spawn(async move {
+        let mut packet = [0u8; 1024];
+        let (length, source) = tokio::time::timeout(
+            Duration::from_secs(2),
+            replacement_node.recv_from(&mut packet),
+        )
+        .await
+        .expect("engine should verify the cached replacement candidate")
+        .expect("replacement node should receive UDP");
+        let query = DhtMessage::decode(&packet[..length]).expect("valid candidate ping");
+        assert_eq!(
+            query.q.as_ref().map(|method| method.0.as_str()),
+            Some("ping")
+        );
+        let response = DhtMessageBuilder::ping_response(&query.t, &CACHED_REPLACEMENT_ID);
+        replacement_node
+            .send_to(&response.encode(), source)
+            .await
+            .expect("send candidate ping response");
+    });
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        self_id: SELF_ID,
+        dht_file_path: Some(snapshot_path.clone()),
+        query_timeout: Duration::from_millis(300),
+        node_contact_interval: Duration::from_secs(3600),
+        refresh_check_interval: Duration::from_secs(3600),
+        cleanup_interval: Duration::from_secs(3600),
+        save_interval: Duration::from_secs(3600),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT engine should load the persisted routing table");
+
+    engine.add_node(replacement_node_addr).await;
+    assert_eq!(engine.stats().await.cached_nodes, 1);
+
+    let (_, replacement_attempts) = engine.evict_nodes().await;
+    assert_eq!(replacement_attempts, 1);
+    old_node_task
+        .await
+        .expect("old-node response task should finish");
+    replacement_node_task
+        .await
+        .expect("replacement-node response task should finish");
+
+    engine
+        .save_state()
+        .await
+        .expect("updated routing table should be persisted");
+    let saved = DhtPersistence::load_from_file_sync(&snapshot_path)
+        .expect("updated routing snapshot should be readable");
+    assert!(
+        saved
+            .nodes
+            .iter()
+            .any(|node| { node.id == RESPONDING_NODE_ID && node.addr == old_node_addr }),
+        "the verified identity returned by the replacement ping must be persisted at its source endpoint: {:?}",
+        saved.nodes
+    );
+    assert!(
+        saved.nodes.iter().all(|node| node.id != [1; 20]),
+        "the superseded node identity must not remain in the live routing snapshot: {:?}",
+        saved.nodes
+    );
+
+    engine.shutdown_async().await;
 }
 
 #[tokio::test]
