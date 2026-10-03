@@ -1,6 +1,6 @@
 //! Multi-seed endpoint manager with automatic fallback.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -33,6 +33,13 @@ pub struct WebSeedManager {
     /// HTTP pools are shared by origin, not by file URL, so multi-file
     /// torrents do not allocate one connection pool per file.
     http_clients: tokio::sync::Mutex<HashMap<String, reqwest::Client>>,
+    unavailable: std::sync::Mutex<UnavailableWebSeeds>,
+}
+
+#[derive(Default)]
+struct UnavailableWebSeeds {
+    uri_generation: Option<u64>,
+    uris: HashSet<String>,
 }
 
 impl WebSeedManager {
@@ -95,6 +102,7 @@ impl WebSeedManager {
             tls: tls.clone(),
             network_policy: None,
             http_clients: tokio::sync::Mutex::new(HashMap::new()),
+            unavailable: std::sync::Mutex::new(UnavailableWebSeeds::default()),
         })
     }
 
@@ -117,6 +125,7 @@ impl WebSeedManager {
             tls,
             network_policy: Some(policy),
             http_clients: tokio::sync::Mutex::new(HashMap::new()),
+            unavailable: std::sync::Mutex::new(UnavailableWebSeeds::default()),
         }
     }
 
@@ -150,7 +159,7 @@ impl WebSeedManager {
                 continue;
             }
             has_range = true;
-            if entry.remaining_uris().is_empty() && entry.spent_uris().is_empty() {
+            if !entry.has_uri_sources() {
                 return false;
             }
         }
@@ -210,7 +219,10 @@ impl WebSeedManager {
         let mut last_error = String::new();
 
         for (i, client) in self.clients.iter().enumerate() {
-            if !client.is_available() || !client.can_request(piece_index) {
+            if !client.is_available()
+                || !client.can_request(piece_index)
+                || self.is_uri_unavailable(client.url(), None)
+            {
                 debug!(
                     index = i,
                     url = client.url(),
@@ -220,7 +232,7 @@ impl WebSeedManager {
             }
 
             match client
-                .download_piece_with_activity(
+                .download_piece_result_with_activity(
                     piece_index,
                     self.piece_length as u64,
                     piece_index as u64 * self.piece_length as u64,
@@ -240,6 +252,9 @@ impl WebSeedManager {
                     return Ok(data);
                 }
                 Err(e) => {
+                    if e.is_not_found() {
+                        self.mark_uri_unavailable(client.url(), None);
+                    }
                     warn!(
                         piece_index,
                         seed_index = i,
@@ -267,14 +282,15 @@ impl WebSeedManager {
         }
         let piece_start = piece_index as u64 * self.piece_length as u64;
         let piece_end = piece_start.saturating_add(piece_data_length);
-        let file_ranges = {
+        let (uri_generation, file_ranges) = {
             let group = group.recover();
+            let uri_generation = group.uri_generation();
             let context = group
                 .get_download_context()
                 .ok_or_else(|| "BitTorrent download context is unavailable".to_string())?;
             let entries = context.get_file_entries();
             let first = entries.partition_point(|entry| entry.last_offset() <= piece_start);
-            entries[first..]
+            let file_ranges = entries[first..]
                 .iter()
                 .take_while(|entry| entry.offset() < piece_end)
                 .filter_map(|entry| {
@@ -282,8 +298,10 @@ impl WebSeedManager {
                     let end = piece_end.min(entry.last_offset());
                     (start < end).then(|| (start, end, entry.offset(), entry.uris()))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (uri_generation, file_ranges)
         };
+        self.observe_uri_generation(uri_generation);
 
         if file_ranges.is_empty() {
             return Err(format!("Piece {piece_index} has no file-backed byte range"));
@@ -310,6 +328,9 @@ impl WebSeedManager {
                 .ok_or_else(|| "WebSeed file range exceeds piece buffer".to_string())?;
             let mut range_received = false;
             for uri in &uris {
+                if self.is_uri_unavailable(uri, Some(uri_generation)) {
+                    continue;
+                }
                 let client = match self.live_client(uri).await {
                     Ok(client) => client,
                     Err(error) => {
@@ -336,7 +357,12 @@ impl WebSeedManager {
                             received
                         ));
                     }
-                    Err(error) => last_error = Some(format!("{uri}: {error}")),
+                    Err(error) => {
+                        if error.is_not_found() {
+                            self.mark_uri_unavailable(uri, Some(uri_generation));
+                        }
+                        last_error = Some(format!("{uri}: {error}"));
+                    }
                 }
             }
 
@@ -422,7 +448,7 @@ impl WebSeedManager {
         let mut last_error = String::new();
 
         for (i, client) in self.clients.iter().enumerate() {
-            if !client.is_available() {
+            if !client.is_available() || self.is_uri_unavailable(client.url(), None) {
                 debug!(
                     index = i,
                     url = client.url(),
@@ -432,7 +458,13 @@ impl WebSeedManager {
             }
 
             match client
-                .download_piece(piece_index, piece_length, piece_offset, length)
+                .download_piece_result_with_activity(
+                    piece_index,
+                    piece_length,
+                    piece_offset,
+                    length,
+                    None,
+                )
                 .await
             {
                 Ok(data) => {
@@ -446,6 +478,9 @@ impl WebSeedManager {
                     return Ok(data);
                 }
                 Err(e) => {
+                    if e.is_not_found() {
+                        self.mark_uri_unavailable(client.url(), None);
+                    }
                     warn!(
                         piece_index,
                         seed_index = i,
@@ -473,9 +508,10 @@ impl WebSeedManager {
                 .recover()
                 .get_download_context()
                 .is_none_or(|context| {
-                    context.get_file_entries().iter().all(|entry| {
-                        entry.remaining_uris().is_empty() && entry.spent_uris().is_empty()
-                    })
+                    context
+                        .get_file_entries()
+                        .iter()
+                        .all(|entry| !entry.has_uri_sources())
                 });
         }
         self.clients.is_empty()
@@ -484,5 +520,41 @@ impl WebSeedManager {
     /// Get reference to the underlying web-seed clients.
     pub fn clients(&self) -> &[WebSeedClient] {
         &self.clients
+    }
+
+    fn observe_uri_generation(&self, generation: u64) {
+        let mut unavailable = self
+            .unavailable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if unavailable
+            .uri_generation
+            .is_none_or(|observed| generation > observed)
+        {
+            unavailable.uris.clear();
+            unavailable.uri_generation = Some(generation);
+        }
+    }
+
+    fn is_uri_unavailable(&self, uri: &str, generation: Option<u64>) -> bool {
+        let unavailable = self
+            .unavailable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unavailable.uri_generation == generation && unavailable.uris.contains(uri)
+    }
+
+    fn mark_uri_unavailable(&self, uri: &str, generation: Option<u64>) {
+        let mut unavailable = self
+            .unavailable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if unavailable.uri_generation == generation {
+            unavailable.uris.insert(uri.to_string());
+            warn!(
+                url = uri,
+                "Web-seed returned HTTP 404; skipping it until URI configuration changes"
+            );
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! HTTP client for downloading individual BT pieces from a web-seed URL.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -9,6 +10,29 @@ use tracing::{debug, warn};
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::AtomicProgress;
+
+#[derive(Debug)]
+pub(super) enum WebSeedError {
+    HttpStatus(u16),
+    Failure(String),
+}
+
+impl WebSeedError {
+    pub(super) fn is_not_found(&self) -> bool {
+        matches!(self, Self::HttpStatus(404))
+    }
+}
+
+impl fmt::Display for WebSeedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HttpStatus(status) => {
+                write!(formatter, "Unexpected HTTP status {status} from web-seed")
+            }
+            Self::Failure(message) => formatter.write_str(message),
+        }
+    }
+}
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
 ///
@@ -172,8 +196,30 @@ impl WebSeedClient {
         length: u64,
         network_activity: Option<&AtomicProgress>,
     ) -> Result<Vec<u8>, String> {
-        let buffer_length = usize::try_from(length)
-            .map_err(|_| format!("requested WebSeed range is too large: {length} bytes"))?;
+        self.download_piece_result_with_activity(
+            piece_index,
+            _piece_length,
+            piece_offset,
+            length,
+            network_activity,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    pub(super) async fn download_piece_result_with_activity(
+        &self,
+        piece_index: u32,
+        _piece_length: u64,
+        piece_offset: u64,
+        length: u64,
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<Vec<u8>, WebSeedError> {
+        let buffer_length = usize::try_from(length).map_err(|_| {
+            WebSeedError::Failure(format!(
+                "requested WebSeed range is too large: {length} bytes"
+            ))
+        })?;
         let mut data = vec![0; buffer_length];
         let received = self
             .download_piece_into(piece_index, piece_offset, &mut data, network_activity)
@@ -182,13 +228,13 @@ impl WebSeedClient {
         Ok(data)
     }
 
-    pub(crate) async fn download_piece_into(
+    pub(super) async fn download_piece_into(
         &self,
         piece_index: u32,
         piece_offset: u64,
         destination: &mut [u8],
         network_activity: Option<&AtomicProgress>,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, WebSeedError> {
         let length = destination.len() as u64;
         if length == 0 {
             return Ok(0);
@@ -212,23 +258,25 @@ impl WebSeedClient {
             .header("User-Agent", crate::constants::USER_AGENT)
             .send()
             .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+            .map_err(|e| WebSeedError::Failure(format!("HTTP request failed: {}", e)))?;
 
         let status = response.status().as_u16();
 
         // Accept 200 OK or 206 Partial Content
         if status != 200 && status != 206 {
-            return Err(format!("Unexpected HTTP status {} from web-seed", status));
+            return Err(WebSeedError::HttpStatus(status));
         }
 
         let mut received = 0usize;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("Failed to read response body: {}", e))?;
+            let chunk = chunk.map_err(|e| {
+                WebSeedError::Failure(format!("Failed to read response body: {}", e))
+            })?;
             if received.saturating_add(chunk.len()) > destination.len() {
-                return Err(format!(
+                return Err(WebSeedError::Failure(format!(
                     "Web-seed response exceeded requested range: expected at most {length} bytes"
-                ));
+                )));
             }
             if !chunk.is_empty()
                 && let Some(progress) = network_activity

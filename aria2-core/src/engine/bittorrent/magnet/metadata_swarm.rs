@@ -370,14 +370,36 @@ impl MetadataExchangeState {
         if let Some(peer) = self.peers.get_mut(&actor_id) {
             peer.handshake_deadline = None;
         }
-        let Some(metadata_size) =
-            metadata_size.filter(|size| *size > 0 && u64::from(*size) <= METADATA_MAX_SIZE)
-        else {
-            return;
-        };
         if ut_metadata_id.is_none_or(|id| id == 0) {
+            if let Some(peer) = self.peers.get_mut(&actor_id) {
+                peer.supports_metadata = false;
+            }
+            let revoked = self
+                .in_flight
+                .iter()
+                .filter_map(|(piece, request)| (request.actor_id == actor_id).then_some(*piece))
+                .collect::<Vec<_>>();
+            for piece in revoked {
+                self.in_flight.remove(&piece);
+                self.record_failure(actor_id, piece, "peer revoked ut_metadata support");
+            }
             return;
         }
+
+        let metadata_size = metadata_size
+            .filter(|size| *size > 0 && u64::from(*size) <= METADATA_MAX_SIZE)
+            .or_else(|| {
+                self.peers
+                    .get(&actor_id)
+                    .and_then(|peer| peer.metadata_size)
+                    .filter(|size| *size > 0 && u64::from(*size) <= METADATA_MAX_SIZE)
+            });
+        let Some(metadata_size) = metadata_size else {
+            if let Some(peer) = self.peers.get_mut(&actor_id) {
+                peer.supports_metadata = false;
+            }
+            return;
+        };
 
         if self.metadata_size.is_none() {
             let Ok(collector) = MetadataCollector::new(u64::from(metadata_size), self.piece_size)

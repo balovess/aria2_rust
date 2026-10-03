@@ -82,6 +82,34 @@ fn test_torrent(tracker_url: &str) -> Vec<u8> {
     BencodeValue::Dict(root).encode()
 }
 
+fn test_torrent_with_webseed(tracker_url: &str, webseed_url: &str) -> Vec<u8> {
+    let mut info = BTreeMap::new();
+    info.insert(b"length".to_vec(), BencodeValue::Int(3));
+    info.insert(
+        b"name".to_vec(),
+        BencodeValue::Bytes(b"actor-runtime.bin".to_vec()),
+    );
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(16 * 1024));
+    info.insert(
+        b"pieces".to_vec(),
+        BencodeValue::Bytes(vec![
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+        ]),
+    );
+    let mut root = BTreeMap::new();
+    root.insert(
+        b"announce".to_vec(),
+        BencodeValue::Bytes(tracker_url.as_bytes().to_vec()),
+    );
+    root.insert(
+        b"url-list".to_vec(),
+        BencodeValue::Bytes(webseed_url.as_bytes().to_vec()),
+    );
+    root.insert(b"info".to_vec(), BencodeValue::Dict(info));
+    BencodeValue::Dict(root).encode()
+}
+
 fn request_window_torrent(tracker_url: &str) -> Vec<u8> {
     let mut info = BTreeMap::new();
     info.insert(b"length".to_vec(), BencodeValue::Int(524_288));
@@ -662,6 +690,83 @@ async fn cli_waits_for_unchoke_before_requesting_a_non_fast_piece() {
             .expect("completed payload is readable"),
         b"abc"
     );
+}
+
+#[tokio::test]
+async fn rpc_change_uri_updates_file_uris_while_bt_piece_session_is_active() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = test_torrent_with_webseed(
+        &placeholder_tracker.announce_url(),
+        "http://127.0.0.1:1/original.bin",
+    );
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let peer = ControlledSeeder::start(meta.info_hash.bytes).await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr.port()).await;
+    let torrent =
+        test_torrent_with_webseed(&tracker.announce_url(), "http://127.0.0.1:1/original.bin");
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--seed-time=1".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if peer.request_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("piece session did not become active");
+
+    let original = "http://127.0.0.1:1/original.bin";
+    let replacement = "http://127.0.0.1:1/replacement.bin";
+    let changed = client.post(
+        "/jsonrpc",
+        "application/json",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "aria2.changeUri",
+            "params": [gid, 1, [original], [replacement]],
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    assert_eq!(changed.status, 200);
+    let changed: Value = serde_json::from_slice(&changed.body).expect("changeUri JSON response");
+    assert!(
+        changed.get("error").is_none(),
+        "changeUri failed: {changed}"
+    );
+    assert_eq!(changed["result"], json!(["1", "1"]));
+
+    let files = rpc(&client, 3, "aria2.getFiles", json!([gid]));
+    let uris = files[0]["uris"].as_array().expect("file URI list");
+    assert!(uris.iter().any(|uri| uri["uri"] == replacement), "{files}");
+    assert!(!uris.iter().any(|uri| uri["uri"] == original), "{files}");
 }
 
 #[tokio::test]
@@ -2459,6 +2564,106 @@ async fn cli_magnet_reuses_metadata_peer_actor_for_payload_download() {
     assert_eq!(
         std::fs::read(output_dir.path().join("actor-runtime.bin"))
             .expect("magnet payload is written"),
+        b"abc"
+    );
+}
+
+#[tokio::test]
+async fn cli_magnet_retries_metadata_on_another_peer_after_extension_revocation() {
+    let output_dir = tempfile::tempdir().expect("temporary magnet output directory");
+    let placeholder = test_torrent("http://127.0.0.1:1/announce");
+    let (metadata, info_bytes) =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse_with_info_bytes(
+            &placeholder,
+        )
+        .expect("placeholder torrent metadata parses");
+    let revoked_peer = MockBtPeerServer::start_revoking_metadata_after_first_request(
+        metadata.info_hash.bytes,
+        vec![b"abc".to_vec()],
+        info_bytes.clone(),
+    )
+    .await;
+    let replacement_peer = MockBtPeerServer::start_with_delayed_metadata_handshake(
+        metadata.info_hash.bytes,
+        vec![b"abc".to_vec()],
+        info_bytes,
+        Duration::from_millis(500),
+    )
+    .await;
+    let tracker = MockTrackerServer::start_with_peers(
+        vec![revoked_peer.addr().port(), replacement_peer.addr().port()],
+        false,
+    )
+    .await;
+    let encoded_tracker = tracker
+        .announce_url()
+        .replace(':', "%3A")
+        .replace('/', "%2F");
+    let magnet_uri = format!(
+        "magnet:?xt=urn:btih:{}&tr={encoded_tracker}",
+        metadata.info_hash.as_hex()
+    );
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-dht6=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--bt-metadata-only=false".to_owned(),
+        "--bt-tracker-timeout=3".to_owned(),
+        "--bt-tracker-connect-timeout=2".to_owned(),
+        "--max-tries=1".to_owned(),
+        "--seed-time=30".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let gid = rpc(&client, 1, "aria2.addUri", json!([[magnet_uri], {}]))
+        .as_str()
+        .expect("addUri returns a GID")
+        .to_owned();
+
+    assert!(
+        revoked_peer
+            .wait_for_metadata_requests(1, Duration::from_secs(5))
+            .await,
+        "the first peer should receive a BEP 9 metadata request before revoking ut_metadata"
+    );
+    assert!(
+        replacement_peer
+            .wait_for_metadata_requests(1, Duration::from_secs(5))
+            .await,
+        "the scheduler should move the outstanding metadata request to the replacement peer"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let status = rpc(
+            &client,
+            2,
+            "aria2.tellStatus",
+            json!([gid, ["status", "completedLength", "totalLength"]]),
+        );
+        if status["completedLength"] == "3" {
+            assert_eq!(status["status"], "active");
+            assert_eq!(status["totalLength"], "3");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "magnet must finish metadata and payload after ut_metadata revocation: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert_eq!(
+        revoked_peer.metadata_request_count(),
+        1,
+        "a peer that revoked ut_metadata must not receive another metadata request"
+    );
+    assert_eq!(
+        std::fs::read(output_dir.path().join("actor-runtime.bin"))
+            .expect("replacement peer payload is written"),
         b"abc"
     );
 }

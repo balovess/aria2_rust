@@ -11,8 +11,9 @@
 //!
 //! # Thread Safety
 //!
-//! `FileEntry` is **not** `Sync` — it is meant to be owned by a single
-//! download task. If sharing is needed, wrap in `Arc<Mutex<FileEntry>>`.
+//! The URI lifecycle queues use a narrow per-entry lock so a live request
+//! group can update them while protocol sessions hold a shared `DownloadContext`.
+//! Request-pool and file metadata operations still require exclusive access.
 
 pub mod entry;
 pub mod helpers;

@@ -1252,10 +1252,11 @@ pub(crate) async fn run_peer_actor(
                                 .send(PeerEvent::ExtensionHandshakeReceived {
                                     actor_id,
                                     ut_pex_id: connection.peer_extension_id("ut_pex"),
-                                    ut_metadata_id: remote_extension_handshake
-                                        .as_ref()
-                                        .and_then(|handshake| handshake.ut_metadata_id())
-                                        .filter(|id| *id != 0),
+                                    // The connection owns the effective BEP 10 map: omitted
+                                    // entries retain their previous ID, while an explicit zero
+                                    // removes the mapping. Publish that resolved state so swarm
+                                    // coordinators can observe capability revocations.
+                                    ut_metadata_id: connection.peer_extension_id("ut_metadata"),
                                     metadata_size: remote_extension_handshake
                                         .as_ref()
                                         .and_then(|handshake| handshake.metadata_size())

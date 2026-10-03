@@ -394,14 +394,15 @@ impl DownloadResult {
                                 .saturating_sub(file.offset())
                                 .min(file.length())
                         });
-                    let uris = file
-                        .uris()
-                        .into_iter()
+                    let (remaining_uris, spent_uris, _) = file.uri_state_snapshot();
+                    let uris = spent_uris
+                        .iter()
+                        .chain(remaining_uris.iter())
+                        .cloned()
                         .map(|uri| {
-                            let status = if file.remaining_uris().iter().any(|value| value == &uri)
-                            {
+                            let status = if remaining_uris.iter().any(|value| value == &uri) {
                                 "waiting"
-                            } else if file.spent_uris().iter().any(|value| value == &uri) {
+                            } else if spent_uris.iter().any(|value| value == &uri) {
                                 "used"
                             } else {
                                 "spent"
