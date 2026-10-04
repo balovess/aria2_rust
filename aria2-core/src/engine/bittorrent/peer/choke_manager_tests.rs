@@ -199,6 +199,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn seeder_refills_optimistic_slot_when_incumbent_ranks_into_regular_slots() {
+        let start = Instant::now();
+        let mut peers = [make_peer(), make_peer(), make_peer(), make_peer()];
+        for (index, peer) in peers.iter_mut().enumerate() {
+            peer.peer_id[0] = index as u8 + 1;
+            peer.addr.set_port(6881 + index as u16);
+            peer.peer_interested = true;
+            peer.last_unchoke_at = start - Duration::from_secs(60);
+        }
+        let mut choke = BtSeederStateChoke::with_slots_and_optimistic_unchoke_interval(3, 60);
+
+        let mut refs = to_choke_refs(&mut peers);
+        choke.execute_choke_at(&mut refs, start);
+        let optimistic = peers
+            .iter()
+            .position(|peer| peer.opt_unchoking)
+            .expect("initial optimistic slot");
+
+        for elapsed in [10, 20] {
+            let mut refs = to_choke_refs(&mut peers);
+            choke.execute_choke_at(&mut refs, start + Duration::from_secs(elapsed));
+        }
+        let promotion_time = start + Duration::from_secs(30);
+        peers[optimistic].record_upload_rate_at(4096, promotion_time - Duration::from_secs(1));
+        let mut refs = to_choke_refs(&mut peers);
+        choke.execute_choke_at(&mut refs, promotion_time);
+
+        assert!(!peers[optimistic].am_choking);
+        assert_eq!(
+            peers.iter().filter(|peer| !peer.am_choking).count(),
+            3,
+            "promoting the optimistic peer must not leave an upload slot idle"
+        );
+        assert_eq!(peers.iter().filter(|peer| peer.opt_unchoking).count(), 1);
+        assert!(!peers[optimistic].opt_unchoking);
+    }
+
+    #[test]
     fn test_seeder_round_cycle() {
         let mut choke = BtSeederStateChoke::new();
         assert_eq!(choke.round(), 0);

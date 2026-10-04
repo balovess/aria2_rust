@@ -169,8 +169,10 @@ pub(crate) mod tests {
         );
         assert!(stats.check_snubbed_at(5, start + Duration::from_secs(5)));
         assert!(stats.is_snubbed);
+        assert_eq!(stats.snub_count, 1);
         assert!(stats.next_snubbed_deadline(5).is_none());
         assert!(!stats.check_snubbed_at(5, start + Duration::from_secs(10)));
+        assert_eq!(stats.snub_count, 1);
     }
 
     #[test]

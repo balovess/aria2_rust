@@ -165,28 +165,27 @@ impl BtSeederStateChoke {
 
         if self.round < 2 {
             let optimistic_candidates = &entries[split_point..];
-            let current_is_eligible = self
-                .current_optimistic_peer
-                .is_some_and(|current| entries.iter().any(|entry| entry.identity == current));
+            let current_is_optimistic_candidate =
+                self.current_optimistic_peer.is_some_and(|current| {
+                    optimistic_candidates
+                        .iter()
+                        .any(|entry| entry.identity == current)
+                });
             let rotation_due = self.last_optimistic_unchoke_at.is_none_or(|last| {
                 now.saturating_duration_since(last) >= self.optimistic_unchoke_interval
             });
 
-            if !rotation_due
-                && current_is_eligible
-                && let Some(current) = self.current_optimistic_peer
-            {
-                if let Some(entry) = optimistic_candidates
+            if !rotation_due && current_is_optimistic_candidate {
+                let current = self
+                    .current_optimistic_peer
+                    .expect("eligible peer identity");
+                let entry = optimistic_candidates
                     .iter()
                     .find(|entry| entry.identity == current)
-                {
-                    let peer = &mut peers[entry.index];
-                    peer.opt_unchoking = true;
-                    peer.am_choking = false;
-                }
-                // If the current optimistic peer now ranks in a regular slot,
-                // keep it there and leave the spare slot unused until its
-                // rotation deadline instead of displacing another peer early.
+                    .expect("current optimistic peer is a candidate");
+                let peer = &mut peers[entry.index];
+                peer.opt_unchoking = true;
+                peer.am_choking = false;
             } else if !optimistic_candidates.is_empty() {
                 let current = self.current_optimistic_peer;
                 let alternative_count = optimistic_candidates
@@ -216,7 +215,7 @@ impl BtSeederStateChoke {
                 peer.opt_unchoking = true;
                 peer.record_optimistic_unchoke_at(now);
                 tracing::debug!("POU (seeder): peer idx={}", picked_index);
-            } else if !current_is_eligible {
+            } else {
                 self.current_optimistic_peer = None;
             }
         }
