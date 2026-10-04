@@ -58,6 +58,27 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-optimistic-unchoke-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::None,
+            min: Some(0),
+            max: Some(i64::MAX as u64),
+            description: "Seconds between optimistic unchoke rotations (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-snubbed-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::None,
+            min: Some(1),
+            max: Some(i64::MAX as u64),
+            description: "Seconds without peer data before treating it as snubbed (Rust extension)"
+                .into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "bt-max-open-files".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(100),

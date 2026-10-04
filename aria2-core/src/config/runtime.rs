@@ -194,6 +194,8 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-load-saved-metadata",
     "bt-max-peers",
     "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
@@ -481,6 +483,8 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-load-saved-metadata",
     "bt-max-peers",
     "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
@@ -638,9 +642,9 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 133);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 135);
         #[cfg(not(feature = "bittorrent"))]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 132);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 134);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate
@@ -660,6 +664,22 @@ mod tests {
         );
         assert_eq!(
             is_option_changeable("bt-max-upload-slots", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("bt-optimistic-unchoke-interval", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("bt-optimistic-unchoke-interval", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("bt-snubbed-timeout", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("bt-snubbed-timeout", false),
             ChangeableKind::Immediate
         );
         assert_eq!(

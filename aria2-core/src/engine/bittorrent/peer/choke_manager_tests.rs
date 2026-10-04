@@ -157,6 +157,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn seeder_optimistic_slot_holds_until_rotation_deadline_then_advances() {
+        let start = Instant::now();
+        let mut peers = [make_peer(), make_peer()];
+        for (index, peer) in peers.iter_mut().enumerate() {
+            peer.peer_id[0] = index as u8 + 1;
+            peer.addr.set_port(6881 + index as u16);
+            peer.peer_interested = true;
+        }
+        let mut choke = BtSeederStateChoke::with_slots_and_optimistic_unchoke_interval(1, 30);
+
+        let mut refs = to_choke_refs(&mut peers);
+        choke.execute_choke_at(&mut refs, start);
+        let first = peers
+            .iter()
+            .position(|peer| peer.opt_unchoking)
+            .expect("first optimistic slot");
+        let other = 1 - first;
+
+        peers[other].peer_interested = false;
+        let sentinel = start - Duration::from_secs(5);
+        peers[first].last_optimistic_unchoke_at = sentinel;
+        let mut refs = to_choke_refs(&mut peers);
+        choke.execute_choke_at(&mut refs, start + Duration::from_secs(10));
+
+        assert!(peers[first].opt_unchoking);
+        assert_eq!(
+            peers[first].last_optimistic_unchoke_at, sentinel,
+            "holding the current slot must not restart its rotation deadline"
+        );
+
+        peers[other].peer_interested = true;
+        peers[other].upload_speed = 100_000.0;
+        let mut refs = to_choke_refs(&mut peers);
+        choke.execute_choke_at(&mut refs, start + Duration::from_secs(20));
+        let mut refs = to_choke_refs(&mut peers);
+        choke.execute_choke_at(&mut refs, start + Duration::from_secs(30));
+
+        assert!(peers[other].opt_unchoking);
+        assert!(!peers[first].opt_unchoking);
+    }
+
+    #[test]
     fn test_seeder_round_cycle() {
         let mut choke = BtSeederStateChoke::new();
         assert_eq!(choke.round(), 0);

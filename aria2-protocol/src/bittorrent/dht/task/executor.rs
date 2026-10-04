@@ -14,6 +14,7 @@ use tracing::{debug, trace, warn};
 ///
 /// The executor manages concurrency and scheduling; implementations define
 /// the work performed by a task.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait DhtTask: Send + fmt::Debug {
     /// Execute the task to completion.

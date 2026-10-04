@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use rand::Rng;
 
+use crate::engine::bittorrent::peer::choking_algorithm::PeerIdentity;
 use crate::engine::bittorrent::peer::stats::PeerStats;
 
 const RECENT_UNCHOKE_WINDOW: Duration = Duration::from_secs(20);
@@ -72,6 +73,9 @@ impl Eq for SeederPeerEntry {}
 pub struct BtSeederStateChoke {
     round: u32,
     base_unchoke_slots: usize,
+    optimistic_unchoke_interval: Duration,
+    current_optimistic_peer: Option<PeerIdentity>,
+    last_optimistic_unchoke_at: Option<Instant>,
 }
 
 impl BtSeederStateChoke {
@@ -80,9 +84,19 @@ impl BtSeederStateChoke {
     }
 
     pub fn with_slots(slots: usize) -> Self {
+        Self::with_slots_and_optimistic_unchoke_interval(slots, 0)
+    }
+
+    pub fn with_slots_and_optimistic_unchoke_interval(
+        slots: usize,
+        optimistic_unchoke_interval_secs: u64,
+    ) -> Self {
         Self {
             round: 0,
             base_unchoke_slots: slots,
+            optimistic_unchoke_interval: Duration::from_secs(optimistic_unchoke_interval_secs),
+            current_optimistic_peer: None,
+            last_optimistic_unchoke_at: None,
         }
     }
 
@@ -101,6 +115,7 @@ impl BtSeederStateChoke {
                 continue;
             }
             peer.am_choking = true;
+            peer.opt_unchoking = false;
             if peer.peer_interested {
                 entries.push(SeederPeerEntry::from_peer(
                     index,
@@ -113,15 +128,19 @@ impl BtSeederStateChoke {
             }
         }
 
-        self.unchoke_peers(&mut entries, peers);
+        self.unchoke_peers(&mut entries, peers, now);
         self.round = (self.round + 1) % 3;
     }
 
-    fn unchoke_peers(&mut self, entries: &mut [SeederPeerEntry], peers: &mut [&mut PeerStats]) {
+    fn unchoke_peers(
+        &mut self,
+        entries: &mut [SeederPeerEntry],
+        peers: &mut [&mut PeerStats],
+        now: Instant,
+    ) {
         if self.base_unchoke_slots == 0 {
-            for entry in entries.iter() {
-                peers[entry.index].opt_unchoking = false;
-            }
+            self.current_optimistic_peer = None;
+            self.last_optimistic_unchoke_at = None;
             return;
         }
 
@@ -145,17 +164,60 @@ impl BtSeederStateChoke {
         }
 
         if self.round < 2 {
-            for entry in entries.iter() {
-                peers[entry.index].opt_unchoking = false;
-            }
-            if entries.len() > split_point {
-                let mut rng = rand::thread_rng();
-                let pick_idx = split_point + rng.gen_range(0..entries.len() - split_point);
-                let picked_index = entries[pick_idx].index;
-                peers[picked_index].opt_unchoking = true;
-                peers[picked_index].am_choking = false;
-                peers[picked_index].record_optimistic_unchoke();
+            let optimistic_candidates = &entries[split_point..];
+            let current_is_eligible = self
+                .current_optimistic_peer
+                .is_some_and(|current| entries.iter().any(|entry| entry.identity == current));
+            let rotation_due = self.last_optimistic_unchoke_at.is_none_or(|last| {
+                now.saturating_duration_since(last) >= self.optimistic_unchoke_interval
+            });
+
+            if !rotation_due
+                && current_is_eligible
+                && let Some(current) = self.current_optimistic_peer
+            {
+                if let Some(entry) = optimistic_candidates
+                    .iter()
+                    .find(|entry| entry.identity == current)
+                {
+                    let peer = &mut peers[entry.index];
+                    peer.opt_unchoking = true;
+                    peer.am_choking = false;
+                }
+                // If the current optimistic peer now ranks in a regular slot,
+                // keep it there and leave the spare slot unused until its
+                // rotation deadline instead of displacing another peer early.
+            } else if !optimistic_candidates.is_empty() {
+                let current = self.current_optimistic_peer;
+                let alternative_count = optimistic_candidates
+                    .iter()
+                    .filter(|entry| Some(entry.identity) != current)
+                    .count();
+                let candidate_offset = if alternative_count > 0 {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(0..alternative_count)
+                } else {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(0..optimistic_candidates.len())
+                };
+                let picked = if alternative_count > 0 {
+                    optimistic_candidates
+                        .iter()
+                        .filter(|entry| Some(entry.identity) != current)
+                        .nth(candidate_offset)
+                        .expect("selected optimistic candidate")
+                } else {
+                    &optimistic_candidates[candidate_offset]
+                };
+                let picked_index = picked.index;
+                self.current_optimistic_peer = Some(picked.identity);
+                self.last_optimistic_unchoke_at = Some(now);
+                let peer = &mut peers[picked_index];
+                peer.opt_unchoking = true;
+                peer.record_optimistic_unchoke_at(now);
                 tracing::debug!("POU (seeder): peer idx={}", picked_index);
+            } else if !current_is_eligible {
+                self.current_optimistic_peer = None;
             }
         }
     }

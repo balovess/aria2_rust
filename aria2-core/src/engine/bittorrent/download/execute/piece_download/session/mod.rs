@@ -50,7 +50,6 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) endgame_state: EndgameState,
     pub(super) request_timeout: Duration,
     pub(super) peer_last_data_time: HashMap<PeerKey, Instant>,
-    pub(super) last_snub_check: Instant,
     pub(super) stop_timeout: BtStopTimeoutState,
     pub(super) in_flight_pieces:
         HashMap<u32, crate::filesystem::control_file::ControlFileInFlightPiece>,

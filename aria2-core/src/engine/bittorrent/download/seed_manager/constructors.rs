@@ -218,7 +218,10 @@ impl BtSeedManager {
             connection.stats.am_choking = true;
         }
 
-        let seeder_choke = BtSeederStateChoke::with_slots(config.max_peers_to_unchoke);
+        let seeder_choke = BtSeederStateChoke::with_slots_and_optimistic_unchoke_interval(
+            config.max_peers_to_unchoke,
+            config.optimistic_unchoke_interval_secs,
+        );
         let upload_counter = Arc::new(AtomicU64::new(0));
         for connection in &mut pending_connections {
             connection.set_upload_counter(Arc::clone(&upload_counter));

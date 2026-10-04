@@ -393,7 +393,11 @@ impl PieceDownloadSession<'_> {
                     .map_or(peer_deadline, |retry_deadline| {
                         peer_deadline.min(retry_deadline)
                     });
-                let deadline = protocol_deadline.min(self.next_snub_check_deadline());
+                let deadline = self
+                    .next_snub_check_deadline()
+                    .map_or(protocol_deadline, |snub_deadline| {
+                        protocol_deadline.min(snub_deadline)
+                    });
                 let (uri_generation, uri_notifier) = {
                     let group = self.command.group.recover();
                     (group.uri_generation_handle(), group.uri_notifier())
@@ -470,11 +474,12 @@ impl PieceDownloadSession<'_> {
                                     .and_then(|algo| algo.next_choke_rotation_deadline())
                             })
                             .flatten();
-                        let deadline = choke_deadline
-                            .map_or(protocol_deadline, |choke_deadline| {
-                                protocol_deadline.min(choke_deadline)
-                            })
-                            .min(self.next_snub_check_deadline());
+                        let deadline = choke_deadline.map_or(protocol_deadline, |choke_deadline| {
+                            protocol_deadline.min(choke_deadline)
+                        });
+                        let deadline = self
+                            .next_snub_check_deadline()
+                            .map_or(deadline, |snub_deadline| deadline.min(snub_deadline));
                         let (uri_generation, uri_notifier) = {
                             let group = self.command.group.recover();
                             (group.uri_generation_handle(), group.uri_notifier())
@@ -542,11 +547,12 @@ impl PieceDownloadSession<'_> {
                                 .and_then(|algo| algo.next_choke_rotation_deadline())
                         })
                         .flatten();
-                    let deadline = choke_deadline
-                        .map_or(protocol_deadline, |choke_deadline| {
-                            protocol_deadline.min(choke_deadline)
-                        })
-                        .min(self.next_snub_check_deadline());
+                    let deadline = choke_deadline.map_or(protocol_deadline, |choke_deadline| {
+                        protocol_deadline.min(choke_deadline)
+                    });
+                    let deadline = self
+                        .next_snub_check_deadline()
+                        .map_or(deadline, |snub_deadline| deadline.min(snub_deadline));
                     let peer_event = self.command.wait_for_swarm_peer_event(self.swarm, deadline);
                     let event = tokio::select! {
                         event = peer_event => NoPeerWaitEvent::Peer(event),
@@ -1121,11 +1127,6 @@ impl PieceDownloadSession<'_> {
     }
 
     fn check_and_mark_swarm_peers_snubbed(&mut self) {
-        const CHECK_INTERVAL: Duration = Duration::from_secs(10);
-        if self.last_snub_check.elapsed() < CHECK_INTERVAL {
-            return;
-        }
-        self.last_snub_check = Instant::now();
         let timeout = self
             .command
             .group
@@ -1133,17 +1134,35 @@ impl PieceDownloadSession<'_> {
             .options()
             .bt_snubbed_timeout
             .unwrap_or(60);
+        let now = Instant::now();
+        if !self.swarm.iter().filter(|actor| !actor.dead).any(|actor| {
+            actor
+                .stats
+                .next_snubbed_deadline(timeout)
+                .is_some_and(|deadline| deadline <= now)
+        }) {
+            return;
+        }
         for actor in self.swarm.iter_mut().filter(|actor| !actor.dead) {
-            if actor.stats.check_snubbed(timeout) {
+            if actor.stats.check_snubbed_at(timeout, now) {
                 debug!(peer = %actor.endpoint, timeout, "Marked peer actor as snubbed");
             }
         }
     }
 
-    fn next_snub_check_deadline(&self) -> Instant {
-        self.last_snub_check
-            .checked_add(Duration::from_secs(10))
-            .unwrap_or_else(Instant::now)
+    fn next_snub_check_deadline(&self) -> Option<Instant> {
+        let timeout = self
+            .command
+            .group
+            .recover()
+            .options()
+            .bt_snubbed_timeout
+            .unwrap_or(60);
+        self.swarm
+            .iter()
+            .filter(|actor| !actor.dead)
+            .filter_map(|actor| actor.stats.next_snubbed_deadline(timeout))
+            .min()
     }
 }
 

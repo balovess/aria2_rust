@@ -55,10 +55,11 @@ impl PositionedDiskWriter {
             .await?;
         #[cfg(unix)]
         if let Some(file) = self.shared_file() {
+            let data_length = data.len() as u64;
             crate::filesystem::disk_io_pool::shared()
                 .run(
                     move || {
-                        advise_drop_cache(file.as_ref(), offset, data.len() as u64);
+                        advise_drop_cache(file.as_ref(), offset, data_length);
                         Ok(())
                     },
                     "drop disk cache hint",

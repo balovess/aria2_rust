@@ -438,12 +438,27 @@ impl PeerStats {
     /// Returns `false` if the peer is still active or was already snubbed.
     /// Also increments [`snub_count`](Self::snub_count) when transitioning to snubbed state.
     pub fn check_snubbed(&mut self, timeout_secs: u64) -> bool {
-        if self.last_message_received_at.elapsed().as_secs() >= timeout_secs && !self.is_snubbed {
+        self.check_snubbed_at(timeout_secs, Instant::now())
+    }
+
+    pub(crate) fn check_snubbed_at(&mut self, timeout_secs: u64, now: Instant) -> bool {
+        if !self.is_snubbed
+            && now.saturating_duration_since(self.last_message_received_at)
+                >= Duration::from_secs(timeout_secs)
+        {
             self.is_snubbed = true;
             self.snub_count = self.snub_count.saturating_add(1);
             return true;
         }
         false
+    }
+
+    pub(crate) fn next_snubbed_deadline(&self, timeout_secs: u64) -> Option<Instant> {
+        if self.is_snubbed {
+            return None;
+        }
+        self.last_message_received_at
+            .checked_add(Duration::from_secs(timeout_secs))
     }
 
     /// Explicitly reset the snubbed flag (e.g. after an unchoke).
@@ -476,8 +491,12 @@ impl PeerStats {
     /// Sets [`am_choking`](Self::am_choking) to `false` and refreshes
     /// [`last_optimistic_unchoke_at`](Self::last_optimistic_unchoke_at).
     pub fn record_optimistic_unchoke(&mut self) {
+        self.record_optimistic_unchoke_at(Instant::now());
+    }
+
+    pub(crate) fn record_optimistic_unchoke_at(&mut self, now: Instant) {
         self.am_choking = false;
-        self.last_optimistic_unchoke_at = Instant::now();
+        self.last_optimistic_unchoke_at = now;
     }
 
     // ------------------------------------------------------------------

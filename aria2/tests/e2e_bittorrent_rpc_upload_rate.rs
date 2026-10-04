@@ -125,19 +125,31 @@ async fn cli_change_option_upload_limit_throttles_live_peer_actor_upload() {
             &client,
             4,
             "aria2.tellStatus",
-            json!([gid, ["uploadLength"]]),
+            json!([gid, ["uploadLength", "uploadSpeed"]]),
         );
         let uploaded = status["uploadLength"]
             .as_str()
             .and_then(|length| length.parse::<usize>().ok());
-        if uploaded == Some(PIECE_LENGTH) {
+        let upload_speed = status["uploadSpeed"]
+            .as_str()
+            .and_then(|speed| speed.parse::<u64>().ok());
+        let peers = rpc(&client, 5, "aria2.getPeerDetails", json!([gid]));
+        let peer_uploading = peers.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["uploadSpeed"].as_u64().is_some_and(|speed| speed > 0))
+        });
+        if uploaded == Some(PIECE_LENGTH)
+            && upload_speed.is_some_and(|speed| speed > 0)
+            && peer_uploading
+        {
             break;
         }
         assert!(
             Instant::now() < upload_deadline,
-            "RPC uploadLength did not reflect the wire upload: {status}"
+            "RPC must expose the active torrent and peer upload rates from the verified wire transfer: status={status}, peers={peers}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     peer.release_tail();

@@ -350,7 +350,6 @@ impl<'a> PieceDownloadSession<'a> {
 
         // G1: Snub detection state - track last data received time per peer index
         let mut peer_last_data_time: HashMap<PeerKey, Instant> = HashMap::new();
-        let last_snub_check = Instant::now();
         let stop_timeout = BtStopTimeoutState::new(Instant::now(), command.completed_bytes);
 
         // Initialize last-data-time tracking for all active peers
@@ -459,7 +458,6 @@ impl<'a> PieceDownloadSession<'a> {
             endgame_state,
             request_timeout,
             peer_last_data_time,
-            last_snub_check,
             stop_timeout,
             in_flight_pieces,
         })

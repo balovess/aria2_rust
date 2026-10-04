@@ -155,6 +155,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn snubbed_deadline_is_exact_and_one_shot() {
+        let start = Instant::now();
+        let mut stats = make_test_peer();
+        stats.last_message_received_at = start;
+
+        assert_eq!(
+            stats.next_snubbed_deadline(5),
+            Some(start + Duration::from_secs(5))
+        );
+        assert!(
+            !stats.check_snubbed_at(5, start + Duration::from_secs(5) - Duration::from_nanos(1))
+        );
+        assert!(stats.check_snubbed_at(5, start + Duration::from_secs(5)));
+        assert!(stats.is_snubbed);
+        assert!(stats.next_snubbed_deadline(5).is_none());
+        assert!(!stats.check_snubbed_at(5, start + Duration::from_secs(10)));
+    }
+
+    #[test]
     fn test_choke_state_transitions() {
         let mut stats = make_test_peer();
 

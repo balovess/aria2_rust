@@ -539,7 +539,11 @@ async fn seeder_choke_slots_bound_concurrent_peer_wire_uploads() {
         json!([
             base64::engine::general_purpose::STANDARD.encode(torrent),
             [],
-            {"bt-max-upload-slots": "1"}
+            {
+                "bt-max-upload-slots": "1",
+                "bt-optimistic-unchoke-interval": "7",
+                "bt-snubbed-timeout": "13"
+            }
         ]),
     )
     .as_str()
@@ -547,6 +551,8 @@ async fn seeder_choke_slots_bound_concurrent_peer_wire_uploads() {
     .to_owned();
     let options = rpc(&client, 2, "aria2.getOption", json!([gid]));
     assert_eq!(options["bt-max-upload-slots"], "1");
+    assert_eq!(options["bt-optimistic-unchoke-interval"], "7");
+    assert_eq!(options["bt-snubbed-timeout"], "13");
 
     tracker.wait_for_event("completed").await;
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -595,7 +601,10 @@ async fn seeder_choke_slots_bound_concurrent_peer_wire_uploads() {
             &client,
             3,
             "aria2.tellStatus",
-            json!([gid, ["status", "completedLength", "uploadLength"]]),
+            json!([
+                gid,
+                ["status", "completedLength", "uploadLength", "uploadSpeed"]
+            ]),
         );
         let wire_unchoked = peers
             .iter()
@@ -607,6 +616,15 @@ async fn seeder_choke_slots_bound_concurrent_peer_wire_uploads() {
             .flatten()
             .filter(|peer| peer["flags"]["amChoking"].as_bool() == Some(false))
             .count();
+        let peer_upload_speed = peer_details.as_array().is_some_and(|details| {
+            details
+                .iter()
+                .any(|peer| peer["uploadSpeed"].as_u64().is_some_and(|speed| speed > 0))
+        });
+        let torrent_upload_speed = status["uploadSpeed"]
+            .as_str()
+            .and_then(|speed| speed.parse::<u64>().ok())
+            .is_some_and(|speed| speed > 0);
         let all_interested = peer_details.as_array().is_some_and(|details| {
             details.len() == peers.len()
                 && details
@@ -620,6 +638,8 @@ async fn seeder_choke_slots_bound_concurrent_peer_wire_uploads() {
         if all_interested
             && wire_unchoked == 1
             && rpc_unchoked == wire_unchoked
+            && peer_upload_speed
+            && torrent_upload_speed
             && uploaded_bytes >= PIECE_LENGTH
             && status["uploadLength"]
                 .as_str()
