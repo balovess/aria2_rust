@@ -381,13 +381,23 @@ async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
 #[tokio::test]
 async fn seeding_choke_decision_runs_when_interest_and_choke_state_mismatch() {
     let (mut manager, _client) = manager_with_dead_seed_peer(true, false).await;
+    manager.config.max_peers_to_unchoke = 4;
     let actor_id = manager.swarm.iter().next().unwrap().actor_id;
+    manager.swarm.actor_mut(actor_id).unwrap().dead = false;
     // Interested + choked needs an unchoke decision.
     {
         let stats = &mut manager.swarm.actor_mut(actor_id).unwrap().stats;
         stats.peer_interested = true;
         stats.am_choking = true;
     }
+    assert!(
+        manager
+            .swarm
+            .actor_mut(actor_id)
+            .unwrap()
+            .handle()
+            .set_upload_choked(true)
+    );
     assert!(manager.any_peer_choke_state_mismatch());
 
     // Not interested + unchoked needs a choke decision immediately.
@@ -396,17 +406,52 @@ async fn seeding_choke_decision_runs_when_interest_and_choke_state_mismatch() {
         stats.peer_interested = false;
         stats.am_choking = false;
     }
+    assert!(
+        manager
+            .swarm
+            .actor_mut(actor_id)
+            .unwrap()
+            .handle()
+            .set_upload_choked(false)
+    );
     assert!(manager.any_peer_choke_state_mismatch());
 
     // Both settled states do not trigger an unnecessary choke round.
-    manager.swarm.actor_mut(actor_id).unwrap().stats.am_choking = true;
+    {
+        let actor = manager.swarm.actor_mut(actor_id).unwrap();
+        actor.stats.am_choking = true;
+        assert!(actor.handle().set_upload_choked(true));
+    }
     assert!(!manager.any_peer_choke_state_mismatch());
     {
         let stats = &mut manager.swarm.actor_mut(actor_id).unwrap().stats;
         stats.peer_interested = true;
         stats.am_choking = false;
     }
+    assert!(
+        manager
+            .swarm
+            .actor_mut(actor_id)
+            .unwrap()
+            .handle()
+            .set_upload_choked(false)
+    );
     assert!(!manager.any_peer_choke_state_mismatch());
+
+    manager.config.max_peers_to_unchoke = 0;
+    manager.swarm.actor_mut(actor_id).unwrap().stats.am_choking = true;
+    assert!(
+        manager
+            .swarm
+            .actor_mut(actor_id)
+            .unwrap()
+            .handle()
+            .set_upload_choked(true)
+    );
+    assert!(
+        !manager.any_peer_choke_state_mismatch(),
+        "a choked interested peer is settled when the configured upload-slot capacity is zero"
+    );
 }
 
 #[tokio::test]

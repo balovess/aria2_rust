@@ -96,6 +96,8 @@ struct UploadPeer {
     observed_handshake: Arc<StdMutex<Vec<u8>>>,
     download_requests: Arc<AtomicUsize>,
     download_request_length: Arc<AtomicUsize>,
+    am_unchoked: Arc<std::sync::atomic::AtomicBool>,
+    upload_completed: Arc<Notify>,
     task: JoinHandle<()>,
 }
 
@@ -115,6 +117,8 @@ impl UploadPeer {
         let uploaded_bytes = Arc::new(AtomicUsize::new(0));
         let download_requests = Arc::new(AtomicUsize::new(0));
         let download_request_length = Arc::new(AtomicUsize::new(0));
+        let am_unchoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upload_completed = Arc::new(Notify::new());
         let accepted_connections = Arc::new(AtomicUsize::new(0));
         let accepted_connections_task = Arc::clone(&accepted_connections);
         let accepted_handshakes = Arc::new(AtomicUsize::new(0));
@@ -129,6 +133,8 @@ impl UploadPeer {
             observed_handshake: Arc::clone(&observed_handshake),
             download_requests: Arc::clone(&download_requests),
             download_request_length: Arc::clone(&download_request_length),
+            am_unchoked: Arc::clone(&am_unchoked),
+            upload_completed: Arc::clone(&upload_completed),
             advertised_bitfield,
             upload_piece,
         };
@@ -150,6 +156,8 @@ impl UploadPeer {
             observed_handshake,
             download_requests,
             download_request_length,
+            am_unchoked,
+            upload_completed,
             task,
         }
     }
@@ -187,6 +195,8 @@ struct PeerSession {
     observed_handshake: Arc<StdMutex<Vec<u8>>>,
     download_requests: Arc<AtomicUsize>,
     download_request_length: Arc<AtomicUsize>,
+    am_unchoked: Arc<std::sync::atomic::AtomicBool>,
+    upload_completed: Arc<Notify>,
     advertised_bitfield: u8,
     upload_piece: Option<u32>,
 }
@@ -237,6 +247,7 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
             message = read_bt_message(&mut stream) => {
                 let Ok(message) = message else { return true };
                 match message.first() {
+                    Some(0) => peer.am_unchoked.store(false, Ordering::SeqCst),
                     Some(6) if message.len() == 13 => {
                         peer.download_requests.fetch_add(1, Ordering::SeqCst);
                         let index = u32::from_be_bytes(message[1..5].try_into().unwrap());
@@ -264,18 +275,21 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
                             return true;
                         }
                     }
-                    Some(1) if upload_request_sent && !upload_block_requested => {
-                        let Some(upload_piece) = peer.upload_piece else { continue };
-                        let mut request = Vec::with_capacity(17);
-                        request.extend_from_slice(&13u32.to_be_bytes());
-                        request.push(6);
-                        request.extend_from_slice(&upload_piece.to_be_bytes());
-                        request.extend_from_slice(&0u32.to_be_bytes());
-                        request.extend_from_slice(&(PIECE_LENGTH as u32).to_be_bytes());
-                        if stream.write_all(&request).await.is_err() {
-                            return true;
+                    Some(1) => {
+                        peer.am_unchoked.store(true, Ordering::SeqCst);
+                        if upload_request_sent && !upload_block_requested {
+                            let Some(upload_piece) = peer.upload_piece else { continue };
+                            let mut request = Vec::with_capacity(17);
+                            request.extend_from_slice(&13u32.to_be_bytes());
+                            request.push(6);
+                            request.extend_from_slice(&upload_piece.to_be_bytes());
+                            request.extend_from_slice(&0u32.to_be_bytes());
+                            request.extend_from_slice(&(PIECE_LENGTH as u32).to_be_bytes());
+                            if stream.write_all(&request).await.is_err() {
+                                return true;
+                            }
+                            upload_block_requested = true;
                         }
-                        upload_block_requested = true;
                     }
                     Some(7) if upload_block_requested => {
                         if message.len() < 9 {
@@ -297,7 +311,7 @@ async fn serve_peer(mut stream: TcpStream, peer: &PeerSession) -> bool {
                         }
                         peer.uploaded_bytes
                             .fetch_add(message.len() - 9, Ordering::SeqCst);
-                        return true;
+                        peer.upload_completed.notify_one();
                     }
                     _ => {}
                 }
@@ -437,4 +451,200 @@ async fn retained_peer_upload_counts_toward_seed_ratio_and_tracker_stop() {
     );
     assert_eq!(status["completedLength"], "8");
     assert_eq!(status["uploadLength"], "4");
+}
+
+#[tokio::test]
+async fn seeder_choke_slots_bound_concurrent_peer_wire_uploads() {
+    let output_dir = tempfile::tempdir().expect("temporary seed directory");
+    let payload = Arc::new(b"seeddata".to_vec());
+    std::fs::write(
+        output_dir.path().join("seed-counter.bin"),
+        payload.as_slice(),
+    )
+    .expect("preseed a complete torrent payload");
+
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = torrent_bytes(&placeholder_tracker.announce_url(), &payload);
+    let metadata = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("generated torrent parses");
+    let peers = vec![
+        UploadPeer::start(
+            metadata.info_hash.bytes,
+            Arc::clone(&payload),
+            0,
+            Some(0),
+            *b"SeedSlotPeer00000001",
+        )
+        .await,
+        UploadPeer::start(
+            metadata.info_hash.bytes,
+            Arc::clone(&payload),
+            0,
+            Some(0),
+            *b"SeedSlotPeer00000002",
+        )
+        .await,
+        UploadPeer::start(
+            metadata.info_hash.bytes,
+            Arc::clone(&payload),
+            0,
+            Some(0),
+            *b"SeedSlotPeer00000003",
+        )
+        .await,
+        UploadPeer::start(
+            metadata.info_hash.bytes,
+            Arc::clone(&payload),
+            0,
+            Some(0),
+            *b"SeedSlotPeer00000004",
+        )
+        .await,
+        UploadPeer::start(
+            metadata.info_hash.bytes,
+            Arc::clone(&payload),
+            0,
+            Some(0),
+            *b"SeedSlotPeer00000005",
+        )
+        .await,
+    ];
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start_with_event_peers(
+        Vec::new(),
+        peers.iter().map(|peer| peer.addr.port()).collect(),
+        1,
+    )
+    .await;
+    let torrent = torrent_bytes(&tracker.announce_url(), &payload);
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-utp=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--check-integrity=true".to_owned(),
+        "--bt-hash-check-seed=true".to_owned(),
+        "--seed-time=30".to_owned(),
+        "--seed-ratio=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([
+            base64::engine::general_purpose::STANDARD.encode(torrent),
+            [],
+            {"bt-max-upload-slots": "1"}
+        ]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+    let options = rpc(&client, 2, "aria2.getOption", json!([gid]));
+    assert_eq!(options["bt-max-upload-slots"], "1");
+
+    tracker.wait_for_event("completed").await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if peers
+                .iter()
+                .all(|peer| peer.accepted_handshakes.load(Ordering::SeqCst) == 1)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("seeding coordinator must connect to all five interested leechers");
+
+    for peer in &peers {
+        peer.request_upload.notify_one();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if peers
+                .iter()
+                .map(|peer| peer.uploaded_bytes.load(Ordering::SeqCst))
+                .sum::<usize>()
+                >= PIECE_LENGTH
+            {
+                break;
+            }
+            tokio::select! {
+                _ = peers[0].upload_completed.notified() => {},
+                _ = peers[1].upload_completed.notified() => {},
+                _ = peers[2].upload_completed.notified() => {},
+                _ = peers[3].upload_completed.notified() => {},
+                _ = peers[4].upload_completed.notified() => {},
+            }
+        }
+    })
+    .await
+    .expect("at least one seeding slot must upload a verified piece");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (peer_details, status, wire_unchoked) = loop {
+        let peer_details = rpc(&client, 2, "aria2.getPeerDetails", json!([gid]));
+        let status = rpc(
+            &client,
+            3,
+            "aria2.tellStatus",
+            json!([gid, ["status", "completedLength", "uploadLength"]]),
+        );
+        let wire_unchoked = peers
+            .iter()
+            .filter(|peer| peer.am_unchoked.load(Ordering::SeqCst))
+            .count();
+        let rpc_unchoked = peer_details
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|peer| peer["flags"]["amChoking"].as_bool() == Some(false))
+            .count();
+        let all_interested = peer_details.as_array().is_some_and(|details| {
+            details.len() == peers.len()
+                && details
+                    .iter()
+                    .all(|peer| peer["flags"]["peerInterested"].as_bool() == Some(true))
+        });
+        let uploaded_bytes = peers
+            .iter()
+            .map(|peer| peer.uploaded_bytes.load(Ordering::SeqCst))
+            .sum::<usize>();
+        if all_interested
+            && wire_unchoked == 1
+            && rpc_unchoked == wire_unchoked
+            && uploaded_bytes >= PIECE_LENGTH
+            && status["uploadLength"]
+                .as_str()
+                .and_then(|value| value.parse::<usize>().ok())
+                == Some(uploaded_bytes)
+        {
+            break (peer_details, status, wire_unchoked);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "seed choke state did not converge to the configured upload-slot limit: peer_details={peer_details}, wire_unchoked={wire_unchoked}, rpc_unchoked={rpc_unchoked}, uploaded_bytes={uploaded_bytes}, status={status}"
+        );
+        tokio::task::yield_now().await;
+    };
+
+    assert_eq!(wire_unchoked, 1);
+    assert_eq!(peer_details.as_array().unwrap().len(), 5);
+    assert_eq!(status["status"], "active");
+    assert_eq!(status["completedLength"], "8");
+    assert_eq!(
+        status["uploadLength"],
+        peers
+            .iter()
+            .map(|peer| peer.uploaded_bytes.load(Ordering::SeqCst))
+            .sum::<usize>()
+            .to_string()
+    );
 }

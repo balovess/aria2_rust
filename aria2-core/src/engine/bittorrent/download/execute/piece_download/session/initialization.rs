@@ -285,11 +285,17 @@ impl<'a> PieceDownloadSession<'a> {
             };
             peer_tracker.update_peer_bitfield(&actor.endpoint.to_string(), &bitfield);
         }
+        let group_options = command.group.recover().options_arc();
         let upload_config = crate::engine::bittorrent::peer::upload_session::BtSeedingConfig {
-            max_upload_bytes_per_sec: command.group.recover().options().max_upload_limit,
+            max_upload_bytes_per_sec: group_options.max_upload_limit,
             global_limiter: command.global_limiter.clone(),
-            max_peers_to_unchoke: 4,
-            optimistic_unchoke_interval_secs: 30,
+            max_peers_to_unchoke: group_options
+                .bt_max_upload_slots
+                .unwrap_or(crate::constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32)
+                as usize,
+            optimistic_unchoke_interval_secs: group_options
+                .bt_optimistic_unchoke_interval
+                .unwrap_or(crate::constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
         };
         let payload_config = Arc::new(
             crate::engine::bittorrent::peer::message_handler::PeerActorPayloadConfig {

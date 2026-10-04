@@ -118,6 +118,13 @@ impl BtSeederStateChoke {
     }
 
     fn unchoke_peers(&mut self, entries: &mut [SeederPeerEntry], peers: &mut [&mut PeerStats]) {
+        if self.base_unchoke_slots == 0 {
+            for entry in entries.iter() {
+                peers[entry.index].opt_unchoking = false;
+            }
+            return;
+        }
+
         let regular_slots = if self.round == 2 {
             self.base_unchoke_slots
         } else {

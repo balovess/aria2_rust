@@ -143,6 +143,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn zero_seeder_upload_slots_never_optimistically_unchokes() {
+        let mut peer = make_peer();
+        peer.peer_interested = true;
+        let mut peers = [peer];
+        let mut refs = to_choke_refs(&mut peers);
+        let mut choke = BtSeederStateChoke::with_slots(0);
+
+        choke.execute_choke(&mut refs[..]);
+
+        assert!(peers[0].am_choking);
+        assert!(!peers[0].opt_unchoking);
+    }
+
+    #[test]
     fn test_seeder_round_cycle() {
         let mut choke = BtSeederStateChoke::new();
         assert_eq!(choke.round(), 0);

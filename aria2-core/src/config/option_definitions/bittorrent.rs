@@ -48,6 +48,16 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-max-upload-slots".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::None,
+            min: Some(0),
+            max: Some(u32::MAX as u64),
+            description: "Maximum number of peers to unchoke (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "bt-max-open-files".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(100),

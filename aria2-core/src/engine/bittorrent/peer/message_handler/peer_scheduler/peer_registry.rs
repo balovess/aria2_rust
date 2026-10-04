@@ -107,6 +107,10 @@ impl PeerActorEntry {
         self.actor.control.clone()
     }
 
+    pub(crate) fn desired_upload_choked(&self) -> bool {
+        self.actor.control.desired_upload_choked()
+    }
+
     pub(crate) fn try_send(
         &self,
         command: PeerCommand,

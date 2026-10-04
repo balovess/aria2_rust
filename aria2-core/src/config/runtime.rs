@@ -193,6 +193,7 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-peers",
+    "bt-max-upload-slots",
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
@@ -380,9 +381,9 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
 /// Options accepted by `aria2.changeOption` for reserved or waiting
 /// downloads.
 ///
-/// The list mirrors `setChangeOptionForReserved(true)` in the original
-/// implementation. For an active download these options are queued as
-/// pending; for a reserved download they take effect immediately.
+/// Original aria2 reserved-task options plus supported Rust task extensions.
+/// For an active download these options are queued as pending; for a reserved
+/// download they take effect immediately.
 pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     // General
     "allow-overwrite",
@@ -479,6 +480,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-peers",
+    "bt-max-upload-slots",
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
@@ -636,9 +638,9 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 132);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 133);
         #[cfg(not(feature = "bittorrent"))]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 131);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 132);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate
@@ -650,6 +652,14 @@ mod tests {
         );
         assert_eq!(
             is_option_changeable("min-http-range-size", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("bt-max-upload-slots", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("bt-max-upload-slots", false),
             ChangeableKind::Immediate
         );
         assert_eq!(

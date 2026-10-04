@@ -308,6 +308,7 @@ impl OptionRegistry {
             | "seed-time"
             | "seed-ratio"
             | "bt-max-peers"
+            | "bt-max-upload-slots"
             | "bt-request-peer-speed-limit"
             | "bt-max-open-files"
             | "bt-seed-unverified"

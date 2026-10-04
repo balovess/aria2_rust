@@ -75,8 +75,13 @@ impl BtDownloadCommand {
         let config = BtSeedingConfig {
             max_upload_bytes_per_sec: upload_limit,
             global_limiter: self.global_limiter.clone(),
-            max_peers_to_unchoke: 4,
-            optimistic_unchoke_interval_secs: 30,
+            max_peers_to_unchoke: group_options
+                .bt_max_upload_slots
+                .unwrap_or(crate::constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32)
+                as usize,
+            optimistic_unchoke_interval_secs: group_options
+                .bt_optimistic_unchoke_interval
+                .unwrap_or(crate::constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
         };
 
         swarm.set_local_seeder(true);

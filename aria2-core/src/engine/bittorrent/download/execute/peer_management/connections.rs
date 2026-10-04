@@ -261,12 +261,17 @@ impl BtDownloadCommand {
         {
             let options = self.group.recover().options_arc();
             let config = ChokingConfig {
-                max_upload_slots: options.bt_max_upload_slots.unwrap_or(4) as usize,
+                max_upload_slots: options
+                    .bt_max_upload_slots
+                    .unwrap_or(crate::constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32)
+                    as usize,
                 optimistic_unchoke_interval_secs: options
                     .bt_optimistic_unchoke_interval
-                    .unwrap_or(30),
-                snubbed_timeout_secs: options.bt_snubbed_timeout.unwrap_or(60),
-                choke_rotation_interval_secs: 10,
+                    .unwrap_or(crate::constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
+                snubbed_timeout_secs: options
+                    .bt_snubbed_timeout
+                    .unwrap_or(crate::constants::BT_SNUBBED_TIMEOUT_SECS),
+                choke_rotation_interval_secs: crate::constants::BT_CHOKE_ROTATION_INTERVAL_SECS,
             };
 
             let mut algo = ChokingAlgorithm::new(config);

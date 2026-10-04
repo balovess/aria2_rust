@@ -379,6 +379,10 @@ impl PeerActorControl {
         true
     }
 
+    pub(crate) fn desired_upload_choked(&self) -> bool {
+        self.desired_state.borrow().choke_upload
+    }
+
     pub(crate) fn set_local_seeder(&self, local_seeder: bool) -> bool {
         if self.desired_state.receiver_count() == 0 {
             return false;

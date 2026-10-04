@@ -134,12 +134,17 @@ impl BtDownloadCommand {
         piece_length: u32,
         num_pieces: u32,
     ) {
-        let max_upload_bytes_per_sec = self.group.recover().options().max_upload_limit;
+        let options = self.group.recover().options_arc();
         let config = crate::engine::bittorrent::peer::upload_session::BtSeedingConfig {
-            max_upload_bytes_per_sec,
+            max_upload_bytes_per_sec: options.max_upload_limit,
             global_limiter: self.global_limiter.clone(),
-            max_peers_to_unchoke: 4,
-            optimistic_unchoke_interval_secs: 30,
+            max_peers_to_unchoke: options
+                .bt_max_upload_slots
+                .unwrap_or(crate::constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32)
+                as usize,
+            optimistic_unchoke_interval_secs: options
+                .bt_optimistic_unchoke_interval
+                .unwrap_or(crate::constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
         };
         connection.configure_upload_with_auto_unchoke(
             &config,

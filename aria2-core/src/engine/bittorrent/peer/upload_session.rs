@@ -37,8 +37,8 @@ impl Default for BtSeedingConfig {
         Self {
             max_upload_bytes_per_sec: None,
             global_limiter: None,
-            max_peers_to_unchoke: 4,
-            optimistic_unchoke_interval_secs: 30,
+            max_peers_to_unchoke: crate::constants::BT_DEFAULT_MAX_UPLOAD_SLOTS,
+            optimistic_unchoke_interval_secs: crate::constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS,
         }
     }
 }

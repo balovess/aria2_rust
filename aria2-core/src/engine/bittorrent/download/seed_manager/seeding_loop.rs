@@ -384,10 +384,22 @@ impl BtSeedManager {
     }
 
     pub(super) fn any_peer_choke_state_mismatch(&self) -> bool {
-        self.swarm
+        let desired_unchoked = self
+            .swarm
             .iter()
-            .map(|actor| &actor.stats)
-            .any(|stats| stats.peer_interested == stats.am_choking)
+            .filter(|actor| !actor.dead)
+            .filter(|actor| !actor.desired_upload_choked())
+            .count();
+        let has_uninterested_unchoked = self.swarm.iter().any(|actor| {
+            !actor.dead && !actor.stats.peer_interested && !actor.desired_upload_choked()
+        });
+        let has_interested_peer_waiting_for_a_slot = desired_unchoked
+            < self.config.max_peers_to_unchoke
+            && self.swarm.iter().any(|actor| {
+                !actor.dead && actor.stats.peer_interested && actor.desired_upload_choked()
+            });
+
+        has_uninterested_unchoked || has_interested_peer_waiting_for_a_slot
     }
 
     pub(super) fn apply_peer_event(&mut self, event: PeerEvent) {
@@ -579,7 +591,11 @@ impl BtSeedManager {
         let mut desired_stats = self
             .swarm
             .iter()
-            .map(|actor| actor.stats.clone())
+            .map(|actor| {
+                let mut stats = actor.stats.clone();
+                stats.am_choking = actor.desired_upload_choked();
+                stats
+            })
             .collect::<Vec<_>>();
         let mut peers_mut: Vec<&mut PeerStats> = desired_stats.iter_mut().collect();
         self.seeder_choke.execute_choke(&mut peers_mut[..]);
@@ -589,7 +605,7 @@ impl BtSeedManager {
             .map(|stats| stats.am_choking)
             .collect::<Vec<_>>();
         for (actor, desired) in self.swarm.iter().zip(desired_choking) {
-            if desired == actor.stats.am_choking {
+            if desired == actor.desired_upload_choked() {
                 continue;
             }
             if !self.swarm.set_upload_choked(actor.actor_id, desired) {
