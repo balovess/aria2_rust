@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use tracing::{debug, warn};
@@ -11,16 +12,12 @@ use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::AtomicProgress;
 
+pub(super) const DEFAULT_WEB_SEED_TIMEOUT_SECS: u64 = 60;
+
 #[derive(Debug)]
 pub(super) enum WebSeedError {
     HttpStatus(u16),
     Failure(String),
-}
-
-impl WebSeedError {
-    pub(super) fn is_not_found(&self) -> bool {
-        matches!(self, Self::HttpStatus(404))
-    }
 }
 
 impl fmt::Display for WebSeedError {
@@ -49,6 +46,8 @@ pub struct WebSeedClient {
     active_requests: Arc<std::sync::Mutex<HashSet<u32>>>,
     /// Statistics for this web seed
     stats: Arc<WebSeedStats>,
+    /// Inactivity timeout for response headers and each response-body read.
+    timeout: Duration,
 }
 
 impl WebSeedClient {
@@ -74,13 +73,15 @@ impl WebSeedClient {
         crate::http::client_pool::ensure_rustls_provider();
 
         // Build client with sensible defaults for large file downloads
-        let client = build_client(tls, None)?;
+        let timeout = Duration::from_secs(DEFAULT_WEB_SEED_TIMEOUT_SECS);
+        let client = build_client(tls, None, timeout)?;
 
         Ok(Self {
             base_url: base_url.to_string(),
             client,
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats: Arc::new(WebSeedStats::new()),
+            timeout,
         })
     }
 
@@ -97,13 +98,15 @@ impl WebSeedClient {
     ) -> Result<Self, String> {
         debug!(url = base_url, "Creating WebSeedClient with shared stats");
         crate::http::client_pool::ensure_rustls_provider();
-        let client = build_client(tls, None)?;
+        let timeout = Duration::from_secs(DEFAULT_WEB_SEED_TIMEOUT_SECS);
+        let client = build_client(tls, None, timeout)?;
 
         Ok(Self {
             base_url: base_url.to_string(),
             client,
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
+            timeout,
         })
     }
 
@@ -111,12 +114,14 @@ impl WebSeedClient {
         base_url: &str,
         stats: Arc<WebSeedStats>,
         client: reqwest::Client,
+        timeout: Duration,
     ) -> Self {
         Self {
             base_url: base_url.to_string(),
             client,
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
+            timeout,
         }
     }
 
@@ -215,6 +220,26 @@ impl WebSeedClient {
         length: u64,
         network_activity: Option<&AtomicProgress>,
     ) -> Result<Vec<u8>, WebSeedError> {
+        self.download_piece_result_with_response_status(
+            piece_index,
+            _piece_length,
+            piece_offset,
+            length,
+            network_activity,
+            |_| {},
+        )
+        .await
+    }
+
+    pub(super) async fn download_piece_result_with_response_status(
+        &self,
+        piece_index: u32,
+        _piece_length: u64,
+        piece_offset: u64,
+        length: u64,
+        network_activity: Option<&AtomicProgress>,
+        on_response_status: impl FnOnce(u16),
+    ) -> Result<Vec<u8>, WebSeedError> {
         let buffer_length = usize::try_from(length).map_err(|_| {
             WebSeedError::Failure(format!(
                 "requested WebSeed range is too large: {length} bytes"
@@ -222,18 +247,25 @@ impl WebSeedClient {
         })?;
         let mut data = vec![0; buffer_length];
         let received = self
-            .download_piece_into(piece_index, piece_offset, &mut data, network_activity)
+            .download_piece_into_with_response_status(
+                piece_index,
+                piece_offset,
+                &mut data,
+                network_activity,
+                on_response_status,
+            )
             .await?;
         data.truncate(received);
         Ok(data)
     }
 
-    pub(super) async fn download_piece_into(
+    pub(super) async fn download_piece_into_with_response_status(
         &self,
         piece_index: u32,
         piece_offset: u64,
         destination: &mut [u8],
         network_activity: Option<&AtomicProgress>,
+        on_response_status: impl FnOnce(u16),
     ) -> Result<usize, WebSeedError> {
         let length = destination.len() as u64;
         if length == 0 {
@@ -251,16 +283,25 @@ impl WebSeedClient {
             "Web-seed HTTP Range request"
         );
 
-        let response = self
-            .client
-            .get(&self.base_url)
-            .header("Range", &range_header)
-            .header("User-Agent", crate::constants::USER_AGENT)
-            .send()
-            .await
-            .map_err(|e| WebSeedError::Failure(format!("HTTP request failed: {}", e)))?;
+        let response = tokio::time::timeout(
+            self.timeout,
+            self.client
+                .get(&self.base_url)
+                .header("Range", &range_header)
+                .header("User-Agent", crate::constants::USER_AGENT)
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            WebSeedError::Failure(format!(
+                "Web-seed response headers timed out after {} seconds",
+                self.timeout.as_secs()
+            ))
+        })?
+        .map_err(|e| WebSeedError::Failure(format!("HTTP request failed: {}", e)))?;
 
         let status = response.status().as_u16();
+        on_response_status(status);
 
         // Accept 200 OK or 206 Partial Content
         if status != 200 && status != 206 {
@@ -269,7 +310,18 @@ impl WebSeedClient {
 
         let mut received = 0usize;
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let next_chunk = tokio::time::timeout(self.timeout, stream.next())
+                .await
+                .map_err(|_| {
+                    WebSeedError::Failure(format!(
+                        "Web-seed response body stalled for {} seconds",
+                        self.timeout.as_secs()
+                    ))
+                })?;
+            let Some(chunk) = next_chunk else {
+                break;
+            };
             let chunk = chunk.map_err(|e| {
                 WebSeedError::Failure(format!("Failed to read response body: {}", e))
             })?;
@@ -385,10 +437,11 @@ impl WebSeedClient {
 pub(crate) fn build_client(
     tls: &ClientTlsConfig,
     local_address: Option<std::net::IpAddr>,
+    connect_timeout: Duration,
 ) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
     let mut builder = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(connect_timeout)
         .pool_max_idle_per_host(4)
         .gzip(false);
     if let Some(address) = local_address {

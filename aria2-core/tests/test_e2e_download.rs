@@ -710,11 +710,7 @@ async fn test_e2e_sequential_http_pause_interrupts_stalled_body_read() {
     let command_task = tokio::spawn(async move { command.execute().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if tokio::fs::metadata(&output)
-                .await
-                .map(|metadata| metadata.len() > 0)
-                .unwrap_or(false)
-            {
+            if group.recover().completed_length() > 0 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

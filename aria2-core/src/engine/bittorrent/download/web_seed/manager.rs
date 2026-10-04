@@ -1,12 +1,14 @@
 //! Multi-seed endpoint manager with automatic fallback.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{debug, warn};
 
 use super::client::WebSeedClient;
 use super::stats::WebSeedStats;
+use super::uri_state::{UriProbeAdmission, WebSeedUriState};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
@@ -29,17 +31,13 @@ pub struct WebSeedManager {
     /// become visible without rebuilding the piece session.
     live_group: Option<Arc<std::sync::RwLock<RequestGroup>>>,
     tls: ClientTlsConfig,
+    request_timeout: Duration,
+    connect_timeout: Duration,
     network_policy: Option<Arc<OutboundNetworkPolicy>>,
     /// HTTP pools are shared by origin, not by file URL, so multi-file
     /// torrents do not allocate one connection pool per file.
     http_clients: tokio::sync::Mutex<HashMap<String, reqwest::Client>>,
-    unavailable: std::sync::Mutex<UnavailableWebSeeds>,
-}
-
-#[derive(Default)]
-struct UnavailableWebSeeds {
-    uri_generation: Option<u64>,
-    uris: HashSet<String>,
+    uri_state: WebSeedUriState,
 }
 
 impl WebSeedManager {
@@ -87,6 +85,8 @@ impl WebSeedManager {
         );
 
         let stats = Arc::new(WebSeedStats::new());
+        let request_timeout = Duration::from_secs(super::client::DEFAULT_WEB_SEED_TIMEOUT_SECS);
+        let connect_timeout = request_timeout;
 
         let clients = urls
             .into_iter()
@@ -100,9 +100,11 @@ impl WebSeedManager {
             total_length,
             live_group: None,
             tls: tls.clone(),
+            request_timeout,
+            connect_timeout,
             network_policy: None,
             http_clients: tokio::sync::Mutex::new(HashMap::new()),
-            unavailable: std::sync::Mutex::new(UnavailableWebSeeds::default()),
+            uri_state: WebSeedUriState::default(),
         })
     }
 
@@ -116,6 +118,22 @@ impl WebSeedManager {
         tls: ClientTlsConfig,
         policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
+        let (request_timeout, connect_timeout) = {
+            let group = group.recover();
+            let options = group.options();
+            (
+                Duration::from_secs(
+                    options
+                        .timeout
+                        .unwrap_or(super::client::DEFAULT_WEB_SEED_TIMEOUT_SECS),
+                ),
+                Duration::from_secs(
+                    options
+                        .connect_timeout
+                        .unwrap_or(super::client::DEFAULT_WEB_SEED_TIMEOUT_SECS),
+                ),
+            )
+        };
         Self {
             clients: Vec::new(),
             stats: Arc::new(WebSeedStats::new()),
@@ -123,9 +141,11 @@ impl WebSeedManager {
             total_length,
             live_group: Some(group),
             tls,
+            request_timeout,
+            connect_timeout,
             network_policy: Some(policy),
             http_clients: tokio::sync::Mutex::new(HashMap::new()),
-            unavailable: std::sync::Mutex::new(UnavailableWebSeeds::default()),
+            uri_state: WebSeedUriState::default(),
         }
     }
 
@@ -219,10 +239,7 @@ impl WebSeedManager {
         let mut last_error = String::new();
 
         for (i, client) in self.clients.iter().enumerate() {
-            if !client.is_available()
-                || !client.can_request(piece_index)
-                || self.is_uri_unavailable(client.url(), None)
-            {
+            if !client.is_available() || !client.can_request(piece_index) {
                 debug!(
                     index = i,
                     url = client.url(),
@@ -231,17 +248,34 @@ impl WebSeedManager {
                 continue;
             }
 
-            match client
-                .download_piece_result_with_activity(
+            let mut probe_guard = match self.uri_state.admit_request(client.url(), None).await {
+                UriProbeAdmission::Unavailable => continue,
+                UriProbeAdmission::Proceed => None,
+                UriProbeAdmission::Probe(guard) => Some(guard),
+            };
+
+            let result = client
+                .download_piece_result_with_response_status(
                     piece_index,
                     self.piece_length as u64,
                     piece_index as u64 * self.piece_length as u64,
                     piece_data_length,
                     network_activity,
+                    |status| {
+                        if status == 404 {
+                            self.uri_state.mark_unavailable(client.url(), None);
+                        } else if probe_guard.is_some() {
+                            self.uri_state.mark_probed(client.url(), None);
+                        }
+                        drop(probe_guard.take());
+                    },
                 )
-                .await
-            {
+                .await;
+            match result {
                 Ok(data) => {
+                    if probe_guard.is_some() {
+                        self.uri_state.mark_probed(client.url(), None);
+                    }
                     debug!(
                         piece_index,
                         seed_index = i,
@@ -252,8 +286,8 @@ impl WebSeedManager {
                     return Ok(data);
                 }
                 Err(e) => {
-                    if e.is_not_found() {
-                        self.mark_uri_unavailable(client.url(), None);
+                    if probe_guard.take().is_some() {
+                        self.uri_state.mark_probed(client.url(), None);
                     }
                     warn!(
                         piece_index,
@@ -301,7 +335,7 @@ impl WebSeedManager {
                 .collect::<Vec<_>>();
             (uri_generation, file_ranges)
         };
-        self.observe_uri_generation(uri_generation);
+        self.uri_state.observe_generation(uri_generation);
 
         if file_ranges.is_empty() {
             return Err(format!("Piece {piece_index} has no file-backed byte range"));
@@ -328,38 +362,61 @@ impl WebSeedManager {
                 .ok_or_else(|| "WebSeed file range exceeds piece buffer".to_string())?;
             let mut range_received = false;
             for uri in &uris {
-                if self.is_uri_unavailable(uri, Some(uri_generation)) {
-                    continue;
-                }
+                let mut probe_guard = match self
+                    .uri_state
+                    .admit_request(uri, Some(uri_generation))
+                    .await
+                {
+                    UriProbeAdmission::Unavailable => continue,
+                    UriProbeAdmission::Proceed => None,
+                    UriProbeAdmission::Probe(guard) => Some(guard),
+                };
                 let client = match self.live_client(uri).await {
                     Ok(client) => client,
                     Err(error) => {
+                        if probe_guard.is_some() {
+                            self.uri_state.mark_probed(uri, Some(uri_generation));
+                        }
                         last_error = Some(format!("{uri}: {error}"));
                         continue;
                     }
                 };
-                match client
-                    .download_piece_into(
+                let result = client
+                    .download_piece_into_with_response_status(
                         piece_index,
                         start - file_offset,
                         &mut piece[output_start..output_end],
                         network_activity,
+                        |status| {
+                            if status == 404 {
+                                self.uri_state.mark_unavailable(uri, Some(uri_generation));
+                            } else if probe_guard.is_some() {
+                                self.uri_state.mark_probed(uri, Some(uri_generation));
+                            }
+                            drop(probe_guard.take());
+                        },
                     )
-                    .await
-                {
+                    .await;
+                match result {
                     Ok(received) if received as u64 == length => {
+                        if probe_guard.is_some() {
+                            self.uri_state.mark_probed(uri, Some(uri_generation));
+                        }
                         range_received = true;
                         break;
                     }
                     Ok(received) => {
+                        if probe_guard.is_some() {
+                            self.uri_state.mark_probed(uri, Some(uri_generation));
+                        }
                         last_error = Some(format!(
                             "{uri}: expected {length} bytes, received {}",
                             received
                         ));
                     }
                     Err(error) => {
-                        if error.is_not_found() {
-                            self.mark_uri_unavailable(uri, Some(uri_generation));
+                        if probe_guard.take().is_some() {
+                            self.uri_state.mark_probed(uri, Some(uri_generation));
                         }
                         last_error = Some(format!("{uri}: {error}"));
                     }
@@ -406,7 +463,8 @@ impl WebSeedManager {
             if let Some(client) = clients.get(&origin) {
                 client.clone()
             } else {
-                let client = super::client::build_client(&self.tls, local_address)?;
+                let client =
+                    super::client::build_client(&self.tls, local_address, self.connect_timeout)?;
                 clients.insert(origin, client.clone());
                 client
             }
@@ -415,6 +473,7 @@ impl WebSeedManager {
             uri,
             Arc::clone(&self.stats),
             client,
+            self.request_timeout,
         ))
     }
 
@@ -448,7 +507,7 @@ impl WebSeedManager {
         let mut last_error = String::new();
 
         for (i, client) in self.clients.iter().enumerate() {
-            if !client.is_available() || self.is_uri_unavailable(client.url(), None) {
+            if !client.is_available() {
                 debug!(
                     index = i,
                     url = client.url(),
@@ -457,17 +516,34 @@ impl WebSeedManager {
                 continue;
             }
 
-            match client
-                .download_piece_result_with_activity(
+            let mut probe_guard = match self.uri_state.admit_request(client.url(), None).await {
+                UriProbeAdmission::Unavailable => continue,
+                UriProbeAdmission::Proceed => None,
+                UriProbeAdmission::Probe(guard) => Some(guard),
+            };
+
+            let result = client
+                .download_piece_result_with_response_status(
                     piece_index,
                     piece_length,
                     piece_offset,
                     length,
                     None,
+                    |status| {
+                        if status == 404 {
+                            self.uri_state.mark_unavailable(client.url(), None);
+                        } else if probe_guard.is_some() {
+                            self.uri_state.mark_probed(client.url(), None);
+                        }
+                        drop(probe_guard.take());
+                    },
                 )
-                .await
-            {
+                .await;
+            match result {
                 Ok(data) => {
+                    if probe_guard.is_some() {
+                        self.uri_state.mark_probed(client.url(), None);
+                    }
                     debug!(
                         piece_index,
                         seed_index = i,
@@ -478,8 +554,8 @@ impl WebSeedManager {
                     return Ok(data);
                 }
                 Err(e) => {
-                    if e.is_not_found() {
-                        self.mark_uri_unavailable(client.url(), None);
+                    if probe_guard.take().is_some() {
+                        self.uri_state.mark_probed(client.url(), None);
                     }
                     warn!(
                         piece_index,
@@ -520,41 +596,5 @@ impl WebSeedManager {
     /// Get reference to the underlying web-seed clients.
     pub fn clients(&self) -> &[WebSeedClient] {
         &self.clients
-    }
-
-    fn observe_uri_generation(&self, generation: u64) {
-        let mut unavailable = self
-            .unavailable
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if unavailable
-            .uri_generation
-            .is_none_or(|observed| generation > observed)
-        {
-            unavailable.uris.clear();
-            unavailable.uri_generation = Some(generation);
-        }
-    }
-
-    fn is_uri_unavailable(&self, uri: &str, generation: Option<u64>) -> bool {
-        let unavailable = self
-            .unavailable
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unavailable.uri_generation == generation && unavailable.uris.contains(uri)
-    }
-
-    fn mark_uri_unavailable(&self, uri: &str, generation: Option<u64>) {
-        let mut unavailable = self
-            .unavailable
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if unavailable.uri_generation == generation {
-            unavailable.uris.insert(uri.to_string());
-            warn!(
-                url = uri,
-                "Web-seed returned HTTP 404; skipping it until URI configuration changes"
-            );
-        }
     }
 }

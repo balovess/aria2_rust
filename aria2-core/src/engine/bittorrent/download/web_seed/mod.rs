@@ -14,8 +14,11 @@
 mod client;
 mod manager;
 mod stats;
+mod uri_state;
 mod url_parser;
 
+#[cfg(test)]
+mod concurrency_tests;
 #[cfg(test)]
 mod tests;
 

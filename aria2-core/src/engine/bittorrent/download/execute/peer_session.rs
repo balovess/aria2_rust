@@ -14,8 +14,8 @@ use super::types::DiscoveredPeer;
 
 /// Torrent-scoped swarm state retained from peer discovery through seeding.
 pub(super) struct TorrentSession {
-    /// Discovered endpoints not yet connected; socket ownership starts in the
-    /// actor-ready piece-session setup after its upload provider is available.
+    /// Discovered endpoints, not live connections. Once dialed, a connection
+    /// moves into this torrent's `PeerSwarm` when its actor context is ready.
     pub(super) initial_peers: Vec<DiscoveredPeer>,
     pub(super) network_info_hash: [u8; 20],
     /// Registry handed directly from download-session lifetime into seeding.

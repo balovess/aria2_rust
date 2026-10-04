@@ -65,6 +65,43 @@ async fn paused_task_failure_keeps_group_paused() {
 }
 
 #[tokio::test]
+async fn duplicate_info_hash_keeps_aria2_result_code_and_message() {
+    let ctx = test_ctx(false);
+    let gid = ctx
+        .group_man
+        .add_group(
+            vec!["http://example.com/duplicate-info-hash.torrent".to_string()],
+            DownloadOptions::default(),
+        )
+        .unwrap();
+    let group = ctx.group_man.find_group(gid).unwrap();
+    ctx.group_man.fill_from_reserver();
+    group.recover().inc_commands();
+
+    let message = "InfoHash 0123456789abcdef0123456789abcdef01234567 is already registered.";
+    group
+        .recover()
+        .set_last_error(DownloadResultCode::DuplicateInfoHash, message);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    tx.send((
+        gid,
+        1,
+        TaskResult::Failed(Aria2Error::DownloadFailed(message.to_string())),
+    ))
+    .unwrap();
+
+    process_task_completions(&ctx, &mut rx, &mut Vec::new(), &mut HashSet::new()).await;
+
+    let group = group.recover();
+    assert!(matches!(group.status(), DownloadStatus::Error(_)));
+    assert_eq!(
+        group.get_last_error_code(),
+        DownloadResultCode::DuplicateInfoHash
+    );
+    assert_eq!(group.get_last_error_message(), message);
+}
+
+#[tokio::test]
 async fn paused_task_success_keeps_group_paused() {
     let ctx = test_ctx(false);
     let gid = {

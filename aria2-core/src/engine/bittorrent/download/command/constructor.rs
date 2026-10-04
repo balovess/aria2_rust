@@ -772,6 +772,7 @@ impl BtDownloadCommand {
 
             // Download path lock (J6)
             download_path_lock,
+            output_path_reservation: None,
 
             // Seeding mode
 

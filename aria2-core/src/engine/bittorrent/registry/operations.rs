@@ -127,6 +127,52 @@ impl BtRegistry {
         }
     }
 
+    /// Register an active torrent without allowing another GID to claim its
+    /// info-hash. Generic `put` intentionally keeps its replacement semantics;
+    /// task activation uses this atomic check-and-insert boundary instead.
+    pub(crate) fn put_unless_info_hash_registered(
+        &mut self,
+        gid: u64,
+        obj: BtObject,
+    ) -> Result<(), String> {
+        if let Some(info_hash) = obj
+            .download_context
+            .as_ref()
+            .and_then(|context| context.get_bt_info_hash_hex())
+            && let Some(owner_gid) = self.info_hash_owner(&info_hash)
+            && owner_gid != gid
+        {
+            return Err(info_hash);
+        }
+
+        self.put(gid, obj);
+        Ok(())
+    }
+
+    fn info_hash_owner(&self, info_hash: &str) -> Option<u64> {
+        if let Some(&gid) = self.info_hash_index.get(info_hash)
+            && self
+                .pool
+                .get(&gid)
+                .and_then(|object| object.download_context.as_ref())
+                .and_then(|context| context.get_bt_info_hash_hex())
+                .as_deref()
+                == Some(info_hash)
+        {
+            return Some(gid);
+        }
+
+        self.pool.iter().find_map(|(&gid, object)| {
+            (object
+                .download_context
+                .as_ref()
+                .and_then(|context| context.get_bt_info_hash_hex())
+                .as_deref()
+                == Some(info_hash))
+            .then_some(gid)
+        })
+    }
+
     /// Get a reference to the `BtObject` for the given GID.
     ///
     /// Equivalent to C++ `BtRegistry::get(a2_gid_t)`.

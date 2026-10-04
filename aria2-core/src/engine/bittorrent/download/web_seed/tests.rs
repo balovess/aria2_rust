@@ -42,12 +42,14 @@ async fn web_seed_hostname_uses_a_compatible_policy_source() {
         .source_for_host("localhost", address.port())
         .await
         .expect("web-seed policy should select the IPv4 source for localhost");
-    let http_client = super::client::build_client(&tls, local_address)
+    let timeout = std::time::Duration::from_secs(60);
+    let http_client = super::client::build_client(&tls, local_address, timeout)
         .expect("web-seed HTTP client should build");
     let client = WebSeedClient::with_shared_http_client(
         &format!("http://localhost:{}/file.bin", address.port()),
         stats,
         http_client,
+        timeout,
     );
 
     assert_eq!(client.download_piece(0, 2, 0, 2).await.unwrap(), b"ok");

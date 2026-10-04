@@ -7,8 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, Result};
@@ -47,13 +46,30 @@ impl Default for OutputPathPolicy {
     }
 }
 
-/// Process-wide registry of output paths that are currently being written by active downloads.
+/// Process-wide registry of output paths claimed by active downloads.
 ///
-/// All download command types (`DownloadCommand`, `MetalinkDownloadCommand`)
-/// consult this registry **before** opening their disk writer,
-/// so that concurrent downloads targeting the same filename receive distinct paths.
+/// HTTP and Metalink resolve collisions to a distinct filename. BitTorrent
+/// reserves its complete file set and rejects an overlap, matching aria2's
+/// duplicate-download contract. All paths share the same set so the policies
+/// remain effective across protocols.
 pub struct ActiveOutputRegistry {
-    inner: Arc<RwLock<HashSet<PathBuf>>>,
+    inner: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+/// Exact output paths owned by one BitTorrent command. Dropping the command
+/// releases the complete reservation, including on failed or cancelled runs.
+#[cfg(feature = "bittorrent")]
+#[must_use = "dropping the reservation releases its output paths"]
+pub(crate) struct OutputPathReservation {
+    inner: Arc<Mutex<HashSet<PathBuf>>>,
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(feature = "bittorrent")]
+impl Drop for OutputPathReservation {
+    fn drop(&mut self) {
+        release_paths(&self.inner, &self.paths);
+    }
 }
 
 impl Default for ActiveOutputRegistry {
@@ -66,8 +82,40 @@ impl ActiveOutputRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(HashSet::new())),
+            inner: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    fn lock_paths(&self) -> MutexGuard<'_, HashSet<PathBuf>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Atomically reserve a set of exact paths for a long-lived command.
+    ///
+    /// Unlike `resolve_with_policy`, this does not rename colliding paths or
+    /// reject paths merely because a file already exists on disk.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn reserve_exact_paths(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> std::result::Result<OutputPathReservation, PathBuf> {
+        let paths = paths
+            .into_iter()
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect::<Vec<_>>();
+
+        let mut registry = self.lock_paths();
+        if let Some(conflict) = paths.iter().find(|path| registry.contains(*path)) {
+            return Err(conflict.clone());
+        }
+        registry.extend(paths.iter().cloned());
+
+        Ok(OutputPathReservation {
+            inner: Arc::clone(&self.inner),
+            paths,
+        })
     }
 
     /// Resolve the final output path for a download, registering it to prevent collisions.
@@ -81,7 +129,7 @@ impl ActiveOutputRegistry {
     /// The resolved `PathBuf` that the caller should use for all subsequent disk I/O.
     /// The caller **must** call [`Self::release`] when the download finishes (success or failure).
     pub async fn resolve(&self, desired: &Path) -> PathBuf {
-        let mut registry = self.inner.write().await;
+        let mut registry = self.lock_paths();
 
         if !registry.contains(desired) {
             registry.insert(desired.to_path_buf());
@@ -141,7 +189,7 @@ impl ActiveOutputRegistry {
         desired: &Path,
         policy: OutputPathPolicy,
     ) -> Result<PathBuf> {
-        let mut registry = self.inner.write().await;
+        let mut registry = self.lock_paths();
         let desired_claimed = registry.contains(desired);
         let desired_exists = desired.exists();
         let desired_has_control = ControlFile::control_path_for(desired).exists();
@@ -194,7 +242,7 @@ impl ActiveOutputRegistry {
     /// Must be called when a download completes (success or failure) so that the path
     /// becomes available for future downloads if needed.
     pub async fn release(&self, path: &Path) {
-        let mut registry = self.inner.write().await;
+        let mut registry = self.lock_paths();
         if registry.remove(path) {
             debug!("Output path released: {}", path.display());
         }
@@ -202,12 +250,22 @@ impl ActiveOutputRegistry {
 
     /// Return the number of paths currently registered (for diagnostics / testing).
     pub async fn len(&self) -> usize {
-        self.inner.read().await.len()
+        self.lock_paths().len()
     }
 
     /// Check whether the registry is empty.
     pub async fn is_empty(&self) -> bool {
-        self.inner.read().await.is_empty()
+        self.lock_paths().is_empty()
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+fn release_paths(inner: &Mutex<HashSet<PathBuf>>, paths: &[PathBuf]) {
+    let mut registry = inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for path in paths {
+        registry.remove(path);
     }
 }
 

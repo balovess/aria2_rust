@@ -198,6 +198,10 @@ pub struct BtDownloadCommand {
     #[allow(dead_code)]
     pub(crate) download_path_lock: Option<crate::filesystem::file_lock::DownloadPathLock>,
 
+    /// Exact output paths reserved through the download and seeding lifecycle.
+    pub(crate) output_path_reservation:
+        Option<crate::engine::active_output_registry::OutputPathReservation>,
+
     // BEP 0027 (Private Torrent): when true, DHT/PEX/LPD and public tracker
     // announcement are disabled to enforce the privacy guarantees of the
     // torrent private flag.
@@ -226,9 +230,9 @@ pub struct BtDownloadCommand {
     /// Shared rejection state for verified bad piece sources.
     pub(crate) peer_rejection: crate::engine::bittorrent::peer::storage::SharedPeerRejection,
 
-    /// Session-scoped peer identity pool shared by discovery and connection
-    /// scheduling. Socket ownership remains in the download loop until the
-    /// lifecycle adapter is wired in.
+    /// Session-scoped peer pool shared by discovery and connection scheduling.
+    /// Once admitted, established transports move into `PeerSwarm` and their
+    /// `PeerActor` owns all runtime socket I/O.
     pub(crate) peer_storage: std::sync::Arc<
         std::sync::Mutex<crate::engine::bittorrent::peer::storage::DefaultPeerStorage>,
     >,

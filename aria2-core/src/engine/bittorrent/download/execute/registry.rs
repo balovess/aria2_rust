@@ -7,9 +7,48 @@ use crate::engine::bittorrent::download::command::BtDownloadCommand;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
-    pub(super) fn register_bt_download(&mut self) {
+    pub(super) fn reserve_output_paths(&mut self) -> crate::error::Result<()> {
+        let paths = {
+            let group = self.group.recover();
+            if group.options().uses_memory_download() {
+                return Ok(());
+            }
+
+            group
+                .get_download_context()
+                .map(|context| {
+                    context
+                        .get_file_entries()
+                        .iter()
+                        .map(|entry| std::path::PathBuf::from(entry.path()))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|paths| !paths.is_empty())
+                .unwrap_or_else(|| vec![self.output_path.clone()])
+        };
+
+        match crate::engine::active_output_registry::global_registry().reserve_exact_paths(paths) {
+            Ok(reservation) => {
+                self.output_path_reservation = Some(reservation);
+                Ok(())
+            }
+            Err(_) => {
+                let message = format!(
+                    "File {} is being downloaded by other command.",
+                    self.output_path.display()
+                );
+                self.group.recover().set_last_error(
+                    crate::request::request_group::DownloadResultCode::DuplicateDownload,
+                    message.clone(),
+                );
+                Err(crate::error::Aria2Error::DownloadFailed(message))
+            }
+        }
+    }
+
+    pub(super) fn register_bt_download(&mut self) -> std::result::Result<(), String> {
         let Some(registry) = self.bt_registry.as_ref() else {
-            return;
+            return Ok(());
         };
 
         let (gid, download_context, dht_external_ip) = {
@@ -66,14 +105,17 @@ impl BtDownloadCommand {
             }))
             .peer_rejection(self.peer_rejection.clone())
             .build();
-        if let Ok(mut reg) = registry.write() {
-            reg.put(gid, bt_object);
-            reg.set_dht_external_ip(gid, dht_external_ip);
-            info!(
-                gid,
-                "Registered BT download into BtRegistry with BtAnnounce"
-            );
-        }
+        let mut reg = registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.put_unless_info_hash_registered(gid, bt_object)
+            .map_err(|info_hash| format!("InfoHash {info_hash} is already registered."))?;
+        reg.set_dht_external_ip(gid, dht_external_ip);
+        info!(
+            gid,
+            "Registered BT download into BtRegistry with BtAnnounce"
+        );
+        Ok(())
     }
 }
 
@@ -81,6 +123,7 @@ impl BtDownloadCommand {
 mod tests {
     use super::*;
     use crate::engine::bittorrent::download::command_tests::build_test_torrent;
+    use crate::engine::command::Command;
     use crate::request::request_group::{DownloadOptions, GroupId};
 
     #[test]
@@ -93,7 +136,9 @@ mod tests {
             crate::engine::bittorrent::registry::BtRegistry::new(),
         ));
         command.set_bt_registry(Arc::clone(&registry));
-        command.register_bt_download();
+        command
+            .register_bt_download()
+            .expect("unique BT task should register");
 
         let registry = registry.read().expect("BT registry should be readable");
         let object = registry.get(777).expect("BT task should be registered");
@@ -109,5 +154,54 @@ mod tests {
             snapshot.tracker_tiers[0][0],
             "http://tracker.example.com/announce"
         );
+    }
+
+    #[tokio::test]
+    async fn duplicate_info_hash_registration_preserves_the_first_task() {
+        let torrent = build_test_torrent();
+        let options = DownloadOptions::default();
+        let registry = Arc::new(std::sync::RwLock::new(
+            crate::engine::bittorrent::registry::BtRegistry::new(),
+        ));
+
+        let mut first = BtDownloadCommand::new(GroupId::new(777), &torrent, &options, None)
+            .expect("test torrent should construct");
+        first.set_bt_registry(Arc::clone(&registry));
+        first
+            .register_bt_download()
+            .expect("first task with this info-hash should register");
+        let info_hash = first
+            .group()
+            .get_download_context()
+            .and_then(|context| context.get_bt_info_hash_hex())
+            .expect("test torrent should have an info-hash");
+
+        let mut second = BtDownloadCommand::new(GroupId::new(778), &torrent, &options, None)
+            .expect("same test torrent should construct for another GID");
+        second.set_bt_registry(Arc::clone(&registry));
+
+        let message = format!("InfoHash {info_hash} is already registered.");
+        assert_eq!(
+            second.execute().await.unwrap_err(),
+            crate::error::Aria2Error::DownloadFailed(message.clone())
+        );
+        let failed_group = second.group();
+        assert_eq!(
+            failed_group.get_last_error_code(),
+            crate::request::request_group::DownloadResultCode::DuplicateInfoHash
+        );
+        assert_eq!(failed_group.get_last_error_message(), message);
+        drop(failed_group);
+
+        let registry = registry.read().expect("BT registry should be readable");
+        assert!(
+            registry.get(777).is_some(),
+            "the first task must remain registered"
+        );
+        assert!(
+            registry.get(778).is_none(),
+            "the duplicate task must not be inserted"
+        );
+        assert_eq!(registry.info_hash_index.get(&info_hash), Some(&777));
     }
 }

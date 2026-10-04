@@ -40,7 +40,14 @@ impl Command for BtDownloadCommand {
             self.started_at = Some(Instant::now());
         }
 
-        self.register_bt_download();
+        if let Err(message) = self.register_bt_download() {
+            self.group.recover().set_last_error(
+                crate::request::request_group::DownloadResultCode::DuplicateInfoHash,
+                message.clone(),
+            );
+            return Err(Aria2Error::DownloadFailed(message));
+        }
+        self.reserve_output_paths()?;
 
         let (mut meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
         let network_info_hash = meta.network_info_hash();

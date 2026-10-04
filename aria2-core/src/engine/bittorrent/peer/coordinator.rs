@@ -6,7 +6,7 @@ use std::collections::HashSet;
 /// This owns the policy part of the C++ `ActivePeerConnectionCommand`:
 /// connection admission is derived from the live count, the configured peer
 /// limit, and the set of already active/candidate endpoints. Socket I/O and
-/// peer lifecycle ownership remain with the download command.
+/// admitted-peer lifecycle belong to `PeerActor` and `PeerSwarm` respectively.
 #[derive(Debug)]
 pub(crate) struct BtPeerCoordinator {
     max_peers: usize,
