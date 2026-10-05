@@ -5,6 +5,10 @@ on:
     branches: [master]
   workflow_dispatch:
     inputs:
+      release_artifact_run_id:
+        description: Create the release using artifacts from a completed Release run without rebuilding
+        required: false
+        type: string
       retry_package_managers:
         description: Recheck Homebrew and Scoop for an existing release
         required: false
@@ -33,15 +37,20 @@ jobs:
     name: Prepare binary release
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
+      (github.event_name == 'workflow_dispatch' &&
+        (github.ref == 'refs/heads/master' || inputs.release_artifact_run_id != ''))
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
       retry_package_managers: ${{ steps.release.outputs.retry_package_managers }}
       package_manager_matrix: ${{ steps.release.outputs.package_manager_matrix }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ github.sha }}
+      sha: ${{ steps.release.outputs.sha }}
+      release_artifact_run_id: ${{ steps.release.outputs.release_artifact_run_id }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -49,6 +58,9 @@ jobs:
           fetch-depth: 0
       - id: release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ARTIFACT_RUN_ID: ${{ inputs.release_artifact_run_id || '' }}
         run: |
           set -euo pipefail
           bash scripts/sync-version.sh
@@ -72,6 +84,70 @@ jobs:
            esac
            echo "package_manager_matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
+          SOURCE_SHA="$GITHUB_SHA"
+          if [[ -n "$RELEASE_ARTIFACT_RUN_ID" ]]; then
+            if [[ ! "$RELEASE_ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "release_artifact_run_id must be a numeric workflow run ID" >&2
+              exit 1
+            fi
+
+            RUN_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_ARTIFACT_RUN_ID")
+            if ! jq -e '
+              .head_branch == "master" and
+              .event == "push" and
+              .status == "completed" and
+              .conclusion == "failure" and
+              .path == ".github/workflows/release.yml" and
+              (.head_sha | test("^[0-9a-f]{40}$"))
+            ' <<< "$RUN_JSON" >/dev/null; then
+              echo "The source must be a completed Release workflow run on master." >&2
+              exit 1
+            fi
+
+            SOURCE_SHA=$(jq -r '.head_sha' <<< "$RUN_JSON")
+            SOURCE_VERSION=$(git show "$SOURCE_SHA:aria2/Cargo.toml" | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -n 1)
+            if [[ "$SOURCE_VERSION" != "$VERSION" ]]; then
+              echo "Source artifact version $SOURCE_VERSION does not match release version $VERSION." >&2
+              exit 1
+            fi
+
+            JOBS_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_ARTIFACT_RUN_ID/jobs")
+            if ! jq -e '
+              [.jobs[] | select(.name == "Prepare binary release")] as $prepare |
+              [.jobs[] | select(.conclusion == "failure")] as $failures |
+              [.jobs[] | select(.name | startswith("Build ("))] as $builds |
+              [.jobs[] | select(
+                .name == "Publish Docker image" or
+                .name == "Publish Node.js SDK" or
+                .name == "Publish Python SDK" or
+                .name == "Publish crates.io packages"
+              )] as $publishers |
+              ($prepare | length) == 1 and all($prepare[]; .conclusion == "success") and
+              ($failures | length) == 1 and $failures[0].name == "Create GitHub Release" and
+              ($builds | length) == 5 and all($builds[]; .conclusion == "success") and
+              ($publishers | length) == 4 and all($publishers[]; .conclusion == "success")
+            ' <<< "$JOBS_JSON" >/dev/null; then
+              echo "The source run must have all five builds and all package publishers successful." >&2
+              exit 1
+            fi
+
+            ARTIFACTS_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_ARTIFACT_RUN_ID/artifacts")
+            EXPECTED_ARTIFACTS='["aria2-x86_64-linux","aria2-aarch64-linux","aria2-x86_64-windows","aria2-aarch64-macos","aria2-x86_64-macos"]'
+            if ! jq -e --argjson expected "$EXPECTED_ARTIFACTS" '
+              [.artifacts[] | select(.name | startswith("aria2-"))] as $matches |
+              ([$matches[].name] | sort) == ($expected | sort) and
+              all($matches[]; .expired == false)
+            ' <<< "$ARTIFACTS_JSON" >/dev/null; then
+              echo "The source run must have all five unexpired platform artifacts." >&2
+              exit 1
+            fi
+
+            echo "Validated reusable artifacts from run $RELEASE_ARTIFACT_RUN_ID at $SOURCE_SHA."
+          fi
+
+          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "release_artifact_run_id=$RELEASE_ARTIFACT_RUN_ID" >> "$GITHUB_OUTPUT"
+
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             echo "$TAG already exists; no release is needed."
@@ -82,7 +158,9 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: prepare
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -222,7 +300,9 @@ jobs:
   publish-crates:
     name: Publish crates.io packages
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -319,7 +399,9 @@ jobs:
   publish-python:
     name: Publish Python SDK
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -401,7 +483,9 @@ jobs:
   publish-nodejs:
     name: Publish Node.js SDK
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -515,10 +599,23 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    # All published artifacts must succeed before the release is created.
+    # Reused artifacts are validated in prepare; new artifacts require all publishers.
     needs: [prepare, build, publish-crates, publish-python, publish-nodejs]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      always() && needs.prepare.outputs.should_release == 'true' &&
+      (
+        needs.prepare.outputs.release_artifact_run_id != '' ||
+        (
+          needs.build.result == 'success' &&
+          needs.publish-crates.result == 'success' &&
+          needs.publish-python.result == 'success' &&
+          needs.publish-nodejs.result == 'success'
+        )
+      )
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -542,7 +639,11 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v5
         with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.prepare.outputs.release_artifact_run_id || github.run_id }}
           path: artifacts
+          pattern: aria2-*
       - name: Generate release download table
         shell: bash
         env:
