@@ -22,6 +22,7 @@ mod tests;
 pub use file_backed_provider::FileBackedPieceProvider;
 pub(crate) use file_backed_provider::read_piece_range_from_files;
 pub(crate) use multi_file_writer::write_piece_block_to_multi_files;
+pub(crate) use multi_file_writer::write_piece_to_multi_files_coalesced_with_limit_tracked;
 pub use multi_file_writer::{
     write_piece_to_multi_files, write_piece_to_multi_files_coalesced,
     write_piece_to_multi_files_coalesced_with_limit,

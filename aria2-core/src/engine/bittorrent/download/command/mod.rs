@@ -2,6 +2,7 @@ mod choke_api;
 mod constructor;
 mod integration_api;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -254,6 +255,8 @@ pub struct BtDownloadCommand {
     pub(crate) checkpoint_bytes_since_save: u64,
     /// Time at which the last durable torrent checkpoint completed.
     pub(crate) checkpoint_last_save: Instant,
+    /// Multi-file payloads modified since the last durable checkpoint.
+    pub(crate) dirty_multi_file_indices: HashSet<usize>,
 }
 
 impl BtDownloadCommand {

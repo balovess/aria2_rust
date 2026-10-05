@@ -201,9 +201,14 @@ impl PieceDownloadSession<'_> {
                 continue;
             };
             if halt_requested {
-                self.writer.flush().await.map_err(|error| {
-                    Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
-                })?;
+                self.command
+                    .sync_checkpoint_payload(&mut self.writer)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::FileIo(format!(
+                            "Failed to sync halted BT output before checkpoint: {error}"
+                        ))
+                    })?;
                 self.writer.close().await.map_err(|error| {
                     Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                 })?;
@@ -669,6 +674,14 @@ impl PieceDownloadSession<'_> {
             }
         }
         tracing::info!("[BT] Finalizing writer...");
+        self.command
+            .sync_dirty_multi_file_payload()
+            .await
+            .map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to sync remaining BitTorrent files before completion: {error}"
+                ))
+            })?;
         self.writer
             .flush()
             .await

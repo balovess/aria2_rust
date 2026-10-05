@@ -36,7 +36,7 @@ impl fmt::Display for WebSeedError {
 /// Uses HTTP Range requests (`Range: bytes={start}-{end}`) to fetch specific
 /// byte ranges corresponding to torrent pieces.
 pub struct WebSeedClient {
-    /// Base URL of the web-seed (e.g., "http://example.com/files/")
+    /// Base URL of the web-seed (e.g., `<http://example.com/files/>`).
     base_url: String,
     /// Reusable reqwest HTTP client with connection pooling
     client: reqwest::Client,

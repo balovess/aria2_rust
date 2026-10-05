@@ -296,10 +296,21 @@ impl SeekableDiskWriter for PositionedDiskWriter {
             // is visible to other readers and safe from process crashes.
             // sync_all is deferred to `close()`.
             //
-            // If callers need explicit durability (e.g., session save),
-            // they should call `close()` instead of `flush()`.
+            // Call `sync_data()` when durability is needed without releasing
+            // the writer; `close()` retains its stronger sync-all behavior.
         }
         Ok(())
+    }
+
+    async fn sync_data(&mut self) -> Result<()> {
+        self.ensure_open().await?;
+        let file = self.file_handle()?;
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || file.sync_data().map_err(Aria2Error::from),
+                "positioned sync data",
+            )
+            .await
     }
 
     async fn len(&self) -> Result<u64> {

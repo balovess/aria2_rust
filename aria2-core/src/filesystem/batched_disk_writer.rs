@@ -222,6 +222,15 @@ impl SeekableDiskWriter for BatchedDiskWriter {
         Ok(())
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        self.flush().await?;
+        self.ensure_open().await?;
+        let writer = self.file.as_mut().ok_or_else(|| {
+            Aria2Error::Io("file not open after ensure_open — invariant violated".into())
+        })?;
+        writer.sync_data().await
+    }
+
     async fn len(&self) -> Result<u64> {
         match self.file.as_ref() {
             Some(writer) => writer.len().await,
@@ -355,6 +364,21 @@ mod tests {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_sync_data_flushes_buffer_before_durable_barrier() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sync.bin");
+        let mut writer = BatchedDiskWriter::new(&path).with_threshold(1024 * 1024);
+
+        writer.write_at(0, b"durable batch").await.unwrap();
+        assert_eq!(writer.buffered_count(), 1);
+
+        writer.sync_data().await.unwrap();
+
+        assert_eq!(writer.buffered_count(), 0);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"durable batch");
     }
 
     #[tokio::test]

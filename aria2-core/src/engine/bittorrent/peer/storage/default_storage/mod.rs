@@ -12,9 +12,9 @@
 //!
 //! | C++ aria2 | Rust | Rationale |
 //! |---|---|---|
-//! | set<pair<string, uint16_t>> | HashSet<(String, u16)> | Same dedup by (ip, port) |
-//! | deque<shared_ptr<Peer>> | VecDeque<PeerEntry> | Same FIFO ordering |
-//! | PeerSet (sorted by ptr) | HashSet<PeerEntry> | Identity by (ip, port) suffices |
+//! | `set<pair<string, uint16_t>>` | `HashSet<(String, u16)>` | Same dedup by (ip, port) |
+//! | `deque<shared_ptr<Peer>>` | `VecDeque<PeerEntry>` | Same FIFO ordering |
+//! | PeerSet (sorted by ptr) | `HashSet<PeerEntry>` | Identity by (ip, port) suffices |
 //! | map<string, Timer> | HashMap<String, Instant> | Same ip -> timeout mapping |
 
 mod peer_ops;
@@ -70,7 +70,7 @@ pub struct DefaultPeerStorage {
 
     /// IP range-based blocklist for rejecting peers by address.
     ///
-    /// In C++ aria2, this is shared_ptr<BtPeerBlocklist> peerBlocklist_,
+    /// In C++ aria2, this is `shared_ptr<BtPeerBlocklist>` peerBlocklist_,
     /// always non-null (constructed with make_shared). Here we use
     /// Option<Arc<>> to allow construction without a blocklist and to
     /// support shared ownership with BtRegistry.

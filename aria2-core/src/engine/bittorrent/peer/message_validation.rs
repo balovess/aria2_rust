@@ -275,7 +275,7 @@ impl BtMessageValidator {
 
     /// Validate a Piece message's data block.
     ///
-    /// The same checks as [`validate_range`] but using the actual data length
+    /// The same checks as [`Self::validate_range`] but using the actual data length
     /// (which may differ from the requested length for the final block of a
     /// piece).
     pub fn validate_piece(

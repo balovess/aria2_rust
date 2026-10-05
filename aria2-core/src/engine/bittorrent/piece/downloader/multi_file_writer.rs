@@ -152,7 +152,7 @@ pub async fn write_piece_to_multi_files(
 /// 2. **Sort** – order entries by `(file_idx, file_offset)` so that
 ///    adjacent regions are neighbours.
 /// 3. **Coalesce** – merge consecutive writes to the **same file** whose
-///    start offset is within [`COALESCE_GAP`] bytes of the previous write's
+///    start offset is within `COALESCE_GAP` bytes of the previous write's
 ///    end.  Any gap is zero-filled (sparse region).
 /// 4. **Execute** – open each unique file **once**, seek + write_all per
 ///    coalesced entry, then flush.
@@ -202,6 +202,27 @@ pub async fn write_piece_to_multi_files_coalesced_with_limit(
         max_open_files,
     )
     .await
+    .map(|_| ())
+}
+
+/// Same write path as [`write_piece_to_multi_files_coalesced_with_limit`],
+/// returning the torrent file indices that were actually modified so the BT
+/// checkpoint owner can sync only dirty payload files.
+pub(crate) async fn write_piece_to_multi_files_coalesced_with_limit_tracked(
+    layout: &MultiFileLayout,
+    piece_idx: u32,
+    piece_data: &bytes::Bytes,
+    _piece_length: u32,
+    max_open_files: usize,
+) -> Result<Vec<usize>> {
+    write_piece_range_to_multi_files_coalesced_with_limit(
+        layout,
+        piece_idx,
+        0,
+        piece_data,
+        max_open_files,
+    )
+    .await
 }
 
 /// Writes one received block at its offset within a torrent piece.
@@ -211,7 +232,7 @@ pub(crate) async fn write_piece_block_to_multi_files(
     block_offset: u32,
     block_data: &bytes::Bytes,
     max_open_files: usize,
-) -> Result<()> {
+) -> Result<Vec<usize>> {
     write_piece_range_to_multi_files_coalesced_with_limit(
         layout,
         piece_idx,
@@ -228,7 +249,7 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
     start_offset: u32,
     piece_data: &bytes::Bytes,
     max_open_files: usize,
-) -> Result<()> {
+) -> Result<Vec<usize>> {
     // ------------------------------------------------------------------
     // Phase 1: Collect all raw write operations
     // ------------------------------------------------------------------
@@ -315,6 +336,12 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
     // downloads.
     // ------------------------------------------------------------------
     let file_indices: Vec<_> = coalesced.iter().map(|write| write.file_idx).collect();
+    let mut touched_file_indices = Vec::new();
+    for &file_index in &file_indices {
+        if touched_file_indices.last() != Some(&file_index) {
+            touched_file_indices.push(file_index);
+        }
+    }
     for batch in coalesced_file_batches(&file_indices, max_open_files) {
         let mut file_writers: HashMap<usize, PositionedDiskWriter> = HashMap::new();
 
@@ -351,7 +378,7 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
         }
     }
 
-    Ok(())
+    Ok(touched_file_indices)
 }
 
 #[cfg(test)]

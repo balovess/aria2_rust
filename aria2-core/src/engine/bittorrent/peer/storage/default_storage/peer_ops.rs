@@ -18,7 +18,7 @@ impl DefaultPeerStorage {
     /// - The peer IP is in the blocklist
     /// - The peer is temporarily rejected
     ///
-    /// Matches C++ DefaultPeerStorage::addPeer(shared_ptr<Peer>).
+    /// Matches C++ `DefaultPeerStorage::addPeer(shared_ptr<Peer>)`.
     pub fn add_peer(&mut self, peer: PeerEntry) -> bool {
         let key = (peer.ip.clone(), peer.port);
 
@@ -75,7 +75,7 @@ impl DefaultPeerStorage {
     /// being added. After all additions, excess peers are evicted from
     /// the back.
     ///
-    /// Matches C++ DefaultPeerStorage::addPeer(vector<shared_ptr<Peer>>).
+    /// Matches the C++ overload accepting a vector of shared peer references.
     pub fn add_peers(&mut self, peers: Vec<PeerEntry>) {
         if self.unused_peers.len() < self.max_peer_list_size {
             for peer in peers {

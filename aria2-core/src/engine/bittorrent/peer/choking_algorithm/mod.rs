@@ -2,9 +2,8 @@
 //!
 //! Module structure:
 //! - [ChokingAlgorithm] - Main struct and public API
-//! - [selection] - Unchoke candidate selection (tit-for-tat rotation)
-//! - [optimistic] - Optimistic unchoke logic (round-robin)
-//! - [tests] - Comprehensive test suite
+//! - `selection` - Unchoke candidate selection (tit-for-tat rotation)
+//! - `optimistic` - Optimistic unchoke logic (round-robin)
 
 mod optimistic;
 mod selection;

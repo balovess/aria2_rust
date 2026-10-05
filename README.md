@@ -180,7 +180,7 @@ cookies, DHT state, and server statistics are enabled only by explicit options.
 <summary>Click to expand build instructions</summary>
 
 **Prerequisites:**
-- [Rust](https://www.rust-lang.org/tools/install) 1.70+ (stable)
+- [Rust](https://www.rust-lang.org/tools/install) 1.99+ (stable)
 - Windows / macOS / Linux
 
 **Build Commands:**
@@ -525,7 +525,7 @@ async fn main() {
 
 ### Requirements
 
-- **Rust**: 1.70 or later ([install](https://rustup.rs/))
+- **Rust**: 1.99 or later ([install](https://rustup.rs/))
 - **OS**: Windows 10+, macOS 10.15+, Linux (glibc 2.17+)
 
 ### Build Commands

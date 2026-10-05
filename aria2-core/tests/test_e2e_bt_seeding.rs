@@ -8,17 +8,6 @@ use aria2_protocol::bittorrent::message::handshake::Handshake;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-#[test]
-fn test_bt_upload_session_creation() {
-    let config = BtSeedingConfig {
-        max_upload_bytes_per_sec: Some(50000),
-        global_limiter: None,
-        max_peers_to_unchoke: 4,
-        optimistic_unchoke_interval_secs: 30,
-    };
-    assert_eq!(config.max_peers_to_unchoke, 4);
-}
-
 #[tokio::test]
 async fn test_piece_data_provider_from_memory() {
     let mut provider = InMemoryPieceProvider::new(1024, 5);
@@ -62,39 +51,6 @@ fn test_seed_manager_no_exit_infinite() {
         .checked_sub(std::time::Duration::from_secs(3600))
         .unwrap_or(std::time::Instant::now());
     assert!(!mgr.should_stop_seeding());
-}
-
-#[test]
-fn test_choke_blocks_upload_concept() {
-    let _config = BtSeedingConfig::default();
-    let session_state = (false, false);
-
-    let should_upload = !session_state.0 && session_state.1;
-    assert!(!should_upload, "Choked peer should not upload");
-}
-
-#[test]
-fn test_upload_speed_tracking_concept() {
-    let start = std::time::Instant::now();
-    let uploaded = 50000u64;
-    let elapsed = start.elapsed().as_secs_f64();
-
-    if elapsed > 0.0 {
-        let speed = (uploaded as f64 / elapsed) as u64;
-        assert!(speed > 0);
-    }
-}
-
-#[test]
-fn test_seeding_config_limits() {
-    let cfg = BtSeedingConfig {
-        max_upload_bytes_per_sec: Some(1024 * 1024),
-        global_limiter: None,
-        max_peers_to_unchoke: 2,
-        optimistic_unchoke_interval_secs: 60,
-    };
-    assert_eq!(cfg.max_upload_bytes_per_sec.unwrap(), 1024 * 1024);
-    assert_eq!(cfg.max_peers_to_unchoke, 2);
 }
 
 #[test]

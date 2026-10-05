@@ -803,6 +803,7 @@ impl BtDownloadCommand {
             checkpoint: None,
             checkpoint_bytes_since_save: 0,
             checkpoint_last_save: Instant::now(),
+            dirty_multi_file_indices: std::collections::HashSet::new(),
         };
         command.apply_context_paths()?;
         Ok(command)

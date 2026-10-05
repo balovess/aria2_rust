@@ -64,7 +64,7 @@ enum Inner {
         /// never read directly (the mmap provides all data access). Dropping
         /// this field would invalidate the mapping.
         #[allow(dead_code)]
-        file: std::fs::File,
+        file: Arc<std::fs::File>,
         /// Writable memory mapping of the file.
         mmap: Arc<Mutex<MmapMut>>,
     },
@@ -201,7 +201,7 @@ impl MmapDiskWriter {
             Ok(mmap) => {
                 debug!("Created mmap for {:?}, size: {} bytes", path, file_size);
                 Ok(Inner::Mmap {
-                    file,
+                    file: Arc::new(file),
                     mmap: Arc::new(Mutex::new(mmap)),
                 })
             }
@@ -440,6 +440,32 @@ impl SeekableDiskWriter for MmapDiskWriter {
         }
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        self.open().await?;
+        match self.inner.as_mut() {
+            Some(Inner::Mmap { file, mmap }) => {
+                let file = Arc::clone(file);
+                let mmap = Arc::clone(mmap);
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            mmap.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .flush()
+                                .map_err(|error| {
+                                    Aria2Error::Io(format!("mmap durable flush failed: {error}"))
+                                })?;
+                            file.sync_data().map_err(Aria2Error::from)
+                        },
+                        "mmap sync data",
+                    )
+                    .await
+            }
+            Some(Inner::Fallback(writer)) => writer.sync_data().await,
+            None => Ok(()),
+        }
+    }
+
     async fn len(&self) -> Result<u64> {
         match &self.inner {
             Some(Inner::Mmap { mmap, .. }) => {
@@ -515,6 +541,19 @@ mod tests {
         let n = writer.read_at(0, &mut buf).await.unwrap();
         assert_eq!(n, 10);
         assert_eq!(&buf, b"hello mmap");
+    }
+
+    #[tokio::test]
+    async fn test_mmap_writer_sync_data_flushes_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_mmap_sync.bin");
+        let mut writer = MmapDiskWriter::new(&path, Some(1024));
+
+        writer.write_at(32, b"durable mmap payload").await.unwrap();
+        writer.sync_data().await.unwrap();
+
+        let contents = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(&contents[32..52], b"durable mmap payload");
     }
 
     #[tokio::test]

@@ -122,7 +122,7 @@ docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balove
 
 ### 前置条件
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.70+ (稳定版)
+- [Rust](https://www.rust-lang.org/tools/install) 1.99+ (稳定版)
 - Windows / macOS / Linux
 
 ### 构建和运行
@@ -465,7 +465,7 @@ async fn main() {
 
 ### 系统要求
 
-- **Rust**: 1.70 或更高版本（[安装指南](https://rustup.rs/)）
+- **Rust**: 1.99 或更高版本（[安装指南](https://rustup.rs/)）
 - **操作系统**: Windows 10+, macOS 10.15+, Linux (glibc 2.17+)
 
 ### 构建命令

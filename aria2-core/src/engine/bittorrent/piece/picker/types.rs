@@ -30,7 +30,8 @@ pub enum PiecePriorityMode {
 
 /// Information about a single piece within the picker.
 ///
-/// Returned by [`PiecePicker::get_piece_info`].
+/// Returned by
+/// [`PiecePicker::get_piece_info`](crate::engine::bittorrent::piece::picker::PiecePicker::get_piece_info).
 #[derive(Debug, Clone)]
 pub struct PieceInfo {
     /// Zero-based piece index

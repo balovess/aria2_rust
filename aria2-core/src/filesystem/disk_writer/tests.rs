@@ -134,6 +134,21 @@ async fn test_cached_writer_with_cache() {
 }
 
 #[tokio::test]
+async fn test_cached_writer_sync_data_drains_write_back_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_cached_sync.bin");
+    let mut writer = CachedDiskWriter::new(&path, None, Some(1));
+
+    writer.write_at(0, b"durable payload").await.unwrap();
+    assert!(tokio::fs::read(&path).await.unwrap().is_empty());
+
+    writer.sync_data().await.unwrap();
+
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"durable payload");
+    assert!(writer.stats().cache.flush_write_count > 0);
+}
+
+#[tokio::test]
 async fn test_cached_writer_large_write_bypasses_cache() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_large.bin");

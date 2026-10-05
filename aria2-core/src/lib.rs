@@ -83,6 +83,14 @@
 //! }
 //! ```
 //!
+//! For custom seeding integrations, `aria2-core` also exposes
+//! [`BtSeedManager`](engine::bittorrent::download::seed_manager::BtSeedManager),
+//! [`PieceDataProvider`](engine::bittorrent::peer::upload_session::PieceDataProvider),
+//! and [`BtSeedingConfig`](engine::bittorrent::peer::upload_session::BtSeedingConfig).
+//! The built-in task lifecycle remains the recommended entry point when the
+//! application needs RPC-visible progress, tracker/DHT discovery, persistence,
+//! and download-to-seed handoff.
+//!
 //! The companion `aria2-protocol` crate owns reusable protocol wire formats,
 //! parsers, and clients, such as Bencode, BitTorrent messages, Handshake, and
 //! `Bitfield`. `aria2-core::engine` assembles them with download policy,

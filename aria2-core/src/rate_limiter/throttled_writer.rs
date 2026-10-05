@@ -216,6 +216,10 @@ where
         self.inner.flush().await
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        self.inner.sync_data().await
+    }
+
     async fn len(&self) -> Result<u64> {
         self.inner.len().await
     }

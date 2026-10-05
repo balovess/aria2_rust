@@ -180,6 +180,13 @@ impl SeekableDiskWriter for IoUringDiskWriter {
         Ok(())
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        // The io_uring writer's existing flush is already a stable-storage
+        // barrier (sync_all), which is stronger than the payload-only sync
+        // required by checkpoint persistence.
+        self.flush().await
+    }
+
     async fn len(&self) -> Result<u64> {
         if self.file.is_some() {
             // Use a synchronous `stat` (fast, non-blocking syscall) to get

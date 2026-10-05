@@ -18,7 +18,7 @@ mod tests;
 pub use atomic::{ByteArrayDiskWriter, DefaultDiskWriter};
 pub use buffered::{CachedDiskWriter, CachedDiskWriterStats};
 
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -87,6 +87,20 @@ pub trait SeekableDiskWriter: Send + Sync {
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize>;
     async fn truncate(&mut self, length: u64) -> Result<()>;
     async fn flush(&mut self) -> Result<()>;
+
+    /// Push written data to stable storage without releasing the writer.
+    ///
+    /// `flush` only makes data visible through the operating-system page
+    /// cache. Call this before persisting metadata that claims the payload is
+    /// recoverable. Implementations that cannot provide this guarantee must
+    /// keep the default error rather than silently treating a page-cache
+    /// flush as durable.
+    async fn sync_data(&mut self) -> Result<()> {
+        Err(Aria2Error::Io(
+            "durable data synchronization is unsupported by this writer".into(),
+        ))
+    }
+
     async fn len(&self) -> Result<u64>;
     fn path(&self) -> &Path;
 
@@ -118,6 +132,9 @@ impl SeekableDiskWriter for Box<dyn SeekableDiskWriter> {
     }
     async fn flush(&mut self) -> Result<()> {
         self.as_mut().flush().await
+    }
+    async fn sync_data(&mut self) -> Result<()> {
+        self.as_mut().sync_data().await
     }
     async fn len(&self) -> Result<u64> {
         self.as_ref().len().await

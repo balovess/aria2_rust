@@ -1,7 +1,6 @@
 use tracing::{info, warn};
 
 use crate::engine::bittorrent::download::command::BtDownloadCommand;
-use crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit;
 use crate::error::Result;
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -67,13 +66,11 @@ pub(super) async fn try_web_seed_fallback(
                 piece_picker.mark_completed(next_piece_idx as u32);
 
                 let web_seed_bytes = bytes::Bytes::from(web_seed_data);
-                if let Some(ref layout) = cmd.multi_file_layout {
+                if cmd.multi_file_layout.is_some() {
                     let max_open_files = cmd.group.recover().options().bt_max_open_files;
-                    write_piece_to_multi_files_coalesced_with_limit(
-                        layout,
+                    cmd.write_multi_file_piece_and_track(
                         next_piece_idx as u32,
                         &web_seed_bytes,
-                        layout.piece_length(),
                         max_open_files,
                     )
                     .await?;

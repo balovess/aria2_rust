@@ -17,7 +17,7 @@
 //! This module provides:
 //! - [`HandshakeValidationError`] — Error type for the two abort conditions
 //! - [`validate_received_peer_id`] — Standalone validation function
-//! - [`filter_duplicate_peer_connections`] — Batch filter for Vec<BtPeerConn>
+//! - [`filter_duplicate_peer_connections`] — Batch filter for `Vec<BtPeerConn>`
 //!
 //! # Self-connection check in C++ vs. Rust
 //!

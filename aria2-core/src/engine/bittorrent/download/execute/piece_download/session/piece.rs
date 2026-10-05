@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,6 +25,7 @@ async fn persist_received_block(
     layout: Option<&crate::engine::bittorrent::torrent::file_layout::MultiFileLayout>,
     piece_lengths: &HashMap<u32, u32>,
     in_flight: &mut HashMap<u32, ControlFileInFlightPiece>,
+    dirty_multi_file_indices: &mut HashSet<usize>,
     max_open_files: usize,
     block: ReceivedPieceBlock,
 ) -> Result<()> {
@@ -45,14 +46,16 @@ async fn persist_received_block(
     }
 
     if let Some(layout) = layout {
-        crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
-            layout,
-            block.piece_index,
-            block.offset,
-            &block.data,
-            max_open_files,
-        )
-        .await?;
+        let touched_files =
+            crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
+                layout,
+                block.piece_index,
+                block.offset,
+                &block.data,
+                max_open_files,
+            )
+            .await?;
+        dirty_multi_file_indices.extend(touched_files);
     } else {
         let global_offset =
             u64::from(block.piece_index) * u64::from(piece_length) + u64::from(block.offset);
@@ -115,16 +118,11 @@ impl PieceDownloadSession<'_> {
 
         let web_seed_data_length = web_seed_data.len() as u64;
         let web_seed_bytes = bytes::Bytes::from(web_seed_data);
-        if let Some(ref layout) = self.command.multi_file_layout {
+        if self.command.multi_file_layout.is_some() {
             let max_open_files = self.command.group.recover().options().bt_max_open_files;
-            crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit(
-                layout,
-                piece_index,
-                &web_seed_bytes,
-                layout.piece_length(),
-                max_open_files,
-            )
-            .await?;
+            self.command
+                .write_multi_file_piece_and_track(piece_index, &web_seed_bytes, max_open_files)
+                .await?;
         } else {
             self.writer
                 .write_bytes_at(
@@ -338,6 +336,7 @@ impl PieceDownloadSession<'_> {
             let writer = &mut self.writer;
             let layout = self.command.multi_file_layout.as_ref();
             let in_flight = &mut self.in_flight_pieces;
+            let dirty_multi_file_indices = &mut self.command.dirty_multi_file_indices;
             let swarm = &mut self.swarm;
             let choking_algo = &mut self.command.choking_algo;
             let endgame_state = &mut self.endgame_state;
@@ -399,6 +398,7 @@ impl PieceDownloadSession<'_> {
                                 layout,
                                 &piece_lengths,
                                 in_flight,
+                                dirty_multi_file_indices,
                                 max_open_files,
                                 block,
                             ).await?;
@@ -417,6 +417,7 @@ impl PieceDownloadSession<'_> {
                     layout,
                     &piece_lengths,
                     in_flight,
+                    dirty_multi_file_indices,
                     max_open_files,
                     block,
                 )
@@ -431,9 +432,14 @@ impl PieceDownloadSession<'_> {
                     let group = self.command.group.recover();
                     group.is_force_halt_requested() || group.is_halt_requested()
                 };
-                self.writer.flush().await.map_err(|error| {
-                    Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
-                })?;
+                self.command
+                    .sync_checkpoint_payload(&mut self.writer)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::FileIo(format!(
+                            "Failed to sync halted BT output before checkpoint: {error}"
+                        ))
+                    })?;
                 if let Some(checkpoint) = self.command.checkpoint.as_mut() {
                     let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
                         &self.completed_bitfield,
@@ -537,6 +543,7 @@ impl PieceDownloadSession<'_> {
             let writer = &mut self.writer;
             let layout = self.command.multi_file_layout.as_ref();
             let in_flight = &mut self.in_flight_pieces;
+            let dirty_multi_file_indices = &mut self.command.dirty_multi_file_indices;
             let swarm = &mut self.swarm;
             let choking_algo = &mut self.command.choking_algo;
             let batch_download = download_piece_blocks_batch(
@@ -558,6 +565,7 @@ impl PieceDownloadSession<'_> {
                                 layout,
                                 &piece_lengths,
                                 in_flight,
+                                dirty_multi_file_indices,
                                 max_open_files,
                                 block,
                             ).await?;
@@ -576,6 +584,7 @@ impl PieceDownloadSession<'_> {
                     layout,
                     &piece_lengths,
                     in_flight,
+                    dirty_multi_file_indices,
                     max_open_files,
                     block,
                 )
@@ -590,9 +599,14 @@ impl PieceDownloadSession<'_> {
                     let group = self.command.group.recover();
                     group.is_force_halt_requested() || group.is_halt_requested()
                 };
-                self.writer.flush().await.map_err(|error| {
-                    Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
-                })?;
+                self.command
+                    .sync_checkpoint_payload(&mut self.writer)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::FileIo(format!(
+                            "Failed to sync halted BT output before checkpoint: {error}"
+                        ))
+                    })?;
                 if let Some(checkpoint) = self.command.checkpoint.as_mut() {
                     let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
                         &self.completed_bitfield,
@@ -725,17 +739,16 @@ impl PieceDownloadSession<'_> {
                     self.piece_picker.mark_completed(next_piece_idx as u32);
 
                     let piece_bytes = bytes::Bytes::from(piece_data);
-                    if let Some(ref layout) = self.command.multi_file_layout {
+                    if self.command.multi_file_layout.is_some() {
                         let max_open_files =
                             self.command.group.recover().options().bt_max_open_files;
-                        crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit(
-                                        layout,
-                                        next_piece_idx as u32,
-                                        &piece_bytes,
-                                        layout.piece_length(),
-                                        max_open_files,
-                                    )
-                                    .await?;
+                        self.command
+                            .write_multi_file_piece_and_track(
+                                next_piece_idx as u32,
+                                &piece_bytes,
+                                max_open_files,
+                            )
+                            .await?;
                     } else {
                         self.writer
                             .write_bytes_at(

@@ -154,6 +154,47 @@ fn test_write_piece_resolve_logic() {
     assert_eq!(r_oob, None, "Out-of-range offset should return None");
 }
 
+#[tokio::test]
+async fn block_writer_reports_only_the_payload_file_it_modified() {
+    use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
+
+    let info = InfoDict {
+        name: "tracked_write".to_string(),
+        piece_length: 256,
+        pieces: vec![[0u8; 20], [1u8; 20]],
+        length: None,
+        files: Some(vec![
+            FileEntry {
+                length: 200,
+                path: vec!["first.bin".to_string()],
+            },
+            FileEntry {
+                length: 312,
+                path: vec!["second.bin".to_string()],
+            },
+        ]),
+        private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
+    };
+    let dir = tempfile::tempdir().expect("temporary multi-file output");
+    let layout = MultiFileLayout::from_info_dict(&info, dir.path()).unwrap();
+    layout.create_directories().unwrap();
+    let data = bytes::Bytes::from(vec![0xA5; 16]);
+
+    let touched = crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
+        &layout, 1, 0, &data, 1,
+    )
+    .await
+    .expect("block should write to its mapped torrent file");
+
+    assert_eq!(touched, vec![1]);
+    assert!(!layout.file_absolute_path(0).unwrap().exists());
+    let second_file = std::fs::read(layout.file_absolute_path(1).unwrap()).unwrap();
+    assert_eq!(&second_file[56..72], data.as_ref());
+}
+
 // ==================================================================
 // Phase 14 / Task I4 — Coalesced multi-file write tests
 // ==================================================================
