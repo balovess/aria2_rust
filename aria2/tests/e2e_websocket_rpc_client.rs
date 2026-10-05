@@ -235,15 +235,15 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
         "shutdown must return aria2's successful result: {shutdown}"
     );
     drop(socket);
+    stop_download_server.store(true, Ordering::Release);
+    download_server
+        .join()
+        .expect("test HTTP server thread must exit cleanly");
     assert!(
         aria2
             .wait_for_exit(GRACEFUL_SHUTDOWN_EXIT_TIMEOUT)
             .success()
     );
-    stop_download_server.store(true, Ordering::Release);
-    download_server
-        .join()
-        .expect("test HTTP server thread must exit cleanly");
 }
 
 /// `aria2_original` limits WebSocket JSON parsing with

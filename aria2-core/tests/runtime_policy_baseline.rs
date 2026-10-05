@@ -23,6 +23,12 @@ const RUST_HTTP2_POLICY_EXTENSIONS: &[&str] = &[
 
 const RUST_HTTP_RANGE_POLICY_EXTENSIONS: &[&str] = &["min-http-range-size"];
 
+const RUST_BITTORRENT_POLICY_EXTENSIONS: &[&str] = &[
+    "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
+];
+
 const RUST_DHT_POLICY_EXTENSIONS: &[&str] = &[
     "enable-dht",
     "enable-dht6",
@@ -107,6 +113,7 @@ fn assert_policy_matches_baseline(
 #[test]
 fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions() {
     let mut initial_extensions = vec!["bt-tracker-stopped-timeout"];
+    initial_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
@@ -132,6 +139,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         &global_extensions,
     );
     let mut reserved_extensions = vec!["enable-public-trackers"];
+    reserved_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);

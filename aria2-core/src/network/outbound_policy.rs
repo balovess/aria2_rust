@@ -161,6 +161,18 @@ impl OutboundNetworkPolicy {
     /// Resolve a UDP peer and retain the first address compatible with this
     /// policy's configured source families.
     pub async fn resolve_udp_host(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        if let Ok(address) = host.parse::<IpAddr>() {
+            let remote = SocketAddr::new(address, port);
+            if self.is_direct() || self.best_source(remote).is_some() {
+                return Ok(remote);
+            }
+            return Err(family_mismatch(remote));
+        }
+
         let addresses = tokio::net::lookup_host((host, port)).await?;
         for remote in addresses {
             if self.is_direct() || self.best_source(remote).is_some() {
@@ -439,6 +451,20 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
+    }
+
+    #[tokio::test]
+    async fn udp_host_resolution_accepts_bracketed_ipv6_literals_with_matching_source() {
+        let policy = OutboundNetworkPolicy::new(vec![
+            IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            policy.resolve_udp_host("[::1]", 6881).await.unwrap(),
+            SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 6881)
+        );
     }
 
     #[test]
