@@ -41,9 +41,11 @@ fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
         request.to_string().as_bytes(),
     );
     assert_eq!(
-        response.status, 200,
-        "RPC HTTP response: {:?}",
-        response.headers
+        response.status,
+        200,
+        "RPC HTTP response for {method}: {:?}; body: {}",
+        response.headers,
+        String::from_utf8_lossy(&response.body)
     );
     let response: Value = serde_json::from_slice(&response.body).expect("RPC JSON response");
     assert!(response.get("error").is_none(), "RPC error: {response}");
@@ -2040,7 +2042,12 @@ async fn cli_restores_bt_metadata_and_verified_pieces_across_process_restart() {
     let resumed_started_announce = queries_after_restart[queries_before_restart..]
         .iter()
         .find(|query| query.contains("event=started"))
-        .expect("restored process must send event=started")
+        .unwrap_or_else(|| {
+            panic!(
+                "restored process must send event=started; observed announces: {:?}",
+                &queries_after_restart[queries_before_restart..]
+            )
+        })
         .as_str();
     let tracker_parameter = |query: &str, name: &str| {
         query
