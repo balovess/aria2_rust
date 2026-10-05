@@ -128,6 +128,10 @@ impl SequentialDownloader {
             if !effective_resume_state.should_resume
                 && total_length > 0
                 && no_proxy
+                // The raw splice request only knows the original URI and
+                // cannot preserve the redirect/metadata path established by
+                // an explicit HEAD request.
+                && !options.use_head
                 && !uri.starts_with("https://")
                 && !self.request_policy.has_custom_headers()
                 && self.cookie_helper.build_cookie_header(uri).is_none()

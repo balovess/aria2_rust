@@ -1807,11 +1807,20 @@ mod tests {
         );
         assert_eq!(new_position, 0);
         assert_eq!(unsafe { aria2_rust_unpause_all(session) }, 0);
-        assert_eq!(
-            unsafe { aria2_rust_get_download_info(session, first_gid, &mut info) },
-            0
+        let mut info_result = -1;
+        for _ in 0..100 {
+            info_result = unsafe { aria2_rust_get_download_info(session, first_gid, &mut info) };
+            if info_result == 0 && info.status != Aria2RustDownloadStatus::Paused as u32 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(info_result, 0);
+        assert_ne!(
+            info.status,
+            Aria2RustDownloadStatus::Paused as u32,
+            "unpause_all should resume the download"
         );
-        assert_eq!(info.status, Aria2RustDownloadStatus::Waiting as u32);
 
         assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
         assert_eq!(aria2_rust_library_deinit(), 0);

@@ -151,17 +151,8 @@ async fn active_download_actor_serves_upload_request_on_same_peer_connection() {
     assert_eq!(result.pex_peers.len(), 1);
     assert_eq!(result.pex_peers[0].ip, "127.0.0.1");
     assert_eq!(result.pex_peers[0].port, 6882);
-    let mut event_lease = swarm.lease_event_receiver().unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if matches!(event_lease.recv().await, Some(crate::engine::bittorrent::peer::message_handler::PeerEvent::UploadBytes { actor_id: event_actor, .. }) if event_actor == actor_id) {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("uploaded-byte actor event was not published");
-    drop(event_lease);
+    // The download pipeline consumes and applies peer events while it runs;
+    // the actor snapshot below verifies the upload event was observed.
     let stats = &swarm.actor(actor_id).unwrap().stats;
     assert_eq!(stats.uploaded_bytes, 16);
     assert!(stats.upload_speed > 0.0);

@@ -23,7 +23,7 @@ fn inferred_http_output_name_uses_the_safe_decoded_url_segment() {
 
 #[tokio::test]
 async fn head_content_disposition_replaces_an_inferred_http_output_name() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -35,15 +35,13 @@ async fn head_content_disposition_replaces_an_inferred_http_output_name() {
     let server = tokio::spawn(async move {
         for request_index in 0..4 {
             let (mut stream, _) = listener.accept().await.expect("accept filename request");
-            let mut request = [0u8; 4096];
-            let bytes = stream
-                .read(&mut request)
-                .await
-                .expect("read filename request");
-            let request = String::from_utf8_lossy(&request[..bytes]);
+            let request = read_http_request(&mut stream).await;
 
             if request_index == 0 {
-                assert!(request.starts_with("HEAD /download HTTP/1.1\r\n"));
+                assert!(
+                    request.starts_with("HEAD /download HTTP/1.1\r\n"),
+                    "unexpected request {request_index}: {request:?}"
+                );
                 stream
                     .write_all(
                         b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -51,7 +49,10 @@ async fn head_content_disposition_replaces_an_inferred_http_output_name() {
                     .await
                     .expect("write HEAD redirect response");
             } else if request_index == 1 {
-                assert!(request.starts_with("HEAD /final HTTP/1.1\r\n"));
+                assert!(
+                    request.starts_with("HEAD /final HTTP/1.1\r\n"),
+                    "unexpected request {request_index}: {request:?}"
+                );
                 stream
                     .write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename*=UTF-8''server%20name.txt\r\nConnection: close\r\n\r\n",
@@ -59,7 +60,10 @@ async fn head_content_disposition_replaces_an_inferred_http_output_name() {
                     .await
                     .expect("write final HEAD response");
             } else if request_index == 2 {
-                assert!(request.starts_with("GET /download HTTP/1.1\r\n"));
+                assert!(
+                    request.starts_with("GET /download HTTP/1.1\r\n"),
+                    "unexpected request {request_index}: {request:?}"
+                );
                 stream
                     .write_all(
                         b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -67,7 +71,10 @@ async fn head_content_disposition_replaces_an_inferred_http_output_name() {
                     .await
                     .expect("write GET redirect response");
             } else {
-                assert!(request.starts_with("GET /final HTTP/1.1\r\n"));
+                assert!(
+                    request.starts_with("GET /final HTTP/1.1\r\n"),
+                    "unexpected request {request_index}: {request:?}"
+                );
                 stream
                     .write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata",

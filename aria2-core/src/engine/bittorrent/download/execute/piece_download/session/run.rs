@@ -253,13 +253,6 @@ impl PieceDownloadSession<'_> {
                 web_seed_scan_cursor = 0;
                 web_seed_retries.clear();
             }
-            self.schedule_web_seed_pieces(
-                &mut web_seed_tasks,
-                &mut active_web_seed_pieces,
-                &mut web_seed_scan_cursor,
-                &mut web_seed_retries,
-                web_seed_concurrency,
-            );
             while let Some(joined) = web_seed_tasks.try_join_next() {
                 match joined {
                     Ok((piece_index, result)) => {
@@ -280,6 +273,17 @@ impl PieceDownloadSession<'_> {
                     }
                 }
             }
+            // Replenish the queue after harvesting completed tasks. If a full
+            // batch finishes between loop turns, scheduling first would see a
+            // full JoinSet, then drain it to empty and wait for peer discovery
+            // without ever starting the next WebSeed batch.
+            self.schedule_web_seed_pieces(
+                &mut web_seed_tasks,
+                &mut active_web_seed_pieces,
+                &mut web_seed_scan_cursor,
+                &mut web_seed_retries,
+                web_seed_concurrency,
+            );
 
             if BtPieceSelector::is_complete(&self.piece_picker) {
                 if self.endgame_state.is_endgame_active() {
