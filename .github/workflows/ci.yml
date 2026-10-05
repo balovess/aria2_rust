@@ -127,6 +127,14 @@ jobs:
             sudo ifconfig lo0 alias 127.0.0.2
           fi
           ifconfig lo0 | grep -F '127.0.0.2'
+          python3 - <<'PY'
+          import socket
+
+          listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          listener.bind(("127.0.0.2", 0))
+          print(f"TCP loopback bind succeeded: {listener.getsockname()}")
+          listener.close()
+          PY
       - name: Run tests
         shell: bash
         run: |
