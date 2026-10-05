@@ -12,10 +12,10 @@ use std::sync::Arc;
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::config::{ConfigManager, project_initial_options};
 #[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_registry::BtRegistry;
+use aria2_core::engine::bittorrent::registry::BtRegistry;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
-use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group_man::{GroupIdResolution, RequestGroupMan};
 use aria2_rpc::{BackendError, BackendMetadata};
 use tokio::sync::RwLock;
 
@@ -29,6 +29,40 @@ const RPC_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 
 fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
     if is_incoming { 0 } else { addr.port() }
+}
+
+#[cfg(test)]
+mod peer_id_tests {
+    use super::rpc_peer_id;
+
+    #[test]
+    fn peer_id_uses_aria2_percent_encoding() {
+        let mut peer_id = [0u8; 20];
+        peer_id[0] = b'A';
+        peer_id[1] = b'7';
+        peer_id[2] = b' ';
+        peer_id[3] = 0xff;
+
+        assert_eq!(
+            rpc_peer_id(&peer_id),
+            "A7%20%FF%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00"
+        );
+    }
+}
+
+fn rpc_peer_id(peer_id: &[u8; 20]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(peer_id.len() * 3);
+    for &byte in peer_id {
+        if byte.is_ascii_alphanumeric() {
+            output.push(byte as char);
+        } else {
+            output.push('%');
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    output
 }
 
 /// The application adapter behind the RPC wire layer.
@@ -95,20 +129,21 @@ impl CoreRpcBackend {
         Ok(())
     }
 
-    fn parse_gid(gid: &str) -> Result<GroupId, BackendError> {
-        GroupId::from_hex_string(gid).ok_or_else(|| Self::invalid("Invalid GID"))
+    fn parse_gid(&self, gid: &str) -> Result<GroupId, BackendError> {
+        match self.group_man.resolve_gid_hex_detailed(gid) {
+            GroupIdResolution::Resolved(gid) => Ok(gid),
+            GroupIdResolution::Invalid => Err(Self::execution(format!("Invalid GID {gid}"))),
+            GroupIdResolution::NotUnique => {
+                Err(Self::execution(format!("GID {gid} is not unique")))
+            }
+            GroupIdResolution::NotFound => Err(Self::execution(format!("GID {gid} is not found"))),
+        }
     }
 
     fn send(&self, command: EngineCommand) -> Result<(), BackendError> {
         self.engine_cmd_tx.send(command).map_err(|error| {
             BackendError::Internal(format!("Failed to send engine command: {error}"))
         })
-    }
-
-    fn group(&self, gid: &str) -> Result<Arc<std::sync::RwLock<RequestGroup>>, BackendError> {
-        self.group_man
-            .group_by_hex(gid)
-            .ok_or_else(|| Self::execution(format!("GID {gid} not found")))
     }
 
     async fn global_options(&self) -> HashMap<String, serde_json::Value> {
@@ -142,6 +177,7 @@ impl CoreRpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria2_core::request::request_group::RequestGroup;
 
     #[test]
     fn status_uses_real_non_bt_connection_count_instead_of_split() {

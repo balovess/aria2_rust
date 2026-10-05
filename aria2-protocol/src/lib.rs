@@ -2,9 +2,9 @@
 //!
 //! Protocol implementations for the aria2-rust download utility.
 //!
-//! Provides client-side protocol handlers for HTTP/HTTPS, FTP/SFTP, BitTorrent,
-//! Metalink, and SFTP downloads. Each protocol module is feature-gated to allow
-//! minimal builds when only specific protocols are needed.
+//! Provides client-side protocol handlers for HTTP/HTTPS, FTP, SFTP, BitTorrent,
+//! and Metalink. Optional protocol modules are feature-gated to allow minimal
+//! builds when only specific protocols are needed.
 //!
 //! ## Modules
 //!
@@ -13,7 +13,7 @@
 //!   gzip/deflate decompression, Cookie management, chunked transfer decoding,
 //!   custom headers, and redirect following.
 //!
-//! - **[`ftp`]** — FTP/SFTP client: control connection (USER/PASS/CWD/SIZE/PASV/EPSV),
+//! - **[`ftp`]** — FTP client: control connection (USER/PASS/CWD/SIZE/PASV/EPSV),
 //!   passive mode data transfer, anonymous and authenticated login, REST-based resume.
 //!
 //! - **[`bittorrent`]** *(feature: `bittorrent`)* — Full BitTorrent protocol stack:
@@ -25,7 +25,7 @@
 //!   multi-mirror URL priority, hash verification (MD5/SHA1/SHA256/SHA512),
 //!   piece checksums, MetaURL torrent detection.
 //!
-//! - **[`sftp`]` *(feature: `sftp`)* — SFTP over SSH2 client: key/password auth,
+//! - **[`sftp`]** *(feature: `sftp`)* — SFTP over SSH2 client: key/password auth,
 //!   file operations (stat/read/write/mkdir/rmdir/readdir/symlink), streaming transfer.
 
 pub mod ftp;

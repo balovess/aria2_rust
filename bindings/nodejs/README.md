@@ -130,7 +130,10 @@ interface ClientOptions {
 #### Methods
 
 The client exposes the standard aria2 RPC methods listed below. Methods not
-listed here can still be called through a custom transport.
+listed here can be called with `call(method, params)`.
+
+**Custom RPC:**
+- `call<T = unknown>(method: string, params?: unknown[]): Promise<T>`
 
 **Task Management:**
 - `addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>`
@@ -142,7 +145,7 @@ listed here can still be called through a custom transport.
 - `forcePause(gid: string): Promise<string>`
 - `forceRemove(gid: string): Promise<string>`
 - `pauseAll(): Promise<string>` / `forcePauseAll(): Promise<string>` / `unpauseAll(): Promise<string>`
-- `changePosition(gid: string, position: number, mode: string): Promise<number>`
+- `changePosition(gid: string, position: number, mode: PositionMode): Promise<number>`
 - `changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>`
 
 **Status Queries:**
@@ -151,10 +154,16 @@ listed here can still be called through a custom transport.
 - `getUris(gid: string): Promise<UriEntry[]>`
 - `getServers(gid: string): Promise<ServerInfoIndex[]>`
 - `getPeers(gid: string): Promise<PeerInfo[]>`
+- `getTrackers(gid: string): Promise<TrackerInfo[]>`
+- `getDhtStatus(): Promise<DhtStatus>`
 - `tellActive(keys?: string[]): Promise<StatusInfo[]>`
 - `tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `getGlobalStat(): Promise<GlobalStat>`
+
+`TrackerInfo.lastFailureKind` is optional and identifies the latest failed
+announce (`network`, `timeout`, `remoteTemporary`, `trackerRejected`, or
+`malformedResponse`). A successful announce clears it.
 
 **Session and browser context:**
 - `updateBrowserContext(context: unknown): Promise<string>`
@@ -193,6 +202,10 @@ metadata can be queried even when the task is created with `pause: true`.
 - `removeDownloadResult(gid: string): Promise<string>`
 
 **Event Subscription:**
+- `connectEvents(): Promise<Aria2EventEmitter>` - Connect to the event WebSocket
+- `Aria2EventEmitter.waitForTerminal(gid, timeoutMs?)` - Wait for `stop`,
+  `complete`, `error`, or BitTorrent completion for one GID without polling;
+  connect before submitting fast tasks
 - `on(event: string, handler: Function): this`
 - `off(event: string, handler: Function): this`
 - `once(event: string, handler: Function): this`

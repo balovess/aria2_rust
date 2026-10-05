@@ -1,0 +1,489 @@
+//! Concurrent download module — split into sub-modules for maintainability.
+
+mod fixed_piece_size;
+mod pipeline;
+mod range_size_limit;
+mod segment;
+mod slow_range;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::engine::download_progress::ProgressUpdater;
+use crate::engine::http::cookie_helper::CookieHelper;
+use crate::engine::retry_policy::RetryPolicy;
+use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::control_file::ControlFile;
+use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+use crate::filesystem::resume_helper::ResumeState;
+use crate::http::AuthResolveOptions;
+use crate::http::HttpRequestPolicy;
+use crate::rate_limiter::RateLimiter;
+use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
+
+/// Cap the requested concurrent ranges at aria2's minimum split-size policy.
+///
+/// A task may request more connections than its payload can support without
+/// creating ranges of the configured minimum size. The original scheduler
+/// therefore keeps one range for a payload smaller than that threshold and
+/// only admits additional ranges as another minimum-sized range remains.
+pub(crate) fn effective_segment_count(
+    total_length: u64,
+    requested_split: u16,
+    min_split_size: u64,
+) -> usize {
+    let requested = u64::from(requested_split.max(1));
+    let max_by_minimum = total_length
+        .checked_div(min_split_size.max(1))
+        .unwrap_or(0)
+        .max(1);
+    requested.min(max_by_minimum) as usize
+}
+
+/// Map a completed HTTP attempt to the status code recorded by mirror stats.
+///
+/// The download error remains the source of truth for callers. This helper
+/// only supplies the best structured status available to the internal mirror
+/// scheduler; errors without an HTTP status retain the existing 500 fallback.
+pub(crate) fn server_stat_error_code(error: &Aria2Error) -> u16 {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) => *code,
+        Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. }) => 416,
+        Aria2Error::Recoverable(
+            RecoverableError::ResourceNotFound | RecoverableError::MaxFileNotFound,
+        ) => 404,
+        Aria2Error::Recoverable(RecoverableError::Timeout) => 408,
+        _ => crate::constants::HTTP_DEFAULT_ERROR_CODE,
+    }
+}
+
+/// HTTP responses and HTTP/2 stream errors that indicate server-side
+/// concurrency pressure. These trigger rollback of the current connection
+/// probe while preserving the incumbent topology.
+pub(crate) fn is_capacity_limited_error(error: &Aria2Error) -> bool {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) => {
+            matches!(*code, 429 | 503)
+        }
+        Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure { message }
+            | RecoverableError::HttpProtocolError { message },
+        ) => {
+            let message = message.to_ascii_uppercase();
+            [
+                "REFUSED_STREAM",
+                "ENHANCE_YOUR_CALM",
+                "MAX_CONCURRENT_STREAMS",
+            ]
+            .iter()
+            .any(|signal| message.contains(signal))
+        }
+        _ => false,
+    }
+}
+
+/// Apply the shared retry classification to one concurrent Range failure.
+///
+/// A 404 is governed by the request group's separate `max-file-not-found`
+/// counter. Range 416 remains eligible for the concurrent scheduler's
+/// existing fallback threshold; all other errors use the same allowlist as
+/// sequential HTTP and protocol retry paths.
+pub(crate) fn should_retry_segment(
+    retry_policy: &RetryPolicy,
+    retry_count: u32,
+    error: &Aria2Error,
+    file_not_found_retry_allowed: bool,
+) -> bool {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => file_not_found_retry_allowed,
+        Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. }) => true,
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound) => false,
+        _ => retry_policy.should_retry(retry_count, error),
+    }
+}
+
+/// Outcome of a concurrent download attempt.
+pub enum ConcurrentDownloadResult {
+    /// All segments completed successfully.
+    Complete,
+    /// The server does not support Range requests well enough; fall back to
+    /// sequential mode, preserving already-completed byte ranges.
+    Fallback { completed_ranges: Vec<(u64, u64)> },
+}
+
+/// Acquire the download limits for one HTTP write chunk.
+///
+/// Concurrent HTTP writes are owned by this module rather than by a
+/// `ThrottledWriter`, so keep the per-download and process-wide checks in one
+/// place. The global limiter is checked on every chunk to preserve live
+/// `changeOption` updates while avoiding duplicated call-site logic.
+pub(crate) async fn acquire_download_tokens(
+    limiter: Option<&RateLimiter>,
+    global_limiter: Option<&RateLimiter>,
+    bytes: usize,
+) {
+    let bytes = bytes as u64;
+    if let Some(limiter) = limiter {
+        limiter.acquire_download(bytes).await;
+    }
+    if let Some(global_limiter) = global_limiter
+        && global_limiter.is_download_limited()
+    {
+        global_limiter.acquire_download(bytes).await;
+    }
+}
+
+/// Orchestrates concurrent (multi-segment / multi-mirror) HTTP downloads.
+///
+/// Fields are pub(crate) so that the sibling modules segment and
+/// pipeline can access them without going through accessor methods on the
+/// hot path.
+pub struct ConcurrentDownloader {
+    pub(crate) client: Arc<reqwest::Client>,
+    pub(crate) range_clients: Arc<Vec<reqwest::Client>>,
+    pub(crate) output_path: std::path::PathBuf,
+    pub(crate) request_policy: HttpRequestPolicy,
+    pub(crate) auth_options: AuthResolveOptions,
+    pub(crate) netrc_path: Option<String>,
+    pub(crate) cookie_helper: CookieHelper,
+    pub(crate) progress_updater: ProgressUpdater,
+    pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
+    /// Direct access to progress counters — avoids RwLock on the hot path.
+    pub(crate) progress: Arc<AtomicProgress>,
+    pub(crate) mmap_threshold: u64,
+    pub(crate) file_allocation: String,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// When `Some`, tokens are acquired after the per-download limiter
+    /// in `segment.rs` and `pipeline.rs`.
+    pub(crate) global_limiter: Option<RateLimiter>,
+    /// Protocol observed by the redirect-aware Range probe, scoped to its
+    /// final authority so multi-mirror downloads do not infer other servers.
+    pub(crate) initial_http_protocol: Option<(String, reqwest::Version)>,
+}
+
+pub(super) async fn flush_requested_control_file(
+    dl: &ConcurrentDownloader,
+    writer: &mut CachedDiskWriter,
+    control_file: &mut Option<ControlFile>,
+    completed_bytes: u64,
+) -> Result<()> {
+    if control_file.is_none() || !dl.group.recover().is_save_control_file_requested() {
+        return Ok(());
+    }
+
+    writer.flush().await.map_err(|error| {
+        Aria2Error::FileIo(format!(
+            "Failed to flush requested concurrent checkpoint: {error}"
+        ))
+    })?;
+    if let Some(control_file) = control_file.as_mut() {
+        control_file.update_completed_length(completed_bytes);
+        control_file.save().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to save requested concurrent checkpoint: {error}"
+            ))
+        })?;
+    }
+    dl.group.recover().take_save_control_file_request();
+    Ok(())
+}
+
+impl ConcurrentDownloader {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        client: Arc<reqwest::Client>,
+        output_path: std::path::PathBuf,
+        request_policy: HttpRequestPolicy,
+        auth_options: AuthResolveOptions,
+        netrc_path: Option<String>,
+        cookie_helper: CookieHelper,
+        progress_updater: ProgressUpdater,
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        progress: Arc<AtomicProgress>,
+        mmap_threshold: u64,
+        file_allocation: String,
+        global_limiter: Option<RateLimiter>,
+    ) -> Self {
+        Self {
+            range_clients: Arc::new(vec![client.as_ref().clone()]),
+            client,
+            output_path,
+            request_policy,
+            auth_options,
+            netrc_path,
+            cookie_helper,
+            progress_updater,
+            group,
+            progress,
+            mmap_threshold,
+            file_allocation,
+            global_limiter,
+            initial_http_protocol: None,
+        }
+    }
+
+    pub(crate) fn with_range_clients(mut self, clients: Arc<Vec<reqwest::Client>>) -> Self {
+        if !clients.is_empty() {
+            self.range_clients = clients;
+        }
+        self
+    }
+
+    pub(crate) fn with_initial_http_version(
+        mut self,
+        uri: &str,
+        version: Option<reqwest::Version>,
+    ) -> Self {
+        self.initial_http_protocol = version.and_then(|version| {
+            crate::engine::http::request_executor::authority_key(uri)
+                .map(|authority| (authority, version))
+        });
+        self
+    }
+
+    /// Non-blocking cancellation check.
+    ///
+    /// Returns Err when the underlying RequestGroup has been marked
+    /// removed or paused. Uses try_read on the outer group lock so it is
+    /// safe to call from the download loop; a contended lock is treated as
+    /// `not cancelled'' and the caller will re-check on the next iteration.
+    pub(crate) fn check_cancelled(&self) -> Result<()> {
+        use crate::error::Aria2Error;
+        match self.group.try_read() {
+            Ok(g) if g.is_removed() => Err(Aria2Error::DownloadFailed(
+                "Download cancelled by user".into(),
+            )),
+            Ok(g) if g.is_paused_flag() => {
+                Err(Aria2Error::DownloadFailed("Download paused".into()))
+            }
+            Ok(g) if g.is_force_halt_requested() => {
+                Err(Aria2Error::DownloadFailed("Download halted".into()))
+            }
+            Ok(g) if g.is_halt_requested() => {
+                Err(Aria2Error::DownloadFailed("Download halted".into()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Wait for adaptive HTTP retry cooldown without delaying RequestGroup
+    /// pause, remove, or halt controls.
+    pub(crate) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let notifier = self.group.recover().lifecycle_notifier();
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        self.check_cancelled()?;
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => self.check_cancelled(),
+            _ = notified.as_mut() => self.check_cancelled(),
+        }
+    }
+
+    /// Entry point: decides whether to use single-mirror or multi-mirror
+    /// concurrent download and delegates accordingly.
+    pub async fn execute_with_retry(
+        &mut self,
+        source_uri: &str,
+        effective_uri: &str,
+        total_length: u64,
+        resume_state: &ResumeState,
+        max_retries_per_segment: u32,
+    ) -> Result<ConcurrentDownloadResult> {
+        use crate::constants;
+
+        tracing::info!(
+            "Using concurrent download mode (split={}, max_retries/segment={})",
+            self.group
+                .recover()
+                .options()
+                .split
+                .unwrap_or(constants::DEFAULT_SPLIT),
+            max_retries_per_segment
+        );
+
+        let source_uris: Vec<String> = {
+            let g = self.group.recover();
+            g.uris().iter().map(|uri| uri.to_string()).collect()
+        };
+        // Redirect targets can be appended to RequestGroup's URI list so the
+        // next attempt can use them. For this active attempt, replace its
+        // source URI with the already-probed final URL and collapse duplicate
+        // entries; otherwise the redirect source and target are scheduled as
+        // two mirrors, wasting a Range request per segment.
+        let mut all_uris = Vec::with_capacity(source_uris.len().max(1));
+        for source in source_uris {
+            let effective = if source == source_uri {
+                effective_uri
+            } else {
+                source.as_str()
+            };
+            if !all_uris.iter().any(|existing| existing == effective) {
+                all_uris.push(effective.to_owned());
+            }
+        }
+        if !all_uris.iter().any(|existing| existing == effective_uri) {
+            all_uris.insert(0, effective_uri.to_owned());
+        }
+
+        if all_uris.len() > 1 {
+            tracing::info!(
+                "Intelligent multi-mirror selection enabled: {} mirror sources",
+                all_uris.len()
+            );
+            pipeline::execute_with_coordinator(
+                self,
+                &all_uris,
+                total_length,
+                resume_state,
+                max_retries_per_segment,
+            )
+            .await
+        } else {
+            segment::execute(
+                self,
+                effective_uri,
+                total_length,
+                resume_state,
+                max_retries_per_segment,
+            )
+            .await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        effective_segment_count, is_capacity_limited_error, server_stat_error_code,
+        should_retry_segment,
+    };
+    use crate::engine::retry_policy::RetryPolicy;
+    use crate::error::{Aria2Error, RecoverableError};
+
+    #[test]
+    fn server_stat_error_code_preserves_structured_http_statuses() {
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 429
+            })),
+            429
+        );
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(
+                RecoverableError::RangeNotSatisfiable {
+                    range: "bytes=0-99".to_string(),
+                }
+            )),
+            416
+        );
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(RecoverableError::Timeout)),
+            408
+        );
+    }
+
+    #[test]
+    fn server_stat_error_code_keeps_default_for_non_status_errors() {
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "connection reset".to_string(),
+                }
+            )),
+            crate::constants::HTTP_DEFAULT_ERROR_CODE
+        );
+    }
+
+    #[test]
+    fn detects_http_capacity_responses_and_refused_h2_streams() {
+        let capacity_status = Aria2Error::Recoverable(RecoverableError::ServerError { code: 429 });
+        let refused_stream = Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "HTTP/2 stream error: REFUSED_STREAM".into(),
+        });
+        let ordinary_reset = Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "connection reset by peer".into(),
+        });
+
+        assert!(is_capacity_limited_error(&capacity_status));
+        assert!(is_capacity_limited_error(&refused_stream));
+        assert!(!is_capacity_limited_error(&ordinary_reset));
+    }
+
+    #[test]
+    fn concurrent_retry_classification_matches_shared_policy() {
+        let no_wait = RetryPolicy::new(3, 0);
+        let with_wait = RetryPolicy::new(3, 1_000);
+        let server_error = |code| Aria2Error::Recoverable(RecoverableError::ServerError { code });
+
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &server_error(500),
+            false
+        ));
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &server_error(503),
+            false
+        ));
+        assert!(should_retry_segment(
+            &with_wait,
+            0,
+            &server_error(503),
+            false
+        ));
+        assert!(should_retry_segment(&no_wait, 0, &server_error(504), false));
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+                message: "401".to_string(),
+            }),
+            false
+        ));
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+            false
+        ));
+        assert!(should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+            true
+        ));
+        assert!(should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
+                range: "bytes=0-9".to_string(),
+            }),
+            false
+        ));
+    }
+
+    #[test]
+    fn min_split_size_caps_concurrent_segment_count() {
+        assert_eq!(
+            effective_segment_count(10 * 1024 * 1024, 16, 20 * 1024 * 1024),
+            1
+        );
+        assert_eq!(
+            effective_segment_count(40 * 1024 * 1024, 16, 20 * 1024 * 1024),
+            2
+        );
+        assert_eq!(
+            effective_segment_count(100 * 1024 * 1024, 16, 20 * 1024 * 1024),
+            5
+        );
+    }
+
+    #[test]
+    fn zero_min_split_size_keeps_requested_segment_count() {
+        assert_eq!(effective_segment_count(10 * 1024 * 1024, 4, 0), 4);
+    }
+}

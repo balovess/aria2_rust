@@ -11,18 +11,23 @@ mod support;
 #[path = "../../../aria2-core/tests/fixtures/mock_tracker.rs"]
 mod mock_tracker;
 
-use aria2_core::engine::bt_registry::{BtObject, BtRegistry};
-use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
-use aria2_core::engine::bt_tracker_comm::{BtAnnounce, TrackerAnnouncer, TrackerRuntimeSnapshot};
-use aria2_core::engine::bt_upload_session::{BtSeedingConfig, InMemoryPieceProvider};
+use aria2_core::engine::bittorrent::download::seed_manager::{BtSeedManager, SeedExitCondition};
+use aria2_core::engine::bittorrent::peer::upload_session::{
+    BtSeedingConfig, InMemoryPieceProvider,
+};
+use aria2_core::engine::bittorrent::registry::{BtObject, BtRegistry};
+use aria2_core::engine::bittorrent::tracker::communication::{
+    BtAnnounce, TrackerAnnouncer, TrackerRuntimeInfo, TrackerRuntimeSnapshot,
+};
 use aria2_core::request::request_group::{BtPeerSnapshot, BtPeerSource};
 use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig, DhtEngineState};
+use aria2_protocol::bittorrent::dht::message::DhtMessageBuilder;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
 use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use std::sync::Arc;
 use support::rpc::RpcFixture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 fn make_request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
     JsonRpcRequest::new(method, params).with_id(1)
@@ -36,6 +41,44 @@ fn assert_success(resp: &JsonRpcResponse) {
     );
 }
 
+async fn announce_peer_to_local_dht(engine: &DhtEngine, info_hash: &[u8; 20]) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dht_addr = std::net::SocketAddr::new(
+        std::net::Ipv4Addr::LOCALHOST.into(),
+        engine.local_addr().port(),
+    );
+    let sender_id = [0xA9; 20];
+    let get_peers = DhtMessageBuilder::get_peers(1, &sender_id, info_hash).encode();
+    socket.send_to(&get_peers, dht_addr).await.unwrap();
+
+    let mut packet = [0u8; 2048];
+    let (length, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut packet),
+    )
+    .await
+    .expect("local DHT get_peers response should arrive")
+    .unwrap();
+    let response =
+        aria2_protocol::bittorrent::dht::message::DhtMessage::decode(&packet[..length]).unwrap();
+    let token = response
+        .r
+        .as_ref()
+        .and_then(|result| result.dict_get(b"token"))
+        .and_then(|value| value.as_bytes())
+        .expect("local DHT should return an announce token");
+    let announce =
+        DhtMessageBuilder::announce_peer_with_token(2, &sender_id, info_hash, 6881, token).encode();
+    socket.send_to(&announce, dht_addr).await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut packet),
+    )
+    .await
+    .expect("local DHT announce_peer response should arrive")
+    .unwrap();
+}
+
 /// Test: real BitTorrent peer, tracker, and DHT runtime state reaches RPC snapshots.
 #[tokio::test]
 async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
@@ -47,7 +90,14 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         .collect::<Vec<_>>();
     let piece_len = piece.len();
 
-    let tracker = mock_tracker::MockTrackerServer::start_with_peers(vec![65535], false).await;
+    let returned_dynamic_url = "http://dynamic-response-tracker.example/announce".to_string();
+    let tracker = mock_tracker::MockTrackerServer::start_with_dynamic_announce_list(
+        vec![65535],
+        300,
+        vec![vec![returned_dynamic_url.clone()]],
+        None,
+    )
+    .await;
     let tracker_url = tracker.announce_url();
     let tracker_runtime = Arc::new(std::sync::RwLock::new(TrackerRuntimeSnapshot::default()));
     let mut tracker_announcer = TrackerAnnouncer::new(&[], &Some(tracker_url.clone()));
@@ -59,7 +109,11 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(announce.peers, vec![("127.0.0.1".to_string(), 65535)]);
     tracker.wait_for_event("started").await;
 
-    let dht = DhtEngine::start(DhtEngineConfig::local())
+    let dht_directory = tempfile::tempdir().unwrap();
+    let dht_file_path = dht_directory.path().join("dht.dat");
+    let mut dht_config = DhtEngineConfig::local();
+    dht_config.dht_file_path = Some(dht_file_path.clone());
+    let dht = DhtEngine::start(dht_config)
         .await
         .expect("the local DHT engine should start");
     assert_eq!(dht.stats().await.state, DhtEngineState::Running);
@@ -93,9 +147,15 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
 
         let mut length = [0u8; 4];
         stream.read_exact(&mut length).await.unwrap();
+        let mut extension_handshake = vec![0u8; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut extension_handshake).await.unwrap();
+        assert_eq!(extension_handshake.first(), Some(&20));
+        assert_eq!(extension_handshake.get(1), Some(&0));
+
+        stream.read_exact(&mut length).await.unwrap();
         let mut availability = vec![0u8; u32::from_be_bytes(length) as usize];
         stream.read_exact(&mut availability).await.unwrap();
-        assert_eq!(availability, vec![5, 0x80]);
+        assert_eq!(availability, vec![14], "Fast seeder advertises HaveAll");
 
         stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // Interested
         loop {
@@ -124,18 +184,18 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         assert_eq!(&payload[9..], leecher_piece.as_slice());
     });
     let (server_stream, leecher_addr) = listener.accept().await.unwrap();
-    let peer_connection =
-        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
-            server_stream,
-            &info_hash,
-            &seeder_peer_id,
-        )
+    let incoming = aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+        .await
+        .expect("the seeder should parse the real leecher handshake");
+    let peer_connection = incoming
+        .complete(seeder_peer_id, None, false)
         .await
         .expect("the seeder should complete the real leecher handshake");
-    assert_eq!(peer_connection.remote_peer_id, Some(leecher_peer_id));
+    assert_eq!(peer_connection.remote_peer_id(), Some(&leecher_peer_id));
     assert_eq!(peer_connection.remote_addr(), Some(leecher_addr));
     let peer_id = peer_connection
-        .remote_peer_id
+        .remote_peer_id()
+        .copied()
         .expect("handshake should provide the leecher peer-id");
     let peer_addr = peer_connection
         .remote_addr()
@@ -164,22 +224,34 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         upload_length > 0,
         "real seeder uploadLength should increase"
     );
-    assert!(upload_speed > 0, "real seeder uploadSpeed should increase");
+    assert!(
+        upload_speed > 0,
+        "recent uploadSpeed should remain visible while its 10-second sample is fresh"
+    );
+
+    // The RPC peer snapshot is seeded with a deterministic live-rate sample;
+    // the real transfer above independently verifies cumulative byte accounting.
+    let peer_upload_speed = 16_384;
 
     let peer_snapshot = BtPeerSnapshot {
         peer_id,
+        client: Some("fixture-peer/1.0".to_string()),
         addr: peer_addr,
         is_incoming: true,
         source: BtPeerSource::Incoming,
         bitfield: Some(vec![0x80]),
         uploaded_bytes: upload_length,
         downloaded_bytes: 0,
-        upload_speed: upload_speed as f64,
+        upload_speed: peer_upload_speed as f64,
         download_speed: 0.0,
-        avg_upload_speed: upload_speed,
+        avg_upload_speed: peer_upload_speed,
         avg_download_speed: 0,
         am_choking: false,
         peer_choking: false,
+        am_interested: false,
+        peer_interested: false,
+        outstanding_upload_requests: 0,
+        outstanding_download_requests: 0,
         seeder: Some(false),
         connection_duration_secs: 1,
         last_data_age_secs: 0,
@@ -211,6 +283,7 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         registry.put(gid_value, bt_object);
         registry.set_dht_engine_for_gid(gid_value, Arc::clone(&dht));
     }
+    announce_peer_to_local_dht(&dht, &[0x93; 20]).await;
 
     let peers_resp = engine
         .handle_request(&make_request("aria2.getPeers", serde_json::json!([gid])))
@@ -218,21 +291,50 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_success(&peers_resp);
     let peers = peers_resp.result.unwrap();
     assert_eq!(peers.as_array().unwrap().len(), 1);
-    assert_eq!(peers[0]["peerId"], "72".repeat(20));
+    assert_eq!(peers[0]["peerId"], "r".repeat(20));
     assert_eq!(peers[0]["ip"], "127.0.0.1");
     assert_eq!(peers[0]["port"], "0");
     assert_eq!(peers[0]["bitfield"], "80");
     assert_eq!(peers[0]["amChoking"], "false");
     assert_eq!(peers[0]["peerChoking"], "false");
-    assert_eq!(peers[0]["uploadSpeed"], upload_speed.to_string());
+    assert_eq!(peers[0]["uploadSpeed"], peer_upload_speed.to_string());
     assert_eq!(peers[0]["seeder"], "false");
+
+    let peer_stats_resp = engine
+        .handle_request(&make_request(
+            "aria2.getPeerStats",
+            serde_json::json!([gid]),
+        ))
+        .await;
+    assert_success(&peer_stats_resp);
+    let peer_stats = peer_stats_resp.result.unwrap();
+    assert_eq!(peer_stats["peerCount"], "1");
+    assert_eq!(peer_stats["seeders"], "0");
+    assert_eq!(peer_stats["leechers"], "1");
+    assert_eq!(peer_stats["unknown"], "0");
+
+    let peer_details_resp = engine
+        .handle_request(&make_request(
+            "aria2.getPeerDetails",
+            serde_json::json!([gid]),
+        ))
+        .await;
+    assert_success(&peer_details_resp);
+    let peer_details = peer_details_resp.result.unwrap();
+    assert_eq!(peer_details[0]["source"], "incoming");
+    assert_eq!(peer_details[0]["client"], "fixture-peer/1.0");
+    assert_eq!(peer_details[0]["progressPercent"], 100.0);
+    assert_eq!(peer_details[0]["uploadedBytes"], upload_length.to_string());
+    assert_eq!(peer_details[0]["flags"]["incoming"], true);
+    assert_eq!(peer_details[0]["outstandingRequestsToPeer"], 0);
+    assert_eq!(peer_details[0]["outstandingRequestsFromPeer"], 0);
 
     let trackers_resp = engine
         .handle_request(&make_request("aria2.getTrackers", serde_json::json!([gid])))
         .await;
     assert_success(&trackers_resp);
     let trackers = trackers_resp.result.unwrap();
-    assert_eq!(trackers.as_array().unwrap().len(), 1);
+    assert_eq!(trackers.as_array().unwrap().len(), 2);
     assert_eq!(trackers[0]["uri"], tracker_url);
     assert_eq!(trackers[0]["tier"], 1);
     assert_eq!(trackers[0]["current"], true);
@@ -240,6 +342,93 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(trackers[0]["interval"], "300");
     assert_eq!(trackers[0]["seeders"], 1);
     assert_eq!(trackers[0]["leechers"], 1);
+    assert_eq!(trackers[0]["downloaded"], serde_json::Value::Null);
+    assert!(trackers[0]["snapshotAtUnixMillis"].as_str().is_some());
+    assert!(
+        trackers.as_array().unwrap().iter().any(|tracker| {
+            tracker["uri"] == returned_dynamic_url
+                && tracker["tier"] == 2
+                && tracker["status"] == "unknown"
+        }),
+        "dynamic tracker response is absent from getTrackers: {trackers}"
+    );
+
+    {
+        let mut snapshot = tracker_runtime.write().unwrap();
+        let tracker = snapshot
+            .trackers
+            .iter_mut()
+            .find(|tracker| tracker.uri == tracker_url)
+            .expect("runtime snapshot contains the announced tracker");
+        tracker.seconds_since_last_success = Some(0);
+        tracker.last_success_at_unix_millis = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                - 120_000,
+        );
+        let public_url = "http://public-tracker.example/announce".to_string();
+        let dynamic_url = "http://dynamic-tracker.example/announce".to_string();
+        let failed_url = "http://failed-tracker.example/announce".to_string();
+        snapshot.tracker_tiers.push(vec![public_url.clone()]);
+        snapshot.tracker_tiers.push(vec![dynamic_url.clone()]);
+        snapshot.tracker_tiers.push(vec![failed_url.clone()]);
+        snapshot.trackers.push(TrackerRuntimeInfo {
+            uri: public_url.clone(),
+            tier: 3,
+            status: "succeeded".to_string(),
+            ..TrackerRuntimeInfo::default()
+        });
+        snapshot.trackers.push(TrackerRuntimeInfo {
+            uri: dynamic_url.clone(),
+            tier: 4,
+            status: "idle".to_string(),
+            ..TrackerRuntimeInfo::default()
+        });
+        snapshot.trackers.push(TrackerRuntimeInfo {
+            uri: failed_url.clone(),
+            tier: 5,
+            last_failure_kind: Some(
+                aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind::Timeout,
+            ),
+            status: "failed".to_string(),
+            ..TrackerRuntimeInfo::default()
+        });
+    }
+    let elapsed_trackers_resp = engine
+        .handle_request(&make_request("aria2.getTrackers", serde_json::json!([gid])))
+        .await;
+    assert_success(&elapsed_trackers_resp);
+    let elapsed_trackers = elapsed_trackers_resp.result.unwrap();
+    assert_eq!(elapsed_trackers.as_array().unwrap().len(), 5);
+    assert!(
+        elapsed_trackers[0]["secondsSinceLastSuccess"]
+            .as_u64()
+            .is_some_and(|seconds| seconds >= 120),
+        "getTrackers must calculate elapsed time at query time instead of returning a frozen snapshot age: {elapsed_trackers}"
+    );
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == returned_dynamic_url
+            && tracker["tier"] == 2
+            && tracker["status"] == "unknown"
+    }));
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://public-tracker.example/announce"
+            && tracker["tier"] == 3
+            && tracker["status"] == "succeeded"
+    }));
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://dynamic-tracker.example/announce"
+            && tracker["tier"] == 4
+            && tracker["status"] == "idle"
+    }));
+    assert!(elapsed_trackers.as_array().unwrap().iter().any(|tracker| {
+        tracker["uri"] == "http://failed-tracker.example/announce"
+            && tracker["tier"] == 5
+            && tracker["status"] == "failed"
+            && tracker["lastFailureKind"] == "timeout"
+    }));
 
     let dht_resp = engine
         .handle_request(&make_request("aria2.getDhtStatus", serde_json::json!([])))
@@ -247,9 +436,29 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_success(&dht_resp);
     let dht_status = dht_resp.result.unwrap();
     assert_eq!(dht_status["state"], "running");
-    assert_eq!(dht_status["totalNodes"], "0");
-    assert_eq!(dht_status["goodNodes"], "0");
+    assert_eq!(dht_status["totalNodes"], "1");
+    assert_eq!(dht_status["goodNodes"], "1");
     assert_eq!(dht_status["pendingTransactions"], "0");
+    assert_eq!(dht_status["peerInfoHashes"], "1");
+    assert_eq!(dht_status["storedPeers"], "1");
+    assert_eq!(dht_status["peerStorageEvictions"], "0");
+    assert_eq!(dht_status["maxPeerInfoHashes"], "4096");
+
+    let save_resp = engine
+        .handle_request(&make_request("aria2.saveDhtState", serde_json::json!([])))
+        .await;
+    assert_success(&save_resp);
+    assert_eq!(save_resp.result.unwrap(), "OK");
+    assert!(
+        dht_file_path.is_file(),
+        "manual RPC save writes the DHT table"
+    );
+
+    let evict_resp = engine
+        .handle_request(&make_request("aria2.evictDhtNodes", serde_json::json!([])))
+        .await;
+    assert_success(&evict_resp);
+    assert_eq!(evict_resp.result.unwrap(), serde_json::json!(["0", "0"]));
 
     dht.shutdown_async().await;
 }

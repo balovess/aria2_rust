@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "aria2"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "aria2-core",
  "aria2-protocol",
@@ -200,6 +200,7 @@ dependencies = [
  "futures",
  "libc",
  "mimalloc",
+ "rand 0.8.5",
  "ratatui",
  "reqwest",
  "serde",
@@ -214,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-core"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "adler32",
  "aes-gcm 0.10.3",
@@ -265,6 +266,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-test",
+ "tokio-tungstenite 0.24.0",
  "tokio-uring",
  "tokio-util",
  "tracing",
@@ -278,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-protocol"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -294,6 +296,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
+ "libc",
  "md-5",
  "mockito",
  "num-bigint-dig",
@@ -316,11 +319,12 @@ dependencies = [
  "tracing",
  "url",
  "webpki-roots 0.26.11",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "aria2-rpc"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -4412,8 +4416,12 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite 0.24.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4663,6 +4671,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1 0.10.6",
  "thiserror 1.0.69",
  "utf-8",

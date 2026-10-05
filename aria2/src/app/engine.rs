@@ -9,10 +9,12 @@ use super::App;
 use super::startup::StartupPlan;
 #[cfg(feature = "bittorrent")]
 use aria2_core::config::TrackerCatalogConfig;
+use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-#[cfg(all(feature = "metalink", feature = "bittorrent"))]
-use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
+#[cfg(feature = "metalink")]
+use aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup;
+use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
@@ -97,6 +99,25 @@ fn option_snapshot_for_input(
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
+        // `--interface` takes precedence over `--multiple-interface`, as in
+        // aria2_original. Resolve the specification before constructing any
+        // protocol-owned sockets so special BT paths such as LPD use the same
+        // process-wide outbound policy.
+        let outbound_policy_spec = self
+            .get_opt_str("interface")
+            .await
+            .or(self.get_opt_str("multiple-interface").await);
+        let outbound_policy = match outbound_policy_spec {
+            Some(spec) => match OutboundNetworkPolicy::resolve_spec(&spec).await {
+                Ok(policy) => Arc::new(policy),
+                Err(error) => {
+                    tracing::warn!(%error, %spec, "Ignoring invalid network interface configuration");
+                    Arc::new(OutboundNetworkPolicy::direct())
+                }
+            },
+            None => Arc::new(OutboundNetworkPolicy::direct()),
+        };
+
         #[cfg(feature = "bittorrent")]
         let mut engine = {
             let config = self.config.read().await;
@@ -143,7 +164,16 @@ impl App {
                 }
                 _ => None,
             };
-            let lpd_manager = match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
+            let lpd_interface = lpd_interface.or_else(|| {
+                outbound_policy
+                    .addresses()
+                    .into_iter()
+                    .find_map(|address| match address {
+                        std::net::IpAddr::V4(address) => Some(address),
+                        std::net::IpAddr::V6(_) => None,
+                    })
+            });
+            let lpd_manager = match aria2_core::engine::bittorrent::discovery::lpd::LpdManager::with_interval_and_interface_and_port(
                 aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
                 lpd_interface,
                 lpd_port,
@@ -154,7 +184,7 @@ impl App {
                         %error,
                         "Using default LPD manager because configured LPD setup failed"
                     );
-                    Arc::new(aria2_core::engine::lpd_manager::LpdManager::new())
+                    Arc::new(aria2_core::engine::bittorrent::discovery::lpd::LpdManager::new())
                 }
             };
 
@@ -169,6 +199,41 @@ impl App {
 
         #[cfg(not(feature = "bittorrent"))]
         let mut engine = DownloadEngine::new();
+
+        let global_download_limit = self
+            .get_opt_i64("max-overall-download-limit")
+            .await
+            .and_then(|limit| (limit > 0).then_some(limit as u64));
+        let global_upload_limit = self
+            .get_opt_i64("max-overall-upload-limit")
+            .await
+            .and_then(|limit| (limit > 0).then_some(limit as u64));
+        if global_download_limit.is_some() || global_upload_limit.is_some() {
+            engine.set_global_rate_limiter(aria2_core::rate_limiter::RateLimiterConfig::new(
+                global_download_limit,
+                global_upload_limit,
+            ));
+        }
+
+        engine.set_outbound_network_policy(outbound_policy);
+
+        let dns_timeout = self
+            .get_opt_i64("dns-timeout")
+            .await
+            .filter(|value| *value > 0)
+            .map(|value| std::time::Duration::from_secs(value as u64))
+            .unwrap_or_else(|| std::time::Duration::from_secs(30));
+        let dns_servers = self
+            .get_opt_str("async-dns-server")
+            .await
+            .and_then(|value| match DnsCache::parse_dns_server_list(&value) {
+                Ok(servers) => Some(servers),
+                Err(error) => {
+                    tracing::warn!(%error, "Ignoring invalid async-dns-server configuration");
+                    None
+                }
+            });
+        engine.set_dns_config(dns_timeout, dns_servers);
 
         let server_stat_timeout = self
             .get_opt_i64("server-stat-timeout")
@@ -247,24 +312,10 @@ impl App {
                     .ok_or_else(|| format!("Invalid GID '{}': expected a hexadecimal u64", value))
             })
             .transpose()?;
-        let global_dl = self
-            .get_opt_i64("max-overall-download-limit")
-            .await
-            .and_then(|v| (v > 0).then_some(v as u64));
-        let global_ul = self
-            .get_opt_i64("max-overall-upload-limit")
-            .await
-            .and_then(|v| (v > 0).then_some(v as u64));
-
         let mut engine_lock = self.engine.lock().await;
         let engine = engine_lock
             .as_mut()
             .ok_or_else(|| "Engine not initialized".to_string())?;
-
-        if global_dl.is_some() || global_ul.is_some() {
-            use aria2_core::rate_limiter::RateLimiterConfig;
-            engine.set_global_rate_limiter(RateLimiterConfig::new(global_dl, global_ul));
-        }
 
         #[cfg(feature = "metalink")]
         let mut metalink_resource_groups = Vec::new();
@@ -308,12 +359,12 @@ impl App {
                 let input_snapshot =
                     option_snapshot_for_input(&option_snapshot, input, self.explicit_timeout);
                 let converter = MetalinkToRequestGroup::new();
+                let expansion = converter
+                    .create_groups_from_bytes(data, &input_options, &mut gid_iter)
+                    .map_err(|error| format!("Metalink group construction failed: {error}"))?;
                 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
                 {
-                    let graphs = converter
-                        .create_torrent_graphs_from_bytes(data, &input_options, &mut gid_iter)
-                        .map_err(|e| format!("Metalink graph construction failed: {}", e))?;
-                    for graph in &graphs {
+                    for graph in &expansion.torrent_graphs {
                         graph
                             .metadata
                             .recover_mut()
@@ -323,19 +374,16 @@ impl App {
                             .recover_mut()
                             .set_option_snapshot(input_snapshot.clone());
                     }
-                    metalink_graphs.extend(graphs);
+                    metalink_graphs.extend(expansion.torrent_graphs);
                 }
                 #[cfg(feature = "metalink")]
                 {
-                    let groups = converter
-                        .create_resource_groups_from_bytes(data, &input_options, &mut gid_iter)
-                        .map_err(|e| format!("Metalink resource construction failed: {}", e))?;
-                    for group in &groups {
+                    for group in &expansion.resource_groups {
                         group
                             .recover_mut()
                             .set_option_snapshot(input_snapshot.clone());
                     }
-                    metalink_resource_groups.extend(groups);
+                    metalink_resource_groups.extend(expansion.resource_groups);
                 }
             }
         }
@@ -506,7 +554,7 @@ impl App {
             let tui_command_tx = tui_enabled.then(|| engine.engine_command_sender());
             engine.set_keep_alive(startup_plan.keeps_engine_alive());
             if let Some(tx) = engine.take_shutdown_sender() {
-                let cmd_tx = engine.engine_cmd_tx();
+                let cmd_tx = engine.engine_command_sender();
                 tokio::spawn(async move {
                     run_shutdown_signal_handler(tx, cmd_tx).await;
                 });
@@ -515,7 +563,8 @@ impl App {
             // `--stop=N` / `--stop-with-process=PID` shutdown triggers.
             // Mirrors C++ `DownloadEngineFactory`, which registers a
             // `TimedHaltCommand` / `WatchProcessCommand` as routine commands.
-            self.spawn_halt_watchers(engine.engine_cmd_tx()).await;
+            self.spawn_halt_watchers(engine.engine_command_sender())
+                .await;
 
             drop(engine_lock);
             info!(

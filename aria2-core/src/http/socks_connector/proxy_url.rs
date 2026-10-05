@@ -64,21 +64,37 @@ impl ProxyUrl {
             (None, None)
         };
 
-        // Parse host and port
-        let (host, port) = if let Some(colon_idx) = host_port.rfind(':') {
+        // Parse host and port. IPv6 literals must be bracketed so the colons
+        // inside the address cannot be mistaken for the port separator.
+        let default_port = match protocol {
+            ProxyProtocol::Socks4 | ProxyProtocol::Socks5 => 1080u16,
+            ProxyProtocol::Http => 8080u16,
+            ProxyProtocol::Https => 443u16,
+        };
+        let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+            let close = bracketed
+                .find(']')
+                .ok_or_else(|| "Missing closing bracket in proxy IPv6 host".to_string())?;
+            let host = &bracketed[..close];
+            let suffix = &bracketed[close + 1..];
+            let port = if suffix.is_empty() {
+                default_port
+            } else if let Some(port_text) = suffix.strip_prefix(':') {
+                port_text
+                    .parse()
+                    .map_err(|_| format!("Invalid port number in proxy URL: {port_text}"))?
+            } else {
+                return Err(format!("Invalid bracketed proxy host: {host_port}"));
+            };
+            (host.to_string(), port)
+        } else if let Some(colon_idx) = host_port.rfind(':') {
             let h = &host_port[..colon_idx];
             let p_str = &host_port[colon_idx + 1..];
             let port: u16 = p_str
                 .parse()
-                .map_err(|_| format!("Invalid port number in proxy URL: {}", p_str))?;
+                .map_err(|_| format!("Invalid port number in proxy URL: {p_str}"))?;
             (h.to_string(), port)
         } else {
-            // Use default port based on protocol
-            let default_port = match protocol {
-                ProxyProtocol::Socks4 | ProxyProtocol::Socks5 => 1080u16,
-                ProxyProtocol::Http => 8080u16,
-                ProxyProtocol::Https => 443u16,
-            };
             (host_port.to_string(), default_port)
         };
 

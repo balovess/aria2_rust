@@ -20,7 +20,7 @@ pub(crate) fn request_directory(path: &str) -> &str {
     }
 }
 
-use crate::http::request_response::basic_auth;
+use crate::http::request::basic_auth;
 
 // ---------------------------------------------------------------------------
 // AuthConfig — mirrors C++ AuthConfig

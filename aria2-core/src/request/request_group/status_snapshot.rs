@@ -41,6 +41,10 @@ impl BtStatusSnapshot {
         self.peers.len()
     }
 
+    /// Count connected peers whose advertised bitfield is complete.
+    ///
+    /// This is deliberately different from the Tracker swarm `complete`
+    /// statistic.
     pub fn seeder_count(&self) -> usize {
         self.peers
             .iter()

@@ -22,6 +22,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::network::OutboundNetworkPolicy;
 
 /// Configuration for establishing an FTP-over-HTTP-proxy tunnel.
 #[derive(Debug, Clone)]
@@ -102,26 +103,43 @@ impl FtpProxyTunnel {
     /// - If proxy authentication fails after retry
     /// - If timeout occurs
     pub async fn establish(config: &FtpProxyTunnelConfig) -> Result<TcpStream> {
+        Self::establish_with_policy(config, &OutboundNetworkPolicy::direct()).await
+    }
+
+    /// Establish a tunnel through the shared outbound policy.
+    pub async fn establish_with_policy(
+        config: &FtpProxyTunnelConfig,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<TcpStream> {
         // Step 1: Connect to the proxy server
         debug!(
             "Connecting to HTTP proxy {}:{} for FTP tunnel to {}:{}",
             config.proxy_host, config.proxy_port, config.target_host, config.target_port
         );
 
-        let mut stream = timeout(
-            config.connect_timeout,
-            TcpStream::connect((config.proxy_host.as_str(), config.proxy_port)),
-        )
-        .await
-        .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-        .map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Failed to connect to proxy {}:{}: {}",
-                    config.proxy_host, config.proxy_port, e
-                ),
-            })
-        })?;
+        let connect = async {
+            if policy.is_direct() {
+                TcpStream::connect((config.proxy_host.as_str(), config.proxy_port))
+                    .await
+                    .map_err(|error| Aria2Error::Network(error.to_string()))
+            } else {
+                policy
+                    .connect_host(&config.proxy_host, config.proxy_port)
+                    .await
+                    .map_err(|error| Aria2Error::Network(error.to_string()))
+            }
+        };
+        let mut stream = timeout(config.connect_timeout, connect)
+            .await
+            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
+            .map_err(|e: Aria2Error| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Failed to connect to proxy {}:{}: {}",
+                        config.proxy_host, config.proxy_port, e
+                    ),
+                })
+            })?;
 
         stream.set_nodelay(true).map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -538,6 +556,62 @@ fn md5_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn proxy_tunnel_binds_configured_source_address() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy tunnel fixture should bind");
+        let address = listener.local_addr().expect("proxy tunnel fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, peer) = listener.accept().await.expect("proxy should accept");
+            let mut request = [0u8; 4096];
+            let bytes = stream
+                .read(&mut request)
+                .await
+                .expect("read CONNECT request");
+            assert!(
+                String::from_utf8_lossy(&request[..bytes])
+                    .starts_with("CONNECT ftp.example.com:21 HTTP/1.1\r\n")
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .expect("write CONNECT response");
+            peer
+        });
+
+        let config = FtpProxyTunnelConfig {
+            proxy_host: "localhost".to_string(),
+            proxy_port: address.port(),
+            target_host: "ftp.example.com".to_string(),
+            target_port: 21,
+            ..Default::default()
+        };
+        let stream = FtpProxyTunnel::establish_with_policy(
+            &config,
+            &OutboundNetworkPolicy::single(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                127, 0, 0, 2,
+            ))),
+        )
+        .await
+        .expect("proxy tunnel should use the configured source");
+
+        assert_eq!(
+            server
+                .await
+                .expect("proxy tunnel fixture should finish")
+                .ip(),
+            stream.local_addr().expect("read tunnel local address").ip()
+        );
+        assert_eq!(
+            stream.local_addr().expect("read tunnel local address").ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))
+        );
+    }
 
     #[test]
     fn test_build_connect_request_without_auth() {

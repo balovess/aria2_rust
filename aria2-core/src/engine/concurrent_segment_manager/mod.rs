@@ -21,6 +21,10 @@ pub use types::{MirrorState, Segment, SegmentStatus};
 pub struct ConcurrentSegmentManager {
     total_size: u64,
     segments: Vec<Segment>,
+    /// Bytes already completed within each durable parent segment. These
+    /// offsets are kept in memory only; the control-file bitfield still marks
+    /// a parent complete only after every dynamic subrange has succeeded.
+    completed_lengths: Vec<u64>,
     mirrors: Vec<MirrorState>,
     /// URLs for mirror selection (used with UriSelector)
     mirror_urls: Vec<String>,
@@ -67,6 +71,7 @@ impl ConcurrentSegmentManager {
 
         Self {
             total_size,
+            completed_lengths: vec![0; num_segments],
             segments,
             mirrors,
             mirror_urls: urls,
@@ -138,6 +143,7 @@ impl ConcurrentSegmentManager {
 
         Self {
             total_size,
+            completed_lengths: vec![0; num_segments],
             segments,
             mirrors,
             mirror_urls: urls,
@@ -191,6 +197,19 @@ impl ConcurrentSegmentManager {
         &mut self,
         mirror_idx: usize,
     ) -> Option<(u32, u64, u64)> {
+        self.next_pending_range_for_mirror(mirror_idx, u64::MAX)
+    }
+
+    /// Claim a pending durable parent and return its next dynamic subrange.
+    ///
+    /// The caller chooses the request size. Successfully completed prefixes
+    /// within a parent stay in memory for the current download attempt, while
+    /// the parent remains the unit recorded in the control-file bitfield.
+    pub fn next_pending_range_for_mirror(
+        &mut self,
+        mirror_idx: usize,
+        max_length: u64,
+    ) -> Option<(u32, u64, u64)> {
         if !self
             .mirrors
             .get(mirror_idx)
@@ -211,6 +230,14 @@ impl ConcurrentSegmentManager {
             let idx = (start + i) % len;
             let seg = &mut self.segments[idx];
             if seg.status == SegmentStatus::Pending {
+                let completed = self.completed_lengths[idx].min(seg.length);
+                let remaining = seg.length - completed;
+                if remaining == 0 {
+                    seg.status = SegmentStatus::Done;
+                    continue;
+                }
+                let offset = seg.offset.saturating_add(completed);
+                let length = remaining.min(max_length.max(1));
                 seg.status = SegmentStatus::Downloading;
                 seg.assigned_mirror = Some(mirror_idx);
                 self.next_segment_idx
@@ -218,7 +245,7 @@ impl ConcurrentSegmentManager {
                 if let Some(m) = self.mirrors.get_mut(mirror_idx) {
                     m.active_segments += 1;
                 }
-                return Some((seg.index, seg.offset, seg.length));
+                return Some((seg.index, offset, length));
             }
         }
         None
@@ -301,12 +328,7 @@ impl ConcurrentSegmentManager {
         if self.total_size == 0 {
             return 100.0;
         }
-        let done = self
-            .segments
-            .iter()
-            .filter(|s| s.status == SegmentStatus::Done)
-            .count();
-        done as f64 / self.segments.len() as f64 * 100.0
+        self.completed_bytes as f64 / self.total_size as f64 * 100.0
     }
 
     pub fn num_segments(&self) -> usize {
@@ -363,26 +385,11 @@ impl ConcurrentSegmentManager {
     }
 
     pub fn mark_completed_up_to(&mut self, offset: u64, length: u64) {
-        let end_offset = offset + length;
-        for segment in &mut self.segments {
-            if segment.offset + segment.length <= offset {
-                if segment.status != SegmentStatus::Done {
-                    segment.status = SegmentStatus::Done;
-                    self.completed_bytes += segment.length;
-                }
-            } else if segment.offset < end_offset {
-                let overlap_start = std::cmp::max(segment.offset, offset);
-                let overlap_end = std::cmp::min(segment.offset + segment.length, end_offset);
-                if overlap_end > overlap_start {
-                    debug!(
-                        "Segment {} partially completed: {}/{} bytes",
-                        segment.index,
-                        overlap_end - segment.offset,
-                        segment.length
-                    );
-                }
-            }
-        }
+        let completed = self.restore_completed_prefix(offset);
+        debug!(
+            "Restored contiguous prefix at offset {} (observed local length {}): {} bytes",
+            offset, length, completed
+        );
     }
 
     pub fn segment_info(&self, index: usize) -> Option<(u64, u64, &SegmentStatus)> {

@@ -23,7 +23,7 @@ const K: usize = 8;
 /// they collectively cover.
 ///
 /// This is the Rust equivalent of C++ `DHTBucketTreeNode`.
-pub enum BucketTreeNode {
+pub(super) enum BucketTreeNode {
     /// Internal (branch) node with two children.
     Internal {
         left: Box<BucketTreeNode>,
@@ -39,7 +39,7 @@ pub enum BucketTreeNode {
 
 impl BucketTreeNode {
     /// Create a new leaf node wrapping the given bucket.
-    pub fn new_leaf(bucket: Bucket) -> Self {
+    pub(super) fn new_leaf(bucket: Bucket) -> Self {
         Self::Leaf { bucket }
     }
 
@@ -57,13 +57,8 @@ impl BucketTreeNode {
         }
     }
 
-    /// Returns `true` if this is a leaf node.
-    pub fn is_leaf(&self) -> bool {
-        matches!(self, Self::Leaf { .. })
-    }
-
     /// Returns the minimum ID covered by this subtree.
-    pub fn min_id(&self) -> [u8; 20] {
+    fn min_id(&self) -> [u8; 20] {
         match self {
             Self::Internal { min_id, .. } => *min_id,
             Self::Leaf { bucket } => *bucket.min_id(),
@@ -71,7 +66,7 @@ impl BucketTreeNode {
     }
 
     /// Returns the maximum ID covered by this subtree.
-    pub fn max_id(&self) -> [u8; 20] {
+    fn max_id(&self) -> [u8; 20] {
         match self {
             Self::Internal { max_id, .. } => *max_id,
             Self::Leaf { bucket } => *bucket.max_id(),
@@ -109,43 +104,11 @@ impl BucketTreeNode {
     }
 
     /// Returns `true` if `key` falls within this node's [min, max] range.
-    pub fn is_in_range(&self, key: &[u8; 20]) -> bool {
+    fn is_in_range(&self, key: &[u8; 20]) -> bool {
         let min = self.min_id();
         let max = self.max_id();
         // key >= min AND key <= max (lexicographic comparison)
         key.as_slice() >= min.as_slice() && key.as_slice() <= max.as_slice()
-    }
-
-    /// Get a reference to the bucket if this is a leaf node.
-    pub fn bucket(&self) -> Option<&Bucket> {
-        match self {
-            Self::Leaf { bucket } => Some(bucket),
-            Self::Internal { .. } => None,
-        }
-    }
-
-    /// Get a mutable reference to the bucket if this is a leaf node.
-    pub fn bucket_mut(&mut self) -> Option<&mut Bucket> {
-        match self {
-            Self::Leaf { bucket } => Some(bucket),
-            Self::Internal { .. } => None,
-        }
-    }
-
-    /// Get the left child (internal nodes only).
-    pub fn left(&self) -> Option<&BucketTreeNode> {
-        match self {
-            Self::Internal { left, .. } => Some(left),
-            Self::Leaf { .. } => None,
-        }
-    }
-
-    /// Get the right child (internal nodes only).
-    pub fn right(&self) -> Option<&BucketTreeNode> {
-        match self {
-            Self::Internal { right, .. } => Some(right),
-            Self::Leaf { .. } => None,
-        }
     }
 
     /// Split this leaf node's bucket into two child buckets.
@@ -155,7 +118,7 @@ impl BucketTreeNode {
     /// - Right: the new bucket returned by `Bucket::split()`
     ///
     /// Panics if called on an internal node.
-    pub fn split(&mut self, local_id: &[u8; 20]) {
+    pub(super) fn split(&mut self, local_id: &[u8; 20]) {
         match self {
             Self::Leaf { bucket } => {
                 // Check if splitting is allowed.
@@ -181,20 +144,30 @@ impl BucketTreeNode {
 
                 *self = Self::new_internal(left_node, right_node);
 
-                tracing::debug!(
-                    "Bucket split: left prefix={}, right prefix={}",
-                    match self.left() {
-                        Some(BucketTreeNode::Leaf { bucket }) => bucket.prefix_length(),
-                        _ => 0,
-                    },
-                    match self.right() {
-                        Some(BucketTreeNode::Leaf { bucket }) => bucket.prefix_length(),
-                        _ => 0,
+                let (left_prefix, right_prefix) = match self {
+                    Self::Internal { left, right, .. } => {
+                        let prefix = |node: &BucketTreeNode| match node {
+                            Self::Leaf { bucket } => bucket.prefix_length(),
+                            Self::Internal { .. } => 0,
+                        };
+                        (prefix(left), prefix(right))
                     }
-                );
+                    Self::Leaf { .. } => unreachable!("a split produces two child buckets"),
+                };
+                tracing::debug!(left_prefix, right_prefix, "Bucket split");
             }
             Self::Internal { .. } => {
                 panic!("split() called on non-leaf node");
+            }
+        }
+    }
+
+    pub(super) fn for_each_bucket_mut(&mut self, f: &mut impl FnMut(&mut Bucket)) {
+        match self {
+            Self::Leaf { bucket } => f(bucket),
+            Self::Internal { left, right, .. } => {
+                left.for_each_bucket_mut(f);
+                right.for_each_bucket_mut(f);
             }
         }
     }
@@ -207,7 +180,7 @@ impl BucketTreeNode {
 /// Find the leaf tree node whose bucket range contains `key`.
 ///
 /// Equivalent to C++ `dht::findTreeNodeFor()`.
-pub fn find_tree_node_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a BucketTreeNode {
+fn find_tree_node_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a BucketTreeNode {
     match root {
         BucketTreeNode::Leaf { .. } => root,
         BucketTreeNode::Internal { .. } => {
@@ -218,7 +191,7 @@ pub fn find_tree_node_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a B
 }
 
 /// Find the mutable leaf tree node whose bucket range contains `key`.
-pub fn find_tree_node_for_mut<'a>(
+pub(super) fn find_tree_node_for_mut<'a>(
     root: &'a mut BucketTreeNode,
     key: &[u8; 20],
 ) -> &'a mut BucketTreeNode {
@@ -234,7 +207,7 @@ pub fn find_tree_node_for_mut<'a>(
 /// Find the bucket whose range contains `key`.
 ///
 /// Equivalent to C++ `dht::findBucketFor()`.
-pub fn find_bucket_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a Bucket {
+pub(super) fn find_bucket_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a Bucket {
     let leaf = find_tree_node_for(root, key);
     match leaf {
         BucketTreeNode::Leaf { bucket } => bucket,
@@ -243,7 +216,10 @@ pub fn find_bucket_for<'a>(root: &'a BucketTreeNode, key: &[u8; 20]) -> &'a Buck
 }
 
 /// Find the mutable bucket whose range contains `key`.
-pub fn find_bucket_for_mut<'a>(root: &'a mut BucketTreeNode, key: &[u8; 20]) -> &'a mut Bucket {
+pub(super) fn find_bucket_for_mut<'a>(
+    root: &'a mut BucketTreeNode,
+    key: &[u8; 20],
+) -> &'a mut Bucket {
     let leaf = find_tree_node_for_mut(root, key);
     match leaf {
         BucketTreeNode::Leaf { bucket } => bucket,
@@ -257,7 +233,7 @@ pub fn find_bucket_for_mut<'a>(root: &'a mut BucketTreeNode, key: &[u8; 20]) -> 
 /// It traverses the tree to find the leaf bucket containing `key`,
 /// then collects nodes from the parent's subtree and walks upward
 /// until K nodes are found.
-pub fn find_closest_k_nodes(root: &BucketTreeNode, key: &[u8; 20]) -> Vec<DhtNode> {
+pub(super) fn find_closest_k_nodes(root: &BucketTreeNode, key: &[u8; 20]) -> Vec<DhtNode> {
     let mut nodes = BinaryHeap::with_capacity(K);
     collect_closest_from_tree(root, key, &mut nodes);
     let mut result: Vec<DhtNode> = nodes.into_iter().map(|candidate| candidate.node).collect();
@@ -339,7 +315,7 @@ fn collect_closest_from_tree(
 /// Enumerate all leaf buckets in the tree (in-order traversal).
 ///
 /// Equivalent to C++ `dht::enumerateBucket()`.
-pub fn enumerate_buckets<'a>(root: &'a BucketTreeNode, buckets: &mut Vec<&'a Bucket>) {
+pub(super) fn enumerate_buckets<'a>(root: &'a BucketTreeNode, buckets: &mut Vec<&'a Bucket>) {
     match root {
         BucketTreeNode::Leaf { bucket } => {
             buckets.push(bucket);
@@ -348,14 +324,6 @@ pub fn enumerate_buckets<'a>(root: &'a BucketTreeNode, buckets: &mut Vec<&'a Buc
             enumerate_buckets(left, buckets);
             enumerate_buckets(right, buckets);
         }
-    }
-}
-
-/// Count the total number of leaf buckets in the tree.
-pub fn count_buckets(root: &BucketTreeNode) -> usize {
-    match root {
-        BucketTreeNode::Leaf { .. } => 1,
-        BucketTreeNode::Internal { left, right, .. } => count_buckets(left) + count_buckets(right),
     }
 }
 
@@ -374,10 +342,7 @@ mod tests {
         let bucket = Bucket::new(&local);
         let node = BucketTreeNode::new_leaf(bucket);
 
-        assert!(node.is_leaf());
-        assert!(node.bucket().is_some());
-        assert!(node.left().is_none());
-        assert!(node.right().is_none());
+        assert!(matches!(node, BucketTreeNode::Leaf { .. }));
     }
 
     #[test]
@@ -401,7 +366,7 @@ mod tests {
 
         let key = [0x42u8; 20];
         let found = find_tree_node_for(&root, &key);
-        assert!(found.is_leaf());
+        assert!(matches!(found, BucketTreeNode::Leaf { .. }));
     }
 
     #[test]
@@ -413,13 +378,5 @@ mod tests {
         let mut buckets = Vec::new();
         enumerate_buckets(&root, &mut buckets);
         assert_eq!(buckets.len(), 1);
-    }
-
-    #[test]
-    fn test_count_buckets() {
-        let local = make_local_node();
-        let bucket = Bucket::new(&local);
-        let root = BucketTreeNode::new_leaf(bucket);
-        assert_eq!(count_buckets(&root), 1);
     }
 }

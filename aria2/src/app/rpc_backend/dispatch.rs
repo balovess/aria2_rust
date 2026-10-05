@@ -91,13 +91,15 @@ impl RpcBackend for CoreRpcBackend {
                 Ok(BackendResult::response(BackendResponse::Text("OK".into())))
             }
             BackendRequest::RemoveDownloadResult { gid } => {
+                let gid = self.parse_gid(&gid)?.to_hex_string();
                 if self.group_man.remove_stopped_result(&gid).is_none() {
                     return Err(Self::execution(format!(
-                        "GID {gid} not found in download results"
+                        "Could not remove download result of GID#{gid}"
                     )));
                 }
                 Ok(BackendResult::response(BackendResponse::Text("OK".into())))
             }
+            BackendRequest::RemoveDownloadFiles { gid } => self.remove_download_files(gid).await,
             BackendRequest::GetGlobalOption => {
                 let options = self.global_options().await;
                 let options =
@@ -110,6 +112,8 @@ impl RpcBackend for CoreRpcBackend {
             BackendRequest::GetOption { gid } => self.get_option(gid).await,
             BackendRequest::ChangeOption { gid, options } => self.change_option(gid, options),
             BackendRequest::GetPeers { gid } => self.get_peers(gid),
+            BackendRequest::GetPeerStats { gid } => self.get_peer_stats(gid),
+            BackendRequest::GetPeerDetails { gid } => self.get_peer_details(gid),
             #[cfg(feature = "bittorrent")]
             BackendRequest::GetTrackers { gid } => self.get_trackers(gid),
             #[cfg(not(feature = "bittorrent"))]
@@ -120,6 +124,18 @@ impl RpcBackend for CoreRpcBackend {
             BackendRequest::GetDhtStatus => self.get_dht_status().await,
             #[cfg(not(feature = "bittorrent"))]
             BackendRequest::GetDhtStatus => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::SaveDhtState => self.save_dht_state().await,
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::SaveDhtState => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::EvictDhtNodes => self.evict_dht_nodes().await,
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::EvictDhtNodes => {
                 Err(BackendError::Unsupported("BitTorrent is disabled".into()))
             }
             BackendRequest::PauseAll => {
@@ -156,7 +172,11 @@ impl RpcBackend for CoreRpcBackend {
                 add_uris,
                 position,
             } => {
-                let group = self.group(&gid)?;
+                let gid = self.parse_gid(&gid)?.to_hex_string();
+                let group = self
+                    .group_man
+                    .group_by_hex(&gid)
+                    .ok_or_else(|| Self::execution(format!("Cannot remove URIs from GID#{gid}")))?;
                 let result = group
                     .write()
                     .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?

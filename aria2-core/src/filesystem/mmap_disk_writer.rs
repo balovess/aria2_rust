@@ -44,6 +44,7 @@
 //! no other process writes/truncates the same file.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use memmap2::MmapMut;
@@ -65,7 +66,7 @@ enum Inner {
         #[allow(dead_code)]
         file: std::fs::File,
         /// Writable memory mapping of the file.
-        mmap: MmapMut,
+        mmap: Arc<Mutex<MmapMut>>,
     },
     /// Fallback mode: used when mmap creation fails or after `truncate`.
     /// Delegates all operations to a [`PositionedDiskWriter`].
@@ -199,7 +200,10 @@ impl MmapDiskWriter {
         match unsafe { MmapMut::map_mut(&file) } {
             Ok(mmap) => {
                 debug!("Created mmap for {:?}, size: {} bytes", path, file_size);
-                Ok(Inner::Mmap { file, mmap })
+                Ok(Inner::Mmap {
+                    file,
+                    mmap: Arc::new(Mutex::new(mmap)),
+                })
             }
             Err(e) => {
                 warn!(
@@ -227,9 +231,9 @@ impl SeekableDiskWriter for MmapDiskWriter {
         if self.inner.is_none() {
             let path = self.path.clone();
             let total_size = self.total_size;
-            let inner = tokio::task::spawn_blocking(move || Self::open_sync(&path, total_size))
-                .await
-                .map_err(|error| Aria2Error::Io(format!("mmap open task failed: {error}")))??;
+            let inner = crate::filesystem::disk_io_pool::shared()
+                .run(move || Self::open_sync(&path, total_size), "mmap open")
+                .await?;
             self.inner = Some(inner);
         }
 
@@ -246,21 +250,34 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = usize::try_from(offset)
-                    .map_err(|_| Aria2Error::Io("write offset exceeds usize range".into()))?;
-                let end = start
-                    .checked_add(data.len())
-                    .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
-                if end > mmap.len() {
-                    return Err(Aria2Error::Io(format!(
-                        "write at offset {} len {} exceeds mmap size {}",
-                        offset,
-                        data.len(),
-                        mmap.len()
-                    )));
-                }
-                mmap[start..end].copy_from_slice(data);
-                Ok(())
+                let mmap = Arc::clone(mmap);
+                let data = data.to_vec();
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            let mut mmap = mmap
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let start = usize::try_from(offset).map_err(|_| {
+                                Aria2Error::Io("write offset exceeds usize range".into())
+                            })?;
+                            let end = start.checked_add(data.len()).ok_or_else(|| {
+                                Aria2Error::Io("write offset + length overflow".into())
+                            })?;
+                            if end > mmap.len() {
+                                return Err(Aria2Error::Io(format!(
+                                    "write at offset {} len {} exceeds mmap size {}",
+                                    offset,
+                                    data.len(),
+                                    mmap.len()
+                                )));
+                            }
+                            mmap[start..end].copy_from_slice(&data);
+                            Ok(())
+                        },
+                        "mmap write",
+                    )
+                    .await
             }
             Some(Inner::Fallback(writer)) => writer.write_at(offset, data).await,
             None => Err(Aria2Error::Io("writer not open".into())),
@@ -276,21 +293,33 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = usize::try_from(offset)
-                    .map_err(|_| Aria2Error::Io("write offset exceeds usize range".into()))?;
-                let end = start
-                    .checked_add(data.len())
-                    .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
-                if end > mmap.len() {
-                    return Err(Aria2Error::Io(format!(
-                        "write at offset {} len {} exceeds mmap size {}",
-                        offset,
-                        data.len(),
-                        mmap.len()
-                    )));
-                }
-                mmap[start..end].copy_from_slice(&data);
-                Ok(())
+                let mmap = Arc::clone(mmap);
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            let mut mmap = mmap
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let start = usize::try_from(offset).map_err(|_| {
+                                Aria2Error::Io("write offset exceeds usize range".into())
+                            })?;
+                            let end = start.checked_add(data.len()).ok_or_else(|| {
+                                Aria2Error::Io("write offset + length overflow".into())
+                            })?;
+                            if end > mmap.len() {
+                                return Err(Aria2Error::Io(format!(
+                                    "write at offset {} len {} exceeds mmap size {}",
+                                    offset,
+                                    data.len(),
+                                    mmap.len()
+                                )));
+                            }
+                            mmap[start..end].copy_from_slice(&data);
+                            Ok(())
+                        },
+                        "mmap write",
+                    )
+                    .await
             }
             Some(Inner::Fallback(writer)) => writer.write_bytes_at(offset, data).await,
             None => Err(Aria2Error::Io("writer not open".into())),
@@ -301,15 +330,29 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = usize::try_from(offset)
-                    .map_err(|_| Aria2Error::Io("read offset exceeds usize range".into()))?;
-                if start >= mmap.len() {
-                    return Ok(0); // EOF
-                }
-                let available = mmap.len() - start;
-                let to_read = buf.len().min(available);
-                buf[..to_read].copy_from_slice(&mmap[start..start + to_read]);
-                Ok(to_read)
+                let mmap = Arc::clone(mmap);
+                let len = buf.len();
+                let (data, read) = crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            let mmap = mmap
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let start = usize::try_from(offset).map_err(|_| {
+                                Aria2Error::Io("read offset exceeds usize range".into())
+                            })?;
+                            if start >= mmap.len() {
+                                return Ok((Vec::new(), 0));
+                            }
+                            let available = mmap.len() - start;
+                            let to_read = len.min(available);
+                            Ok((mmap[start..start + to_read].to_vec(), to_read))
+                        },
+                        "mmap read",
+                    )
+                    .await?;
+                buf[..read].copy_from_slice(&data);
+                Ok(read)
             }
             Some(Inner::Fallback(writer)) => writer.read_at(offset, buf).await,
             None => Err(Aria2Error::Io("writer not open".into())),
@@ -326,12 +369,33 @@ impl SeekableDiskWriter for MmapDiskWriter {
                 // Use flush_async (MS_ASYNC) — the data reaches the page cache
                 // immediately, making it visible to file reads. Dropping the
                 // mmap below triggers an implicit munmap which also writes back.
-                if let Err(e) = mmap.flush_async() {
+                let mmap = Arc::clone(mmap);
+                if let Err(e) = crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            mmap.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .flush_async()
+                                .map_err(|error| Aria2Error::Io(error.to_string()))
+                        },
+                        "mmap flush before truncate",
+                    )
+                    .await
+                {
                     warn!("mmap flush_async before truncate failed: {}", e);
                 }
                 // Drop the mmap and file, switch to fallback for truncate.
                 // v1 does not support remapping after resize.
-                self.inner = None;
+                let previous = self.inner.take();
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            drop(previous);
+                            Ok(())
+                        },
+                        "mmap release before truncate",
+                    )
+                    .await?;
                 let mut writer = PositionedDiskWriter::new(&self.path, self.total_size);
                 writer.open().await?;
                 writer.truncate(length).await?;
@@ -356,9 +420,20 @@ impl SeekableDiskWriter for MmapDiskWriter {
                 // flush operations. MS_ASYNC makes data visible in the page
                 // cache immediately; the OS writes back to stable storage
                 // asynchronously. Data is visible to other file readers.
-                mmap.flush_async()
-                    .map_err(|e| Aria2Error::Io(format!("mmap flush_async failed: {}", e)))?;
-                Ok(())
+                let mmap = Arc::clone(mmap);
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            mmap.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .flush_async()
+                                .map_err(|error| {
+                                    Aria2Error::Io(format!("mmap flush_async failed: {error}"))
+                                })
+                        },
+                        "mmap flush",
+                    )
+                    .await
             }
             Some(Inner::Fallback(writer)) => writer.flush().await,
             None => Ok(()), // No-op if not open
@@ -367,7 +442,20 @@ impl SeekableDiskWriter for MmapDiskWriter {
 
     async fn len(&self) -> Result<u64> {
         match &self.inner {
-            Some(Inner::Mmap { mmap, .. }) => Ok(mmap.len() as u64),
+            Some(Inner::Mmap { mmap, .. }) => {
+                let mmap = Arc::clone(mmap);
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            Ok(mmap
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .len() as u64)
+                        },
+                        "mmap length",
+                    )
+                    .await
+            }
             Some(Inner::Fallback(writer)) => writer.len().await,
             None => {
                 if let Some(size) = self.total_size {
@@ -389,7 +477,16 @@ impl SeekableDiskWriter for MmapDiskWriter {
     async fn close(&mut self) -> Result<()> {
         self.flush().await?;
         // Drop the file and mmap (or the fallback writer), releasing resources.
-        self.inner = None;
+        let inner = self.inner.take();
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    drop(inner);
+                    Ok(())
+                },
+                "mmap writer close",
+            )
+            .await?;
         self.opened = false;
         Ok(())
     }

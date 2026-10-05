@@ -9,7 +9,11 @@ pub struct MagnetLink {
     pub info_hash_v2: Option<[u8; 32]>,
     pub display_name: Option<String>,
     pub trackers: Vec<String>,
+    /// Expected total payload length from the optional `xl` parameter.
     pub exact_length: Option<u64>,
+    /// Complete torrent metadata sources from BEP 9 `xs` parameters.
+    pub exact_sources: Vec<String>,
+    /// Web seed base URLs from BEP 19 `ws` parameters.
     pub ws: Vec<String>,
 }
 
@@ -27,6 +31,7 @@ impl MagnetLink {
         let mut display_name = None;
         let mut trackers = Vec::new();
         let mut exact_length = None;
+        let mut exact_sources = Vec::new();
         let mut ws = Vec::new();
 
         for pair in query_part.split('&') {
@@ -66,6 +71,9 @@ impl MagnetLink {
                         exact_length = Some(size);
                     }
                 }
+                "xs" => {
+                    exact_sources.push(Self::url_decode(value));
+                }
                 "ws" => {
                     ws.push(Self::url_decode(value));
                 }
@@ -84,6 +92,7 @@ impl MagnetLink {
             display_name,
             trackers,
             exact_length,
+            exact_sources,
             ws,
         })
     }
@@ -229,6 +238,17 @@ mod tests {
         let magnet = "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&xl=1500000000";
         let ml = MagnetLink::parse(magnet).unwrap();
         assert_eq!(ml.exact_length, Some(1500000000));
+    }
+
+    #[test]
+    fn test_parse_exact_sources_and_web_seeds() {
+        let magnet = "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&xs=https%3A%2F%2Fexample.com%2Ffile.torrent&ws=https%3A%2F%2Fseed.example.com%2Ffiles%2F";
+        let ml = MagnetLink::parse(magnet).unwrap();
+        assert_eq!(
+            ml.exact_sources,
+            vec!["https://example.com/file.torrent".to_string()]
+        );
+        assert_eq!(ml.ws, vec!["https://seed.example.com/files/".to_string()]);
     }
 
     #[test]

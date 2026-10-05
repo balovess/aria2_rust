@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version = "0.3.9"
+version = "0.3.10"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -55,6 +55,7 @@ aria2-protocol = { workspace = true }
 # The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
 # automatically use ring as the crypto provider.
 reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
@@ -104,13 +105,13 @@ libc = "0.2"
 tokio-uring = { version = "0.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
 # for serving test HTTP responses. reqwest 0.13 already depends on hyper 1.x
 # as a transitive dep, so no additional version conflicts are introduced.
-hyper = { version = "1", features = ["http1", "http2"] }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 http = "1"
@@ -161,7 +162,7 @@ name = "io_uring_positioned_write_bench"
 harness = false
 
 # ── Phase F performance benchmarks ──────────────────────────────────────
-# F1: PositionedDiskWriter vs old Arc<Mutex<DirectDiskAdaptor>> for concurrent writes.
+# F1: independent PositionedDiskWriter instances vs mutex-serialized writes.
 [[bench]]
 name = "positioned_write_bench"
 harness = false

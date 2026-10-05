@@ -35,7 +35,6 @@ impl UriEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UriStatus {
     Used,
-    Spent,
     #[default]
     Waiting,
 }
@@ -43,7 +42,7 @@ pub enum UriStatus {
 impl Serialize for UriStatus {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(match self {
-            Self::Used | Self::Spent => "used",
+            Self::Used => "used",
             Self::Waiting => "waiting",
         })
     }
@@ -55,8 +54,6 @@ impl<'de> Deserialize<'de> for UriStatus {
         match value.as_str() {
             "used" => Ok(Self::Used),
             "waiting" => Ok(Self::Waiting),
-            // Accepted for in-process snapshots; never emitted on the wire.
-            "spent" => Ok(Self::Spent),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
                 &["used", "waiting"],
@@ -64,11 +61,6 @@ impl<'de> Deserialize<'de> for UriStatus {
         }
     }
 }
-
-/// URI information returned by `aria2.getUris`.
-///
-/// Type alias for [`UriEntry`] for API compatibility.
-pub type UriInfo = UriEntry;
 
 // =========================================================================
 // Server and Peer Types
@@ -151,11 +143,23 @@ pub struct TrackerInfo {
     )]
     pub interval: u64,
     pub min_interval: u64,
-    pub seeders: i64,
-    pub leechers: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeders: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leechers: Option<i64>,
+    /// Tracker-reported completed torrent count, not downloaded bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded: Option<String>,
+    /// Category of this tracker's most recent failed announce, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_kind: Option<String>,
     pub tracker_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds_since_last_success: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success_at_unix_millis: Option<String>,
+    pub snapshot_at_unix_millis: String,
+    pub status: String,
 }
 
 /// BitTorrent peer information.
@@ -208,6 +212,78 @@ pub struct PeerInfo {
     /// Seeder status as "true"/"false" string (matches original VLB_TRUE/VLB_FALSE)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seeder: Option<String>,
+}
+
+/// Counts of currently connected BitTorrent peers, returned by the Rust
+/// extension `aria2.getPeerStats`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerStats {
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub peer_count: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub seeders: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub leechers: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub unknown: usize,
+}
+
+/// Detailed per-peer telemetry exposed by the Rust extension RPC.
+/// Optional fields are omitted when the engine has no authoritative value.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerDetails {
+    pub peer_id: String,
+    pub ip: String,
+    pub source: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitfield: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeder: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flags: Option<PeerFlags>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded_bytes: Option<String>,
+    pub download_speed: u64,
+    pub upload_speed: u64,
+    pub avg_download_speed: u64,
+    pub avg_upload_speed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outstanding_requests_to_peer: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outstanding_requests_from_peer: Option<usize>,
+}
+
+/// Peer state from the local client's perspective.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerFlags {
+    pub am_choking: bool,
+    pub peer_choking: bool,
+    pub am_interested: bool,
+    pub peer_interested: bool,
+    pub snubbed: bool,
+    pub incoming: bool,
 }
 
 fn default_peer_source() -> String {

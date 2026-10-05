@@ -1,99 +1,17 @@
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::connection::{FtpActiveDataListener, FtpConnection, FtpResponseClass};
 use super::listing::parse_ftp_list_response;
 
-const DEFAULT_BUFFER_SIZE: usize = 65536;
+mod types;
+pub use types::{DownloadProgress, DownloadResult, FtpDownloadOptions};
 
-/// FTP download configuration options
-#[derive(Debug, Clone)]
-pub struct FtpDownloadOptions {
-    pub buffer_size: usize,
-    pub resume_offset: Option<u64>,
-    pub max_retries: u32,
-    /// Transfer mode (binary or ASCII)
-    pub binary_mode: bool,
-    /// Timeout for data connection establishment
-    pub data_connect_timeout: Duration,
-    /// Whether to download directories recursively
-    pub recursive_download: bool,
-}
-
-impl Default for FtpDownloadOptions {
-    fn default() -> Self {
-        Self {
-            buffer_size: DEFAULT_BUFFER_SIZE,
-            resume_offset: None,
-            max_retries: 3,
-            binary_mode: true,
-            data_connect_timeout: Duration::from_secs(30),
-            recursive_download: false,
-        }
-    }
-}
-
-/// Check if an IO error is transient and retry-worthy
-fn is_transient_io_error(e: &std::io::Error) -> bool {
-    use std::io::ErrorKind;
-    matches!(
-        e.kind(),
-        ErrorKind::Interrupted
-            | ErrorKind::WouldBlock
-            | ErrorKind::ConnectionReset
-            | ErrorKind::ConnectionAborted
-            | ErrorKind::BrokenPipe
-            | ErrorKind::TimedOut
-    ) || e.to_string().to_lowercase().contains("temporary")
-}
-
-/// Download progress information
-#[derive(Debug, Clone)]
-pub struct DownloadProgress {
-    pub downloaded_bytes: u64,
-    pub total_bytes: Option<u64>,
-    pub speed_bytes_per_sec: f64,
-}
-
-/// Result of a file download operation
-#[derive(Debug, Clone)]
-pub struct DownloadResult {
-    pub file_path: String,
-    pub bytes_downloaded: u64,
-    pub total_size: Option<u64>,
-    pub success: bool,
-    pub average_speed_bps: f64,
-    pub duration_secs: f64,
-}
-
-impl DownloadResult {
-    /// Check if the download completed successfully with all bytes received
-    pub fn is_complete(&self) -> bool {
-        self.success
-            && match self.total_size {
-                Some(total) => self.bytes_downloaded >= total,
-                None => self.bytes_downloaded > 0,
-            }
-    }
-
-    /// Convert byte count to human-readable string
-    pub fn human_readable_size(bytes: u64) -> String {
-        const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-        let mut size = bytes as f64;
-        let mut unit_idx = 0;
-        while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-            size /= 1024.0;
-            unit_idx += 1;
-        }
-        if unit_idx == 0 {
-            format!("{} {}", bytes, UNITS[unit_idx])
-        } else {
-            format!("{:.2} {}", size, UNITS[unit_idx])
-        }
-    }
-}
+#[cfg(test)]
+mod tests;
 
 /// FTP download manager that handles file transfers
 pub struct FtpDownload<'a> {
@@ -129,6 +47,21 @@ impl FtpDataConnection {
     }
 }
 
+/// Check if an IO error is transient and retry-worthy.
+fn is_transient_io_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+
+    matches!(
+        error.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::TimedOut
+    ) || error.to_string().to_lowercase().contains("temporary")
+}
+
 impl<'a> FtpDownload<'a> {
     /// Create a new FTP download manager
     pub fn new(conn: &'a mut FtpConnection, options: Option<FtpDownloadOptions>) -> Self {
@@ -150,6 +83,41 @@ impl<'a> FtpDownload<'a> {
         local_path: &str,
         progress_callback: Option<fn(DownloadProgress)>,
     ) -> Result<DownloadResult, String> {
+        self.download_file_controlled(remote_path, local_path, progress_callback, None)
+            .await
+    }
+
+    /// Download a file while observing a cancellation token.
+    ///
+    /// Cancellation is checked between data reads. The data connection is
+    /// closed and FTP `ABOR` is sent before returning the cancellation error.
+    pub async fn download_file_with_cancellation(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: &CancellationToken,
+    ) -> Result<DownloadResult, String> {
+        self.download_file_controlled(
+            remote_path,
+            local_path,
+            progress_callback,
+            Some(cancellation),
+        )
+        .await
+    }
+
+    async fn download_file_controlled(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<DownloadResult, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("FTP download cancelled".to_string());
+        }
+
         // Set transfer mode (binary by default)
         if self.options.binary_mode {
             self.conn.type_image().await?;
@@ -175,7 +143,13 @@ impl<'a> FtpDownload<'a> {
 
         // Connect to data port and receive file content
         let result = self
-            .receive_data_to_file(data_connection, local_path, file_size, progress_callback)
+            .receive_data_to_file(
+                data_connection,
+                local_path,
+                file_size,
+                progress_callback,
+                cancellation,
+            )
             .await?;
 
         Ok(result)
@@ -183,6 +157,28 @@ impl<'a> FtpDownload<'a> {
 
     /// Download a file into memory (for small files or when disk I/O is not needed)
     pub async fn download_to_memory(&mut self, remote_path: &str) -> Result<Vec<u8>, String> {
+        self.download_to_memory_controlled(remote_path, None).await
+    }
+
+    /// Download a file into memory while observing a cancellation token.
+    pub async fn download_to_memory_with_cancellation(
+        &mut self,
+        remote_path: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>, String> {
+        self.download_to_memory_controlled(remote_path, Some(cancellation))
+            .await
+    }
+
+    async fn download_to_memory_controlled(
+        &mut self,
+        remote_path: &str,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<u8>, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("FTP download cancelled".to_string());
+        }
+
         // Set binary mode
         self.conn.type_image().await?;
 
@@ -204,7 +200,7 @@ impl<'a> FtpDownload<'a> {
 
         // Receive data into memory
         let data = self
-            .receive_data_to_memory(data_connection, file_size)
+            .receive_data_to_memory(data_connection, file_size, cancellation)
             .await?;
 
         Ok(data)
@@ -219,6 +215,38 @@ impl<'a> FtpDownload<'a> {
         local_base_dir: &str,
         progress_callback: Option<fn(DownloadProgress)>,
     ) -> Result<Vec<DownloadResult>, String> {
+        self.download_directory_controlled(remote_dir, local_base_dir, progress_callback, None)
+            .await
+    }
+
+    /// Download a directory recursively while observing a cancellation token.
+    pub async fn download_directory_with_cancellation(
+        &mut self,
+        remote_dir: &str,
+        local_base_dir: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<DownloadResult>, String> {
+        self.download_directory_controlled(
+            remote_dir,
+            local_base_dir,
+            progress_callback,
+            Some(cancellation),
+        )
+        .await
+    }
+
+    async fn download_directory_controlled(
+        &mut self,
+        remote_dir: &str,
+        local_base_dir: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<DownloadResult>, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("FTP download cancelled".to_string());
+        }
+
         if !self.options.recursive_download {
             return Err("Recursive download not enabled in options".to_string());
         }
@@ -239,7 +267,9 @@ impl<'a> FtpDownload<'a> {
         }
 
         // Read directory listing from data connection
-        let listing_data = self.receive_data_to_memory(data_connection, None).await?;
+        let listing_data = self
+            .receive_data_to_memory(data_connection, None, cancellation)
+            .await?;
 
         // Parse listing
         let listing_str = String::from_utf8_lossy(&listing_data);
@@ -251,14 +281,22 @@ impl<'a> FtpDownload<'a> {
 
         let mut results = Vec::new();
         for entry in entries {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err("FTP download cancelled".to_string());
+            }
+
             if entry.is_directory {
                 // Recursively download subdirectory
                 let sub_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
                 let sub_local = format!("{}/{}", local_base_dir.trim_end_matches('/'), entry.name);
 
-                let sub_results =
-                    Box::pin(self.download_directory(&sub_remote, &sub_local, progress_callback))
-                        .await?;
+                let sub_results = Box::pin(self.download_directory_controlled(
+                    &sub_remote,
+                    &sub_local,
+                    progress_callback,
+                    cancellation,
+                ))
+                .await?;
                 results.extend(sub_results);
             } else {
                 // Download individual file
@@ -266,7 +304,12 @@ impl<'a> FtpDownload<'a> {
                 let local_file = format!("{}/{}", local_base_dir.trim_end_matches('/'), entry.name);
 
                 let result = self
-                    .download_file(&remote_file, &local_file, progress_callback)
+                    .download_file_controlled(
+                        &remote_file,
+                        &local_file,
+                        progress_callback,
+                        cancellation,
+                    )
                     .await?;
                 results.push(result);
             }
@@ -313,6 +356,7 @@ impl<'a> FtpDownload<'a> {
         local_path: &str,
         file_size: Option<u64>,
         progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<DownloadResult, String> {
         let mut data_stream = data_connection
             .open(self.options.data_connect_timeout)
@@ -349,7 +393,18 @@ impl<'a> FtpDownload<'a> {
         let start_time = std::time::Instant::now();
         let mut read_retry_count = 0u32;
         loop {
-            let read_result = data_stream.read(&mut buffer).await;
+            let read_result = if let Some(token) = cancellation {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        drop(data_stream);
+                        let _ = self.conn.abor().await;
+                        return Err("FTP download cancelled".to_string());
+                    }
+                    result = data_stream.read(&mut buffer) => result,
+                }
+            } else {
+                data_stream.read(&mut buffer).await
+            };
 
             match read_result {
                 Ok(bytes_read) => {
@@ -434,6 +489,7 @@ impl<'a> FtpDownload<'a> {
         &mut self,
         data_connection: FtpDataConnection,
         expected_size: Option<u64>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<Vec<u8>, String> {
         let mut data_stream = data_connection
             .open(self.options.data_connect_timeout)
@@ -446,7 +502,20 @@ impl<'a> FtpDownload<'a> {
 
         let mut read_retry_count = 0u32;
         loop {
-            match data_stream.read(&mut buffer).await {
+            let read_result = if let Some(token) = cancellation {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        drop(data_stream);
+                        let _ = self.conn.abor().await;
+                        return Err("FTP download cancelled".to_string());
+                    }
+                    result = data_stream.read(&mut buffer) => result,
+                }
+            } else {
+                data_stream.read(&mut buffer).await
+            };
+
+            match read_result {
                 Ok(0) => break,
                 Ok(bytes_read) => {
                     read_retry_count = 0;
@@ -490,103 +559,5 @@ impl<'a> FtpDownload<'a> {
             ));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_human_readable_size() {
-        assert_eq!(DownloadResult::human_readable_size(500), "500 B");
-        assert_eq!(DownloadResult::human_readable_size(1024), "1.00 KB");
-        assert_eq!(DownloadResult::human_readable_size(1536), "1.50 KB");
-        assert_eq!(DownloadResult::human_readable_size(1048576), "1.00 MB");
-        assert_eq!(DownloadResult::human_readable_size(1073741824), "1.00 GB");
-    }
-
-    #[test]
-    fn test_download_result_complete() {
-        let full = DownloadResult {
-            file_path: "test.bin".into(),
-            bytes_downloaded: 1000,
-            total_size: Some(1000),
-            success: true,
-            average_speed_bps: 1000.0,
-            duration_secs: 1.0,
-        };
-        assert!(full.is_complete());
-
-        let partial = DownloadResult {
-            file_path: "test.bin".into(),
-            bytes_downloaded: 500,
-            total_size: Some(1000),
-            success: true,
-            average_speed_bps: 500.0,
-            duration_secs: 1.0,
-        };
-        assert!(!partial.is_complete());
-
-        let unknown_total = DownloadResult {
-            file_path: "test.bin".into(),
-            bytes_downloaded: 100,
-            total_size: None,
-            success: true,
-            average_speed_bps: 100.0,
-            duration_secs: 1.0,
-        };
-        assert!(unknown_total.is_complete()); // Any data with unknown total is complete
-
-        let failed = DownloadResult {
-            file_path: "test.bin".into(),
-            bytes_downloaded: 1000,
-            total_size: Some(1000),
-            success: false, // Failed
-            average_speed_bps: 1000.0,
-            duration_secs: 1.0,
-        };
-        assert!(!failed.is_complete());
-    }
-
-    #[test]
-    fn test_ftp_download_options_default() {
-        let opts = FtpDownloadOptions::default();
-        assert_eq!(opts.buffer_size, DEFAULT_BUFFER_SIZE);
-        assert!(opts.resume_offset.is_none());
-        assert_eq!(opts.max_retries, 3);
-        assert!(opts.binary_mode);
-        assert_eq!(opts.data_connect_timeout, Duration::from_secs(30));
-        assert!(!opts.recursive_download);
-    }
-
-    #[test]
-    fn test_is_transient_io_error() {
-        use std::io::ErrorKind;
-
-        // Transient errors (should retry)
-        let interrupted = std::io::Error::new(ErrorKind::Interrupted, "interrupted");
-        assert!(is_transient_io_error(&interrupted));
-
-        let would_block = std::io::Error::new(ErrorKind::WouldBlock, "would block");
-        assert!(is_transient_io_error(&would_block));
-
-        let connection_reset = std::io::Error::new(ErrorKind::ConnectionReset, "connection reset");
-        assert!(is_transient_io_error(&connection_reset));
-
-        let timed_out = std::io::Error::new(ErrorKind::TimedOut, "timed out");
-        assert!(is_transient_io_error(&timed_out));
-
-        // Non-transient errors (should not retry)
-        let not_found = std::io::Error::new(ErrorKind::NotFound, "not found");
-        assert!(!is_transient_io_error(&not_found));
-
-        let permission_denied =
-            std::io::Error::new(ErrorKind::PermissionDenied, "permission denied");
-        assert!(!is_transient_io_error(&permission_denied));
-
-        // Error with "temporary" in message
-        let temp_error = std::io::Error::other("temporary failure");
-        assert!(is_transient_io_error(&temp_error));
     }
 }

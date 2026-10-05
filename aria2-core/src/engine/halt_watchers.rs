@@ -47,12 +47,11 @@ fn send_halt(tx: &EngineCommandSender, force: bool, reason: HaltReason) -> bool 
 ///
 /// The returned [`JoinHandle`] can be dropped; the task is fully detached and
 /// self-terminating.
-pub fn spawn_timed_halt<T: Into<EngineCommandSender>>(
-    cmd_tx: T,
+pub fn spawn_timed_halt(
+    cmd_tx: EngineCommandSender,
     duration: Duration,
     force: bool,
 ) -> JoinHandle<()> {
-    let cmd_tx = cmd_tx.into();
     tokio::spawn(async move {
         debug!(?duration, force, "Timed halt watcher armed");
 
@@ -80,12 +79,7 @@ pub fn spawn_timed_halt<T: Into<EngineCommandSender>>(
 /// Mirrors C++ `WatchProcessCommand` (`--stop-with-process=PID`). The watcher
 /// is driven by the operating system's process-exit notification on supported
 /// platforms, so it does not wake once per second just to re-check a PID.
-pub fn spawn_process_watch<T: Into<EngineCommandSender>>(
-    cmd_tx: T,
-    pid: u32,
-    force: bool,
-) -> JoinHandle<()> {
-    let cmd_tx = cmd_tx.into();
+pub fn spawn_process_watch(cmd_tx: EngineCommandSender, pid: u32, force: bool) -> JoinHandle<()> {
     tokio::spawn(async move {
         debug!(pid, force, "Process watcher armed");
 
@@ -166,7 +160,7 @@ pub fn is_process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
+    use crate::engine::engine_command::channel;
 
     #[test]
     fn current_process_is_alive() {
@@ -184,7 +178,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timed_halt_sends_graceful_halt_after_duration() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = channel();
         let handle = spawn_timed_halt(tx, Duration::from_secs(30), false);
 
         // Nothing before the deadline.
@@ -203,7 +197,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timed_halt_honours_force_flag() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = channel();
         let handle = spawn_timed_halt(tx, Duration::from_secs(5), true);
 
         tokio::time::advance(Duration::from_secs(6)).await;
@@ -217,7 +211,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timed_halt_exits_when_engine_channel_closes() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = channel();
         let handle = spawn_timed_halt(tx, Duration::from_secs(3600), false);
 
         drop(rx);
@@ -227,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_watch_halts_immediately_for_dead_pid() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = channel();
         let handle = spawn_process_watch(tx, u32::MAX, false);
         handle.await.unwrap();
 
@@ -236,7 +230,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn process_watch_keeps_running_while_process_lives() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = channel();
         let handle = spawn_process_watch(tx, std::process::id(), false);
 
         tokio::time::advance(Duration::from_secs(10)).await;
@@ -248,7 +242,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn process_watch_exits_when_engine_channel_closes() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = channel();
         let handle = spawn_process_watch(tx, std::process::id(), false);
 
         tokio::task::yield_now().await;

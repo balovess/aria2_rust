@@ -217,8 +217,8 @@ fn bench_striped_locks_concurrent_writes(c: &mut Criterion) {
 }
 
 fn bench_striped_vs_single_lock_comparison(c: &mut Criterion) {
-    use aria2_core::filesystem::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
     use aria2_core::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+    use aria2_core::filesystem::positioned_disk_writer::PositionedDiskWriter;
     use std::sync::Arc;
     use tokio::runtime::Runtime;
     use tokio::sync::Mutex;
@@ -271,11 +271,11 @@ fn bench_striped_vs_single_lock_comparison(c: &mut Criterion) {
             let path = dir.path().join("bench_single.bin");
 
             // Initialize file
-            let adaptor = Arc::new(Mutex::new(DirectDiskAdaptor::new()));
+            let writer = Arc::new(Mutex::new(PositionedDiskWriter::new(&path, None)));
             {
-                let mut a = adaptor.lock().await;
-                a.open(&path).await.unwrap();
-                a.close().await.unwrap();
+                let mut guard = writer.lock().await;
+                guard.open().await.unwrap();
+                drop(guard);
             }
 
             let mut handles = vec![];
@@ -284,15 +284,15 @@ fn bench_striped_vs_single_lock_comparison(c: &mut Criterion) {
 
                 handles.push(tokio::spawn(async move {
                     // Each thread opens its own file handle
-                    let mut adaptor = DirectDiskAdaptor::new();
-                    adaptor.open(&path_clone).await.unwrap();
+                    let mut writer = PositionedDiskWriter::new(&path_clone, None);
+                    writer.open().await.unwrap();
 
                     let offset = (i as u64) * 1024 * 1024;
                     let data = vec![i as u8; 4096];
-                    adaptor.write(offset, &data).await.unwrap();
+                    writer.write_at(offset, &data).await.unwrap();
 
-                    adaptor.flush().await.unwrap();
-                    adaptor.close().await.unwrap();
+                    writer.flush().await.unwrap();
+                    drop(writer);
                 }));
             }
 

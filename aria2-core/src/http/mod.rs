@@ -7,17 +7,16 @@ pub mod conditional_get;
 pub mod connection;
 pub mod content_disposition;
 pub mod cookie;
-pub mod cookie_storage;
 pub mod digest_auth;
 pub mod happy_eyeballs;
 pub mod header_processor;
+pub mod http_version;
 pub mod metalink_http;
 pub mod ns_cookie_parser;
 pub mod proxy;
 pub mod proxy_tunnel;
 pub mod request;
 pub mod request_policy;
-pub mod request_response;
 pub mod response;
 pub mod response_processor;
 pub mod skip_response;
@@ -73,6 +72,7 @@ pub use auth::netrc::{NetrcEntry as NetrcParserEntry, NetrcError, NetrcParser, f
 pub use browser_context::{
     BrowserContext, BrowserContextUpdate, global as global_browser_context, update_global_json,
 };
+pub use http_version::HttpVersion;
 pub use request_policy::{HttpRequestPolicy, RequestPacing};
 
 // Re-export response processor types for convenient access

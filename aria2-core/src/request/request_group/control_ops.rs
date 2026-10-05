@@ -58,11 +58,21 @@ impl super::RequestGroup {
     /// Mirrors C++ `AbstractCommand` destructor decrementing `numCommand_`.
     /// Returns the previous value, or zero when the counter is already empty.
     pub fn dec_commands(&self) -> u32 {
-        self.num_commands
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_sub(1)
-            })
-            .unwrap_or(0)
+        let mut current = self.num_commands.load(Ordering::SeqCst);
+        loop {
+            let Some(updated) = current.checked_sub(1) else {
+                return 0;
+            };
+            match self.num_commands.compare_exchange_weak(
+                current,
+                updated,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return current,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Get the current number of in-flight commands (lock-free).

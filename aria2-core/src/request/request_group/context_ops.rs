@@ -37,6 +37,26 @@ pub struct UriMemoryStats {
 }
 
 impl super::RequestGroup {
+    pub(crate) fn uri_generation(&self) -> u64 {
+        self.uri_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn uri_generation_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.uri_generation)
+    }
+
+    pub(crate) fn uri_notifier(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.uri_notify)
+    }
+
+    fn notify_uri_changed(&self) {
+        self.uri_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.uri_notify.notify_waiters();
+        self.notify_activity_changed();
+    }
+
     /// Measure URI duplication across the group's fallback list and its
     /// download-context URI lifecycle lists. This is diagnostic only and
     /// does not change URI ownership or ordering.
@@ -60,15 +80,7 @@ impl super::RequestGroup {
 
         if let Some(ctx) = self.download_context.recover().as_ref() {
             for entry in ctx.get_file_entries() {
-                for uri in entry.remaining_uris() {
-                    account(uri, uri.capacity());
-                }
-                for uri in entry.spent_uris() {
-                    account(uri, uri.capacity());
-                }
-                for result in entry.uri_results() {
-                    account(&result.uri, result.uri.capacity());
-                }
+                entry.visit_uri_storage(&mut account);
             }
         }
 
@@ -204,8 +216,9 @@ impl super::RequestGroup {
 
     /// Return all URIs (spent + remaining) across all requested file entries.
     ///
-    /// Mirrors C++ `RequestGroup::getUris()` which collects URIs from
-    /// all `FileEntry` objects.
+    /// This is an internal aggregate used by lifecycle/session accounting. The
+    /// upstream-compatible RPC `getUris` projection intentionally reads only
+    /// the first `FileEntry`.
     pub fn get_all_uris(&self) -> Vec<String> {
         let guard = self.download_context.recover();
         if let Some(ref ctx) = *guard {
@@ -230,10 +243,16 @@ impl super::RequestGroup {
                 .iter()
                 .filter(|fe| fe.is_requested())
                 .flat_map(|fe| {
-                    fe.uris().into_iter().map(|uri| {
-                        let status = if fe.remaining_uris().iter().any(|value| value == &uri) {
+                    let (remaining, spent, _) = fe.uri_state_snapshot();
+                    let uris = spent
+                        .iter()
+                        .chain(remaining.iter())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    uris.into_iter().map(move |uri| {
+                        let status = if remaining.iter().any(|value| value == &uri) {
                             "waiting"
-                        } else if fe.spent_uris().iter().any(|value| value == &uri) {
+                        } else if spent.iter().any(|value| value == &uri) {
                             "used"
                         } else {
                             "spent"
@@ -272,39 +291,17 @@ impl super::RequestGroup {
         let file_index = file_index.checked_sub(1).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument("file index must be at least 1".to_string())
         })?;
-        let mut guard = self.download_context.recover_mut();
-        if let Some(ctx) = guard.as_mut() {
-            let ctx_inner = Arc::get_mut(ctx).ok_or_else(|| {
-                crate::error::Aria2Error::InvalidArgument(
-                    "download context is shared and cannot be changed".to_string(),
-                )
+        let guard = self.download_context.recover();
+        if let Some(ctx) = guard.as_ref() {
+            let entry = ctx.get_file_entries().get(file_index).ok_or_else(|| {
+                crate::error::Aria2Error::InvalidArgument("fileIndex is out of range".to_string())
             })?;
-            let entry = ctx_inner
-                .get_file_entries_mut()
-                .get_mut(file_index)
-                .filter(|fe| fe.is_requested())
-                .ok_or_else(|| {
-                    crate::error::Aria2Error::InvalidArgument(
-                        "download context has no requested file entry".to_string(),
-                    )
-                })?;
-            let mut deleted = 0;
-            for uri in del_uris {
-                deleted += entry.remove_uri(uri) as usize;
+            let (deleted, added) = entry.change_uris_shared(del_uris, add_uris, position);
+            if deleted > 0 || added > 0 {
+                self.notify_uri_changed();
+            } else {
+                self.notify_activity_changed();
             }
-            let added = match position {
-                Some(mut position) => {
-                    let mut added = 0;
-                    for uri in add_uris {
-                        if entry.insert_uri(uri, position) {
-                            added += 1;
-                            position = position.saturating_add(1);
-                        }
-                    }
-                    added
-                }
-                None => entry.add_uris(add_uris),
-            };
             return Ok((deleted, added));
         }
 
@@ -349,6 +346,11 @@ impl super::RequestGroup {
                 })
                 .sum(),
         };
+        if deleted > 0 || added > 0 {
+            self.notify_uri_changed();
+        } else {
+            self.notify_activity_changed();
+        }
         Ok((deleted, added))
     }
 

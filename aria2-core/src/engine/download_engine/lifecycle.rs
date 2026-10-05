@@ -51,6 +51,7 @@ impl DownloadEngine {
         let ctx = super::super::engine_loop::EngineLoopContext {
             group_man,
             dns_cache: Arc::clone(&self.dns_cache),
+            outbound_network_policy: Arc::clone(&self.outbound_network_policy),
             auto_save: self.auto_save.take(),
             auto_save_dirty_signal: self.auto_save_dirty_signal.take(),
             // Share the engine's bus so listeners registered before the loop are reached.
@@ -84,14 +85,25 @@ impl DownloadEngine {
         #[cfg(feature = "bittorrent")]
         self.public_tracker_catalog.start_catalog_update();
 
-        super::super::engine_loop::run_engine_loop_with_receiver(ctx, engine_cmd_rx, shutdown_rx)
-            .await;
+        super::super::engine_loop::run_engine_loop(ctx, engine_cmd_rx, shutdown_rx).await;
 
         #[cfg(feature = "bittorrent")]
         self.bt_listener.shutdown().await;
 
         #[cfg(feature = "bittorrent")]
         self.public_tracker_catalog.shutdown();
+
+        #[cfg(feature = "bittorrent")]
+        let engines = self
+            .bt_registry
+            .write()
+            .ok()
+            .map(|mut registry| registry.take_global_dht_engines())
+            .unwrap_or_default();
+        #[cfg(feature = "bittorrent")]
+        for engine in engines {
+            engine.shutdown_async().await;
+        }
 
         Ok(())
     }

@@ -32,6 +32,7 @@ impl BtPeerSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BtPeerSnapshot {
     pub peer_id: [u8; 20],
+    pub client: Option<String>,
     pub addr: SocketAddr,
     /// Whether this peer accepted our inbound connection.
     ///
@@ -50,6 +51,12 @@ pub struct BtPeerSnapshot {
     pub avg_download_speed: u64,
     pub am_choking: bool,
     pub peer_choking: bool,
+    pub am_interested: bool,
+    pub peer_interested: bool,
+    /// Number of upload block requests currently queued by this peer.
+    pub outstanding_upload_requests: usize,
+    /// Requests sent to this peer that remain in the actor ledger.
+    pub outstanding_download_requests: usize,
     pub seeder: Option<bool>,
     pub connection_duration_secs: u64,
     pub last_data_age_secs: u64,

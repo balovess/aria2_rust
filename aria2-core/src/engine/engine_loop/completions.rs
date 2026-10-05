@@ -76,6 +76,24 @@ pub(super) fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
     }
 }
 
+fn failure_code_and_message(
+    group: &crate::request::request_group::RequestGroup,
+    error: &Aria2Error,
+) -> (DownloadResultCode, String) {
+    // Some protocol preflight failures already carry an aria2-compatible
+    // result code on the RequestGroup. Preserve that typed result only when
+    // the command reports the exact same failure payload; otherwise map the
+    // current error normally so stale diagnostics cannot affect a new failure.
+    if let Aria2Error::DownloadFailed(message) = error
+        && group.get_last_error_message() == *message
+        && group.get_last_error_code() != DownloadResultCode::UnknownError
+    {
+        return (group.get_last_error_code(), message.clone());
+    }
+
+    (map_error_code(error), error.to_string())
+}
+
 pub(super) trait CompletionQueue {
     fn try_completion(&mut self) -> Result<(GroupId, CommandGeneration, TaskResult), ()>;
 }
@@ -153,8 +171,7 @@ fn apply_completion_state(
             // A non-final command failure is recorded for the group,
             // but terminal state is deferred until all commands have
             // exited, matching C++ numCommand_ semantics.
-            let message = error.to_string();
-            let code = map_error_code(&error);
+            let (code, message) = failure_code_and_message(&group, &error);
             group.set_last_error(code, message);
             group
                 .command_failure
@@ -204,7 +221,8 @@ fn apply_completion_state(
                     }
                 }
                 HaltReason::None => {
-                    group.mark_error_with_code(map_error_code(&error), error.to_string());
+                    let (code, message) = failure_code_and_message(&group, &error);
+                    group.mark_error_with_code(code, message);
                 }
             }
             group

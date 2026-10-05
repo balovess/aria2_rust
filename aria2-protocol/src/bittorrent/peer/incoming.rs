@@ -30,20 +30,6 @@ pub struct IncomingCryptoPolicy {
     pub prefer_encryption: bool,
 }
 
-pub enum IncomingConnection {
-    Plain(Box<crate::bittorrent::peer::connection::PeerConnection>),
-    Encrypted(Box<crate::bittorrent::peer::encrypted_connection::EncryptedConnection>),
-}
-
-impl IncomingConnection {
-    pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
-        match self {
-            Self::Plain(connection) => connection.remote_peer_id,
-            Self::Encrypted(connection) => connection.remote_peer_id().copied(),
-        }
-    }
-}
-
 pub enum IncomingHandshake {
     Plain {
         stream: TcpStream,
@@ -63,17 +49,14 @@ impl IncomingHandshake {
         }
     }
 
-    pub async fn complete(self, local_peer_id: [u8; 20]) -> Result<IncomingConnection, String> {
-        self.complete_with_hybrid(local_peer_id, None).await
-    }
-
-    /// Complete the handshake and upgrade a hybrid responder to the v2
-    /// truncated hash when the remote advertised BEP 52.
-    pub async fn complete_with_hybrid(
+    /// Complete an incoming connection and negotiate its v1/v2 and BEP 5
+    /// capabilities in one protocol operation.
+    pub async fn complete(
         self,
         local_peer_id: [u8; 20],
         info_hash_v2: Option<[u8; 32]>,
-    ) -> Result<IncomingConnection, String> {
+        dht_enabled: bool,
+    ) -> Result<crate::bittorrent::peer::connection::PeerConnection, String> {
         match self {
             Self::Plain {
                 mut stream,
@@ -86,17 +69,21 @@ impl IncomingHandshake {
                 stream
                     .write_all(
                         &Handshake::new(&response_hash, &local_peer_id)
+                            .with_dht(dht_enabled)
                             .with_bep52(info_hash_v2.is_some())
                             .to_bytes(),
                     )
                     .await
                     .map_err(|error| format!("Failed to send handshake response: {error}"))?;
-                Ok(IncomingConnection::Plain(Box::new(
-                    crate::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+                Ok(
+                    crate::bittorrent::peer::connection::PeerConnection::from_stream_with_peer_capabilities(
                         stream,
                         handshake.peer_id,
+                        handshake.supports_dht(),
+                        handshake.supports_fast_extension(),
+                        handshake.supports_extended_messaging(),
                     ),
-                )))
+                )
             }
             Self::Mse {
                 mut stream,
@@ -108,6 +95,7 @@ impl IncomingHandshake {
                     .map(|hash| hash[..20].try_into().expect("SHA-256 hash is 32 bytes"))
                     .unwrap_or(handshake.info_hash);
                 let mut response = Handshake::new(&response_hash, &local_peer_id)
+                    .with_dht(dht_enabled)
                     .with_bep52(info_hash_v2.is_some())
                     .to_bytes();
                 crypto.encrypt(&mut response);
@@ -115,13 +103,17 @@ impl IncomingHandshake {
                     .write_all(&response)
                     .await
                     .map_err(|error| format!("Failed to send MSE handshake response: {error}"))?;
-                Ok(IncomingConnection::Encrypted(
-                    Box::new(crate::bittorrent::peer::encrypted_connection::EncryptedConnection::from_incoming_parts(
+                Ok(
+                    crate::bittorrent::peer::connection::PeerConnection::from_stream_with_mse(
                         stream,
                         *crypto,
+                        Vec::new(),
                         handshake.peer_id,
-                    )),
-                ))
+                        handshake.supports_dht(),
+                        handshake.supports_fast_extension(),
+                        handshake.supports_extended_messaging(),
+                    ),
+                )
             }
         }
     }
@@ -256,8 +248,8 @@ async fn read_exact(stream: &mut TcpStream, buffer: &mut [u8]) -> Result<(), Str
 mod tests {
     use super::*;
     use crate::bittorrent::message::types::BtMessage;
-    use crate::bittorrent::peer::connection::PeerAddr;
     use std::net::SocketAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     async fn run_incoming_server(
@@ -265,7 +257,9 @@ mod tests {
         policy: IncomingCryptoPolicy,
     ) -> (
         SocketAddr,
-        tokio::task::JoinHandle<Result<IncomingConnection, String>>,
+        tokio::task::JoinHandle<
+            Result<crate::bittorrent::peer::connection::PeerConnection, String>,
+        >,
     ) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -274,7 +268,7 @@ mod tests {
             let mut policies = HashMap::new();
             policies.insert(info_hash, policy);
             let incoming = receive_with_policies(stream, &[info_hash], &policies).await?;
-            incoming.complete([2u8; 20]).await
+            incoming.complete([2u8; 20], None, false).await
         });
         (address, server)
     }
@@ -292,14 +286,20 @@ mod tests {
         )
         .await;
 
-        let client_result =
-            crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(
-                &PeerAddr::new("127.0.0.1", address.port()),
-                &info_hash,
-                true,
-                true,
-            )
-            .await;
+        let stream = TcpStream::connect(address).await.unwrap();
+        let client_result = crate::bittorrent::peer::mse::connect_with_stream(
+            stream,
+            &info_hash,
+            None,
+            crate::bittorrent::peer::mse::MseConnectionOptions {
+                force_encryption: true,
+                prefer_encryption: true,
+                local_peer_id: [0x41; 20],
+                timeout: std::time::Duration::from_secs(2),
+                dht_enabled: false,
+            },
+        )
+        .await;
         let mut client = match client_result {
             Ok(client) => client,
             Err(error) => {
@@ -314,10 +314,7 @@ mod tests {
         assert!(client.is_encrypted());
         client.send_message(&BtMessage::KeepAlive).await.unwrap();
         let mut server_connection = server.await.unwrap().unwrap();
-        let server_connection = match &mut server_connection {
-            IncomingConnection::Encrypted(connection) => connection,
-            IncomingConnection::Plain(_) => panic!("expected an encrypted connection"),
-        };
+        assert!(server_connection.is_mse_negotiated());
         assert_eq!(
             server_connection.read_message().await.unwrap(),
             Some(BtMessage::KeepAlive)
@@ -331,26 +328,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_incoming_handshake_preserves_dht_capabilities() {
+        let info_hash = [0x34u8; 20];
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let incoming = receive(stream, &[info_hash]).await.unwrap();
+            incoming.complete([2u8; 20], None, true).await.unwrap()
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                &Handshake::new(&info_hash, &[3u8; 20])
+                    .with_dht(true)
+                    .to_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = [0u8; 68];
+        client.read_exact(&mut response).await.unwrap();
+        assert!(Handshake::parse(&response).unwrap().supports_dht());
+
+        let connection = server.await.unwrap();
+        assert!(connection.remote_supports_dht());
+        assert!(connection.remote_supports_fast_extension());
+        assert!(connection.remote_supports_extended_messaging());
+    }
+
+    #[tokio::test]
     async fn mse_plain_socket_handshake_keeps_aria2_fallback() {
         let info_hash = [0x32u8; 20];
         let (address, server) =
             run_incoming_server(info_hash, IncomingCryptoPolicy::default()).await;
 
-        let client =
-            crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(
-                &PeerAddr::new("127.0.0.1", address.port()),
-                &info_hash,
-                false,
-                false,
-            )
-            .await
-            .unwrap();
+        let stream = TcpStream::connect(address).await.unwrap();
+        let client = crate::bittorrent::peer::mse::connect_with_stream(
+            stream,
+            &info_hash,
+            None,
+            crate::bittorrent::peer::mse::MseConnectionOptions {
+                force_encryption: false,
+                prefer_encryption: false,
+                local_peer_id: [0x42; 20],
+                timeout: std::time::Duration::from_secs(2),
+                dht_enabled: false,
+            },
+        )
+        .await
+        .unwrap();
         assert!(!client.is_encrypted());
         let server_connection = server.await.unwrap().unwrap();
-        assert!(matches!(
-            server_connection,
-            IncomingConnection::Encrypted(_)
-        ));
+        assert!(server_connection.is_mse_negotiated());
+        assert!(!server_connection.is_encrypted());
+        assert!(server_connection.remote_supports_extended_messaging());
     }
 
     #[tokio::test]
@@ -398,22 +430,26 @@ mod tests {
                 },
             );
             let incoming = receive_with_policies(stream, &[v1], &policies).await?;
-            incoming.complete_with_hybrid([0x44; 20], Some(v2)).await
+            incoming.complete([0x44; 20], Some(v2), false).await
         });
 
-        let connection = crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_hybrid_with_options(
-            &PeerAddr::new("127.0.0.1", address.port()),
+        let stream = TcpStream::connect(address).await.unwrap();
+        let connection = crate::bittorrent::peer::mse::connect_with_stream(
+            stream,
             &v1,
-            &v2,
-            true,
-            true,
-            &[0x43; 20],
-            std::time::Duration::from_secs(2),
+            Some(&v2),
+            crate::bittorrent::peer::mse::MseConnectionOptions {
+                force_encryption: true,
+                prefer_encryption: true,
+                local_peer_id: [0x43; 20],
+                timeout: std::time::Duration::from_secs(2),
+                dht_enabled: false,
+            },
         )
         .await
         .unwrap();
         assert!(connection.is_encrypted());
         let server_connection = server.await.unwrap().unwrap();
-        assert_eq!(server_connection.remote_peer_id(), Some([0x43; 20]));
+        assert_eq!(server_connection.remote_peer_id(), Some(&[0x43; 20]));
     }
 }

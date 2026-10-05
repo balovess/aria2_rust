@@ -1,5 +1,6 @@
+use aria2_core::engine::retry_policy::RetryPolicy;
 use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
-use aria2_core::retry::{RetryExecutor, RetryPolicy, RetryStats};
+use aria2_core::retry::{RetryExecutor, RetryStats};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -225,12 +226,6 @@ fn test_stats_reset() {
     assert_eq!(stats.total(), 0);
     assert_eq!(stats.timeouts(), 0);
     assert_eq!(stats.server_errors(), 0);
-}
-
-#[test]
-fn test_with_max_per_server() {
-    let policy = RetryPolicy::new(10, 1000).with_max_per_server(3);
-    assert_eq!(policy.max_tries(), 10);
 }
 
 #[tokio::test]

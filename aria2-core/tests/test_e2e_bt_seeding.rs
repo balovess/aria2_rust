@@ -1,7 +1,7 @@
 #![cfg(feature = "bittorrent")]
 
-use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
-use aria2_core::engine::bt_upload_session::{
+use aria2_core::engine::bittorrent::download::seed_manager::{BtSeedManager, SeedExitCondition};
+use aria2_core::engine::bittorrent::peer::upload_session::{
     BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider,
 };
 use aria2_protocol::bittorrent::message::handshake::Handshake;
@@ -19,8 +19,8 @@ fn test_bt_upload_session_creation() {
     assert_eq!(config.max_peers_to_unchoke, 4);
 }
 
-#[test]
-fn test_piece_data_provider_from_memory() {
+#[tokio::test]
+async fn test_piece_data_provider_from_memory() {
     let mut provider = InMemoryPieceProvider::new(1024, 5);
     provider.set_all_from_pattern(|piece_idx, byte_idx| ((piece_idx * 7 + byte_idx) % 256) as u8);
 
@@ -29,7 +29,7 @@ fn test_piece_data_provider_from_memory() {
     assert!(!provider.has_piece(5));
     assert_eq!(provider.num_pieces(), 5);
 
-    let data = provider.get_piece_data(0, 100, 50).unwrap();
+    let data = provider.get_piece_data(0, 100, 50).await.unwrap();
     assert_eq!(data.len(), 50);
 }
 
@@ -37,20 +37,20 @@ fn test_piece_data_provider_from_memory() {
 fn test_seed_manager_exit_by_time() {
     let cond = SeedExitCondition::with_time(1);
     let mut mgr = make_empty_mgr(cond);
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 
     mgr.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(2);
-    assert!(mgr.should_exit());
+    assert!(mgr.should_stop_seeding());
 }
 
 #[test]
 fn test_seed_manager_exit_by_ratio() {
     let cond = SeedExitCondition::with_ratio(1.0);
     let mut mgr = make_empty_mgr_with_downloaded(1000, 200, cond);
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 
     mgr.total_uploaded = 1200;
-    assert!(mgr.should_exit());
+    assert!(mgr.should_stop_seeding());
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_seed_manager_no_exit_infinite() {
     mgr.seeding_start_time = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(3600))
         .unwrap_or(std::time::Instant::now());
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 }
 
 #[test]
@@ -104,11 +104,11 @@ fn test_exit_condition_combined_logic() {
         seed_ratio: Some(1.5),
     };
     let mut mgr = make_empty_mgr_with_downloaded(1000, 400, cond);
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 
     mgr.total_uploaded = 1600;
     mgr.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(15);
-    assert!(mgr.should_exit(), "Both time and ratio met");
+    assert!(mgr.should_stop_seeding(), "Both time and ratio met");
 
     let mut mgr2 = make_empty_mgr_with_downloaded(
         1000,
@@ -119,11 +119,14 @@ fn test_exit_condition_combined_logic() {
         },
     );
     mgr2.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(9);
-    assert!(!mgr2.should_exit(), "Neither time nor ratio fully met yet");
+    assert!(
+        !mgr2.should_stop_seeding(),
+        "Neither time nor ratio fully met yet"
+    );
 }
 
-#[test]
-fn test_inmemory_provider_all_pieces_complete() {
+#[tokio::test]
+async fn test_inmemory_provider_all_pieces_complete() {
     let mut provider = InMemoryPieceProvider::new(512, 3);
     provider.set_all_from_pattern(|_, _| 0xAA);
 
@@ -131,6 +134,7 @@ fn test_inmemory_provider_all_pieces_complete() {
         assert!(provider.has_piece(i), "piece {} should be set", i);
         let data = provider
             .get_piece_data(i, 0, 512.min(provider.num_pieces() * 512 - i * 512))
+            .await
             .unwrap();
         assert!(!data.is_empty());
         assert!(data.iter().all(|&b| b == 0xAA));
@@ -164,9 +168,16 @@ async fn test_bt_download_to_seed_upload_and_ratio_exit_over_tcp() {
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(Handshake::parse(&response).unwrap().info_hash, info_hash);
 
+        let extension_handshake = read_bt_frame(&mut stream).await;
+        assert_eq!(extension_handshake.first(), Some(&20));
+        assert_eq!(extension_handshake.get(1), Some(&0));
+
         let availability = read_bt_frame(&mut stream).await;
-        assert_eq!(availability.first().copied(), Some(5));
-        assert_eq!(availability.get(1), Some(&0x80));
+        assert_eq!(
+            availability,
+            [14],
+            "Fast peers receive HaveAll from a seeder"
+        );
 
         stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // Interested
         loop {
@@ -194,13 +205,12 @@ async fn test_bt_download_to_seed_upload_and_ratio_exit_over_tcp() {
 
     let (server_stream, _) = listener.accept().await.unwrap();
     let connection =
-        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
-            server_stream,
-            &info_hash,
-            &local_peer_id,
-        )
-        .await
-        .unwrap();
+        aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+            .await
+            .unwrap()
+            .complete(local_peer_id, None, false)
+            .await
+            .unwrap();
 
     let mut manager = BtSeedManager::new(
         vec![connection],
@@ -221,9 +231,238 @@ async fn test_bt_download_to_seed_upload_and_ratio_exit_over_tcp() {
     assert_eq!(manager.total_uploaded(), piece_len as u64);
     let (upload_length, upload_speed) = manager.get_upload_stats();
     assert!(upload_length > 0, "seeder uploadLength should increase");
-    assert!(upload_speed > 0, "seeder uploadSpeed should increase");
+    assert!(
+        upload_speed > 0,
+        "recent uploadSpeed should remain visible while its 10-second sample is fresh"
+    );
     assert!(manager.halt_requested(), "ratio exit should request halt");
     assert!(!manager.is_active(), "ratio exit should end seeding");
+}
+
+#[tokio::test]
+async fn bt_upload_rate_limit_is_aggregated_across_peers_on_wire() {
+    const BLOCK_LENGTH: usize = 16 * 1024;
+
+    let burst_bytes = aria2_core::constants::DEFAULT_BURST_BYTES;
+    let block_count = burst_bytes.div_ceil(BLOCK_LENGTH) + 1;
+    let piece_length = block_count * BLOCK_LENGTH;
+    let upload_rate = 32 * 1024u64;
+    let info_hash = [0x52u8; 20];
+    let local_peer_id = [0x62u8; 20];
+    let piece = std::sync::Arc::new(
+        (0..piece_length)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let mut provider = InMemoryPieceProvider::new(piece_length as u32, 1);
+    provider.set_piece_data(0, piece.as_ref().clone());
+    let provider = std::sync::Arc::new(provider);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let start_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let clients = (0..2usize)
+        .map(|peer_index| {
+            let start_barrier = std::sync::Arc::clone(&start_barrier);
+            let piece = std::sync::Arc::clone(&piece);
+            tokio::spawn(async move {
+                let mut stream = TcpStream::connect(address).await.unwrap();
+                let remote_peer_id = [0x71 + peer_index as u8; 20];
+                stream
+                    .write_all(&Handshake::new(&info_hash, &remote_peer_id).to_bytes())
+                    .await
+                    .unwrap();
+
+                let mut response = [0u8; 68];
+                stream.read_exact(&mut response).await.unwrap();
+                assert_eq!(Handshake::parse(&response).unwrap().info_hash, info_hash);
+                assert_eq!(read_bt_frame(&mut stream).await.first(), Some(&20));
+                assert_eq!(read_bt_frame(&mut stream).await, [14]);
+
+                stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // Interested
+                loop {
+                    let payload = read_bt_frame(&mut stream).await;
+                    assert!(!payload.is_empty(), "seed peer closed before unchoking");
+                    if payload[0] == 1 {
+                        break;
+                    }
+                }
+
+                let block_indices = (peer_index..block_count).step_by(2).collect::<Vec<_>>();
+                start_barrier.wait().await;
+                for block_index in &block_indices {
+                    let mut request = Vec::with_capacity(17);
+                    request.extend_from_slice(&13u32.to_be_bytes());
+                    request.push(6); // Request
+                    request.extend_from_slice(&0u32.to_be_bytes());
+                    request
+                        .extend_from_slice(&((*block_index * BLOCK_LENGTH) as u32).to_be_bytes());
+                    request.extend_from_slice(&(BLOCK_LENGTH as u32).to_be_bytes());
+                    stream.write_all(&request).await.unwrap();
+                }
+
+                for block_index in block_indices {
+                    let payload = read_bt_frame(&mut stream).await;
+                    let begin = block_index * BLOCK_LENGTH;
+                    assert_eq!(payload.first(), Some(&7), "expected Piece response");
+                    assert_eq!(u32::from_be_bytes(payload[1..5].try_into().unwrap()), 0);
+                    assert_eq!(
+                        u32::from_be_bytes(payload[5..9].try_into().unwrap()),
+                        begin as u32
+                    );
+                    assert_eq!(&payload[9..], &piece[begin..begin + BLOCK_LENGTH]);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut connections = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let connection =
+            aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+                .await
+                .unwrap()
+                .complete(local_peer_id, None, false)
+                .await
+                .unwrap();
+        connections.push(connection);
+    }
+
+    let mut manager = BtSeedManager::new_with_info_hash(
+        info_hash,
+        connections,
+        provider,
+        BtSeedingConfig {
+            max_upload_bytes_per_sec: Some(upload_rate),
+            ..BtSeedingConfig::default()
+        },
+        SeedExitCondition::with_ratio(1.0),
+        piece_length as u64,
+    );
+    let manager_task = tokio::spawn(async move { manager.run_seeding_loop().await });
+
+    let start = std::time::Instant::now();
+    start_barrier.wait().await;
+    let finish = async {
+        for client in clients {
+            client.await.expect("leecher task panicked");
+        }
+        manager_task
+            .await
+            .expect("seeding manager task panicked")
+            .expect("seeding manager returned an error");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), finish)
+        .await
+        .expect("rate-limited multi-peer upload did not complete");
+
+    let expected_wait_ms = ((piece_length - burst_bytes) as u64 * 1_000) / upload_rate;
+    let minimum_wait = std::time::Duration::from_millis(expected_wait_ms * 3 / 5);
+    assert!(
+        start.elapsed() >= minimum_wait,
+        "torrent-wide upload limit should throttle wire bytes beyond the shared burst; elapsed={:?}, expected at least {minimum_wait:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn test_bt_seeder_does_not_send_short_piece_for_oversized_request() {
+    let info_hash = [0x81u8; 20];
+    let local_peer_id = [0x82u8; 20];
+    let remote_peer_id = [0x83u8; 20];
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let mut provider = InMemoryPieceProvider::new(16 * 1024, 1);
+    provider.set_piece_data(0, vec![0xA5; 8 * 1024]);
+    let provider = std::sync::Arc::new(provider);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(&Handshake::new(&info_hash, &remote_peer_id).to_bytes())
+            .await
+            .unwrap();
+
+        let mut response = [0u8; 68];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(Handshake::parse(&response).unwrap().info_hash, info_hash);
+
+        let extension_handshake = read_bt_frame(&mut stream).await;
+        assert_eq!(extension_handshake.first(), Some(&20));
+        assert_eq!(extension_handshake.get(1), Some(&0));
+
+        let availability = read_bt_frame(&mut stream).await;
+        assert_eq!(
+            availability,
+            [14],
+            "Fast peers receive HaveAll from a seeder"
+        );
+
+        stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // Interested
+        loop {
+            let payload = read_bt_frame(&mut stream).await;
+            assert!(!payload.is_empty(), "seed peer closed before unchoking");
+            if payload[0] == 1 {
+                break;
+            }
+        }
+
+        let mut request = Vec::with_capacity(17);
+        request.extend_from_slice(&13u32.to_be_bytes());
+        request.push(6); // Request
+        request.extend_from_slice(&0u32.to_be_bytes());
+        request.extend_from_slice(&0u32.to_be_bytes());
+        request.extend_from_slice(&(16 * 1024u32).to_be_bytes());
+        stream.write_all(&request).await.unwrap();
+
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            read_bt_frame(&mut stream),
+        )
+        .await
+        {
+            Err(_) => {}
+            Ok(frame) => {
+                // Handshake::new advertises BEP 6, so the correct response is
+                // Reject (id 16), never a truncated Piece payload.
+                assert_eq!(frame.first(), Some(&16), "unexpected response: {frame:?}");
+                assert_eq!(frame.len(), 13);
+                assert_eq!(u32::from_be_bytes(frame[1..5].try_into().unwrap()), 0);
+                assert_eq!(u32::from_be_bytes(frame[5..9].try_into().unwrap()), 0);
+                assert_eq!(
+                    u32::from_be_bytes(frame[9..13].try_into().unwrap()),
+                    16 * 1024
+                );
+            }
+        }
+    });
+
+    let (server_stream, _) = listener.accept().await.unwrap();
+    let connection =
+        aria2_protocol::bittorrent::peer::incoming::receive(server_stream, &[info_hash])
+            .await
+            .unwrap()
+            .complete(local_peer_id, None, false)
+            .await
+            .unwrap();
+
+    let mut manager = BtSeedManager::new_with_cancel_token(
+        info_hash,
+        vec![connection],
+        provider,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        8 * 1024,
+        cancel_token.clone(),
+    );
+    let run = tokio::spawn(async move { manager.run_seeding_loop().await });
+
+    client.await.unwrap();
+    cancel_token.cancel();
+    run.await.unwrap().unwrap();
 }
 
 async fn read_bt_frame(stream: &mut TcpStream) -> Vec<u8> {

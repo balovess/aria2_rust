@@ -1,14 +1,4 @@
-//! Metalink Resource — represents a download source (mirror) for a Metalink file.
-//!
-//! Each Metalink file can have multiple resources (mirrors) with different
-//! priorities, preferences, and location constraints.
-//!
-//! # C++ Equivalence
-//!
-//! | Rust | C++ |
-//! |---|---|
-//! | `MetalinkResource` | `MetalinkResource` |
-//! | `ResourceType` | `MetalinkResource::TYPE` |
+//! Resource type classification for Metalink URLs and V3 type attributes.
 
 /// Protocol type of a Metalink resource URL.
 ///
@@ -80,14 +70,6 @@ impl ResourceType {
         }
     }
 
-    /// Alias for [`from_v3_type`] used by the Metalink parser.
-    ///
-    /// The parser calls `ResourceType::from_url_type_str(val)` to match
-    /// the V3 `<url type="...">` attribute.
-    pub fn from_url_type_str(type_attr: &str) -> Self {
-        Self::from_v3_type(type_attr)
-    }
-
     /// Whether this resource type is supported for downloading.
     ///
     /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()` — only
@@ -109,67 +91,10 @@ impl ResourceType {
     }
 }
 
-/// A download resource (mirror) for a Metalink file entry.
-///
-/// Contains the URL along with priority, preference, and geo-location
-/// metadata used to select the best mirror.
-///
-/// Mirrors C++ `MetalinkResource`.
-#[derive(Debug, Clone)]
-pub struct MetalinkResource {
-    /// The URL of this resource
-    pub url: String,
-    /// Protocol type of this resource
-    pub resource_type: ResourceType,
-    /// Priority (lower = preferred, per Metalink spec)
-    pub priority: i32,
-    /// Preference value (higher = preferred, aria2 extension)
-    pub preference: i32,
-    /// Geographic location constraint (ISO 3166-1 alpha-2 country code)
-    pub location: String,
-    /// Maximum number of concurrent connections to this resource
-    pub max_connections: i32,
-}
-
 /// Default lowest priority for unsorted resources.
 ///
 /// Mirrors C++ `MetalinkResource::getLowestPriority()` = 999999.
 pub const LOWEST_PRIORITY: i32 = 999999;
-
-impl MetalinkResource {
-    /// Create a new resource with the given URL and default priority.
-    pub fn new(url: impl Into<String>) -> Self {
-        let url_str = url.into();
-        let resource_type = ResourceType::from_url(&url_str);
-        Self {
-            url: url_str,
-            resource_type,
-            priority: LOWEST_PRIORITY,
-            preference: 0,
-            location: String::new(),
-            max_connections: -1,
-        }
-    }
-
-    /// Create a new resource with explicit priority.
-    pub fn with_priority(url: impl Into<String>, priority: i32) -> Self {
-        Self {
-            priority,
-            ..Self::new(url)
-        }
-    }
-
-    /// Check if this resource is preferred over another.
-    ///
-    /// Lower priority value wins. Ties are broken by higher preference.
-    pub fn is_preferred_over(&self, other: &MetalinkResource) -> bool {
-        if self.priority != other.priority {
-            self.priority < other.priority
-        } else {
-            self.preference > other.preference
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -239,15 +164,5 @@ mod tests {
     #[test]
     fn test_lowest_priority() {
         assert_eq!(LOWEST_PRIORITY, 999999);
-    }
-
-    #[test]
-    fn test_new_resource_defaults() {
-        let res = MetalinkResource::new("http://example.com/file");
-        assert_eq!(res.resource_type, ResourceType::Http);
-        assert_eq!(res.priority, LOWEST_PRIORITY);
-        assert_eq!(res.preference, 0);
-        assert_eq!(res.max_connections, -1);
-        assert!(res.location.is_empty());
     }
 }

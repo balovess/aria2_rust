@@ -17,17 +17,17 @@ pub enum PeerInterestState {
 
 #[derive(Debug, Clone)]
 pub struct PeerState {
-    pub am_choking: bool,
-    pub am_interested: bool,
-    pub peer_choking: bool,
-    pub peer_interested: bool,
-    pub outgoing_requests: HashSet<PieceBlockRequest>,
-    pub download_speed: f64,
-    pub upload_speed: f64,
-    pub last_message_time: Instant,
-    pub connection_established: Instant,
-    pub bytes_downloaded: u64,
-    pub bytes_uploaded: u64,
+    am_choking: bool,
+    am_interested: bool,
+    peer_choking: bool,
+    peer_interested: bool,
+    outgoing_requests: HashSet<PieceBlockRequest>,
+    download_speed: f64,
+    upload_speed: f64,
+    last_message_time: Instant,
+    connection_established: Instant,
+    bytes_downloaded: u64,
+    bytes_uploaded: u64,
 }
 
 impl Default for PeerState {
@@ -60,6 +60,70 @@ impl PeerState {
 
     pub fn can_upload_to(&self) -> bool {
         !self.am_choking && self.peer_interested
+    }
+
+    pub fn am_choking(&self) -> bool {
+        self.am_choking
+    }
+
+    pub fn am_interested(&self) -> bool {
+        self.am_interested
+    }
+
+    pub fn peer_choking(&self) -> bool {
+        self.peer_choking
+    }
+
+    pub fn peer_interested(&self) -> bool {
+        self.peer_interested
+    }
+
+    pub fn outgoing_requests(&self) -> &HashSet<PieceBlockRequest> {
+        &self.outgoing_requests
+    }
+
+    pub fn download_speed(&self) -> f64 {
+        self.download_speed
+    }
+
+    pub fn upload_speed(&self) -> f64 {
+        self.upload_speed
+    }
+
+    pub fn connection_established(&self) -> Instant {
+        self.connection_established
+    }
+
+    pub fn last_message_time(&self) -> Instant {
+        self.last_message_time
+    }
+
+    pub fn bytes_downloaded(&self) -> u64 {
+        self.bytes_downloaded
+    }
+
+    pub fn bytes_uploaded(&self) -> u64 {
+        self.bytes_uploaded
+    }
+
+    pub fn set_peer_choking(&mut self, choking: bool) {
+        self.peer_choking = choking;
+    }
+
+    pub fn set_peer_interested(&mut self, interested: bool) {
+        self.peer_interested = interested;
+    }
+
+    pub fn set_am_choking(&mut self, choking: bool) {
+        self.am_choking = choking;
+    }
+
+    pub fn set_am_interested(&mut self, interested: bool) {
+        self.am_interested = interested;
+    }
+
+    pub fn mark_message_received(&mut self) {
+        self.last_message_time = Instant::now();
     }
 
     pub fn is_active(&self) -> bool {
@@ -111,8 +175,8 @@ impl ChokeAlgorithm {
 
         unchoke_indices.sort_by(|&a, &b| {
             peers[b]
-                .download_speed
-                .partial_cmp(&peers[a].download_speed)
+                .download_speed()
+                .partial_cmp(&peers[a].download_speed())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
@@ -138,17 +202,17 @@ impl ChokeAlgorithm {
         for (rank, &idx) in unchoke_indices.iter().enumerate() {
             if rank < regular_count {
                 to_unchoke.push(idx);
-                peers[idx].am_choking = false;
+                peers[idx].set_am_choking(false);
             } else if let Some(opt_idx) = optimistic_slot {
                 if rank == opt_idx {
                     to_unchoke.push(idx);
-                    peers[idx].am_choking = false;
+                    peers[idx].set_am_choking(false);
                 } else {
-                    peers[idx].am_choking = true;
+                    peers[idx].set_am_choking(true);
                     peers[idx].clear_requests();
                 }
             } else {
-                peers[idx].am_choking = true;
+                peers[idx].set_am_choking(true);
                 peers[idx].clear_requests();
             }
         }
@@ -163,7 +227,7 @@ impl ChokeAlgorithm {
         let choked_interested: Vec<usize> = peers
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.am_choking && p.peer_interested)
+            .filter(|(_, p)| p.am_choking() && p.peer_interested())
             .map(|(i, _)| i)
             .collect();
 
@@ -185,10 +249,10 @@ mod tests {
     #[test]
     fn test_peer_state_defaults() {
         let state = PeerState::new();
-        assert!(state.am_choking);
-        assert!(state.peer_choking);
-        assert!(!state.am_interested);
-        assert!(!state.peer_interested);
+        assert!(state.am_choking());
+        assert!(state.peer_choking());
+        assert!(!state.am_interested());
+        assert!(!state.peer_interested());
         assert!(!state.can_download_from());
         assert!(!state.can_upload_to());
     }
@@ -196,11 +260,11 @@ mod tests {
     #[test]
     fn test_can_download_when_unchoke_and_interested() {
         let mut state = PeerState::new();
-        state.peer_choking = false;
-        state.am_interested = true;
+        state.set_peer_choking(false);
+        state.set_am_interested(true);
         assert!(state.can_download_from());
 
-        state.peer_choking = true;
+        state.set_peer_choking(true);
         assert!(!state.can_download_from());
     }
 
@@ -223,34 +287,58 @@ mod tests {
     }
 
     #[test]
+    fn test_peer_state_accessors_and_counters() {
+        let mut state = PeerState::new();
+        let initial_message_time = state.last_message_time();
+
+        state.set_peer_interested(true);
+        state.update_download_speed(120, 2.0);
+        state.update_upload_speed(60, 3.0);
+        state.mark_message_received();
+
+        assert!(state.peer_interested());
+        assert_eq!(state.download_speed(), 60.0);
+        assert_eq!(state.upload_speed(), 20.0);
+        assert_eq!(state.bytes_downloaded(), 120);
+        assert_eq!(state.bytes_uploaded(), 60);
+        assert!(state.outgoing_requests().is_empty());
+        assert!(state.last_message_time() >= initial_message_time);
+    }
+
+    #[test]
     fn test_choke_algorithm_basic() {
         let mut peers: Vec<PeerState> = vec![
-            PeerState {
-                download_speed: 100.0,
-                ..PeerState::new()
+            {
+                let mut state = PeerState::new();
+                state.update_download_speed(100, 1.0);
+                state
             },
-            PeerState {
-                download_speed: 500.0,
-                ..PeerState::new()
+            {
+                let mut state = PeerState::new();
+                state.update_download_speed(500, 1.0);
+                state
             },
-            PeerState {
-                download_speed: 300.0,
-                ..PeerState::new()
+            {
+                let mut state = PeerState::new();
+                state.update_download_speed(300, 1.0);
+                state
             },
-            PeerState {
-                download_speed: 50.0,
-                ..PeerState::new()
+            {
+                let mut state = PeerState::new();
+                state.update_download_speed(50, 1.0);
+                state
             },
-            PeerState {
-                download_speed: 200.0,
-                ..PeerState::new()
+            {
+                let mut state = PeerState::new();
+                state.update_download_speed(200, 1.0);
+                state
             },
         ];
         let mut refs: Vec<&mut PeerState> = peers.iter_mut().collect();
         let unchoked = ChokeAlgorithm::evaluate_choke(&mut refs, false);
 
         assert_eq!(unchoked.len(), 4);
-        assert!(!refs[1].am_choking);
-        assert!(!refs[2].am_choking);
+        assert!(!refs[1].am_choking());
+        assert!(!refs[2].am_choking());
     }
 }

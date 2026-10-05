@@ -18,13 +18,14 @@ impl CoreRpcBackend {
         options: DownloadOptions,
         option_snapshot: HashMap<String, serde_json::Value>,
         torrent_data: Option<Vec<u8>>,
+        additional_web_seeds: &[String],
     ) -> Result<String, BackendError> {
         self.group_man
             .add_group_with_gid(gid, uris, options)
             .map_err(|error| Self::execution(format!("Failed to add group: {error}")))?;
         let group = self
             .group_man
-            .group_by_id(gid)
+            .find_group(gid)
             .ok_or_else(|| BackendError::Internal("Group not found after insert".into()))?;
         #[cfg(feature = "bittorrent")]
         if let Some(data) = torrent_data.as_deref() {
@@ -33,12 +34,15 @@ impl CoreRpcBackend {
                 .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?
                 .options()
                 .clone();
-            if let Err(error) = aria2_core::engine::bt_download_command::prepare_group_metadata(
-                Arc::clone(&group),
-                data,
-                &options,
-                options.dir.as_deref(),
-            ) {
+            if let Err(error) =
+                aria2_core::engine::bittorrent::download::command::prepare_group_metadata(
+                    Arc::clone(&group),
+                    data,
+                    &options,
+                    options.dir.as_deref(),
+                    additional_web_seeds,
+                )
+            {
                 let _ = self.group_man.remove_group_by_id(gid);
                 return Err(Self::invalid(error.to_string()));
             }
@@ -65,7 +69,7 @@ impl CoreRpcBackend {
     ) -> Result<BackendResult, BackendError> {
         let (download_options, snapshot) = self.merged_task_options(options).await?;
         let gid = self.group_man.next_available_gid();
-        let gid_hex = self.add_group(gid, uris, download_options, snapshot, None)?;
+        let gid_hex = self.add_group(gid, uris, download_options, snapshot, None, &[])?;
         if let Some(position) = position {
             self.change_position(&gid_hex, position as i32, PositionMode::SetFromStart)?;
         }
@@ -95,10 +99,15 @@ impl CoreRpcBackend {
             Self::validate_torrent_data(&data)?;
             let (download_options, snapshot) = self.merged_task_options(options).await?;
             let gid = self.group_man.next_available_gid();
-            let mut uris = Vec::with_capacity(1 + additional_uris.len());
-            uris.push(format!("bt://{}", gid.to_hex_string()));
-            uris.extend(additional_uris);
-            let gid_hex = self.add_group(gid, uris, download_options, snapshot, Some(data))?;
+            let uris = vec![format!("bt://{}", gid.to_hex_string())];
+            let gid_hex = self.add_group(
+                gid,
+                uris,
+                download_options,
+                snapshot,
+                Some(data),
+                &additional_uris,
+            )?;
             if let Some(position) = position {
                 self.change_position(&gid_hex, position as i32, PositionMode::SetFromStart)?;
             }
@@ -125,14 +134,14 @@ impl CoreRpcBackend {
         {
             let (download_options, snapshot) = self.merged_task_options(options).await?;
             let converter =
-                aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
+                aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup::new();
             let mut gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
-            let resource_groups = converter
-                .create_resource_groups_from_bytes(&data, &download_options, &mut gids)
+            let expansion = converter
+                .create_groups_from_bytes(&data, &download_options, &mut gids)
                 .map_err(|error| Self::invalid(error.to_string()))?;
             let mut response_gids = Vec::new();
             let mut start_gids = Vec::new();
-            for group in resource_groups {
+            for group in expansion.resource_groups {
                 let gid = group.recover().gid();
                 group.recover_mut().set_option_snapshot(snapshot.clone());
                 let wake_group = Arc::clone(&group);
@@ -145,12 +154,7 @@ impl CoreRpcBackend {
 
             #[cfg(all(feature = "metalink", feature = "bittorrent"))]
             {
-                let mut graph_gids =
-                    std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
-                let graphs = converter
-                    .create_torrent_graphs_from_bytes(&data, &download_options, &mut graph_gids)
-                    .map_err(|error| Self::invalid(error.to_string()))?;
-                for graph in graphs {
+                for graph in expansion.torrent_graphs {
                     let metadata_gid = graph.metadata.recover().gid();
                     let payload_gid = graph.payload.recover().gid();
                     graph
@@ -182,10 +186,14 @@ impl CoreRpcBackend {
                 }
             }
 
-            if let Some(position) = position
-                && let Some(gid) = response_gids.first()
-            {
-                self.change_position(gid, position as i32, PositionMode::SetFromStart)?;
+            if let Some(position) = position {
+                // C++ inserts the complete Metalink result vector at one
+                // queue position. Groups are already appended in response
+                // order above, so moving them in reverse order to the same
+                // position keeps that order intact.
+                for gid in response_gids.iter().rev() {
+                    self.change_position(gid, position as i32, PositionMode::SetFromStart)?;
+                }
             }
             Ok(BackendResult::with_events(
                 BackendResponse::Gids(response_gids),

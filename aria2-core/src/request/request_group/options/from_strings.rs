@@ -59,6 +59,12 @@ impl DownloadOptions {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             max_connection_per_server: positive_u16("max-connection-per-server"),
+            max_http2_sessions_per_server: positive_u16("max-http2-sessions-per-server"),
+            max_http2_streams_per_session: positive_u16("max-http2-streams-per-session"),
+            http_version: options
+                .get("http-version")
+                .and_then(|value| crate::http::HttpVersion::parse_option(value))
+                .unwrap_or_default(),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
@@ -242,6 +248,46 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|value| *value > 0)
                 .unwrap_or(10),
+            dht_refresh_check_interval: options
+                .get("dht-refresh-check-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(300),
+            dht_token_rotation_interval: options
+                .get("dht-token-rotation-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(600),
+            dht_node_contact_interval: options
+                .get("dht-node-contact-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(900),
+            dht_cleanup_interval: options
+                .get("dht-cleanup-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(300),
+            dht_save_interval: options
+                .get("dht-save-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1800),
+            dht_bootstrap_timeout: options
+                .get("dht-bootstrap-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(60),
+            dht_max_concurrent_lookups: options
+                .get("dht-max-concurrent-lookups")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(16),
+            dht_persistence_max_age: options
+                .get("dht-persistence-max-age")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(24 * 60 * 60),
             enable_dht6: options
                 .get("enable-dht6")
                 .map(|v| v == "true")
@@ -390,6 +436,15 @@ impl DownloadOptions {
                 .map(|v| OptionValue::parse_size_str(v))
                 .filter(|value| *value > 0)
                 .or(Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)),
+            min_http_range_size: options
+                .get("min-http-range-size")
+                .and_then(|value| OptionValue::parse_size_str_checked(value).ok())
+                .filter(|value| {
+                    (crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES
+                        ..=crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES)
+                        .contains(value)
+                })
+                .or(Some(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES)),
             parameterized_uri: options
                 .get("parameterized-uri")
                 .map(|v| v == "true")

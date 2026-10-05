@@ -27,6 +27,7 @@ use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::network::ConnectionContext;
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId, HaltReason};
 use crate::request::request_group_man::RequestGroupMan;
@@ -80,6 +81,9 @@ pub struct EngineLoopContext {
     /// DNS cache for dependency injection.
     pub dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
 
+    /// Process-wide source-address policy for outgoing connections.
+    pub outbound_network_policy: Arc<OutboundNetworkPolicy>,
+
     /// Unified deadline-driven coordinator for session and control-file saves.
     pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveCoordinator>>>,
 
@@ -124,15 +128,15 @@ pub struct EngineLoopContext {
 
     /// Engine-owned registry shared by all BitTorrent commands.
     #[cfg(feature = "bittorrent")]
-    pub bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+    pub bt_registry: Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>,
 
     /// Process-level BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
-    pub bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    pub bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
 
     /// Process-level Local Peer Discovery manager and receive loop.
     #[cfg(feature = "bittorrent")]
-    pub lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+    pub lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.
@@ -163,28 +167,7 @@ fn mark_session_dirty(ctx: &EngineLoopContext) {
     }
 }
 
-/// Run the main engine loop.
-///
-/// This function runs until:
-/// - No active/reserved downloads remain AND `keep_alive` is false, OR
-/// - A shutdown signal is received via `shutdown_rx`.
-///
-/// The loop processes `EngineCommand`s from `cmd_rx`, task completion
-/// notifications from `completion_rx`, and runs deadline-driven maintenance.
-pub async fn run_engine_loop(
-    ctx: EngineLoopContext,
-    cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) {
-    run_engine_loop_with_receiver(
-        ctx,
-        EngineCommandReceiver::from_unbounded(cmd_rx),
-        shutdown_rx,
-    )
-    .await;
-}
-
-pub(crate) async fn run_engine_loop_with_receiver(
+pub(crate) async fn run_engine_loop(
     mut ctx: EngineLoopContext,
     mut cmd_rx: EngineCommandReceiver,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,

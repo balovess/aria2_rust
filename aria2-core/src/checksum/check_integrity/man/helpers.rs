@@ -90,22 +90,34 @@ pub fn multi_file_task(
 
 /// Truncate an output file when it contains bytes beyond the declared length.
 pub async fn cut_trailing_garbage(path: &Path, expected_length: u64) -> Result<()> {
-    let metadata = match tokio::fs::metadata(path).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(Aria2Error::FileIo(format!("{}: {error}", path.display()))),
-    };
-    if metadata.len() > expected_length {
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .await
-            .map_err(|error| Aria2Error::FileOpen(format!("{}: {error}", path.display())))?;
-        file.set_len(expected_length)
-            .await
-            .map_err(|error| Aria2Error::FileIo(format!("{}: {error}", path.display())))?;
-    }
-    Ok(())
+    let path = path.to_path_buf();
+    crate::filesystem::disk_io_pool::shared()
+        .run(
+            move || {
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => {
+                        return Err(Aria2Error::FileIo(format!("{}: {error}", path.display())));
+                    }
+                };
+                if metadata.len() > expected_length {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .map_err(|error| {
+                            Aria2Error::FileOpen(format!("{}: {error}", path.display()))
+                        })?
+                        .set_len(expected_length)
+                        .map_err(|error| {
+                            Aria2Error::FileIo(format!("{}: {error}", path.display()))
+                        })?;
+                }
+                Ok(())
+            },
+            "integrity output trim",
+        )
+        .await
 }
 
 /// Truncate each physical file in a logical multi-file stream to its declared length.

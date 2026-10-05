@@ -1,4 +1,5 @@
 pub mod bencode;
+pub(crate) mod blocking_worker_pool;
 pub mod encoding;
 pub mod format;
 pub mod hash;

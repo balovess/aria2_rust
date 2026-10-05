@@ -547,7 +547,7 @@ async fn test_json_session_roundtrip_preserves_metalink_graph_descriptor() {
         dir: Some(session_dir.to_string_lossy().into_owned()),
         ..Default::default()
     };
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory_with_fallback_and_mappings(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new_memory_with_fallback_and_mappings(
         "https://example.test/payload.torrent",
         "payload.bin",
         &options,
@@ -914,85 +914,41 @@ fn test_dht_snapshot_roundtrip() {
 /// a new instance, and verifies cookies are preserved.
 #[tokio::test]
 async fn test_cookie_persist_integration() {
-    use crate::http::cookie_storage::{CookieJar, JarCookie};
+    use crate::http::cookie::CookieStorage;
 
     let session_dir = create_test_session_dir();
 
-    // Create original session with cookie jar
-    let mut jar = CookieJar::new();
-    jar.store(JarCookie::new("session_id", "abc123", "example.com"));
-    jar.store(JarCookie::new("auth_token", "xyz789", "api.example.com"));
-
-    let persistence_with_cookies = SessionPersistence::new(&session_dir).with_cookie_jar(jar);
-
-    // Verify cookies are set
-    assert!(
-        persistence_with_cookies.cookie_jar().is_some(),
-        "Cookie jar should be set"
-    );
-    assert_eq!(
-        persistence_with_cookies.cookie_jar().unwrap().len(),
-        2,
-        "Should have 2 cookies before save"
-    );
+    let storage = std::sync::Arc::new(CookieStorage::new());
+    storage.parse_and_store("session_id=abc123; Path=/", "example.com", "/");
+    storage.parse_and_store("auth_token=xyz789; Path=/", "api.example.com", "/");
+    let persistence_with_cookies =
+        SessionPersistence::new(&session_dir).with_cookie_storage(storage);
 
     // Save session (includes cookies)
     let groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
     let _saved = persistence_with_cookies.save_state(&groups).await.unwrap();
 
-    // Verify cookies.json file was created
-    let cookie_path = session_dir.join("cookies.json");
+    // Verify the canonical Netscape cookie file was created
+    let cookie_path = session_dir.join("cookies.txt");
     assert!(
         cookie_path.exists(),
-        "cookies.json file should exist after save"
+        "cookies.txt file should exist after save"
     );
 
-    // Load into new instance (without pre-set cookies)
-    let mut persistence_new = SessionPersistence::new(&session_dir);
+    // Load into new instance with an empty canonical storage
+    let loaded_storage = std::sync::Arc::new(CookieStorage::new());
+    let mut persistence_new =
+        SessionPersistence::new(&session_dir).with_cookie_storage(loaded_storage.clone());
     let mut loaded_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
     let _loaded = persistence_new
         .load_state(&mut loaded_groups)
         .await
         .unwrap();
 
-    // Verify cookies were loaded
-    assert!(
-        persistence_new.cookie_jar().is_some(),
-        "Cookie jar should exist after load"
-    );
-    let loaded_jar = persistence_new.cookie_jar().unwrap();
-    assert_eq!(
-        loaded_jar.len(),
-        2,
-        "Should have loaded 2 cookies from file"
-    );
-
-    // Verify specific cookies were preserved
-    let example_cookies = loaded_jar.get_cookies_for_url("http://example.com/", false);
-    assert_eq!(
-        example_cookies.len(),
-        1,
-        "Should find 1 cookie for example.com"
-    );
-    assert_eq!(example_cookies[0].name, "session_id");
-    assert_eq!(example_cookies[0].value, "abc123");
-
-    let api_cookies = loaded_jar.get_cookies_for_url("http://api.example.com/api", false);
-    assert_eq!(
-        api_cookies.len(),
-        2,
-        "Should find 2 cookies for api.example.com (parent domain + exact)"
-    );
-    let auth_cookie = api_cookies
-        .iter()
-        .find(|c| c.name == "auth_token")
-        .expect("Should find auth_token cookie");
-    assert_eq!(auth_cookie.value, "xyz789");
-    let session_cookie = api_cookies
-        .iter()
-        .find(|c| c.name == "session_id")
-        .expect("Should find session_id cookie from parent domain");
-    assert_eq!(session_cookie.value, "abc123");
+    let example_header = loaded_storage.to_header_string("example.com", "/", false);
+    assert_eq!(example_header, "session_id=abc123");
+    let api_header = loaded_storage.to_header_string("api.example.com", "/api", false);
+    assert!(api_header.contains("auth_token=xyz789"));
 
     // Clean up
     let _ = fs::remove_dir_all(&session_dir);

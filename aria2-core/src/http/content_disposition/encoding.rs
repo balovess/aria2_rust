@@ -87,33 +87,27 @@ pub(super) fn is_dir_traversal(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Decode the `filename=` parameter value (plain or quoted).
-/// Validates bytes as UTF-8; if invalid, attempts ISO-8859-1 interpretation.
-/// Rejects directory-traversal filenames.
-pub(super) fn decode_filename_ascii(bytes: &[u8]) -> Option<String> {
+///
+/// A plain filename has no charset marker. Callers can opt into UTF-8 for
+/// modern servers, or retain the historical ISO-8859-1 interpretation used
+/// by aria2 by passing `false`.
+pub(super) fn decode_filename_ascii(bytes: &[u8], default_utf8: bool) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
 
-    // Try UTF-8 first (matching C++ defaultUTF8=true mode)
-    if let Some(s) = validate_utf8(bytes) {
-        if !is_dir_traversal(&s) {
-            return Some(s);
-        }
-        trace!(filename = %s, "decode_filename_ascii: rejected due to directory traversal");
-        return None;
-    }
+    let decoded = if default_utf8 {
+        validate_utf8(bytes)
+    } else {
+        iso8859p1_to_utf8(bytes)
+    }?;
 
-    // Fallback: interpret as ISO-8859-1 and convert to UTF-8
-    if let Some(s) = iso8859p1_to_utf8(bytes) {
-        if !is_dir_traversal(&s) {
-            return Some(s);
-        }
-        trace!(filename = %s, "decode_filename_ascii: rejected due to directory traversal");
-        return None;
+    if is_dir_traversal(&decoded) {
+        trace!(filename = %decoded, "decode_filename_ascii: rejected due to directory traversal");
+        None
+    } else {
+        Some(decoded)
     }
-
-    trace!("decode_filename_ascii: failed to decode bytes as UTF-8 or ISO-8859-1");
-    None
 }
 
 /// Decode the `filename*=` parameter value with charset awareness.

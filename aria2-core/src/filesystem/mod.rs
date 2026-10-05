@@ -1,6 +1,7 @@
 pub mod control_file;
 pub mod disk_adaptor;
 pub mod disk_cache;
+pub(crate) mod disk_io_pool;
 pub mod disk_space;
 pub mod disk_writer;
 pub mod file_allocation;

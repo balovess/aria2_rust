@@ -178,6 +178,26 @@ impl CheckIntegrityMan {
         })
     }
 
+    /// Return the live RPC-visible integrity state for one request group.
+    ///
+    /// The tuple is `(verified_length, queued)`. A picked entry exposes its
+    /// current validated length, while queued entries expose only the pending
+    /// flag, matching aria2's `CheckIntegrityMan` projection.
+    pub fn status_for_gid(&self, gid: u64) -> (Option<u64>, bool) {
+        let verified_length = self
+            .picked
+            .as_ref()
+            .filter(|entry| entry.gid == gid)
+            .map(|entry| {
+                entry
+                    .progress
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(entry.total_length)
+            });
+        let queued = self.queue.iter().any(|entry| entry.gid == gid);
+        (verified_length, queued)
+    }
+
     /// Cancel every queued entry (notify waiters) and mark the active one.
     pub fn cancel_all(&mut self) {
         for entry in self.queue.drain(..) {

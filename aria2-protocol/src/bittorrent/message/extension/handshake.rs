@@ -137,16 +137,15 @@ impl ExtensionHandshake {
             .as_dict()
             .ok_or("Extension handshake payload is not a dict")?;
 
-        let m_val = dict
+        // BEP 10 makes each top-level field optional. Treat a missing or
+        // malformed `m` as an empty extension table, matching aria2's
+        // `downcast<Dict>(dict->get("m"))` behavior without discarding other
+        // valid handshake fields.
+        let m_dict = dict
             .get(b"m".as_slice())
-            .ok_or("Missing 'm' key in extension handshake")?;
-
-        let m_inner = m_val
-            .as_dict()
-            .ok_or("'m' value is not a dict in extension handshake")?;
-
-        // Clone the m dict contents
-        let m_dict = m_inner.clone();
+            .and_then(BencodeValue::as_dict)
+            .cloned()
+            .unwrap_or_default();
 
         // Parse reqq (default to DEFAULT_REQQ if absent)
         let reqq = dict
@@ -330,25 +329,31 @@ mod tests {
     }
 
     #[test]
-    fn test_handshake_missing_m_key() {
-        // A dict without 'm' key should fail
+    fn test_handshake_without_m_key_has_no_extension_ids() {
         let mut dict = BTreeMap::new();
         dict.insert(b"reqq".to_vec(), BencodeValue::Int(500));
         let bytes = BencodeValue::Dict(dict).encode();
-        let result = ExtensionHandshake::from_bytes(&bytes);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing 'm' key"));
+        let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ut_metadata_id(), None);
+        assert_eq!(parsed.ut_pex_id(), None);
+        assert_eq!(parsed.reqq(), 500);
     }
 
     #[test]
-    fn test_handshake_m_not_dict() {
-        // 'm' value is not a dict
+    fn test_handshake_m_not_dict_keeps_other_fields() {
         let mut dict = BTreeMap::new();
         dict.insert(b"m".to_vec(), BencodeValue::Int(42));
+        dict.insert(
+            b"v".to_vec(),
+            BencodeValue::Bytes(b"remote-agent/2.3".to_vec()),
+        );
+        dict.insert(b"reqq".to_vec(), BencodeValue::Int(17));
         let bytes = BencodeValue::Dict(dict).encode();
-        let result = ExtensionHandshake::from_bytes(&bytes);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a dict"));
+        let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ut_metadata_id(), None);
+        assert_eq!(parsed.ut_pex_id(), None);
+        assert_eq!(parsed.v(), Some("remote-agent/2.3"));
+        assert_eq!(parsed.reqq(), 17);
     }
 
     #[test]

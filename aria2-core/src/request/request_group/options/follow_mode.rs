@@ -16,11 +16,6 @@ pub enum FollowMode {
 }
 
 impl FollowMode {
-    /// Convert the boolean form accepted by legacy RPC callers.
-    pub const fn from_bool(value: bool) -> Self {
-        if value { Self::Follow } else { Self::Disabled }
-    }
-
     /// Parse an aria2 option value. Invalid values are rejected so callers
     /// can preserve the configured default instead of silently changing mode.
     pub fn parse(value: &str) -> Option<Self> {

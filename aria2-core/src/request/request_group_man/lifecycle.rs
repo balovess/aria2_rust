@@ -412,6 +412,7 @@ impl RequestGroupMan {
             if !classified.pending.is_empty() {
                 group.set_pending_options(classified.pending);
             }
+            group.notify_activity_changed();
         }
 
         if should_restart {

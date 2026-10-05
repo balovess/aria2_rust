@@ -1,9 +1,8 @@
 use crate::error::{Aria2Error, Result};
+use url::Url;
 
 const SUPPORTED_SCHEMES: &[&str] = &["http", "https", "ftp", "sftp", "file"];
 const DANGEROUS_SCHEMES: &[&str] = &["javascript", "data", "vbscript"];
-
-const URI_MAX_FILENAME_LEN: usize = 255;
 
 #[derive(Debug, Clone)]
 pub struct ValidatedUri {
@@ -76,48 +75,91 @@ pub fn is_torrent_file(path: &str) -> bool {
 }
 
 pub fn sanitize_filename_from_uri(uri: &str) -> String {
-    let uri = uri.trim();
-    let path_part = uri
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .rsplit('\\')
-        .next()
-        .unwrap_or("");
+    let Some(raw_segment) = raw_uri_path_segment(uri) else {
+        return DEFAULT_FILENAME.to_owned();
+    };
 
-    let decoded = urlencoding_decode(path_part);
-    let cleaned = remove_traversal(&decoded);
-    truncate_filename(&cleaned)
+    let decoded = crate::util::uri::percent_decode(&raw_segment);
+    sanitize_filename_candidate(&decoded).unwrap_or_else(|| DEFAULT_FILENAME.to_owned())
 }
 
-fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2
-                && let Ok(byte) = u8::from_str_radix(&hex, 16)
-            {
-                result.push(byte as char);
-                continue;
-            }
-            result.push(c);
-        } else {
-            result.push(c);
+pub(crate) fn sanitize_filename_candidate(candidate: &str) -> Option<String> {
+    let basename = candidate
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())?;
+
+    let mut name: String = basename
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
+            _ => ch,
+        })
+        .collect();
+
+    name = name.trim_end_matches([' ', '.']).to_owned();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+
+    if is_windows_reserved_name(&name) {
+        name.insert(0, '_');
+    }
+
+    if name.len() > MAX_FILENAME_BYTES {
+        let mut end = MAX_FILENAME_BYTES;
+        while !name.is_char_boundary(end) {
+            end -= 1;
         }
+        name.truncate(end);
+        name = name.trim_end_matches([' ', '.']).to_owned();
     }
-    result
+
+    (!name.is_empty()).then_some(name)
 }
 
-fn remove_traversal(s: &str) -> String {
-    s.replace("../", "").replace("..\\", "").replace("./", "")
-}
+const DEFAULT_FILENAME: &str = "index.html";
+const MAX_FILENAME_BYTES: usize = 255;
 
-fn truncate_filename(s: &str) -> String {
-    if s.len() > URI_MAX_FILENAME_LEN {
-        s[..URI_MAX_FILENAME_LEN].to_string()
+fn raw_uri_path_segment(uri: &str) -> Option<String> {
+    if let Ok(parsed) = Url::parse(uri) {
+        if parsed.path().ends_with('/') {
+            return None;
+        }
+        return parsed
+            .path()
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .map(str::to_owned);
+    }
+
+    let without_suffix = uri.split(['?', '#']).next().unwrap_or_default();
+    let path = if let Some(scheme_end) = without_suffix.find("://") {
+        let authority_and_path = &without_suffix[scheme_end + 3..];
+        let slash = authority_and_path.find('/')?;
+        &authority_and_path[slash..]
     } else {
-        s.to_string()
+        without_suffix
+    };
+
+    if path.ends_with('/') {
+        return None;
     }
+
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(str::to_owned)
+}
+
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default();
+    let bytes = stem.as_bytes();
+    stem.eq_ignore_ascii_case("CON")
+        || stem.eq_ignore_ascii_case("PRN")
+        || stem.eq_ignore_ascii_case("AUX")
+        || stem.eq_ignore_ascii_case("NUL")
+        || (bytes.len() == 4
+            && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
+            && bytes[3].is_ascii_digit()
+            && bytes[3] != b'0')
 }

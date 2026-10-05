@@ -53,9 +53,15 @@ class FileServer:
     def __init__(self, directory: str):
         self.directory = directory
         self._server: Optional[asyncio.Server] = None
+        self._clients: set[asyncio.Task[None]] = set()
+        self._writers: set[asyncio.StreamWriter] = set()
         self.port: int = 0
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        task = asyncio.current_task()
+        if task is not None:
+            self._clients.add(task)
+        self._writers.add(writer)
         try:
             while True:
                 data = await reader.read(65536)
@@ -90,6 +96,9 @@ class FileServer:
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
         finally:
+            self._writers.discard(writer)
+            if task is not None:
+                self._clients.discard(task)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -101,9 +110,17 @@ class FileServer:
         self.port = self._server.sockets[0].getsockname()[1]
 
     async def stop(self):
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
+        if self._server is None:
+            return
+
+        self._server.close()
+        for writer in tuple(self._writers):
+            writer.close()
+        for task in tuple(self._clients):
+            task.cancel()
+        if self._clients:
+            await asyncio.gather(*tuple(self._clients), return_exceptions=True)
+        await self._server.wait_closed()
 
 
 class Aria2Server:

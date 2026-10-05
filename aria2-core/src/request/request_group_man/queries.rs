@@ -16,10 +16,6 @@ use crate::util::rwlock_ext::RwLockRecover;
 impl RequestGroupMan {
     // ── Query Methods ───────────────────────────────────────────────────
 
-    pub fn get_group(&self, gid: GroupId) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
-        self.find_group(gid)
-    }
-
     /// Snapshot groups in the order exposed by the scheduling stores.
     ///
     /// `groups` is the canonical identity index, but its `DashMap` iteration
@@ -76,14 +72,6 @@ impl RequestGroupMan {
         }
 
         snapshot
-    }
-
-    pub fn is_group_active(&self, gid_hex: &str) -> std::result::Result<bool, String> {
-        let group = self
-            .group_by_hex(gid_hex)
-            .ok_or_else(|| format!("GID {} not found", gid_hex))?;
-        let g = group.recover();
-        Ok(g.status().is_active())
     }
 
     /// Snapshot of all groups (active + reserved) as Arc clones.
@@ -169,11 +157,6 @@ impl RequestGroupMan {
     /// Total number of groups (active + reserved).
     pub fn count(&self) -> usize {
         self.groups.len()
-    }
-
-    /// Number of groups in the stopped results storage.
-    pub fn stopped_count(&self) -> usize {
-        self.stopped.len()
     }
 
     // ── Max Concurrent ──────────────────────────────────────────────────

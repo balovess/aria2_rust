@@ -3,8 +3,13 @@
 中文：[`README_CN.md`](README_CN.md)
 
 > **Version Notice:** aria2-rust is currently in a period of rapid iteration.
-> Older versions may retain various issues and basic functionality is not
-> guaranteed. Please use the latest version as soon as possible.
+> It is far from production-ready. Features may be incomplete, unstable, or
+> unusable, and functionality is not guaranteed. Do not rely on it for
+> production workloads or important data.
+
+<p align="center">
+  <img src="https://img.shields.io/badge/STATUS-IN%20DEVELOPMENT-red?style=for-the-badge" alt="In development — not production ready" />
+</p>
 
 ## Documentation
 
@@ -69,7 +74,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Resume Support**: Checkpoint-based resume for the main download paths; protocol-specific compatibility is tracked in the matrix
 - **BitTorrent**:
   - ✅ DHT network (KRPC + routing table + bootstrap)
-  - ✅ Tracker communication (UDP/HTTP)
+  - ✅ Tracker communication (UDP/HTTP), with a periodically refreshed public tracker catalog
   - ✅ Peer Exchange (PEX, per-peer BEP 10 extension-ID negotiation)
   - ✅ MSE/PE encryption (BEP14 handshake)
   - ✅ Choking algorithms + seed-time/ratio support
@@ -81,11 +86,11 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 40 methods and 6 notifications)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 42 methods and 6 notifications)
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
-- **Public Tracker List**: Auto-update from trackerslist.com for BT peer discovery
+- **Public Tracker List**: Enabled by default; refreshes `https://cf.trackerslist.com/best.txt` every 24 hours and appends deduplicated trackers to active BT tasks
 
 ## Quick Start
 
@@ -316,16 +321,16 @@ aria2-rust/
 │   ├── src/main.rs        #   Entry point
 │   ├── src/app.rs         #   App runtime (ConfigManager + Engine)
 │   └── examples/          #   Usage examples
-├── aria2-core/             # Core library (~7,000 lines)
-│   ├── src/engine/        #   Download engine (12 command implementations)
-│   │   ├── process_wait.rs # Native process-exit events with fallback watcher
-│   │   ├── download_engine.rs # Event loop with command queue
-│   │   ├── download_command.rs # HTTP/HTTPS downloader
-│   │   ├── ftp_download_command.rs # FTP/SFTP downloader
-│   │   ├── bt_download_command.rs # BitTorrent downloader
-│   │   ├── magnet_download_command.rs # Magnet link downloader
-│   │   ├── metalink_download_command.rs # Metalink downloader
-│   │   └── concurrent_download_command.rs # Multi-segment downloader
+├── aria2-core/             # Download engine and shared application policies
+│   ├── src/engine/
+│   │   ├── http/          # HTTP/HTTPS command, probing, and transfer pipeline
+│   │   ├── ftp/           # FTP/FTPS task command and transfer lifecycle
+│   │   ├── sftp/          # SFTP task command and transfer lifecycle
+│   │   ├── bittorrent/    # Torrent, peer, and magnet commands
+│   │   ├── metalink/      # Metadata expansion into payload requests
+│   │   ├── task_spawner.rs # Selects a protocol command for each request
+│   │   ├── command.rs     # Shared command interface
+│   │   └── engine_loop/   # Command scheduling and completion lifecycle
 │   ├── src/config/        #   Typed configuration registry and parser
 │   │   ├── option.rs     #     OptionType/Value/Def/Registry
 │   │   ├── parser.rs     #     Multi-source parser (CLI/file/env/defaults)
@@ -353,19 +358,14 @@ aria2-rust/
 │   │   └── save_session_command.rs # Save on exit
 │   ├── src/rate_limiter.rs # Token bucket rate limiting
 │   └── src/ui.rs           #   Progress bar & status panel
-├── aria2-protocol/         # Protocol stack (~5,000 lines)
-│   ├── src/http/           #   HTTP/HTTPS client (auth/proxy/cookies/compression)
-│   ├── src/ftp/            #   FTP/SFTP client (anonymous+auth, passive mode)
-│   ├── src/bittorrent/     #   Full BT stack
-│   │   ├── bencode/ # BEP3 bencode codec
-│   │   ├── torrent/ # .torrent parsing
-│   │   ├── magnet.rs # Magnet link parsing
-│   │   ├── dht/ # KRPC + routing table + bootstrap
-│   │   ├── tracker/ # UDP/HTTP tracker
-│   │   ├── peer/ # Peer connection + handshake
-│   │   ├── extension/ # MSE/PEX/ut_metadata
-│   │   └── piece/ # Piece manager + picker
-│   └── src/metalink/      #   Metalink V3/V4 parser
+├── aria2-protocol/         # Reusable protocol implementations
+│   └── src/
+│       ├── http/          # HTTP/HTTPS client primitives
+│       ├── ftp/           # FTP/FTPS control, data, and TLS primitives
+│       ├── sftp/          # SSH/SFTP connection, packets, sessions, and files
+│       ├── bittorrent/    # Bencode, torrent, peer, DHT, and tracker protocols
+│       ├── metalink/      # Metalink V3/V4 parsing
+│       └── identity.rs    # Shared TLS identity setup
 ├── aria2-rpc/              # RPC server (~1,000 lines)
 │   ├── src/json_rpc.rs     #   JSON-RPC 2.0 codec
 │   ├── src/xml_rpc.rs      #   XML-RPC codec
@@ -386,9 +386,9 @@ Rust-specific differences are:
 
 | Area | Current implementation |
 | --- | --- |
-| Disk I/O | Positioned offset writes, write-back range cache, threshold batching, and coalesced multi-file writes. Blocking syscalls run on Tokio's blocking pool; Linux `io_uring` is an opt-in backend. |
+| Disk I/O | Slow disk operations run in the background so synchronous reads and writes do not stall network tasks. Storage speed can still limit overall download speed. |
 | Data path | `bytes::Bytes` is transferred through the cache, Piece writer, and multi-file slices to reduce copies and temporary allocations. This is a reduced-copy path, not an end-to-end zero-copy guarantee. |
-| Hash verification | Bounded background hash workers, chunked integrity dispatch, cooperative yields, and RequestGroup-aware cancellation. |
+| Hash verification | File and piece checks run in the background to reduce their impact on download tasks. |
 | BitTorrent/DHT | Hash-based peer lifecycle, incremental piece-frequency tracking, shared HAVE frame encoding with bounded concurrent sends, bucket-tree/top-K routing, and bounded UDP workers. |
 | File allocation | Platform-aware Linux `fallocate`, Windows `SetFileValidData`, macOS `F_PREALLOCATE`, and cooperative fallbacks that keep long allocation work off the reactor. |
 | RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
@@ -444,6 +444,14 @@ These are microbenchmark results, not a whole-download throughput claim or a
 comparison with `aria2_original`. Details and validation commands are recorded
 in [docs/MIGRATION.md](docs/MIGRATION.md) and
 [docs/engine-loop-performance.md](docs/engine-loop-performance.md).
+
+### Download Responsiveness
+
+Disk writes and integrity checks run in the background so synchronous I/O or
+hashing does not stall network tasks. The worker queue is bounded; if storage
+falls behind, download tasks still wait and overall speed remains limited by
+the device. The current write benchmark does not include a real network
+download, so it does not establish higher download throughput.
 
 To reproduce the focused benchmarks:
 
@@ -609,7 +617,7 @@ cross-platform evidence is incomplete.
 | CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
-| JSON-RPC API | Implemented path | Feature-dependent method set (up to 40 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, and DHT runtime counters are available |
+| JSON-RPC API | Implemented path | Feature-dependent method set (up to 42 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, DHT runtime counters, and manual DHT maintenance are available |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |
@@ -638,7 +646,7 @@ cross-platform evidence is incomplete.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
-- BitTorrent RPC exposes torrent metadata, live tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. Tracker and DHT values are published from the active BT command and are removed when that command exits; peer discovery attribution is retained internally and is not added to the upstream `getPeers` wire response.
+- BitTorrent RPC exposes torrent metadata, tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. Tracker and DHT values are published from the active BT command and are removed when that command exits; peer discovery attribution is retained internally and is not added to the upstream `getPeers` wire response.
 - Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License

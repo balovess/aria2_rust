@@ -1,4 +1,5 @@
 use aria2_core::config::{OptionValue, UriListFile};
+use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
 
@@ -121,6 +122,18 @@ impl App {
         let r = cli.rpc;
         let a = cli.advanced;
 
+        // `--verbose` is a Rust-only process flag, but it must still cross
+        // the same configuration seam as the original logging options.  Do
+        // this after config/env loading so an explicit CLI value wins, and
+        // map both states so `--verbose=false` can disable a verbose config
+        // value instead of becoming a no-op.
+        if let Some(verbose) = cli.verbose {
+            let level = if verbose { "debug" } else { "notice" };
+            conf.set_global_option("console-log-level", OptionValue::Str(level.into()))
+                .await
+                .map_err(|e| format!("--verbose: {}", e))?;
+        }
+
         // --- General options ---
         set_path!("dir", g.dir);
         set_str!("out", g.out);
@@ -182,6 +195,10 @@ impl App {
         set_str!("gid", g.gid);
         set_bool_true!("async-dns", g.async_dns);
         set_u64!("dns-timeout", g.dns_timeout);
+        if let Some(value) = g.async_dns_server.as_deref() {
+            DnsCache::parse_dns_server_list(value)
+                .map_err(|error| format!("--async-dns-server: {error}"))?;
+        }
         set_str!("async-dns-server", g.async_dns_server);
         set_bool_true!("enable-async-dns6", g.enable_async_dns6);
         set_str!("event-poll", g.event_poll);
@@ -241,7 +258,17 @@ impl App {
         set_u64!("retry-wait", h.retry_wait);
         set_u64!("split", h.split);
         set_str!("min-split-size", h.min_split_size);
+        set_str!("min-http-range-size", h.min_http_range_size);
         set_u64!("max-connection-per-server", h.max_connection_per_server);
+        set_u64!(
+            "max-http2-sessions-per-server",
+            h.max_http2_sessions_per_server
+        );
+        set_u64!(
+            "max-http2-streams-per-session",
+            h.max_http2_streams_per_session
+        );
+        set_str!("http-version", h.http_version);
         set_u64!("max-http-pipelining", h.max_http_pipelining);
         // Negation: --no-check-certificate takes precedence over --check-certificate
         if h.no_check_certificate.unwrap_or(false) {
@@ -291,6 +318,12 @@ impl App {
         set_u64!("bt-keep-alive-interval", b.bt_keep_alive_interval);
         set_u64!("bt-timeout", b.bt_timeout);
         set_u64!("bt-request-timeout", b.bt_request_timeout);
+        set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
+        set_u64!(
+            "bt-optimistic-unchoke-interval",
+            b.bt_optimistic_unchoke_interval
+        );
+        set_u64!("bt-snubbed-timeout", b.bt_snubbed_timeout);
         set_u64!("peer-connection-timeout", b.peer_connection_timeout);
         set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);
@@ -341,6 +374,18 @@ impl App {
         set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);
         set_u64!("bt-tracker-stopped-timeout", b.bt_tracker_stopped_timeout);
         set_u64!("dht-message-timeout", b.dht_message_timeout);
+        set_u64!("dht-refresh-check-interval", b.dht_refresh_check_interval);
+        set_u64!("dht-token-rotation-interval", b.dht_token_rotation_interval);
+        set_u64!("dht-node-contact-interval", b.dht_node_contact_interval);
+        set_u64!("dht-cleanup-interval", b.dht_cleanup_interval);
+        set_u64!("dht-save-interval", b.dht_save_interval);
+        set_u64!("dht-bootstrap-timeout", b.dht_bootstrap_timeout);
+        if let Some(value) = b.dht_max_concurrent_lookups {
+            conf.set_global_option("dht-max-concurrent-lookups", OptionValue::Int(value as i64))
+                .await
+                .map_err(|e| format!("--dht-max-concurrent-lookups: {}", e))?;
+        }
+        set_u64!("dht-persistence-max-age", b.dht_persistence_max_age);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
         set_str!("dht-entry-point6", b.dht_entry_point6);

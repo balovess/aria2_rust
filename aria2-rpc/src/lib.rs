@@ -20,7 +20,7 @@
 //!   GID generation utility.
 //!
 //! - **[`engine`]** — `RpcEngine` bridge implementing the feature-specific
-//!   aria2 RPC catalog (33 core methods, plus BitTorrent/Metalink extensions):
+//!   aria2 RPC catalog (35 core methods, plus BitTorrent/Metalink extensions):
 //!   addUri/addTorrent/remove/pause/unpause/tellStatus/tellActive/tellWaiting/
 //!   tellStopped/getGlobalStat/getUris/getFiles/getServers/getPeers/
 //!   purgeDownloadResult/getGlobalOption/changeGlobalOption/
@@ -56,6 +56,10 @@
 //! The implemented catalog follows the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
+// `async_trait` marks its boxed futures as `must_use`; Clippy 1.99 also sees
+// the wrapped `Result` and flags the generated trait methods as double-must-use.
+#![allow(clippy::double_must_use)]
+
 pub mod backend;
 pub mod constants;
 pub mod engine;
@@ -78,9 +82,9 @@ pub use server::{
     AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig, TlsError,
 };
 pub use types::{
-    BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat, PeerInfo,
-    ServerInfo, ServerInfoIndex, SessionInfo, StatusInfo, TrackerInfo, UriEntry, UriInfo,
-    UriStatus, VersionInfo, create_gid,
+    BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat,
+    PeerDetails, PeerFlags, PeerInfo, PeerStats, ServerInfo, ServerInfoIndex, SessionInfo,
+    StatusInfo, TrackerInfo, UriEntry, UriStatus, VersionInfo, create_gid,
 };
 pub use websocket::{
     DownloadEvent, EventPublisher, EventType, NotificationBatcher, WsConfig, WsSession,

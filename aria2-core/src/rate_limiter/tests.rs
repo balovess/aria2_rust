@@ -57,6 +57,18 @@ async fn test_token_bucket_try_acquire() {
 }
 
 #[test]
+fn token_bucket_reports_the_wait_for_a_token_deadline() {
+    let tb = TokenBucket::new(1000, Some(0));
+
+    assert_eq!(tb.time_until_acquire(0), Duration::ZERO);
+    let wait = tb.time_until_acquire(8);
+    assert!(
+        (Duration::from_millis(7)..=Duration::from_millis(8)).contains(&wait),
+        "8 bytes at 1000 bytes/sec should be ready in about 8 ms, got {wait:?}"
+    );
+}
+
+#[test]
 fn test_token_bucket_available_tokens() {
     let tb = TokenBucket::new(1000, Some(5000));
     let initial = tb.available_tokens();
@@ -516,6 +528,32 @@ async fn test_rate_limiter_set_upload_rate() {
     assert!(!rl.is_upload_limited());
     let config = rl.config().await;
     assert!(config.upload_rate().is_none());
+}
+
+#[tokio::test]
+async fn test_setting_upload_limit_from_unlimited_starts_with_only_the_default_burst() {
+    let limiter = RateLimiter::unlimited();
+    limiter.set_upload_rate(Some(1));
+
+    let burst_bytes = crate::constants::DEFAULT_BURST_BYTES as u64;
+    assert!(limiter.try_acquire_upload(burst_bytes).await);
+    assert!(
+        !limiter.try_acquire_upload(1).await,
+        "switching from unlimited to limited must not preserve an effectively infinite token balance"
+    );
+}
+
+#[tokio::test]
+async fn test_unlimited_rate_limiter_preserves_configured_burst_for_later_limits() {
+    let limiter =
+        RateLimiter::new(&RateLimiterConfig::new(None, None).with_burst(Some(3), Some(5)));
+    limiter.set_download_rate(Some(1));
+    limiter.set_upload_rate(Some(1));
+
+    assert!(limiter.try_acquire_download(3).await);
+    assert!(!limiter.try_acquire_download(1).await);
+    assert!(limiter.try_acquire_upload(5).await);
+    assert!(!limiter.try_acquire_upload(1).await);
 }
 
 #[tokio::test]

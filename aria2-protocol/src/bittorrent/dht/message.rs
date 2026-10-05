@@ -64,11 +64,12 @@ impl DhtMessage {
         }
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, String> {
+    pub fn encode(&self) -> Vec<u8> {
         use std::collections::BTreeMap;
         let mut dict = BTreeMap::new();
 
         dict.insert(b"t".to_vec(), BencodeValue::Bytes(self.t.clone()));
+        dict.insert(b"v".to_vec(), BencodeValue::Bytes(b"A2\x00\x03".to_vec()));
         dict.insert(
             b"y".to_vec(),
             BencodeValue::Bytes(match self.y {
@@ -108,7 +109,7 @@ impl DhtMessage {
             }
         }
 
-        Ok(BencodeValue::Dict(dict).encode())
+        BencodeValue::Dict(dict).encode()
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, String> {
@@ -125,10 +126,10 @@ impl DhtMessage {
             .and_then(|v| v.as_bytes())
             .ok_or("Missing 'y' field")?;
 
-        let y = match y_bytes.first() {
-            Some(b'q') => DhtMessageType::Query,
-            Some(b'r') => DhtMessageType::Response,
-            Some(b'e') => DhtMessageType::Error,
+        let y = match y_bytes {
+            b"q" => DhtMessageType::Query,
+            b"r" => DhtMessageType::Response,
+            b"e" => DhtMessageType::Error,
             _ => return Err(format!("Invalid 'y' value: {:?}", y_bytes)),
         };
 
@@ -146,13 +147,21 @@ impl DhtMessage {
                 })
             }
             DhtMessageType::Response => {
-                let r = root.dict_get(b"r").cloned();
+                let result = root.dict_get(b"r").ok_or("Missing 'r' field")?;
+                result.as_dict().ok_or("Invalid 'r' field")?;
+                let node_id = result
+                    .dict_get(b"id")
+                    .and_then(BencodeValue::as_bytes)
+                    .ok_or("Missing 'r.id' field")?;
+                if node_id.len() != 20 {
+                    return Err("Invalid 'r.id' field length".to_string());
+                }
                 Ok(Self {
                     t,
                     y,
                     q: None,
                     a: None,
-                    r,
+                    r: Some(result.clone()),
                     e: None,
                 })
             }
@@ -161,18 +170,18 @@ impl DhtMessage {
                     .dict_get(b"e")
                     .and_then(|v| v.as_list())
                     .ok_or("Missing 'e' field")?;
-                if err_val.len() < 2 {
+                if err_val.len() != 2 {
                     return Err("Invalid error format".to_string());
                 }
-                let code = err_val[0].as_int().unwrap_or(201);
-                let msg = err_val[1].as_str().unwrap_or("unknown error");
+                let code = err_val[0].as_int().ok_or("Invalid error code")?;
+                let msg = err_val[1].as_bytes().ok_or("Invalid error message")?;
                 Ok(Self {
                     t,
                     y,
                     q: None,
                     a: None,
                     r: None,
-                    e: Some((code, msg.to_string())),
+                    e: Some((code, String::from_utf8_lossy(msg).into_owned())),
                 })
             }
         }
@@ -195,7 +204,7 @@ impl DhtMessage {
 /// - IPv6: 18 bytes (16 bytes IP + 2 bytes port, big-endian)
 ///
 /// The output is directly consumable by
-/// [`crate::bittorrent::dht::client::extract_compact_peers_from_response`].
+/// [`crate::bittorrent::dht::compact::extract_compact_peers_from_response`].
 pub fn encode_compact_peer(addr: std::net::SocketAddr) -> Vec<u8> {
     match addr {
         std::net::SocketAddr::V4(v4) => {
@@ -255,12 +264,14 @@ impl DhtMessageBuilder {
         )
     }
 
-    pub fn announce_peer(
+    /// Build an `announce_peer` query using the opaque token returned by
+    /// `get_peers`.
+    pub fn announce_peer_with_token(
         transaction_id: u32,
         sender_id: &[u8; 20],
         info_hash: &[u8; 20],
         port: u16,
-        token: &str,
+        token: &[u8],
     ) -> DhtMessage {
         let mut args_dict = std::collections::BTreeMap::new();
         args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
@@ -269,10 +280,7 @@ impl DhtMessageBuilder {
             BencodeValue::Bytes(info_hash.to_vec()),
         );
         args_dict.insert(b"port".to_vec(), BencodeValue::Int(port as i64));
-        args_dict.insert(
-            b"token".to_vec(),
-            BencodeValue::Bytes(token.as_bytes().to_vec()),
-        );
+        args_dict.insert(b"token".to_vec(), BencodeValue::Bytes(token.to_vec()));
         DhtMessage::new_query(
             transaction_id,
             DhtQueryMethod::ANNOUNCE_PEER,
@@ -298,10 +306,24 @@ impl DhtMessageBuilder {
     /// `compact_nodes` is a concatenation of 26-byte compact node entries
     /// (20 bytes node ID + 6 bytes IPv4 compact addr) per BEP 0005.
     pub fn find_node_response(tx: &[u8], self_id: &[u8; 20], compact_nodes: &[u8]) -> DhtMessage {
+        Self::find_node_response_with_nodes_field(tx, self_id, b"nodes", compact_nodes)
+    }
+
+    /// Build a find_node response carrying IPv6 compact nodes under `nodes6`.
+    pub fn find_node_response6(tx: &[u8], self_id: &[u8; 20], compact_nodes: &[u8]) -> DhtMessage {
+        Self::find_node_response_with_nodes_field(tx, self_id, b"nodes6", compact_nodes)
+    }
+
+    fn find_node_response_with_nodes_field(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        nodes_field: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
         let mut r_dict = std::collections::BTreeMap::new();
         r_dict.insert(b"id".to_vec(), BencodeValue::Bytes(self_id.to_vec()));
         r_dict.insert(
-            b"nodes".to_vec(),
+            nodes_field.to_vec(),
             BencodeValue::Bytes(compact_nodes.to_vec()),
         );
         DhtMessage::new_response(tx.to_vec(), BencodeValue::Dict(r_dict))
@@ -329,6 +351,61 @@ impl DhtMessageBuilder {
         DhtMessage::new_response(tx.to_vec(), BencodeValue::Dict(r_dict))
     }
 
+    /// Build a get_peers response carrying both peers and IPv4 closest nodes.
+    pub fn get_peers_response_with_peers_and_nodes(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        peers: &[std::net::SocketAddr],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        Self::get_peers_response_with_peers_and_nodes_field(
+            tx,
+            self_id,
+            token,
+            peers,
+            b"nodes",
+            compact_nodes,
+        )
+    }
+
+    /// Build a get_peers response carrying both peers and IPv6 closest nodes.
+    pub fn get_peers_response_with_peers_and_nodes6(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        peers: &[std::net::SocketAddr],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        Self::get_peers_response_with_peers_and_nodes_field(
+            tx,
+            self_id,
+            token,
+            peers,
+            b"nodes6",
+            compact_nodes,
+        )
+    }
+
+    fn get_peers_response_with_peers_and_nodes_field(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        peers: &[std::net::SocketAddr],
+        nodes_field: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        let mut response = Self::get_peers_response_with_peers(tx, self_id, token, peers);
+        let Some(BencodeValue::Dict(result)) = response.r.as_mut() else {
+            unreachable!("get_peers response builder always creates a dictionary")
+        };
+        result.insert(
+            nodes_field.to_vec(),
+            BencodeValue::Bytes(compact_nodes.to_vec()),
+        );
+        response
+    }
+
     /// Build a get_peers response carrying closest nodes (no peers known):
     /// `{"t":tx,"y":"r","r":{"id":self_id,"token":token,"nodes":compact_nodes}}`.
     pub fn get_peers_response_with_nodes(
@@ -337,11 +414,31 @@ impl DhtMessageBuilder {
         token: &[u8],
         compact_nodes: &[u8],
     ) -> DhtMessage {
+        Self::get_peers_response_with_nodes_field(tx, self_id, token, b"nodes", compact_nodes)
+    }
+
+    /// Build a get_peers response carrying closest IPv6 nodes under `nodes6`.
+    pub fn get_peers_response_with_nodes6(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        Self::get_peers_response_with_nodes_field(tx, self_id, token, b"nodes6", compact_nodes)
+    }
+
+    fn get_peers_response_with_nodes_field(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        nodes_field: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
         let mut r_dict = std::collections::BTreeMap::new();
         r_dict.insert(b"id".to_vec(), BencodeValue::Bytes(self_id.to_vec()));
         r_dict.insert(b"token".to_vec(), BencodeValue::Bytes(token.to_vec()));
         r_dict.insert(
-            b"nodes".to_vec(),
+            nodes_field.to_vec(),
             BencodeValue::Bytes(compact_nodes.to_vec()),
         );
         DhtMessage::new_response(tx.to_vec(), BencodeValue::Dict(r_dict))
@@ -361,323 +458,4 @@ impl DhtMessageBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ping_encode_decode_roundtrip() {
-        let id = [1u8; 20];
-        let msg = DhtMessageBuilder::ping(1234, &id);
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_query());
-        assert_eq!(&decoded.t, &msg.t);
-    }
-
-    #[test]
-    fn test_find_node_message() {
-        let sender = [1u8; 20];
-        let target = [2u8; 20];
-        let msg = DhtMessageBuilder::find_node(5678, &sender, &target);
-        assert!(msg.is_query());
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-        assert_eq!(decoded.q.as_ref().unwrap().0, "find_node");
-    }
-
-    #[test]
-    fn test_error_message() {
-        let msg = DhtMessage::new_error(vec![0xAA, 0xBB], 203, "Server Error");
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-        assert!(decoded.is_error());
-        assert_eq!(decoded.e, Some((203, "Server Error".to_string())));
-    }
-
-    #[test]
-    fn test_response_message() {
-        let mut result = std::collections::BTreeMap::new();
-        result.insert(b"id".to_vec(), BencodeValue::Bytes(vec![0u8; 20]));
-        let msg = DhtMessage::new_response(vec![0x01], BencodeValue::Dict(result));
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-        assert!(decoded.is_response());
-    }
-
-    // ==================== encode_compact_peer tests ====================
-
-    #[test]
-    fn test_encode_compact_peer_ipv4() {
-        let addr: std::net::SocketAddr = "192.168.1.100:8080".parse().unwrap();
-        let bytes = encode_compact_peer(addr);
-        assert_eq!(bytes.len(), 6);
-        assert_eq!(&bytes[0..4], &[192, 168, 1, 100]);
-        assert_eq!(u16::from_be_bytes([bytes[4], bytes[5]]), 8080);
-    }
-
-    #[test]
-    fn test_encode_compact_peer_ipv6() {
-        let addr: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
-        let bytes = encode_compact_peer(addr);
-        assert_eq!(bytes.len(), 18);
-        // First 16 bytes are the IPv6 address octets
-        let expected_octets: [u8; 16] =
-            std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1).octets();
-        assert_eq!(&bytes[0..16], &expected_octets[..]);
-        assert_eq!(u16::from_be_bytes([bytes[16], bytes[17]]), 443);
-    }
-
-    // ==================== Response builder tests ====================
-
-    #[test]
-    fn test_ping_response_encode_decode() {
-        let tx = [0x01u8, 0x02, 0x03, 0x04];
-        let self_id = [0xAAu8; 20];
-        let msg = DhtMessageBuilder::ping_response(&tx, &self_id);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_response());
-        assert_eq!(decoded.t, tx.to_vec());
-
-        let r = decoded.r.as_ref().expect("response must have r field");
-        let id_bytes = r
-            .dict_get(b"id")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.id");
-        assert_eq!(id_bytes, &self_id[..]);
-    }
-
-    #[test]
-    fn test_find_node_response_encode_decode() {
-        let tx = [0x11u8, 0x22];
-        let self_id = [0xBBu8; 20];
-
-        // Build 2 compact nodes (26 bytes each: 20 ID + 4 IP + 2 port)
-        let mut compact_nodes = Vec::new();
-        // Node 1: id=0x01.., IP 192.168.1.1:8080
-        compact_nodes.extend_from_slice(&[0x01u8; 20]);
-        compact_nodes.extend_from_slice(&[192, 168, 1, 1]);
-        compact_nodes.extend_from_slice(&[0x1F, 0x90]); // 8080
-        // Node 2: id=0x02.., IP 10.0.0.2:6881
-        compact_nodes.extend_from_slice(&[0x02u8; 20]);
-        compact_nodes.extend_from_slice(&[10, 0, 0, 2]);
-        compact_nodes.extend_from_slice(&[0x1A, 0xE1]); // 6881
-
-        let msg = DhtMessageBuilder::find_node_response(&tx, &self_id, &compact_nodes);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_response());
-        assert_eq!(decoded.t, tx.to_vec());
-
-        let r = decoded.r.as_ref().expect("response must have r field");
-        let id_bytes = r
-            .dict_get(b"id")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.id");
-        assert_eq!(id_bytes, &self_id[..]);
-
-        let nodes_bytes = r
-            .dict_get(b"nodes")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.nodes");
-        assert_eq!(nodes_bytes, &compact_nodes[..]);
-
-        // Cross-check with the existing extractor from client.rs
-        let extracted =
-            crate::bittorrent::dht::client::extract_compact_nodes_from_response(&decoded);
-        assert_eq!(extracted.len(), 2);
-        assert_eq!(extracted[0].0.port(), 8080);
-        assert_eq!(extracted[1].0.port(), 6881);
-        assert_eq!(extracted[0].1, [0x01u8; 20]);
-        assert_eq!(extracted[1].1, [0x02u8; 20]);
-    }
-
-    #[test]
-    fn test_get_peers_response_with_peers_encode_decode() {
-        let tx = [0xDEu8, 0xAD, 0xBE, 0xEF];
-        let self_id = [0xCCu8; 20];
-        let token = b"tok123";
-
-        let peers: Vec<std::net::SocketAddr> = vec![
-            "192.168.1.1:8080".parse().unwrap(),
-            "10.0.0.2:6881".parse().unwrap(),
-        ];
-
-        let msg = DhtMessageBuilder::get_peers_response_with_peers(&tx, &self_id, token, &peers);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_response());
-        assert_eq!(decoded.t, tx.to_vec());
-
-        let r = decoded.r.as_ref().expect("response must have r field");
-        let id_bytes = r
-            .dict_get(b"id")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.id");
-        assert_eq!(id_bytes, &self_id[..]);
-
-        let token_bytes = r
-            .dict_get(b"token")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.token");
-        assert_eq!(token_bytes, &token[..]);
-
-        let values = r
-            .dict_get(b"values")
-            .and_then(|v| v.as_list())
-            .expect("missing r.values");
-        assert_eq!(values.len(), 2);
-
-        // Cross-check with the existing extractor from client.rs
-        let extracted =
-            crate::bittorrent::dht::client::extract_compact_peers_from_response(&decoded);
-        assert_eq!(extracted.len(), 2);
-        assert_eq!(extracted[0], peers[0]);
-        assert_eq!(extracted[1], peers[1]);
-    }
-
-    #[test]
-    fn test_get_peers_response_with_peers_empty() {
-        let tx = [0x01u8];
-        let self_id = [0x00u8; 20];
-        let token = b"";
-        let peers: Vec<std::net::SocketAddr> = vec![];
-
-        let msg = DhtMessageBuilder::get_peers_response_with_peers(&tx, &self_id, token, &peers);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        let r = decoded.r.as_ref().expect("response must have r field");
-        let values = r
-            .dict_get(b"values")
-            .and_then(|v| v.as_list())
-            .expect("missing r.values");
-        assert!(values.is_empty());
-
-        let extracted =
-            crate::bittorrent::dht::client::extract_compact_peers_from_response(&decoded);
-        assert!(extracted.is_empty());
-    }
-
-    #[test]
-    fn test_get_peers_response_with_nodes_encode_decode() {
-        let tx = [0x55u8, 0x66];
-        let self_id = [0xDDu8; 20];
-        let token = b"node-token";
-
-        // Build 1 compact node (26 bytes)
-        let mut compact_nodes = Vec::new();
-        compact_nodes.extend_from_slice(&[0x99u8; 20]);
-        compact_nodes.extend_from_slice(&[172, 16, 0, 1]);
-        compact_nodes.extend_from_slice(&[0x1F, 0x90]); // 8080
-
-        let msg =
-            DhtMessageBuilder::get_peers_response_with_nodes(&tx, &self_id, token, &compact_nodes);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_response());
-        assert_eq!(decoded.t, tx.to_vec());
-
-        let r = decoded.r.as_ref().expect("response must have r field");
-        let id_bytes = r
-            .dict_get(b"id")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.id");
-        assert_eq!(id_bytes, &self_id[..]);
-
-        let token_bytes = r
-            .dict_get(b"token")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.token");
-        assert_eq!(token_bytes, &token[..]);
-
-        let nodes_bytes = r
-            .dict_get(b"nodes")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.nodes");
-        assert_eq!(nodes_bytes, &compact_nodes[..]);
-
-        // Cross-check with the existing extractor from client.rs
-        let extracted =
-            crate::bittorrent::dht::client::extract_compact_nodes_from_response(&decoded);
-        assert_eq!(extracted.len(), 1);
-        assert_eq!(extracted[0].0.port(), 8080);
-        assert_eq!(extracted[0].1, [0x99u8; 20]);
-    }
-
-    #[test]
-    fn test_announce_peer_response_encode_decode() {
-        let tx = [0x77u8, 0x88, 0x99];
-        let self_id = [0xEEu8; 20];
-        let msg = DhtMessageBuilder::announce_peer_response(&tx, &self_id);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_response());
-        assert_eq!(decoded.t, tx.to_vec());
-
-        let r = decoded.r.as_ref().expect("response must have r field");
-        let id_bytes = r
-            .dict_get(b"id")
-            .and_then(|v| v.as_bytes())
-            .expect("missing r.id");
-        assert_eq!(id_bytes, &self_id[..]);
-
-        // announce_peer response should only contain "id" — no nodes/values/token
-        assert!(r.dict_get(b"nodes").is_none());
-        assert!(r.dict_get(b"values").is_none());
-        assert!(r.dict_get(b"token").is_none());
-    }
-
-    #[test]
-    fn test_error_response_encode_decode() {
-        let tx = [0xABu8, 0xCD];
-        let msg = DhtMessageBuilder::error_response(&tx, 203, "Invalid token");
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_error());
-        assert_eq!(decoded.t, tx.to_vec());
-        assert_eq!(decoded.e, Some((203, "Invalid token".to_string())));
-    }
-
-    #[test]
-    fn test_error_response_generic_error() {
-        let tx = [0x00u8];
-        let msg = DhtMessageBuilder::error_response(&tx, 202, "Server Error");
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert!(decoded.is_error());
-        assert_eq!(decoded.t, tx.to_vec());
-        assert_eq!(decoded.e, Some((202, "Server Error".to_string())));
-    }
-
-    #[test]
-    fn test_ping_response_echoes_arbitrary_tx_length() {
-        // BEP 0005 allows variable-length transaction IDs (typically 2 bytes).
-        // Verify a 2-byte tx is echoed back correctly.
-        let tx = [0x0Au8, 0x0B];
-        let self_id = [0x12u8; 20];
-        let msg = DhtMessageBuilder::ping_response(&tx, &self_id);
-
-        let encoded = msg.encode().unwrap();
-        let decoded = DhtMessage::decode(&encoded).unwrap();
-
-        assert_eq!(decoded.t, tx.to_vec());
-    }
-}
+mod tests;

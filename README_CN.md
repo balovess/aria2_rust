@@ -2,8 +2,13 @@
 
 English: [`README.md`](README.md)
 
-> **版本提示：** aria2-rust 当前处于快速迭代阶段，旧版本可能遗留各类问题，
-> 无法保证基本功能的可用性。请及时使用最新版本。
+> **重要提示：** aria2-rust 当前仍处于开发迭代和持续完善阶段，距离生产级别
+> 还有很大差距。功能可能不完整、不稳定，甚至无法使用；我们不保证功能可用性，
+> 请勿将其用于生产环境或重要数据场景。
+
+<p align="center">
+  <img src="https://img.shields.io/badge/状态-开发迭代中-red?style=for-the-badge" alt="开发迭代中，尚未达到生产级别" />
+</p>
 
 ## 文档导览
 
@@ -33,7 +38,8 @@ English: [`README.md`](README.md)
 ***
 
 **aria2_rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
-实现，核心实现迁移已基本完成，目前进入最终兼容性验收阶段。默认构建支持
+实现，项目仍在持续开发和完善中，尚未达到生产级别，也不保证所有功能可用。
+默认构建支持
 HTTP/HTTPS、FTP、BitTorrent 协议，并提供
 JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
@@ -72,7 +78,7 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **断点续传**: HTTP/HTTPS 等主要路径支持控制文件续传；不同协议、并发控制文件和多 URI 失败回退仍按兼容性矩阵逐项验证
 - **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
-  - ✅ Tracker 通信（UDP/HTTP）
+  - ✅ Tracker 通信（UDP/HTTP），并支持按周期刷新的公共 Tracker 列表
   - ✅ Peer 交换（PEX，按 peer 进行 BEP 10 扩展 ID 协商）
   - ✅ MSE/PE 加密（BEP14 握手）
   - ✅ 阻塞算法 + seed-time/ratio 支持
@@ -80,11 +86,11 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 40 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 42 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
-- **公共 Tracker 列表**: 自动从 trackerslist.com 更新 BT Peer 发现
+- **公共 Tracker 列表**：默认启用，每 24 小时刷新 `https://cf.trackerslist.com/best.txt`，并将去重后的 Tracker 追加到运行中的 BT 任务
 
 ## 快速开始
 
@@ -329,9 +335,9 @@ aria2-rust/
 
 | 领域 | 当前 Rust 实现 |
 | --- | --- |
-| 磁盘 I/O | Positioned offset write、写回 range cache、阈值批处理和多文件 coalescing；阻塞 syscall 放入 Tokio blocking pool，Linux `io_uring` 为 opt-in backend。 |
+| 磁盘 I/O | 慢速磁盘操作在后台处理，避免同步读写卡住网络任务；磁盘性能仍会影响整体下载速度。 |
 | 数据路径 | 通过 `bytes::Bytes` 在 cache、Piece writer 和多文件切片之间传递，减少复制和临时分配；这是 reduced-copy path，不是端到端 zero-copy 保证。 |
-| Hash 校验 | 有界后台 hash worker、分块完整性 dispatcher、协作式让出和 RequestGroup 生命周期取消。 |
+| Hash 校验 | 在后台执行文件和分片校验，减少校验计算对下载任务的影响。 |
 | BT/DHT | Hash-based peer 生命周期、增量 Piece 频率、共享 HAVE frame 的有界并发发送、bucket tree/top-K 路由和有界 UDP worker。 |
 | 文件预分配 | Linux `fallocate`、Windows `SetFileValidData`、macOS `F_PREALLOCATE` 的平台适配，以及不会阻塞 reactor 的 fallback。 |
 | RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
@@ -380,6 +386,12 @@ Windows release 构建中的 Rust-only Criterion 基准（`50,000` pieces，同�
 `aria2_original` 的对比结果。详细说明、测试证据和边界条件见
 [docs/MIGRATION.md](docs/MIGRATION.md) 及
 [docs/engine-loop-performance.md](docs/engine-loop-performance.md)。
+
+### 下载响应性
+
+磁盘写入和完整性校验在后台执行，避免同步 I/O 或哈希计算卡住网络任务。
+后台队列有容量限制；磁盘跟不上时，下载任务仍会等待，整体速度也仍受磁盘性能影响。
+目前的写入基准没有覆盖真实网络下载，因此不据此宣称下载吞吐有所提升。
 
 运行专项基准：
 
@@ -548,7 +560,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
-| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/37/40）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
+| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/41/42）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
 | XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
 | WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
@@ -574,7 +586,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 - `aria2.forceShutdown`、`system.listMethods` 和 `system.listNotifications` 已实现，并有 handler/集成测试覆盖。
 - HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
 - IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
-- BT RPC 已覆盖 torrent 元数据、tracker 分层及实时运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；peer 首次发现来源只保留在内部，不加入原版 `getPeers` wire 响应。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
+- BT RPC 已覆盖 torrent 元数据、tracker 分层及运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；peer 首次发现来源只保留在内部，不加入原版 `getPeers` wire 响应。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
 - 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
 - `aria2-core/src/c_api.rs` 已提供 opaque-handle `extern "C"`/cdylib 迁移接口；它不是原版 C++ STL 类 ABI 的二进制兼容实现。
 - Metalink torrent `metaurl` 依赖生命周期、完整性回调路径和部分协议互操作仍未闭环。

@@ -5,7 +5,7 @@
 
 use crate::error::{Aria2Error, RecoverableError};
 use crate::http::header_processor::HttpHeaderProcessor;
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 
 use super::processor::HttpResponseProcessor;
 use super::types::{ResponseProcessResult, ResponseProcessorConfig};

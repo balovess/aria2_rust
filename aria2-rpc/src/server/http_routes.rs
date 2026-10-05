@@ -8,6 +8,7 @@ use super::http_handlers::{
     handle_xmlrpc, http_auth_middleware,
 };
 use super::tls::{TlsConfig, TlsError};
+use crate::backend::RpcBackend;
 use crate::engine::RpcEngine;
 
 /// RPC HTTP server supporting both HTTP and HTTPS.
@@ -81,6 +82,32 @@ impl RpcServer {
     /// on the engine (e.g., when wiring to a running DownloadEngine).
     pub fn new_with_engine(config: ServerConfig, engine: Arc<RpcEngine>) -> Result<Self, TlsError> {
         Self::from_config_and_engine(config, engine)
+    }
+
+    /// Create a new RPC server from an application-owned backend.
+    ///
+    /// This constructor wires the backend into [`RpcEngine`] and mirrors the
+    /// configured token into the engine's library-facing authentication layer.
+    /// It is the compact alternative to constructing an `RpcEngine` manually
+    /// before calling [`Self::new_with_engine`].
+    pub fn new_with_backend(
+        config: ServerConfig,
+        backend: Arc<dyn RpcBackend>,
+    ) -> Result<Self, TlsError> {
+        let engine = RpcEngine::with_backend(backend);
+        let engine = match config.auth.token.as_deref() {
+            Some(token) => engine.with_auth_middleware(super::auth::RpcAuthMiddleware::new(token)),
+            None => engine,
+        };
+        Self::from_config_and_engine(config, Arc::new(engine))
+    }
+
+    /// Get the shared engine used by this server.
+    ///
+    /// Applications can use this handle to install lifecycle bridges or
+    /// otherwise coordinate with the same engine that serves RPC requests.
+    pub fn engine(&self) -> Arc<RpcEngine> {
+        Arc::clone(&self.engine)
     }
 
     /// Create a new HTTP RPC server (no TLS).
@@ -207,6 +234,25 @@ impl RpcServer {
         self.serve_on_listener(listener).await
     }
 
+    /// Start the RPC server and stop accepting new connections when
+    /// `shutdown` completes.
+    ///
+    /// Existing connection tasks are allowed to finish independently. This
+    /// keeps shutdown ownership with the application that owns the listener,
+    /// while preserving the established `serve` behavior for callers that
+    /// intentionally run the server for the process lifetime.
+    pub async fn serve_with_shutdown<F>(
+        &self,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
+        let listener = self.bind_listener().await?;
+        self.serve_on_listener_with_shutdown(listener, shutdown)
+            .await
+    }
+
     /// Serve requests on a listener that was bound by the caller.
     ///
     /// This keeps listener ownership separate from router construction so an
@@ -216,6 +262,22 @@ impl RpcServer {
         &self,
         listener: tokio::net::TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.serve_on_listener_with_shutdown(listener, std::future::pending())
+            .await
+    }
+
+    /// Serve requests on a caller-owned listener until `shutdown` completes.
+    ///
+    /// The listener is closed by returning from this method. Connections that
+    /// were already accepted are handled by their existing detached tasks.
+    pub async fn serve_on_listener_with_shutdown<F>(
+        &self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
         use axum::{
             Router, middleware,
             routing::{get, post},
@@ -252,9 +314,10 @@ impl RpcServer {
             // HTTPS mode — accept TCP connections, perform TLS handshake,
             // then hand the encrypted stream to hyper/axum.
             tracing::info!("TLS enabled, serving HTTPS");
-            self.serve_tls(listener, tls_acceptor.clone(), app).await?;
+            self.serve_tls(listener, tls_acceptor.clone(), app, shutdown)
+                .await?;
         } else {
-            self.serve_http(listener, app).await?;
+            self.serve_http(listener, app, shutdown).await?;
         }
 
         Ok(())
@@ -270,14 +333,19 @@ impl RpcServer {
         &self,
         listener: tokio::net::TcpListener,
         app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::extract::Request;
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::net::SocketAddr;
         use tower_service::Service;
 
+        let mut shutdown = Box::pin(shutdown);
         loop {
-            let (connection, remote_addr) = listener.accept().await?;
+            let (connection, remote_addr) = tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                accepted = listener.accept() => accepted?,
+            };
             let mut make_service = app
                 .clone()
                 .into_make_service_with_connect_info::<SocketAddr>();
@@ -323,14 +391,19 @@ impl RpcServer {
         listener: tokio::net::TcpListener,
         tls_acceptor: tokio_rustls::TlsAcceptor,
         app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::extract::Request;
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::net::SocketAddr;
         use tower_service::Service;
 
+        let mut shutdown = Box::pin(shutdown);
         loop {
-            let (cnx, remote_addr) = listener.accept().await?;
+            let (cnx, remote_addr) = tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                accepted = listener.accept() => accepted?,
+            };
             let tls_acceptor = tls_acceptor.clone();
 
             // Convert the Router into a MakeService that provides
@@ -395,7 +468,41 @@ impl std::fmt::Debug for RpcServer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::auth::AuthConfig;
     use super::*;
+    use crate::backend::{
+        BackendError, BackendRequest, BackendResponse, BackendResult, RpcBackend,
+    };
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct RecordingBackend {
+        requests: Arc<Mutex<Vec<BackendRequest>>>,
+    }
+
+    #[async_trait]
+    impl RpcBackend for RecordingBackend {
+        fn metadata(&self) -> crate::backend::BackendMetadata {
+            crate::backend::BackendMetadata::base("test")
+        }
+
+        async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
+            let response = match &request {
+                BackendRequest::AddUri { .. } => BackendResponse::Gid("0123456789abcdef".into()),
+                _ => {
+                    return Err(BackendError::Unsupported(format!(
+                        "unexpected test request: {request:?}"
+                    )));
+                }
+            };
+            self.requests
+                .lock()
+                .expect("test backend lock poisoned")
+                .push(request);
+            Ok(BackendResult::response(response))
+        }
+    }
 
     #[test]
     fn test_rpc_server_new_http() {
@@ -414,6 +521,46 @@ mod tests {
         let server = RpcServer::new(config).expect("Failed to create server");
         assert_eq!(server.addr(), "0.0.0.0:8080");
         assert!(!server.is_secure());
+    }
+
+    #[test]
+    fn test_rpc_server_from_backend_preserves_server_configuration() {
+        let config = ServerConfig::default()
+            .with_host("127.0.0.1")
+            .with_port(6801)
+            .with_auth(AuthConfig::default().with_token("secret"));
+
+        let server =
+            RpcServer::new_with_backend(config, Arc::new(crate::backend::UnsupportedBackend))
+                .expect("backend-backed server should construct");
+
+        assert_eq!(server.addr(), "127.0.0.1:6801");
+        assert!(server.config().auth.has_token());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_from_backend_dispatches_to_the_same_engine() {
+        let backend = RecordingBackend::default();
+        let requests = Arc::clone(&backend.requests);
+        let server = RpcServer::new_with_backend(
+            ServerConfig::default().with_auth(AuthConfig::default().with_token("secret")),
+            Arc::new(backend),
+        )
+        .expect("backend-backed server should construct");
+
+        let request = crate::json_rpc::JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!(["token:secret", ["https://example.test/file"]]),
+        )
+        .with_id(1);
+        let response = server.engine().handle_request(&request).await;
+
+        assert_eq!(response.result, Some(serde_json::json!("0123456789abcdef")));
+        assert!(response.error.is_none());
+        assert!(matches!(
+            requests.lock().expect("test backend lock poisoned").as_slice(),
+            [BackendRequest::AddUri { uris, .. }] if uris == &["https://example.test/file"]
+        ));
     }
 
     #[test]
@@ -441,5 +588,29 @@ mod tests {
     fn test_rpc_server_tls_acceptor_none_for_http() {
         let server = RpcServer::new_http("127.0.0.1", 6800);
         assert!(server.tls_acceptor().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_stops_accepting_after_shutdown_signal() {
+        let server = RpcServer::new_http("127.0.0.1", 0);
+        let listener = server.bind_listener().await.expect("listener should bind");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            server
+                .serve_on_listener_with_shutdown(listener, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+
+        shutdown_tx
+            .send(())
+            .expect("shutdown receiver should exist");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("server should stop after shutdown")
+            .expect("server task should not panic");
+        assert!(result.is_ok());
     }
 }

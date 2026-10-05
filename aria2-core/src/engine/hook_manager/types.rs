@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::request::request_group::GroupId;
 
-// Re-export DownloadStatus for backward compatibility
+// Keep the hook context status type available from the hook API.
 pub use crate::request::request_group::DownloadStatus;
 
 // ============================================================================

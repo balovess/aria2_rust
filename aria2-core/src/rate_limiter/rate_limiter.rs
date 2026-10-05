@@ -36,11 +36,11 @@ impl RateLimiter {
 
         let download = match dl_rate {
             Some(rate) if rate > 0 => TokenBucket::new(rate, dl_burst),
-            _ => TokenBucket::unlimited(),
+            _ => TokenBucket::unlimited_with_burst(dl_burst),
         };
         let upload = match ul_rate {
             Some(rate) if rate > 0 => TokenBucket::new(rate, ul_burst),
-            _ => TokenBucket::unlimited(),
+            _ => TokenBucket::unlimited_with_burst(ul_burst),
         };
 
         Self {
@@ -63,6 +63,20 @@ impl RateLimiter {
 
     pub async fn acquire_upload(&self, bytes: u64) {
         self.inner.upload.acquire(bytes).await;
+    }
+
+    pub(crate) fn upload_wait(&self, bytes: u64) -> std::time::Duration {
+        self.inner.upload.time_until_acquire(bytes)
+    }
+
+    pub(crate) fn subscribe_upload_rate_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.upload.subscribe_rate_changes()
+    }
+
+    /// Return upload tokens reserved for a request that was canceled before
+    /// its payload was sent.
+    pub fn refund_upload(&self, bytes: u64) {
+        self.inner.upload.refund(bytes);
     }
 
     /// Non-blocking attempt to acquire download tokens.

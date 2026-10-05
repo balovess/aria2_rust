@@ -2,6 +2,27 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      job:
+        description: Select one CI job, or all to run the complete workflow.
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - lint
+          - feature-minimal
+          - feature-standard
+          - feature-tui
+          - feature-full
+          - test-x86_64-unknown-linux-gnu
+          - test-aarch64-unknown-linux-gnu
+          - test-x86_64-pc-windows-msvc
+          - test-aarch64-apple-darwin
+          - homebrew-ubuntu-latest
+          - homebrew-macos-15-intel
+          - homebrew-macos-15
+          - scoop
 
 permissions:
   contents: read
@@ -12,20 +33,24 @@ env:
 jobs:
   feature-matrix:
     name: Feature build (${{ matrix.name }})
-    if: github.ref != 'refs/heads/master'
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'feature-minimal' ||
+       inputs.job == 'feature-standard' || inputs.job == 'feature-tui' ||
+       inputs.job == 'feature-full')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: minimal
-            features: http
-          - name: standard
-            features: standard
-          - name: tui
-            features: tui
-          - name: full
-            features: full
+        include: >-
+          ${{ fromJSON(
+            inputs.job == 'all' && '[{"name":"minimal","features":"http"},{"name":"standard","features":"standard"},{"name":"tui","features":"tui"},{"name":"full","features":"full"}]' ||
+            inputs.job == 'feature-minimal' && '[{"name":"minimal","features":"http"}]' ||
+            inputs.job == 'feature-standard' && '[{"name":"standard","features":"standard"}]' ||
+            inputs.job == 'feature-tui' && '[{"name":"tui","features":"tui"}]' ||
+            inputs.job == 'feature-full' && '[{"name":"full","features":"full"}]' ||
+            '[]'
+          ) }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -38,7 +63,9 @@ jobs:
   # ── Lint & format (fast, single platform) ─────────────────
   lint:
     name: Lint & Format
-    if: github.ref != 'refs/heads/master'
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'lint')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -54,20 +81,25 @@ jobs:
   # ── Library and integration test verification ─────────────
   test:
     name: Test (${{ matrix.os }})
-    if: github.ref != 'refs/heads/master'
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'test-x86_64-unknown-linux-gnu' ||
+       inputs.job == 'test-aarch64-unknown-linux-gnu' ||
+       inputs.job == 'test-x86_64-pc-windows-msvc' ||
+       inputs.job == 'test-aarch64-apple-darwin')
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - os: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04
-          - os: x86_64-pc-windows-msvc
-            runner: windows-latest
-          - os: aarch64-apple-darwin
-            runner: macos-latest
+        include: >-
+          ${{ fromJSON(
+            inputs.job == 'all' && '[{"os":"x86_64-unknown-linux-gnu","runner":"ubuntu-latest"},{"os":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"os":"x86_64-pc-windows-msvc","runner":"windows-latest"},{"os":"aarch64-apple-darwin","runner":"macos-latest"}]' ||
+            inputs.job == 'test-x86_64-unknown-linux-gnu' && '[{"os":"x86_64-unknown-linux-gnu","runner":"ubuntu-latest"}]' ||
+            inputs.job == 'test-aarch64-unknown-linux-gnu' && '[{"os":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04"}]' ||
+            inputs.job == 'test-x86_64-pc-windows-msvc' && '[{"os":"x86_64-pc-windows-msvc","runner":"windows-latest"}]' ||
+            inputs.job == 'test-aarch64-apple-darwin' && '[{"os":"aarch64-apple-darwin","runner":"macos-latest"}]' ||
+            '[]'
+          ) }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -88,6 +120,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.os }}
+      - name: Configure macOS loopback alias for source-binding tests
+        if: matrix.os == 'aarch64-apple-darwin'
+        run: |
+          for suffix in 2 3 4 5; do
+            address="127.0.0.$suffix"
+            if ! ifconfig lo0 | grep -Fq "$address"; then
+              sudo ifconfig lo0 alias "$address"
+            fi
+          done
+          ifconfig lo0 | grep -F '127.0.0.'
+          python3 - <<'PY'
+          import socket
+
+          for suffix in range(2, 6):
+              listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              listener.bind((f"127.0.0.{suffix}", 0))
+              print(f"TCP loopback bind succeeded: {listener.getsockname()}")
+              listener.close()
+          PY
       - name: Run tests
         shell: bash
         run: |
@@ -100,11 +151,22 @@ jobs:
   # ── Dev package manager verification (manual CI on dev) ────
   homebrew:
     name: Homebrew (${{ matrix.os }})
-    if: github.ref == 'refs/heads/dev'
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (inputs.job == 'all' || inputs.job == 'homebrew-ubuntu-latest' ||
+       inputs.job == 'homebrew-macos-15-intel' ||
+       inputs.job == 'homebrew-macos-15')
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15-intel, macos-15]
+        include: >-
+          ${{ fromJSON(
+            inputs.job == 'all' && '[{"os":"ubuntu-latest"},{"os":"macos-15-intel"},{"os":"macos-15"}]' ||
+            inputs.job == 'homebrew-ubuntu-latest' && '[{"os":"ubuntu-latest"}]' ||
+            inputs.job == 'homebrew-macos-15-intel' && '[{"os":"macos-15-intel"}]' ||
+            inputs.job == 'homebrew-macos-15' && '[{"os":"macos-15"}]' ||
+            '[]'
+          ) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -150,7 +212,9 @@ jobs:
 
   scoop:
     name: Scoop (Windows x64)
-    if: github.ref == 'refs/heads/dev'
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (inputs.job == 'all' || inputs.job == 'scoop')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5

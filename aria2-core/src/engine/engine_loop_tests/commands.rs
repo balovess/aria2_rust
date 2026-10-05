@@ -22,6 +22,7 @@ async fn state_changing_command_marks_dirty_and_persists() {
     let mut ctx = EngineLoopContext {
         group_man: man,
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         auto_save: Some(auto_save.clone()),
         auto_save_dirty_signal: Some(auto_save_dirty_signal),
         event_hooks: Arc::new(DownloadEventHooks::new()),
@@ -39,24 +40,24 @@ async fn state_changing_command_marks_dirty_and_persists() {
         ),
         #[cfg(feature = "bittorrent")]
         bt_registry: Arc::new(std::sync::RwLock::new(
-            crate::engine::bt_registry::BtRegistry::new(),
+            crate::engine::bittorrent::registry::BtRegistry::new(),
         )),
         #[cfg(feature = "bittorrent")]
-        bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+        bt_listener: Arc::new(
+            crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+        ),
         #[cfg(feature = "bittorrent")]
-        lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+        lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
     };
 
     // Send an AddDownload command through the engine-command channel.
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::engine::engine_command::channel();
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         GroupId::new(42),
         vec!["http://example.com/engine-autosave.bin".to_string()],
         DownloadOptions::default(),
     )));
     tx.send(EngineCommand::AddDownload { group }).unwrap();
-    let mut rx = EngineCommandReceiver::from_unbounded(rx);
-
     let mut halt_requested = false;
     let mut force_halt_requested = false;
     let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
@@ -96,14 +97,12 @@ async fn state_changing_command_marks_dirty_and_persists() {
 #[tokio::test]
 async fn global_rate_limit_command_updates_shared_limiter_and_snapshot() {
     let mut ctx = test_ctx(false);
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::engine::engine_command::channel();
     tx.send(EngineCommand::SetGlobalRateLimit {
         download_limit: Some(2_000),
         upload_limit: Some(1_000),
     })
     .unwrap();
-    let mut rx = EngineCommandReceiver::from_unbounded(rx);
-
     let mut running_downloads = Vec::new();
     let mut halt_requested = false;
     let mut force_halt_requested = false;
@@ -138,14 +137,12 @@ async fn external_task_completed_command_does_not_mark_session_dirty() {
     let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
     ctx.auto_save_dirty_signal = Some(Arc::clone(&dirty));
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::engine::engine_command::channel();
     tx.send(EngineCommand::TaskCompleted {
         gid: GroupId::new(1),
         result: TaskResult::Success,
     })
     .unwrap();
-    let mut rx = EngineCommandReceiver::from_unbounded(rx);
-
     let mut halt_requested = false;
     let mut force_halt_requested = false;
     let (completion_tx, _completion_rx) = mpsc::unbounded_channel();

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use aria2_protocol::ftp::connection::control_io::{FtpControlReadError, read_control_line};
 use tokio::io::AsyncBufRead;
-use tokio::time::timeout;
 use tracing::debug;
 
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -17,8 +17,6 @@ pub(crate) async fn read_response_impl<R>(
 where
     R: AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
-
     let mut line = String::new();
     let mut code: Option<u16> = None;
     let mut message = String::new();
@@ -27,17 +25,18 @@ where
 
     loop {
         line.clear();
-        let bytes_read = timeout(timeout_dur, reader.read_line(&mut line))
+        let bytes_read = read_control_line(reader, &mut line, timeout_dur)
             .await
-            .map_err(|_| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP response timeout after {timeout_dur:?}"),
-                })
-            })?
             .map_err(|error| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP read response error: {error}"),
-                })
+                let message = match error {
+                    FtpControlReadError::Timeout => {
+                        format!("FTP response timeout after {timeout_dur:?}")
+                    }
+                    FtpControlReadError::Io(error) => {
+                        format!("FTP read response error: {error}")
+                    }
+                };
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message })
             })?;
 
         if bytes_read == 0 || !line.ends_with("\r\n") {

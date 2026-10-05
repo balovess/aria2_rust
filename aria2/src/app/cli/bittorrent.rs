@@ -9,7 +9,7 @@ use clap::Args;
 #[derive(Args, Debug)]
 #[command(next_help_heading = "BitTorrent options")]
 pub struct BitTorrentArgs {
-    /// Seeding time in minutes (0=infinite)
+    /// Seeding time in minutes (0 disables seeding)
     #[arg(short = 'G', long = "seed-time")]
     pub seed_time: Option<f64>,
 
@@ -44,6 +44,18 @@ pub struct BitTorrentArgs {
     /// BitTorrent piece request timeout in seconds
     #[arg(long = "bt-request-timeout", hide = true)]
     pub bt_request_timeout: Option<u64>,
+
+    /// Maximum number of peers to unchoke
+    #[arg(long = "bt-max-upload-slots")]
+    pub bt_max_upload_slots: Option<u64>,
+
+    /// Seconds between optimistic unchoke rotations
+    #[arg(long = "bt-optimistic-unchoke-interval")]
+    pub bt_optimistic_unchoke_interval: Option<u64>,
+
+    /// Seconds without peer data before treating it as snubbed
+    #[arg(long = "bt-snubbed-timeout")]
+    pub bt_snubbed_timeout: Option<u64>,
 
     /// BitTorrent peer connection timeout in seconds
     #[arg(long = "peer-connection-timeout", hide = true)]
@@ -338,6 +350,38 @@ pub struct BitTorrentArgs {
     /// DHT message timeout in seconds
     #[arg(long = "dht-message-timeout")]
     pub dht_message_timeout: Option<u64>,
+
+    /// DHT bucket refresh check interval in seconds
+    #[arg(long = "dht-refresh-check-interval")]
+    pub dht_refresh_check_interval: Option<u64>,
+
+    /// DHT token rotation interval in seconds
+    #[arg(long = "dht-token-rotation-interval")]
+    pub dht_token_rotation_interval: Option<u64>,
+
+    /// DHT node contact interval in seconds
+    #[arg(long = "dht-node-contact-interval")]
+    pub dht_node_contact_interval: Option<u64>,
+
+    /// DHT cleanup and eviction interval in seconds
+    #[arg(long = "dht-cleanup-interval")]
+    pub dht_cleanup_interval: Option<u64>,
+
+    /// DHT routing-table save interval in seconds
+    #[arg(long = "dht-save-interval")]
+    pub dht_save_interval: Option<u64>,
+
+    /// DHT bootstrap timeout in seconds
+    #[arg(long = "dht-bootstrap-timeout")]
+    pub dht_bootstrap_timeout: Option<u64>,
+
+    /// Maximum concurrent DHT lookup tasks
+    #[arg(long = "dht-max-concurrent-lookups")]
+    pub dht_max_concurrent_lookups: Option<usize>,
+
+    /// Maximum age of the persisted DHT snapshot in seconds
+    #[arg(long = "dht-persistence-max-age")]
+    pub dht_persistence_max_age: Option<u64>,
 
     /// Enable IPv6 DHT
     #[arg(

@@ -248,13 +248,6 @@ impl Default for SpeedSmoother {
 }
 
 // =========================================================================
-// Format Helpers
-// =========================================================================
-
-// Re-export shared formatting functions from the format module
-pub use super::format::{format_duration_short, format_speed as format_bytes_per_sec};
-
-// =========================================================================
 // Unit Tests
 // =========================================================================
 
@@ -351,45 +344,6 @@ mod tests {
 
         // Initially no burst (no data)
         assert!(!smoother.is_burst(), "Should not be burst initially");
-    }
-
-    #[test]
-    fn test_format_bytes_per_sec_units() {
-        // Test various magnitude ranges
-        assert!(
-            format_bytes_per_sec(500.0).contains("B/s"),
-            "Small values use B/s"
-        );
-        assert!(
-            format_bytes_per_sec(2048.0).contains("KiB/s"),
-            "KiB range uses KiB/s"
-        );
-        assert!(
-            format_bytes_per_sec(3.0 * 1024.0 * 1024.0).contains("MiB/s"),
-            "MiB range uses MiB/s"
-        );
-        assert!(
-            format_bytes_per_sec(2.0 * 1024.0 * 1024.0 * 1024.0).contains("GiB/s"),
-            "GiB range uses GiB/s"
-        );
-    }
-
-    #[test]
-    fn test_format_duration_short_various() {
-        // Test boundary cases
-        assert_eq!(format_duration_short(0), "0s");
-        assert_eq!(format_duration_short(1), "1s");
-        assert_eq!(format_duration_short(59), "59s");
-
-        // Minute boundaries
-        assert_eq!(format_duration_short(60), "1m0s");
-        assert_eq!(format_duration_short(61), "1m1s");
-        assert_eq!(format_duration_short(3599), "59m59s");
-
-        // Hour boundaries
-        assert_eq!(format_duration_short(3600), "1h0m0s");
-        assert_eq!(format_duration_short(3661), "1h1m1s");
-        assert!(format_duration_short(86400).starts_with("24h"));
     }
 
     #[test]

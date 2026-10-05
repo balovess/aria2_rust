@@ -1,5 +1,5 @@
 //! Type definitions for download context attributes: ContextAttributeType,
-//! BtFileMode, TorrentAttribute, and Signature.
+//! BtFileMode, TorrentAttribute, and context attribute types.
 
 // ---------------------------------------------------------------------------
 // ContextAttributeType
@@ -129,28 +129,5 @@ impl TorrentAttribute {
     /// `metadata_size > 0 || !metadata.is_empty()` which is equivalent.
     pub fn metadata_received(&self) -> bool {
         self.metadata_size > 0 || !self.metadata.is_empty()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Signature
-// ---------------------------------------------------------------------------
-
-/// Placeholder for Metalink / PGP signature data.
-///
-/// Will be expanded with actual PGP parsing when Metalink support is
-/// fully wired in.
-#[derive(Debug, Clone)]
-pub struct Signature {
-    /// Raw signature body (ASCII-armored or binary)
-    pub body: String,
-    /// Hash algorithm used for the signature (e.g. "sha-1", "sha-256")
-    pub hash_type: String,
-}
-
-impl Signature {
-    /// Create a new signature with the given body and hash type.
-    pub fn new(body: String, hash_type: String) -> Self {
-        Self { body, hash_type }
     }
 }

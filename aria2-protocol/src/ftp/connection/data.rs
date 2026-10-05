@@ -81,16 +81,6 @@ impl FtpConnection {
         Ok(FtpActiveDataListener::new(listener, local_addr))
     }
 
-    /// Enter active mode using PORT command (IPv4).
-    ///
-    /// This legacy method returns only the port. Call
-    /// [`Self::prepare_port_active`] when the listener must remain alive until
-    /// the server opens the data connection.
-    pub async fn port_active(&mut self) -> Result<u16, String> {
-        let listener = self.prepare_port_active().await?;
-        Ok(listener.port())
-    }
-
     /// Prepare active mode using the extended `EPRT` command.
     pub async fn prepare_eprt_active(&mut self) -> Result<FtpActiveDataListener, String> {
         debug!("Requesting extended active mode data connection");
@@ -123,17 +113,6 @@ impl FtpConnection {
 
         debug!("EPRT successful, listening {}:{}", addr_str, port);
         Ok(FtpActiveDataListener::new(listener, local_addr))
-    }
-
-    /// Enter active mode using EPRT and return the advertised endpoint.
-    ///
-    /// This legacy method returns only the endpoint. Call
-    /// [`Self::prepare_eprt_active`] when the listener must remain alive until
-    /// the server opens the data connection.
-    pub async fn eprt_active(&mut self) -> Result<(String, u16), String> {
-        let listener = self.prepare_eprt_active().await?;
-        let addr = listener.local_addr();
-        Ok((addr.ip().to_string(), addr.port()))
     }
 
     /// Send LIST command to get directory listing (detailed format).
@@ -169,13 +148,6 @@ impl FtpConnection {
     /// Borrow the FTP control stream.
     pub fn control_stream(&mut self) -> &mut BufReader<TcpStream> {
         &mut self.stream
-    }
-
-    /// Legacy misnamed accessor that returns the control stream, not a data
-    /// connection. Use [`Self::control_stream`] or the data-channel methods.
-    #[deprecated(note = "this returns the control stream; use control_stream")]
-    pub fn get_data_stream(&mut self) -> &mut BufReader<TcpStream> {
-        self.control_stream()
     }
 
     pub(crate) fn parse_pasv_response(message: &str) -> Option<(String, u16)> {

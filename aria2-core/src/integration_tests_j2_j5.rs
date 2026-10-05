@@ -3,12 +3,13 @@
 
 #[cfg(test)]
 mod j2_j5_integration_tests {
-    use crate::engine::http_segment_downloader::{
-        ConnectionLimiter, calculate_dynamic_segment_size, score_source,
+    use crate::engine::http::segment_downloader::{
+        ConnectionLimiter, calculate_dynamic_segment_size,
     };
     use crate::http::conditional_get::{
         ConditionalRequest, ResumeAction, SimpleDateTime, handle_resume_status,
     };
+    use crate::selector::source_scorer::score_source_raw as score_source;
 
     #[test]
     fn test_dynamic_segment_size_slow_start() {

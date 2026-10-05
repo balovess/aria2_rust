@@ -16,7 +16,7 @@ const EMA_ALPHA: f64 = 0.7;
 /// ```
 /// use aria2_core::selector::server_stat::{ServerStat, ServerStatSnapshot};
 ///
-/// let stat = ServerStat::new("mirror.example.com");
+/// let stat = ServerStat::new_with_protocol("mirror.example.com", "https");
 /// stat.update_speed(5000, false);
 ///
 /// let snapshot = stat.to_snapshot();
@@ -98,10 +98,7 @@ impl Clone for ServerStat {
 }
 
 impl ServerStat {
-    /// Creates a new ServerStat with the given hostname and no protocol.
-    ///
-    /// This is the backward-compatible constructor. For protocol-aware lookups
-    /// (matching C++ aria2 behavior), use [`ServerStat::new_with_protocol`].
+    #[cfg(test)]
     pub fn new(host: &str) -> Self {
         Self {
             host: Arc::from(host),
@@ -279,7 +276,7 @@ impl ServerStat {
     /// ```
     /// use aria2_core::selector::server_stat::ServerStat;
     ///
-    /// let stat = ServerStat::new("fast.mirror.com");
+    /// let stat = ServerStat::new_with_protocol("fast.mirror.com", "https");
     /// stat.update_speed(10000, false);
     /// stat.increment_counter();
     ///

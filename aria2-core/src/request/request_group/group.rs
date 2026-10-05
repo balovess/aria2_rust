@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 
 use tokio::sync::Notify;
 use tracing::info;
@@ -64,8 +64,16 @@ pub struct RequestGroup {
     pub(super) uris: Vec<Box<str>>,
     /// Metalink file name override, independent of the global `out` option.
     pub(super) output_name: std::sync::RwLock<Option<String>>,
+    /// Effective local output path selected by the download command.
+    ///
+    /// This is updated after response metadata and collision resolution so
+    /// RPC and UI consumers report the path that the writer actually uses.
+    pub(super) resolved_output_path: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
     pub(super) options: Arc<DownloadOptions>,
+    /// Live peer limit shared with the BT runtime and incoming listener.
+    /// Runtime option changes publish here before returning to their caller.
+    pub(crate) bt_max_peers_limit: Arc<AtomicUsize>,
     /// Canonical option values captured when this task was created.
     ///
     /// The task owns this immutable snapshot so external adapters can report
@@ -107,6 +115,11 @@ pub struct RequestGroup {
     /// protocol schedulers while their real connections are active.
     pub(crate) connection_state: Arc<ConnectionState>,
 
+    /// Changes when the group's URI sources are edited at runtime.
+    pub(crate) uri_generation: Arc<AtomicU64>,
+    /// Dedicated wake-up for schedulers waiting for source URI changes.
+    pub(crate) uri_notify: Arc<Notify>,
+
     /// Download context — central metadata (file entries, piece hashes, attributes).
     /// In C++ aria2, `RequestGroup` owns `shared_ptr<DownloadContext> dctx_`.
     /// `None` until the download engine populates it.
@@ -119,6 +132,7 @@ pub struct RequestGroup {
     pub bt_piece_length: AtomicU32,
     /// Info hash hex string for torrent identification (None for non-BT).
     pub bt_info_hash_hex: std::sync::RwLock<Option<String>>,
+    /// Owned BT metadata retained when the live download context is released.
 
     /// Handle to the download's `RateLimiter` for dynamic rate adjustment.
     /// `None` until the download engine wires up a `ThrottledWriter`.
@@ -249,12 +263,15 @@ impl RequestGroup {
     /// first `FileEntry` when `set_download_context()` is called.
     pub fn new(gid: GroupId, uris: Vec<String>, options: DownloadOptions) -> Self {
         info!("Creating request group #{}", gid.value());
+        let bt_max_peers_limit = Arc::new(AtomicUsize::new(options.bt_max_peers));
 
         RequestGroup {
             gid,
             uris: uris.into_iter().map(String::into_boxed_str).collect(),
             output_name: std::sync::RwLock::new(None),
+            resolved_output_path: std::sync::RwLock::new(None),
             options: Arc::new(options),
+            bt_max_peers_limit,
             option_snapshot: None,
             runtime_options: std::sync::RwLock::new(HashMap::new()),
             pending_options: std::sync::RwLock::new(HashMap::new()),
@@ -266,6 +283,8 @@ impl RequestGroup {
             bt_bitfield: std::sync::RwLock::new(None),
             bt_peer_snapshots: Arc::new(std::sync::RwLock::new(Vec::new())),
             connection_state: Arc::new(ConnectionState::new()),
+            uri_generation: Arc::new(AtomicU64::new(0)),
+            uri_notify: Arc::new(Notify::new()),
             download_context: std::sync::RwLock::new(None),
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),

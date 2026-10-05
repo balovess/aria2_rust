@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -11,10 +11,62 @@ const PEER_TTL: Duration = Duration::from_secs(30 * 60);
 /// Maximum peers to store per info_hash to prevent unbounded growth.
 const MAX_PEERS_PER_INFO_HASH: usize = 50;
 
+/// Maximum swarms retained by one DHT engine.
+const MAX_INFO_HASHES: usize = 4_096;
+
 /// A single announced peer with the timestamp of its last announcement.
 struct PeerEntry {
     addr: SocketAddr,
     last_seen: Instant,
+}
+
+struct SwarmEntry {
+    peers: Vec<PeerEntry>,
+    last_updated: Instant,
+}
+
+#[derive(Default)]
+struct PeerStore {
+    swarms: HashMap<[u8; 20], SwarmEntry>,
+    least_recent: BTreeSet<(Instant, [u8; 20])>,
+    evictions: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DhtPeerStorageStats {
+    pub info_hashes: usize,
+    pub peers: usize,
+    pub evictions: u64,
+    pub max_info_hashes: usize,
+}
+
+impl PeerStore {
+    fn remove_swarm(&mut self, info_hash: &[u8; 20]) -> bool {
+        let Some(entry) = self.swarms.remove(info_hash) else {
+            return false;
+        };
+        self.least_recent.remove(&(entry.last_updated, *info_hash));
+        true
+    }
+
+    fn remove_expired(&mut self, now: Instant) -> usize {
+        let mut removed_peers = 0;
+        let mut expired_hashes = Vec::new();
+        for (info_hash, swarm) in &mut self.swarms {
+            let before = swarm.peers.len();
+            swarm
+                .peers
+                .retain(|peer| now.duration_since(peer.last_seen) < PEER_TTL);
+            removed_peers += before - swarm.peers.len();
+            if swarm.peers.is_empty() {
+                expired_hashes.push(*info_hash);
+            }
+        }
+        for info_hash in expired_hashes {
+            self.remove_swarm(&info_hash);
+        }
+        removed_peers
+    }
 }
 
 /// Stores peers announced via DHT `announce_peer` queries, keyed by info_hash.
@@ -23,7 +75,7 @@ struct PeerEntry {
 /// queries. Thread-safe via an internal `std::sync::Mutex`; operations are
 /// brief and never span `.await` points, so a blocking mutex is appropriate.
 pub struct DhtPeerStorage {
-    inner: Mutex<HashMap<[u8; 20], Vec<PeerEntry>>>,
+    inner: Mutex<PeerStore>,
 }
 
 impl Default for DhtPeerStorage {
@@ -36,7 +88,7 @@ impl DhtPeerStorage {
     /// Create an empty peer storage.
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(PeerStore::default()),
         }
     }
 
@@ -52,41 +104,42 @@ impl DhtPeerStorage {
     /// without waiting for the periodic cleanup pass.
     pub fn get_peers(&self, info_hash: &[u8; 20]) -> Vec<SocketAddr> {
         let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
-        let Some(entries) = map.get_mut(info_hash) else {
+        let Some(swarm) = map.swarms.get_mut(info_hash) else {
             return Vec::new();
         };
         let now = Instant::now();
-        let expired_count = entries
+        let expired_count = swarm
+            .peers
             .iter()
             .filter(|e| now.duration_since(e.last_seen) >= PEER_TTL)
             .count();
-        if expired_count > 0 && expired_count * 2 >= entries.len() {
-            entries.retain(|e| now.duration_since(e.last_seen) < PEER_TTL);
+        if expired_count > 0 && expired_count * 2 >= swarm.peers.len() {
+            swarm
+                .peers
+                .retain(|e| now.duration_since(e.last_seen) < PEER_TTL);
             trace!(
                 expired_count,
                 "opportunistically purged expired peers during get_peers"
             );
         }
-        entries
+        let peers = swarm
+            .peers
             .iter()
             .filter(|e| now.duration_since(e.last_seen) < PEER_TTL)
             .map(|e| e.addr)
-            .collect()
+            .collect::<Vec<_>>();
+        let is_empty = swarm.peers.is_empty();
+        if is_empty {
+            map.remove_swarm(info_hash);
+        }
+        peers
     }
 
     /// Remove expired peers from all info_hashes. Called periodically by the
     /// maintenance loop. Empty info_hash entries are also removed.
     pub fn cleanup_expired(&self) {
         let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
-        let now = Instant::now();
-        let mut total_removed = 0usize;
-        map.retain(|_, entries| {
-            let before = entries.len();
-            entries.retain(|e| now.duration_since(e.last_seen) < PEER_TTL);
-            let removed = before - entries.len();
-            total_removed += removed;
-            !entries.is_empty()
-        });
+        let total_removed = map.remove_expired(Instant::now());
         if total_removed > 0 {
             debug!(total_removed, "DhtPeerStorage cleanup complete");
         }
@@ -98,28 +151,61 @@ impl DhtPeerStorage {
     /// [`cleanup_expired`](Self::cleanup_expired) first for an exact live count.
     pub fn total_peer_count(&self) -> usize {
         let map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
-        map.values().map(Vec::len).sum()
+        map.swarms.values().map(|swarm| swarm.peers.len()).sum()
+    }
+
+    pub(crate) fn stats(&self) -> DhtPeerStorageStats {
+        let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
+        map.remove_expired(Instant::now());
+        DhtPeerStorageStats {
+            info_hashes: map.swarms.len(),
+            peers: map.swarms.values().map(|swarm| swarm.peers.len()).sum(),
+            evictions: map.evictions,
+            max_info_hashes: MAX_INFO_HASHES,
+        }
     }
 
     /// Return the info-hash keys currently represented in the peer store.
     pub fn info_hashes(&self) -> Vec<[u8; 20]> {
         let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
-        let now = Instant::now();
-        map.retain(|_, entries| {
-            entries.retain(|entry| now.duration_since(entry.last_seen) < PEER_TTL);
-            !entries.is_empty()
-        });
-        map.keys().copied().collect()
+        map.remove_expired(Instant::now());
+        map.swarms.keys().copied().collect()
     }
 
-    /// Return a bounded random sample of stored info-hash keys. `num` remains
-    /// available separately through `info_hashes().len()` for BEP 51.
+    /// Return a bounded random sample of stored info-hash keys.
     pub fn sample_info_hashes(&self, limit: usize) -> Vec<[u8; 20]> {
-        use rand::seq::SliceRandom;
-        let mut hashes = self.info_hashes();
-        hashes.shuffle(&mut rand::thread_rng());
-        hashes.truncate(limit);
-        hashes
+        self.sample_info_hashes_with_count(limit).1
+    }
+
+    /// Return the live swarm count and a uniform bounded sample in one pass.
+    ///
+    /// BEP 51 needs both values. Reservoir sampling keeps temporary storage
+    /// proportional to the response sample size instead of all stored swarms.
+    pub(crate) fn sample_info_hashes_with_count(&self, limit: usize) -> (usize, Vec<[u8; 20]>) {
+        use rand::Rng;
+
+        let mut store = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
+        store.remove_expired(Instant::now());
+        let count = store.swarms.len();
+        let sample_size = limit.min(count);
+        if sample_size == 0 {
+            return (count, Vec::new());
+        }
+        let mut sample = Vec::with_capacity(sample_size);
+        let mut rng = rand::thread_rng();
+
+        for (index, info_hash) in store.swarms.keys().copied().enumerate() {
+            if index < sample_size {
+                sample.push(info_hash);
+            } else {
+                let selected = rng.gen_range(0..=index);
+                if selected < sample_size {
+                    sample[selected] = info_hash;
+                }
+            }
+        }
+
+        (count, sample)
     }
 
     /// Internal helper: insert or refresh a peer with an explicit timestamp.
@@ -130,29 +216,55 @@ impl DhtPeerStorage {
     /// evicted.
     fn add_peer_inner(&self, info_hash: [u8; 20], addr: SocketAddr, last_seen: Instant) {
         let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
-        let entries = map.entry(info_hash).or_default();
-        if let Some(entry) = entries.iter_mut().find(|e| e.addr == addr) {
-            entry.last_seen = last_seen;
+        if let Some(swarm) = map.swarms.get_mut(&info_hash) {
+            let previous_update = swarm.last_updated;
+            if let Some(entry) = swarm.peers.iter_mut().find(|e| e.addr == addr) {
+                entry.last_seen = last_seen;
+            } else {
+                swarm.peers.push(PeerEntry { addr, last_seen });
+                if swarm.peers.len() > MAX_PEERS_PER_INFO_HASH {
+                    let oldest_idx = swarm
+                        .peers
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, e)| e.last_seen)
+                        .map(|(i, _)| i);
+                    if let Some(idx) = oldest_idx {
+                        swarm.peers.remove(idx);
+                        debug!(
+                            limit = MAX_PEERS_PER_INFO_HASH,
+                            "evicted oldest DHT peer to enforce per-info_hash cap"
+                        );
+                    }
+                }
+            }
+            swarm.last_updated = last_seen;
+            map.least_recent.remove(&(previous_update, info_hash));
+            map.least_recent.insert((last_seen, info_hash));
             trace!("refreshed existing DHT peer last_seen");
             return;
         }
-        entries.push(PeerEntry { addr, last_seen });
-        if entries.len() > MAX_PEERS_PER_INFO_HASH {
-            // Evict the oldest entry to stay within the cap. The freshly added
-            // entry has the newest timestamp so it is never the victim here.
-            let oldest_idx = entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, e)| e.last_seen)
-                .map(|(i, _)| i);
-            if let Some(idx) = oldest_idx {
-                entries.remove(idx);
-                debug!(
-                    limit = MAX_PEERS_PER_INFO_HASH,
-                    "evicted oldest DHT peer to enforce per-info_hash cap"
-                );
-            }
+
+        if map.swarms.len() == MAX_INFO_HASHES
+            && let Some((_, oldest_hash)) = map.least_recent.pop_first()
+        {
+            let removed = map.swarms.remove(&oldest_hash).is_some();
+            debug_assert!(removed, "DHT swarm recency index must match peer map");
+            map.evictions = map.evictions.saturating_add(1);
+            debug!(
+                limit = MAX_INFO_HASHES,
+                evicted_info_hash = %hex::encode(oldest_hash),
+                "evicted least recently updated DHT swarm to enforce global cap"
+            );
         }
+        map.swarms.insert(
+            info_hash,
+            SwarmEntry {
+                peers: vec![PeerEntry { addr, last_seen }],
+                last_updated: last_seen,
+            },
+        );
+        map.least_recent.insert((last_seen, info_hash));
     }
 
     /// Test-only helper to insert a peer with an explicit `last_seen` so expiry
@@ -264,6 +376,54 @@ mod tests {
             !peers.contains(&first_addr),
             "oldest peer should have been evicted"
         );
+    }
+
+    #[test]
+    fn global_hash_limit_evicts_the_least_recently_updated_swarm() {
+        let storage = DhtPeerStorage::new();
+        let hash_for = |value: u64| {
+            let mut hash = [0u8; 20];
+            hash[..8].copy_from_slice(&value.to_be_bytes());
+            hash
+        };
+
+        storage.add_peer_with_timestamp(
+            hash_for(0),
+            "127.0.0.1:9999"
+                .parse()
+                .expect("expired peer address should parse"),
+            Instant::now() - PEER_TTL - Duration::from_secs(1),
+        );
+        storage.cleanup_expired();
+
+        for value in 1..=MAX_INFO_HASHES as u64 {
+            let addr: SocketAddr = format!("127.0.0.1:{}", 10_000 + value)
+                .parse()
+                .expect("fixture peer address should parse");
+            storage.add_peer(hash_for(value), addr);
+        }
+
+        storage.add_peer(
+            hash_for(1),
+            "127.0.0.1:20000"
+                .parse()
+                .expect("refreshed peer address should parse"),
+        );
+        storage.add_peer(
+            hash_for(MAX_INFO_HASHES as u64 + 1),
+            "127.0.0.1:20001"
+                .parse()
+                .expect("new peer address should parse"),
+        );
+
+        let hashes = storage.info_hashes();
+        assert_eq!(hashes.len(), MAX_INFO_HASHES);
+        assert!(hashes.contains(&hash_for(1)), "refreshed swarm must remain");
+        assert!(
+            !hashes.contains(&hash_for(2)),
+            "least recently updated swarm must be evicted"
+        );
+        assert!(hashes.contains(&hash_for(MAX_INFO_HASHES as u64 + 1)));
     }
 
     #[test]

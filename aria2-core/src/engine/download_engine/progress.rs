@@ -25,7 +25,7 @@ impl DownloadEngine {
     ///
     /// This is intentionally an associated function (not `&self`): it is
     /// called automatically by
-    /// [`DownloadCommand::spawn_progress_aggregator`](crate::engine::download_command::DownloadCommand::spawn_progress_aggregator)
+    /// [`DownloadCommand::spawn_progress_aggregator`](crate::engine::http::download_command::DownloadCommand::spawn_progress_aggregator)
     /// during `execute()`, since every `DownloadCommand` now auto-creates a
     /// progress channel in its constructor. External callers rarely need to
     /// invoke this directly.

@@ -27,6 +27,7 @@ impl ConcurrentSegmentManager {
             }
             segment.status = SegmentStatus::Done;
             segment.retry_count = 0;
+            self.completed_lengths[segment.index as usize] = segment.length;
         }
 
         self.completed_bytes = self
@@ -38,34 +39,35 @@ impl ConcurrentSegmentManager {
         self.completed_bytes
     }
 
-    /// Restore the fully completed prefix represented by a byte count.
+    /// Restore a verified contiguous prefix represented by a byte count.
     ///
     /// This is the conservative fallback for a control file created with a
     /// different segment layout or for sequential progress that has no
-    /// segment bitfield. Partial segments remain pending.
+    /// segment bitfield. A partial parent stays pending and resumes at its
+    /// first missing byte for this process; it is not persisted as complete.
     pub fn restore_completed_prefix(&mut self, length: u64) -> u64 {
-        for segment in &mut self.segments {
-            if segment.offset.saturating_add(segment.length) > length
-                || segment.status == SegmentStatus::Done
-            {
-                continue;
+        let length = length.min(self.total_size);
+        for (index, segment) in self.segments.iter_mut().enumerate() {
+            let completed = length.saturating_sub(segment.offset).min(segment.length);
+            self.completed_lengths[index] = completed;
+            if completed == segment.length {
+                if let Some(mirror_idx) = segment.assigned_mirror.take()
+                    && let Some(mirror) = self.mirrors.get_mut(mirror_idx)
+                {
+                    mirror.active_segments = mirror.active_segments.saturating_sub(1);
+                }
+                segment.status = SegmentStatus::Done;
+                segment.retry_count = 0;
+            } else {
+                if let Some(mirror_idx) = segment.assigned_mirror.take()
+                    && let Some(mirror) = self.mirrors.get_mut(mirror_idx)
+                {
+                    mirror.active_segments = mirror.active_segments.saturating_sub(1);
+                }
+                segment.status = SegmentStatus::Pending;
             }
-
-            if let Some(mirror_idx) = segment.assigned_mirror.take()
-                && let Some(mirror) = self.mirrors.get_mut(mirror_idx)
-            {
-                mirror.active_segments = mirror.active_segments.saturating_sub(1);
-            }
-            segment.status = SegmentStatus::Done;
-            segment.retry_count = 0;
         }
-
-        self.completed_bytes = self
-            .segments
-            .iter()
-            .filter(|segment| segment.status == SegmentStatus::Done)
-            .map(|segment| segment.length)
-            .sum();
+        self.completed_bytes = length;
         self.completed_bytes
     }
 
@@ -93,24 +95,42 @@ impl ConcurrentSegmentManager {
     ///
     /// Returns `true` if the segment existed, `false` otherwise.
     pub fn complete_segment(&mut self, index: u32, len: usize) -> bool {
-        if let Some(seg) = self.segments.get_mut(index as usize) {
-            if seg.status == SegmentStatus::Done || len as u64 != seg.length {
-                return false;
-            }
-            seg.status = SegmentStatus::Done;
+        self.complete_range(index, len as u64) == Some(true)
+    }
 
-            if let Some(mi) = seg.assigned_mirror
-                && let Some(m) = self.mirrors.get_mut(mi)
-            {
-                m.active_segments = m.active_segments.saturating_sub(1);
-                m.consecutive_failures = 0;
-            }
-
-            self.completed_bytes += seg.length;
-            true
-        } else {
-            false
+    /// Credit one successfully downloaded subrange within a durable parent.
+    ///
+    /// Returns `Some(true)` when the parent is now complete, `Some(false)`
+    /// when more bytes remain, and `None` when the result is stale or invalid.
+    pub fn complete_range(&mut self, index: u32, len: u64) -> Option<bool> {
+        let segment_index = index as usize;
+        let segment = self.segments.get_mut(segment_index)?;
+        if segment.status != SegmentStatus::Downloading || len == 0 {
+            return None;
         }
+
+        let completed = self.completed_lengths.get_mut(segment_index)?;
+        let remaining = segment.length.saturating_sub(*completed);
+        if len > remaining {
+            return None;
+        }
+        *completed += len;
+        self.completed_bytes = self.completed_bytes.saturating_add(len);
+        let parent_complete = *completed == segment.length;
+        segment.status = if parent_complete {
+            SegmentStatus::Done
+        } else {
+            SegmentStatus::Pending
+        };
+
+        if let Some(mirror_idx) = segment.assigned_mirror.take()
+            && let Some(mirror) = self.mirrors.get_mut(mirror_idx)
+        {
+            mirror.active_segments = mirror.active_segments.saturating_sub(1);
+            mirror.consecutive_failures = 0;
+        }
+
+        Some(parent_complete)
     }
 
     fn mark_mirror_failed(&mut self, mirror_idx: Option<usize>) {

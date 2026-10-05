@@ -34,7 +34,7 @@ impl SessionPersistence {
     ///
     /// let persistence = SessionPersistence::new(Path::new("/tmp/aria2_session"));
     /// let stat_man = ServerStatMan::new();
-    /// stat_man.update("fast.mirror.com", 10000, false);
+    /// stat_man.update_with_protocol("fast.mirror.com", "http", 10000, false);
     ///
     /// let saved = persistence.save_server_stats(&stat_man).await?;
     /// println!("Saved {} server stats", saved);

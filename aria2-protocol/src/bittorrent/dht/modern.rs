@@ -399,7 +399,7 @@ mod tests {
             nodes6: vec![0u8; 38],
         };
         let message = sample_infohashes_response(b"tx", &[1u8; 20], &response);
-        let decoded = DhtMessage::decode(&message.encode().unwrap()).unwrap();
+        let decoded = DhtMessage::decode(&message.encode()).unwrap();
         let parsed = SampleInfoHashesResponse::from_bencode(decoded.r.as_ref().unwrap()).unwrap();
         assert_eq!(parsed, response);
 

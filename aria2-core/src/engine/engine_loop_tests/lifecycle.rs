@@ -5,7 +5,7 @@ async fn graceful_halt_exits_even_in_keep_alive_mode() {
     // Regression: `halt_requested` used to be write-only, so the exit
     // condition `(all_done && !keep_alive) || force_halt` could never fire
     // under `--enable-rpc` and `aria2.shutdown` hung forever.
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = crate::engine::engine_command::channel();
     let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
     tx.send(EngineCommand::HaltAll {
@@ -18,7 +18,7 @@ async fn graceful_halt_exits_even_in_keep_alive_mode() {
 
 #[tokio::test]
 async fn force_halt_exits_in_keep_alive_mode() {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = crate::engine::engine_command::channel();
     let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
     tx.send(EngineCommand::ForceHaltAll {
@@ -41,7 +41,7 @@ async fn force_halt_removes_reserved_groups_before_exit() {
         .unwrap();
     let group_man = Arc::clone(&ctx.group_man);
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = crate::engine::engine_command::channel();
     let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
     tx.send(EngineCommand::ForceHaltAll {
         reason: HaltReason::ShutdownSignal,
@@ -102,13 +102,12 @@ async fn force_halt_wakes_file_allocation_waiter_before_protocol_timeout() {
     .await
     .expect("allocation waiter should enter the queue");
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = crate::engine::engine_command::channel();
     cmd_tx
         .send(EngineCommand::ForceHaltAll {
             reason: HaltReason::ShutdownSignal,
         })
         .unwrap();
-    let mut cmd_rx = EngineCommandReceiver::from_unbounded(cmd_rx);
     let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
     let mut running_downloads = vec![(
         gid,
@@ -147,7 +146,17 @@ async fn force_halt_wakes_file_allocation_waiter_before_protocol_timeout() {
 }
 
 #[tokio::test]
-async fn force_halt_accounts_for_aborted_running_task() {
+async fn force_halt_joins_aborted_running_task_before_accounting_completion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TaskLifetime(Arc<AtomicBool>);
+
+    impl Drop for TaskLifetime {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
     let mut ctx = test_ctx(true);
     let gid = ctx
         .group_man
@@ -159,9 +168,17 @@ async fn force_halt_accounts_for_aborted_running_task() {
     let group = ctx.group_man.fill_from_reserver().remove(0);
     group.recover().inc_commands();
 
-    let handle = tokio::spawn(async {
+    let task_live = Arc::new(AtomicBool::new(false));
+    let task_started = Arc::new(tokio::sync::Notify::new());
+    let task_live_guard = Arc::clone(&task_live);
+    let task_started_signal = Arc::clone(&task_started);
+    let handle = tokio::spawn(async move {
+        task_live_guard.store(true, Ordering::Release);
+        let _lifetime = TaskLifetime(task_live_guard);
+        task_started_signal.notify_one();
         std::future::pending::<()>().await;
     });
+    task_started.notified().await;
     let mut running_downloads = vec![(
         gid,
         RunningDownload {
@@ -173,13 +190,12 @@ async fn force_halt_accounts_for_aborted_running_task() {
         },
     )];
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = crate::engine::engine_command::channel();
     cmd_tx
         .send(EngineCommand::ForceHaltAll {
             reason: HaltReason::ShutdownSignal,
         })
         .unwrap();
-    let mut cmd_rx = EngineCommandReceiver::from_unbounded(cmd_rx);
     let mut halt_requested = false;
     let mut force_halt_requested = false;
 
@@ -192,6 +208,11 @@ async fn force_halt_accounts_for_aborted_running_task() {
         &completion_tx,
     )
     .await;
+
+    assert!(
+        !task_live.load(Ordering::Acquire),
+        "force halt must join the aborted command future before releasing its running-task owner"
+    );
 
     let mut completed_generations = HashSet::new();
     let processed = process_task_completions(
@@ -218,7 +239,7 @@ async fn force_halt_accounts_for_aborted_running_task() {
 async fn shutdown_signal_exits_in_keep_alive_mode() {
     // The Ctrl+C path sets `halt_requested` directly rather than going
     // through an EngineCommand, so it needs its own coverage.
-    let (_tx, rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = crate::engine::engine_command::channel();
     let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
     sd_tx.send(()).unwrap();
@@ -244,7 +265,7 @@ async fn shutdown_signal_preserves_active_group_for_resume() {
     // the shutdown reason from protocol-specific cancellation behavior.
     let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
     sd_tx.send(()).unwrap();
-    let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (_cmd_tx, cmd_rx) = crate::engine::engine_command::channel();
     run_engine_loop(ctx, cmd_rx, sd_rx).await;
 
     let group = group_man
@@ -269,7 +290,7 @@ async fn shutdown_signal_preserves_active_group_for_resume() {
 async fn keep_alive_without_halt_does_not_exit() {
     // The flip side: keep-alive must still hold the loop open when no halt
     // was requested, otherwise an idle RPC server would shut itself down.
-    let (_tx, rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = crate::engine::engine_command::channel();
     let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
     let loop_fut = run_engine_loop(test_ctx(true), rx, sd_rx);
@@ -283,7 +304,7 @@ async fn keep_alive_without_halt_does_not_exit() {
 
 #[tokio::test]
 async fn idle_loop_exits_without_keep_alive() {
-    let (_tx, rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = crate::engine::engine_command::channel();
     let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
     run_until_exit(test_ctx(false), rx, sd_rx, Duration::from_secs(5)).await;

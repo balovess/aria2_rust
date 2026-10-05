@@ -1,11 +1,12 @@
 //! RPC API regression tests for aria2-rust.
 //!
-//! These tests verify that all 36 original RPC methods return values in the expected format
+//! These tests verify the RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
 #[path = "../support/mod.rs"]
 mod support;
 
+use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
 use aria2_rpc::server::RpcAuthMiddleware;
@@ -34,10 +35,59 @@ fn assert_error_code(resp: &JsonRpcResponse, expected_code: i32) {
     assert_eq!(resp.error.as_ref().unwrap().code, expected_code);
 }
 
+async fn add_uri_task(engine: &RpcEngine) -> JsonRpcResponse {
+    engine
+        .handle_request(&make_request(
+            "aria2.addUri",
+            serde_json::json!([["http://example.com/file"]]),
+        ))
+        .await
+}
+
 fn valid_torrent() -> String {
     base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         b"d8:announce27:http://example.com/announce4:infod6:lengthi4e4:name8:file.bin12:piece lengthi4e6:pieces20:12345678901234567890eee",
+    )
+}
+
+fn multi_file_torrent() -> String {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+    use std::collections::BTreeMap;
+
+    let file = |directory: &[u8], name: &[u8]| {
+        let path = BencodeValue::List(vec![
+            BencodeValue::Bytes(directory.to_vec()),
+            BencodeValue::Bytes(name.to_vec()),
+        ]);
+        let mut entry = BTreeMap::new();
+        entry.insert(b"length".to_vec(), BencodeValue::Int(4));
+        entry.insert(b"path".to_vec(), path);
+        BencodeValue::Dict(entry)
+    };
+
+    let mut info = BTreeMap::new();
+    info.insert(
+        b"files".to_vec(),
+        BencodeValue::List(vec![
+            file(b"one", b"first.bin"),
+            file(b"two", b"second.bin"),
+        ]),
+    );
+    info.insert(b"name".to_vec(), BencodeValue::Bytes(b"multi".to_vec()));
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(4));
+    info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 40]));
+
+    let mut torrent = BTreeMap::new();
+    torrent.insert(
+        b"announce".to_vec(),
+        BencodeValue::Bytes(b"http://example.com/announce".to_vec()),
+    );
+    torrent.insert(b"info".to_vec(), BencodeValue::Dict(info));
+
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        BencodeValue::Dict(torrent).encode(),
     )
 }
 
@@ -360,6 +410,67 @@ async fn regression_tell_status_format() {
     assert_eq!(status.get("gid").unwrap().as_str().unwrap(), gid);
 }
 
+/// Test: RPC GID arguments accept a unique high-order hexadecimal prefix.
+#[tokio::test]
+async fn regression_rpc_accepts_unique_short_gid_prefix() {
+    let engine = core_engine();
+    let add_resp = engine
+        .handle_request(&make_request(
+            "aria2.addUri",
+            serde_json::json!([["http://example.com/file"]]),
+        ))
+        .await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let short_gid = &gid[..15];
+    let status_resp = engine
+        .handle_request(&make_request(
+            "aria2.tellStatus",
+            serde_json::json!([short_gid]),
+        ))
+        .await;
+    assert_success(&status_resp);
+    assert_eq!(status_resp.result.unwrap()["gid"], gid);
+
+    let invalid_resp = engine
+        .handle_request(&make_request(
+            "aria2.tellStatus",
+            serde_json::json!([format!("0x{}", &gid[..15])]),
+        ))
+        .await;
+    assert_error_code(&invalid_resp, 1);
+}
+
+/// Test: an ambiguous GID prefix is rejected instead of targeting a
+/// synthetic numeric GID that happens to equal one matching task.
+#[tokio::test]
+async fn regression_rpc_rejects_ambiguous_gid_prefix() {
+    let engine = core_engine();
+    let first = add_uri_task(&engine).await;
+    let second = add_uri_task(&engine).await;
+    assert_success(&first);
+    assert_success(&second);
+    let first_gid: String = serde_json::from_value(first.result.unwrap()).unwrap();
+    let second_gid: String = serde_json::from_value(second.result.unwrap()).unwrap();
+    assert_eq!(&first_gid[..15], &second_gid[..15]);
+
+    let response = engine
+        .handle_request(&make_request(
+            "aria2.remove",
+            serde_json::json!([&first_gid[..15]]),
+        ))
+        .await;
+    assert_error_code(&response, 1);
+
+    for gid in [first_gid, second_gid] {
+        let status = engine
+            .handle_request(&make_request("aria2.tellStatus", serde_json::json!([gid])))
+            .await;
+        assert_success(&status);
+    }
+}
+
 /// Test: status query `keys` parameters filter the aria2 wire object.
 #[tokio::test]
 async fn regression_status_keys_filter_fields() {
@@ -590,7 +701,12 @@ async fn regression_change_global_option_returns_ok() {
     let req = make_request(
         "aria2.changeGlobalOption",
         serde_json::json!([
-            {"max-concurrent-downloads": 5}
+            {
+                "max-concurrent-downloads": 5,
+                "max-http2-sessions-per-server": 7,
+                "max-http2-streams-per-session": 8,
+                "http-version": "2"
+            }
         ]),
     );
     let resp = engine.handle_request(&req).await;
@@ -598,6 +714,37 @@ async fn regression_change_global_option_returns_ok() {
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(result, "OK");
+    let global_options = engine
+        .handle_request(&make_request(
+            "aria2.getGlobalOption",
+            serde_json::json!([]),
+        ))
+        .await;
+    assert_success(&global_options);
+    assert_eq!(
+        global_options
+            .result
+            .as_ref()
+            .and_then(|value| value.get("max-http2-sessions-per-server"))
+            .and_then(serde_json::Value::as_str),
+        Some("7")
+    );
+    assert_eq!(
+        global_options
+            .result
+            .as_ref()
+            .and_then(|value| value.get("max-http2-streams-per-session"))
+            .and_then(serde_json::Value::as_str),
+        Some("8")
+    );
+    assert_eq!(
+        global_options
+            .result
+            .as_ref()
+            .and_then(|value| value.get("http-version"))
+            .and_then(serde_json::Value::as_str),
+        Some("2")
+    );
 }
 
 /// Test: zero removes the process-wide concurrency limit.
@@ -731,7 +878,7 @@ async fn regression_change_option_validates_keys() {
     assert_success(&invalid_resp);
 }
 
-/// Test: aria2.changeOption accepts max-connection-per-server (runtime-changeable).
+/// Test: aria2.changeOption accepts per-server HTTP connection and H2 pool limits.
 #[tokio::test]
 async fn regression_change_option_accepts_max_connection_per_server() {
     let engine = core_engine();
@@ -747,7 +894,12 @@ async fn regression_change_option_accepts_max_connection_per_server() {
     // Change max-connection-per-server — should succeed (not -32602)
     let req = make_request(
         "aria2.changeOption",
-        serde_json::json!([gid, {"max-connection-per-server": 4}]),
+        serde_json::json!([gid, {
+            "max-connection-per-server": 4,
+            "max-http2-sessions-per-server": 2,
+            "max-http2-streams-per-session": 8,
+            "http-version": "1.1"
+        }]),
     );
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
@@ -807,6 +959,74 @@ async fn regression_get_uris_format() {
     }
 }
 
+/// Test: aria2.getUris follows the original first-FileEntry behavior.
+#[tokio::test]
+async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
+    let engine = core_engine();
+    let add_req = make_request(
+        "aria2.addTorrent",
+        serde_json::json!([
+            multi_file_torrent(),
+            [
+                "http://example.com/first.bin",
+                "http://mirror.example.com/first.bin"
+            ]
+        ]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_req = make_request(
+        "aria2.changeUri",
+        serde_json::json!([gid, 2, [], ["http://example.com/second.bin"]]),
+    );
+    let change_resp = engine.handle_request(&change_req).await;
+    assert_success(&change_resp);
+
+    let req = make_request("aria2.getUris", serde_json::json!([gid]));
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    let uris: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert_eq!(uris.len(), 2);
+    assert_eq!(
+        uris[0]["uri"],
+        "http://example.com/first.bin/multi/one/first.bin"
+    );
+    assert_eq!(
+        uris[1]["uri"],
+        "http://mirror.example.com/first.bin/multi/one/first.bin"
+    );
+}
+
+/// Test: changeUri follows aria2's fileIndex contract even for an unselected
+/// file entry in a multi-file task.
+#[tokio::test]
+async fn regression_change_uri_allows_unselected_file_entry() {
+    let engine = core_engine();
+    let add_req = make_request(
+        "aria2.addTorrent",
+        serde_json::json!([
+            multi_file_torrent(),
+            [],
+            {"select-file": "1"}
+        ]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_resp = engine
+        .handle_request(&make_request(
+            "aria2.changeUri",
+            serde_json::json!([gid, 2, [], ["http://example.com/second.bin"]]),
+        ))
+        .await;
+    assert_success(&change_resp);
+    assert_eq!(change_resp.result.unwrap(), serde_json::json!(["0", "1"]));
+}
+
 /// Test: aria2.getFiles returns array with file info.
 #[tokio::test]
 async fn regression_get_files_format() {
@@ -864,6 +1084,80 @@ async fn regression_add_torrent_get_files_is_available_before_start() {
     assert_eq!(files.len(), 1);
     assert!(files[0]["path"].as_str().unwrap().ends_with("file.bin"));
     assert_eq!(files[0]["length"], "4");
+}
+
+/// Test: live BitTorrent status includes the original nested metadata fields.
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn regression_tell_status_includes_original_bt_metadata() {
+    let engine = core_engine();
+    let add_resp = engine
+        .handle_request(&make_request(
+            "aria2.addTorrent",
+            serde_json::json!([valid_torrent(), [], {"pause": true}]),
+        ))
+        .await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let status_resp = engine
+        .handle_request(&make_request("aria2.tellStatus", serde_json::json!([gid])))
+        .await;
+    assert_success(&status_resp);
+    let status = status_resp.result.unwrap();
+
+    assert_eq!(
+        status["infoHash"], "50af51cbddffdba351a3ed78daffe312c3bdb7bd",
+        "live status: {status}"
+    );
+    assert_eq!(
+        status["bittorrent"]["announceList"][0][0],
+        "http://example.com/announce"
+    );
+    assert_eq!(status["bittorrent"]["mode"], "single");
+    assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
+    assert_eq!(status["seeder"], "false");
+    assert_eq!(status["completedPieces"], "0");
+    assert_eq!(status["missingPieces"], "1");
+}
+
+/// Test: stopped BitTorrent status keeps the original torrent metadata.
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn regression_tell_stopped_includes_original_bt_metadata() {
+    let engine = core_engine();
+    let add_resp = engine
+        .handle_request(&make_request(
+            "aria2.addTorrent",
+            serde_json::json!([valid_torrent(), [], {"pause": true}]),
+        ))
+        .await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let remove_resp = engine
+        .handle_request(&make_request("aria2.forceRemove", serde_json::json!([gid])))
+        .await;
+    assert_success(&remove_resp);
+
+    let status_resp = engine
+        .handle_request(&make_request("aria2.tellStatus", serde_json::json!([gid])))
+        .await;
+    assert_success(&status_resp);
+    let status = status_resp.result.unwrap();
+
+    assert_eq!(
+        status["infoHash"], "50af51cbddffdba351a3ed78daffe312c3bdb7bd",
+        "stopped status: {status}"
+    );
+    assert_eq!(
+        status["bittorrent"]["announceList"][0][0],
+        "http://example.com/announce"
+    );
+    assert_eq!(status["bittorrent"]["mode"], "single");
+    assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
+    assert_eq!(status["completedPieces"], "0");
+    assert_eq!(status["missingPieces"], "1");
 }
 
 /// Test: aria2.getServers returns array with server info.
@@ -1297,11 +1591,110 @@ async fn regression_remove_download_result_returns_ok() {
 
     // Removal updates the shared manager synchronously, so the result is
     // available even though this focused fixture has no download loop.
-    let req = make_request("aria2.removeDownloadResult", serde_json::json!([gid]));
+    let req = make_request(
+        "aria2.removeDownloadResult",
+        serde_json::json!([&gid[..15]]),
+    );
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(result, "OK");
+}
+
+#[tokio::test]
+async fn regression_remove_download_files_cleans_stopped_child_tree() {
+    use aria2_core::request::request_group::{DownloadOptions, GroupId};
+
+    let fixture = RpcFixture::new(None);
+    let directory = tempfile::tempdir().expect("temporary output directory");
+    let directory_name = directory.path().to_string_lossy().into_owned();
+    let parent_gid = GroupId::new(0x7201);
+    let child_gid = GroupId::new(0x7202);
+    let grandchild_gid = GroupId::new(0x7203);
+    let insert_group = |gid, name: &str| {
+        fixture
+            .group_man
+            .add_group_with_gid(
+                gid,
+                vec![format!("https://example.test/{name}")],
+                DownloadOptions {
+                    dir: Some(directory_name.clone()),
+                    out: Some(name.to_string()),
+                    ..DownloadOptions::default()
+                },
+            )
+            .expect("add stopped-tree fixture group");
+    };
+    insert_group(parent_gid, "parent.bin");
+    insert_group(child_gid, "child.bin");
+    insert_group(grandchild_gid, "grandchild.bin");
+
+    fixture
+        .group_man
+        .find_group(parent_gid)
+        .expect("parent group")
+        .read()
+        .expect("parent lock")
+        .add_followed_by_gid(child_gid);
+    fixture
+        .group_man
+        .find_group(child_gid)
+        .expect("child group")
+        .read()
+        .expect("child lock")
+        .add_followed_by_gid(grandchild_gid);
+
+    let file_names = ["parent.bin", "child.bin", "grandchild.bin"];
+    for name in file_names {
+        std::fs::write(directory.path().join(name), b"downloaded").expect("create output");
+    }
+    std::fs::write(directory.path().join("unrelated.bin"), b"keep")
+        .expect("create unrelated output");
+    for gid in [parent_gid, child_gid, grandchild_gid] {
+        fixture
+            .group_man
+            .remove_group(gid)
+            .expect("stop fixture group");
+    }
+
+    let response = fixture
+        .engine
+        .handle_request(&make_request(
+            "aria2.removeDownloadFiles",
+            serde_json::json!([parent_gid.to_hex_string()]),
+        ))
+        .await;
+    assert_success(&response);
+    assert_eq!(response.result.unwrap(), "OK");
+    for name in file_names {
+        assert!(
+            !directory.path().join(name).exists(),
+            "{name} should be removed"
+        );
+    }
+    assert!(directory.path().join("unrelated.bin").exists());
+    assert!(
+        fixture
+            .group_man
+            .find_stopped_result(&parent_gid.to_hex_string())
+            .is_some(),
+        "cleanup should retain the stopped result"
+    );
+
+    let active_gid = GroupId::new(0x7204);
+    insert_group(active_gid, "active.bin");
+    fixture.group_man.fill_from_reserver();
+    let active_path = directory.path().join("active.bin");
+    std::fs::write(&active_path, b"in progress").expect("create active output");
+    let active_response = fixture
+        .engine
+        .handle_request(&make_request(
+            "aria2.removeDownloadFiles",
+            serde_json::json!([active_gid.to_hex_string()]),
+        ))
+        .await;
+    assert_error_code(&active_response, 1);
+    assert!(active_path.exists(), "active output must not be removed");
 }
 
 // =========================================================================
@@ -1323,8 +1716,12 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     expected.extend([
         "aria2.addTorrent",
         "aria2.getPeers",
+        "aria2.getPeerStats",
+        "aria2.getPeerDetails",
         "aria2.getTrackers",
         "aria2.getDhtStatus",
+        "aria2.saveDhtState",
+        "aria2.evictDhtNodes",
     ]);
     #[cfg(feature = "metalink")]
     expected.push("aria2.addMetalink");
@@ -1352,6 +1749,7 @@ async fn regression_list_methods_returns_feature_specific_methods() {
         "aria2.changeGlobalOption",
         "aria2.purgeDownloadResult",
         "aria2.removeDownloadResult",
+        "aria2.removeDownloadFiles",
         "aria2.getVersion",
         "aria2.getSessionInfo",
         "aria2.shutdown",

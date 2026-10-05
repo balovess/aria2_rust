@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, runtime_checkable
 
 import httpx
 
@@ -48,6 +48,8 @@ class HttpTransport:
         self._token = token
         self._timeout = timeout
         self._id_counter = 0
+        self._closed = False
+        self._pending_tasks: Set[asyncio.Task] = set()
         self._client = httpx.AsyncClient(timeout=timeout)
 
     def _next_id(self) -> int:
@@ -67,13 +69,26 @@ class HttpTransport:
         }
 
     async def send_request(self, method: str, params: list) -> Any:
+        if self._closed:
+            raise ConnectionError("Transport closed")
+
         payload = self._build_request(method, params)
+        task = asyncio.current_task()
+        if task is not None:
+            self._pending_tasks.add(task)
         try:
             response = await self._client.post(self._url, json=payload)
+        except asyncio.CancelledError as exc:
+            if self._closed:
+                raise ConnectionError("Transport closed") from exc
+            raise
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise ConnectionError(f"Connection error: {exc}") from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"Request timed out: {exc}") from exc
+        finally:
+            if task is not None:
+                self._pending_tasks.discard(task)
 
         # aria2 returns a JSON-RPC error body with HTTP 400 for execution
         # failures. Decode the body before treating the HTTP status as a
@@ -111,6 +126,17 @@ class HttpTransport:
         return data.get("result")
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        current_task = asyncio.current_task()
+        pending_tasks = [
+            task for task in self._pending_tasks if task is not current_task
+        ]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         await self._client.aclose()
 
 
@@ -128,6 +154,9 @@ class WebSocketTransport:
         self._ws: Any = None
         self._pending: Dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
+        self._connect_task: Optional[asyncio.Task] = None
+        self._connection_generation = 0
+        self._closed = False
         self._event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._connected = False
 
@@ -141,18 +170,43 @@ class WebSocketTransport:
         self._event_callback = callback
 
     async def _ensure_connected(self) -> None:
+        if self._closed:
+            raise ConnectionError("Transport closed")
+
         if self._connected and self._ws is not None:
             return
+
+        generation = self._connection_generation
+        task = self._connect_task
+        if task is None:
+            task = asyncio.create_task(self._open_connection(generation))
+            self._connect_task = task
+
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if self._connection_generation != generation:
+                raise ConnectionError("Transport closed") from exc
+            raise
+        finally:
+            if self._connect_task is task:
+                self._connect_task = None
+
+    async def _open_connection(self, generation: int) -> None:
         try:
             import websockets
 
-            self._ws = await websockets.connect(
-                self._url, open_timeout=self._timeout
-            )
+            ws = await websockets.connect(self._url, open_timeout=self._timeout)
+            if generation != self._connection_generation:
+                await ws.close()
+                raise ConnectionError("Transport closed")
+            self._ws = ws
             self._connected = True
             self._listener_task = asyncio.create_task(self._listen())
         except asyncio.TimeoutError as exc:
             raise TimeoutError(f"WebSocket connection timed out: {exc}") from exc
+        except ConnectionError:
+            raise
         except Exception as exc:
             raise ConnectionError(f"WebSocket connection failed: {exc}") from exc
 
@@ -164,14 +218,18 @@ class WebSocketTransport:
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                if "method" in message and message["method"].startswith("aria2.on"):
+                if not isinstance(message, dict):
+                    continue
+
+                method = message.get("method")
+                if isinstance(method, str) and method.startswith("aria2.on"):
                     if self._event_callback is not None:
                         params = message.get("params", [{}])
                         event_params = params[0] if isinstance(params, list) and params else {}
                         if not isinstance(event_params, dict):
                             event_params = {}
                         try:
-                            self._event_callback(message["method"], event_params)
+                            self._event_callback(method, event_params)
                         except Exception:
                             pass
                     continue
@@ -180,13 +238,16 @@ class WebSocketTransport:
                 if msg_id is not None and msg_id in self._pending:
                     future = self._pending.pop(msg_id)
                     if not future.done():
-                        if "error" in message:
+                        error = message.get("error")
+                        if isinstance(error, dict):
                             future.set_exception(
                                 RpcError(
-                                    message["error"].get("message", "Unknown RPC error"),
-                                    message["error"].get("code", -1),
+                                    error.get("message", "Unknown RPC error"),
+                                    error.get("code", -1),
                                 )
                             )
+                        elif "error" in message:
+                            future.set_exception(RpcError("Malformed RPC error response", -1))
                         else:
                             future.set_result(message.get("result"))
         except asyncio.CancelledError:
@@ -229,11 +290,28 @@ class WebSocketTransport:
 
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
+        except asyncio.CancelledError:
+            self._pending.pop(request_id, None)
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             raise TimeoutError(f"Request timed out after {self._timeout}s")
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._connection_generation += 1
+
+        connect_task = self._connect_task
+        if connect_task is not None:
+            connect_task.cancel()
+            try:
+                await connect_task
+            except asyncio.CancelledError:
+                pass
+            self._connect_task = None
+
         if self._listener_task is not None:
             self._listener_task.cancel()
             try:

@@ -154,6 +154,36 @@ class MockAria2Server:
                 "numStoppedTotal": "0",
             }, None
 
+        elif method == "aria2.getTrackers":
+            return [
+                {
+                    "uri": "udp://tracker.example/announce",
+                    "tier": 1,
+                    "current": True,
+                    "lastAttempt": False,
+                    "announceReady": True,
+                    "allFailed": False,
+                    "inFlight": 0,
+                    "interval": "1800",
+                    "minInterval": 60,
+                    "seeders": 3,
+                    "leechers": 1,
+                    "trackerId": "tracker-id",
+                }
+            ], None
+
+        elif method == "aria2.getDhtStatus":
+            return {
+                "state": "running",
+                "totalNodes": "10",
+                "goodNodes": "8",
+                "pendingTransactions": "1",
+                "peerInfoHashes": "12",
+                "storedPeers": "38",
+                "peerStorageEvictions": "4",
+                "maxPeerInfoHashes": "4096",
+            }, None
+
         elif method == "aria2.purgeDownloadResult":
             self._tasks.clear()
             return "OK", None

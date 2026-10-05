@@ -11,8 +11,6 @@ use crate::segment::piece_storage::types::{
 };
 
 #[cfg(feature = "bittorrent")]
-use crate::segment::piece_selector::{PieceSelectorKind, RarestPieceSelector};
-#[cfg(feature = "bittorrent")]
 use crate::segment::piece_stat_man::PieceStatMan;
 
 /// Default implementation of PieceStorage for HTTP/FTP and BitTorrent downloads.
@@ -40,10 +38,6 @@ pub struct DefaultPieceStorage {
     /// Shared with PieceSelector via Arc.
     #[cfg(feature = "bittorrent")]
     pub(crate) piece_stat_man: Arc<PieceStatMan>,
-    /// Piece selector for BT downloads (rarest-first by default).
-    /// C++ uses `unique_ptr<PieceSelector> pieceSelector_`.
-    #[cfg(feature = "bittorrent")]
-    pub(crate) piece_selector: PieceSelectorKind,
     /// Stream piece selector for HTTP/FTP downloads.
     /// C++ uses `unique_ptr<StreamPieceSelector> streamPieceSelector_`.
     pub(crate) stream_piece_selector: StreamPieceSelectorKind,
@@ -80,10 +74,6 @@ impl DefaultPieceStorage {
         // C++ initializes PieceStatMan with random shuffle for tie-breaking
         #[cfg(feature = "bittorrent")]
         let piece_stat_man = Arc::new(PieceStatMan::new(num_pieces, true));
-        #[cfg(feature = "bittorrent")]
-        let piece_selector =
-            PieceSelectorKind::Rarest(RarestPieceSelector::new(Arc::clone(&piece_stat_man)));
-
         DefaultPieceStorage {
             bfman: BitfieldMan::new(piece_length, total_length),
             used_pieces: HashMap::new(),
@@ -96,8 +86,6 @@ impl DefaultPieceStorage {
             haves: Vec::new(),
             #[cfg(feature = "bittorrent")]
             piece_stat_man,
-            #[cfg(feature = "bittorrent")]
-            piece_selector,
             stream_piece_selector: StreamPieceSelectorKind::Default,
             // C++ GeomStreamPieceSelector defaults: base=1.5, offsetIndex=0
             geom_offset_index: 0,

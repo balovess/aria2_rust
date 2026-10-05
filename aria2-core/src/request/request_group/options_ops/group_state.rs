@@ -51,6 +51,16 @@ impl super::super::RequestGroup {
         self.output_name.recover().clone()
     }
 
+    /// Record the effective path selected for the current download attempt.
+    pub fn set_resolved_output_path(&self, path: impl Into<String>) {
+        *self.resolved_output_path.recover_mut() = Some(path.into());
+    }
+
+    /// Return the path that the download writer currently uses.
+    pub fn resolved_output_path(&self) -> Option<String> {
+        self.resolved_output_path.recover().clone()
+    }
+
     /// Return a reference to the download options.
     pub fn options(&self) -> &super::super::DownloadOptions {
         &self.options
@@ -75,6 +85,10 @@ impl super::super::RequestGroup {
         for (key, value) in &snapshot {
             let _ = super::rpc_update::apply_rpc_option(typed_options, key, value);
         }
+        self.bt_max_peers_limit.store(
+            typed_options.bt_max_peers,
+            std::sync::atomic::Ordering::Release,
+        );
         self.option_snapshot = Some(snapshot);
     }
 

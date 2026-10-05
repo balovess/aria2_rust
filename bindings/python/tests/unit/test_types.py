@@ -6,8 +6,11 @@ from aria2_rust_client.types import (
     EventType,
     FileInfo,
     GlobalStat,
+    PositionMode,
     SessionInfo,
     StatusInfo,
+    TrackerInfo,
+    DhtStatus,
     UriEntry,
     VersionInfo,
 )
@@ -40,6 +43,13 @@ class TestDownloadStatus:
     def test_string_enum(self):
         assert isinstance(DownloadStatus.ACTIVE, str)
         assert DownloadStatus.ACTIVE == "active"
+
+
+class TestPositionMode:
+    def test_wire_values(self):
+        assert PositionMode.SET_FROM_START == "POS_SET"
+        assert PositionMode.MOVE_FROM_START == "POS_CUR"
+        assert PositionMode.SET_FROM_END == "POS_END"
 
 
 class TestUriEntry:
@@ -157,13 +167,20 @@ class TestStatusInfo:
         assert info.gid == "abc"
         assert info.total_length is None
         assert info.completed_length is None
-        assert info.files == []
+        assert info.files is None
+        assert info.followed_by is None
 
     def test_from_dict_empty(self):
         info = StatusInfo.from_dict({})
         assert info.gid is None
         assert info.status is None
+        assert info.files is None
+        assert info.followed_by is None
+
+    def test_from_dict_preserves_explicit_empty_collections(self):
+        info = StatusInfo.from_dict({"files": [], "followedBy": []})
         assert info.files == []
+        assert info.followed_by == []
 
     def test_from_dict_none_values(self):
         info = StatusInfo.from_dict({"gid": None, "status": None})
@@ -234,6 +251,56 @@ class TestSessionInfo:
         assert info.session_id is None
 
 
+class TestTrackerInfo:
+    def test_from_dict(self):
+        info = TrackerInfo.from_dict(
+            {
+                "uri": "udp://tracker.example/announce",
+                "tier": 1,
+                "current": True,
+                "lastAttempt": False,
+                "announceReady": True,
+                "allFailed": False,
+                "inFlight": 0,
+                "interval": "1800",
+                "minInterval": 60,
+                "seeders": 3,
+                "leechers": 1,
+                "trackerId": "tracker-id",
+                "lastFailureKind": "timeout",
+                "secondsSinceLastSuccess": 4,
+            }
+        )
+        assert info.uri == "udp://tracker.example/announce"
+        assert info.last_attempt is False
+        assert info.interval == "1800"
+        assert info.last_failure_kind == "timeout"
+        assert info.seconds_since_last_success == 4
+
+
+class TestDhtStatus:
+    def test_from_dict(self):
+        info = DhtStatus.from_dict(
+            {
+                "state": "running",
+                "totalNodes": "10",
+                "goodNodes": "8",
+                "pendingTransactions": "1",
+                "peerInfoHashes": "12",
+                "storedPeers": "38",
+                "peerStorageEvictions": "4",
+                "maxPeerInfoHashes": "4096",
+            }
+        )
+        assert info.state == "running"
+        assert info.total_nodes == "10"
+        assert info.pending_transactions == "1"
+        assert info.peer_info_hashes == "12"
+        assert info.stored_peers == "38"
+        assert info.peer_storage_evictions == "4"
+        assert info.max_peer_info_hashes == "4096"
+
+
 class TestDownloadEvent:
     def test_from_rpc_notification_start(self):
         event = DownloadEvent.from_rpc_notification(
@@ -254,7 +321,7 @@ class TestDownloadEvent:
             "aria2.onDownloadError", {"gid": "abc", "errorCode": "1"}
         )
         assert event.event_type == EventType.DOWNLOAD_ERROR
-        assert event.error_code == "1"
+        assert event.error_code == 1
 
     def test_from_rpc_notification_bt_complete(self):
         event = DownloadEvent.from_rpc_notification(
@@ -266,7 +333,12 @@ class TestDownloadEvent:
         event = DownloadEvent.from_rpc_notification(
             "aria2.onUnknown", {"gid": "x"}
         )
-        assert event.event_type == EventType.DOWNLOAD_START
+        assert event is None
+
+    @pytest.mark.parametrize("params", [{}, {"gid": None}, {"gid": 123}, {"gid": ""}])
+    def test_from_rpc_notification_rejects_invalid_gid(self, params):
+        event = DownloadEvent.from_rpc_notification("aria2.onDownloadComplete", params)
+        assert event is None
 
     def test_from_rpc_notification_with_files(self):
         event = DownloadEvent.from_rpc_notification(
@@ -281,4 +353,4 @@ class TestDownloadEvent:
         event = DownloadEvent.from_rpc_notification(
             "aria2.onDownloadError", {"gid": "abc", "errorCode": "2"}
         )
-        assert event.error_code == "2"
+        assert event.error_code == 2

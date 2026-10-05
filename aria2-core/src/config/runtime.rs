@@ -35,10 +35,13 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "max-concurrent-downloads",
     "max-connection-per-server",
     "max-download-limit",
+    "max-http2-sessions-per-server",
+    "max-http2-streams-per-session",
     "max-download-result",
     "max-mmap-limit",
     "max-overall-download-limit",
     "max-resume-failure-tries",
+    "min-http-range-size",
     "min-split-size",
     "no-file-allocation-limit",
     "parameterized-uri",
@@ -53,6 +56,7 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "lowest-speed-limit",
     "max-file-not-found",
     "max-tries",
+    "http-version",
     "no-netrc",
     "piece-length",
     "remote-time",
@@ -128,6 +132,28 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-tracker-interval",
     "bt-tracker-timeout",
     "bt-tracker-stopped-timeout",
+    "enable-dht",
+    "enable-dht6",
+    "dht-listen-port",
+    "dht-listen-addr",
+    "dht-listen-addr6",
+    "dht-entry-point",
+    "dht-entry-point-host",
+    "dht-entry-point-port",
+    "dht-entry-point6",
+    "dht-entry-point-host6",
+    "dht-entry-point-port6",
+    "dht-file-path",
+    "dht-file-path6",
+    "dht-message-timeout",
+    "dht-refresh-check-interval",
+    "dht-token-rotation-interval",
+    "dht-node-contact-interval",
+    "dht-cleanup-interval",
+    "dht-save-interval",
+    "dht-bootstrap-timeout",
+    "dht-max-concurrent-lookups",
+    "dht-persistence-max-age",
     "enable-peer-exchange",
     "follow-torrent",
     "max-overall-upload-limit",
@@ -167,6 +193,9 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-peers",
+    "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
@@ -181,6 +210,28 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-tracker-interval",
     "bt-tracker-timeout",
     "bt-tracker-stopped-timeout",
+    "enable-dht",
+    "enable-dht6",
+    "dht-listen-port",
+    "dht-listen-addr",
+    "dht-listen-addr6",
+    "dht-entry-point",
+    "dht-entry-point-host",
+    "dht-entry-point-port",
+    "dht-entry-point6",
+    "dht-entry-point-host6",
+    "dht-entry-point-port6",
+    "dht-file-path",
+    "dht-file-path6",
+    "dht-message-timeout",
+    "dht-refresh-check-interval",
+    "dht-token-rotation-interval",
+    "dht-node-contact-interval",
+    "dht-cleanup-interval",
+    "dht-save-interval",
+    "dht-bootstrap-timeout",
+    "dht-max-concurrent-lookups",
+    "dht-persistence-max-age",
     "check-integrity",
     "checksum",
     "conditional-get",
@@ -225,6 +276,9 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "max-connection-per-server",
     "max-download-limit",
     "max-file-not-found",
+    "max-http2-sessions-per-server",
+    "max-http2-streams-per-session",
+    "http-version",
     "max-mmap-limit",
     "max-resume-failure-tries",
     "max-tries",
@@ -236,6 +290,7 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "metalink-os",
     "metalink-preferred-protocol",
     "metalink-version",
+    "min-http-range-size",
     "min-split-size",
     "no-file-allocation-limit",
     "no-netrc",
@@ -269,7 +324,7 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
 
 /// Initial options whose typed execution representation must not replace the
 /// original wire spelling when a session entry is written.
-pub const INITIAL_SNAPSHOT_WIRE_OPTIONS: &[&str] = &["min-split-size"];
+pub const INITIAL_SNAPSHOT_WIRE_OPTIONS: &[&str] = &["min-http-range-size", "min-split-size"];
 
 /// Initial options consumed by task creation rather than download behavior.
 ///
@@ -279,7 +334,7 @@ pub const INITIAL_IDENTITY_OPTIONS: &[&str] = &["gid"];
 
 /// Returns whether an option belongs to a request-group's initial state.
 pub fn is_initial_option(option_name: &str) -> bool {
-    INITIAL_REQUEST_OPTIONS.contains(&option_name)
+    is_option_available(option_name) && INITIAL_REQUEST_OPTIONS.contains(&option_name)
 }
 
 /// Keep only the options that may be stored and reported by a request group.
@@ -306,7 +361,7 @@ where
 
 /// Returns whether a name is accepted by `changeGlobalOption`.
 pub fn is_global_option_changeable(option_name: &str) -> bool {
-    RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&option_name)
+    is_option_available(option_name) && RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&option_name)
 }
 
 /// Options that `aria2.changeOption` applies immediately to active downloads.
@@ -328,9 +383,9 @@ pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
 /// Options accepted by `aria2.changeOption` for reserved or waiting
 /// downloads.
 ///
-/// The list mirrors `setChangeOptionForReserved(true)` in the original
-/// implementation. For an active download these options are queued as
-/// pending; for a reserved download they take effect immediately.
+/// Original aria2 reserved-task options plus supported Rust task extensions.
+/// For an active download these options are queued as pending; for a reserved
+/// download they take effect immediately.
 pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     // General
     "allow-overwrite",
@@ -349,8 +404,12 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "hash-check-only",
     "max-connection-per-server",
     "max-download-limit",
+    "max-http2-sessions-per-server",
     "max-mmap-limit",
+    "max-http2-streams-per-session",
+    "http-version",
     "max-resume-failure-tries",
+    "min-http-range-size",
     "min-split-size",
     "no-file-allocation-limit",
     "pause-metadata",
@@ -423,6 +482,9 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-peers",
+    "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
     "bt-metadata-only",
     "bt-min-crypto-level",
     "bt-prioritize-piece",
@@ -438,6 +500,28 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
+    "enable-dht",
+    "enable-dht6",
+    "dht-listen-port",
+    "dht-listen-addr",
+    "dht-listen-addr6",
+    "dht-entry-point",
+    "dht-entry-point-host",
+    "dht-entry-point-port",
+    "dht-entry-point6",
+    "dht-entry-point-host6",
+    "dht-entry-point-port6",
+    "dht-file-path",
+    "dht-file-path6",
+    "dht-message-timeout",
+    "dht-refresh-check-interval",
+    "dht-token-rotation-interval",
+    "dht-node-contact-interval",
+    "dht-cleanup-interval",
+    "dht-save-interval",
+    "dht-bootstrap-timeout",
+    "dht-max-concurrent-lookups",
+    "dht-persistence-max-age",
     "enable-peer-exchange",
     "follow-torrent",
     "index-out",
@@ -446,8 +530,50 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "seed-ratio",
 ];
 
+/// Return whether an option belongs to a feature available in this build.
+/// The policy tables retain the complete aria2 wire vocabulary, but a build
+/// without BitTorrent must not expose those names as usable runtime options.
+pub fn is_option_available(option_name: &str) -> bool {
+    #[cfg(feature = "bittorrent")]
+    {
+        let _ = option_name;
+        true
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
+    {
+        !is_bittorrent_option(option_name)
+    }
+}
+
+#[cfg(not(feature = "bittorrent"))]
+fn is_bittorrent_option(option_name: &str) -> bool {
+    option_name.starts_with("bt-")
+        || option_name.starts_with("dht-")
+        || matches!(
+            option_name,
+            "enable-dht"
+                | "enable-dht6"
+                | "enable-peer-exchange"
+                | "follow-torrent"
+                | "index-out"
+                | "listen-port"
+                | "lpd-listen-port"
+                | "bt-lpd-interface"
+                | "seed-ratio"
+                | "seed-time"
+                | "select-file"
+                | "enable-public-trackers"
+                | "enable-utp"
+                | "utp-listen-port"
+        )
+}
+
 /// Classifies how `aria2.changeOption` applies an option for a download.
 pub fn is_option_changeable(option_name: &str, is_active: bool) -> ChangeableKind {
+    if !is_option_available(option_name) {
+        return ChangeableKind::NotChangeable;
+    }
     if RUNTIME_CHANGEABLE_OPTIONS.contains(&option_name) {
         ChangeableKind::Immediate
     } else if RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.contains(&option_name) {
@@ -483,7 +609,11 @@ mod tests {
     fn policy_matches_original_wire_names() {
         assert!(is_global_option_changeable("dir"));
         assert!(is_global_option_changeable("save-session"));
+        assert!(is_global_option_changeable("min-http-range-size"));
+        #[cfg(feature = "bittorrent")]
         assert!(is_global_option_changeable("bt-force-encryption"));
+        #[cfg(not(feature = "bittorrent"))]
+        assert!(!is_global_option_changeable("bt-force-encryption"));
         assert!(!is_global_option_changeable("no-conf"));
         assert!(!is_global_option_changeable("show-files"));
     }
@@ -512,14 +642,46 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 106);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 135);
         #[cfg(not(feature = "bittorrent"))]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 105);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 134);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate
         );
         assert_eq!(is_option_changeable("dir", true), ChangeableKind::Pending);
+        assert_eq!(
+            is_option_changeable("min-http-range-size", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("min-http-range-size", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("bt-max-upload-slots", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("bt-max-upload-slots", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("bt-optimistic-unchoke-interval", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("bt-optimistic-unchoke-interval", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("bt-snubbed-timeout", true),
+            ChangeableKind::Pending
+        );
+        assert_eq!(
+            is_option_changeable("bt-snubbed-timeout", false),
+            ChangeableKind::Immediate
+        );
         assert_eq!(
             is_option_changeable("dir", false),
             ChangeableKind::Immediate

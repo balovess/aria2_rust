@@ -7,9 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "bittorrent")]
+use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
+
 use super::GroupId;
 use super::result_code::DownloadResultCode;
 use super::status::DownloadStatus;
+use crate::segment::piece_storage::BitfieldMan;
 
 /// File entry within a download result.
 ///
@@ -39,6 +43,37 @@ pub struct UriEntry {
     pub uri: String,
     /// Current status of this URI ("used", "waiting", "spent").
     pub status: String,
+}
+
+/// BitTorrent metadata retained with a stopped result for RPC snapshots.
+///
+/// The live download context is released when a group is demoted. Keeping
+/// this small owned projection preserves the original aria2 stopped-status
+/// fields without retaining protocol state or sockets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BittorrentResultMetadata {
+    pub announce_list: Vec<Vec<String>>,
+    pub comment: Option<String>,
+    pub creation_date: Option<i64>,
+    pub mode: Option<String>,
+    pub name: Option<String>,
+}
+
+#[cfg(feature = "bittorrent")]
+impl BittorrentResultMetadata {
+    pub(crate) fn from_torrent_attribute(attribute: &TorrentAttribute) -> Self {
+        let mode = match attribute.mode {
+            crate::download::download_context::BtFileMode::Single => "single",
+            crate::download::download_context::BtFileMode::Multi => "multi",
+        };
+        Self {
+            announce_list: attribute.announce_list.clone(),
+            comment: (!attribute.comment.is_empty()).then(|| attribute.comment.clone()),
+            creation_date: (attribute.creation_date != 0).then_some(attribute.creation_date),
+            mode: Some(mode.to_string()),
+            name: (!attribute.name.is_empty()).then(|| attribute.name.clone()),
+        }
+    }
 }
 
 /// Rich download result for RPC consumers.
@@ -99,6 +134,13 @@ pub struct DownloadResult {
     pub files: Vec<FileEntry>,
     /// BT info hash (empty string for non-BT).
     pub info_hash: String,
+    /// BT metadata needed after the live download context is released.
+    pub bt_metadata: Option<BittorrentResultMetadata>,
+    /// Raw torrent metadata retained only for session entries that may be
+    /// written after this result has been detached from its RequestGroup.
+    #[cfg(feature = "bittorrent")]
+    #[serde(skip)]
+    bt_metadata_data: Option<std::sync::Arc<Vec<u8>>>,
 
     // ── Metadata ───────────────────────────────────────────────────────
     /// Download context attributes (e.g. CTX_ATTR_ED2K for aria2-next).
@@ -141,6 +183,9 @@ impl DownloadResult {
             dir: String::new(),
             files: Vec::new(),
             info_hash: String::new(),
+            bt_metadata: None,
+            #[cfg(feature = "bittorrent")]
+            bt_metadata_data: None,
             attrs: std::collections::HashMap::new(),
             in_memory_download: false,
             session_download_length: 0,
@@ -158,6 +203,11 @@ impl DownloadResult {
     /// Return the option state captured when the request became terminal.
     pub fn option_snapshot(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         self.option_snapshot.as_ref()
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn bt_metadata_data(&self) -> Option<&[u8]> {
+        self.bt_metadata_data.as_deref().map(Vec::as_slice)
     }
 
     /// Create a successful result (convenience for tests).
@@ -182,6 +232,9 @@ impl DownloadResult {
             dir: String::new(),
             files: Vec::new(),
             info_hash: String::new(),
+            bt_metadata: None,
+            #[cfg(feature = "bittorrent")]
+            bt_metadata_data: None,
             attrs: std::collections::HashMap::new(),
             in_memory_download: false,
             session_download_length: 0,
@@ -243,61 +296,113 @@ impl DownloadResult {
 
     /// Fill in progress stats from the given `RequestGroup`.
     ///
-    /// Reads `total_length`, `completed_length`, `upload_length`,
-    /// `download_speed`, `upload_speed`, `dir`, and `info_hash`
-    /// from the group's `AtomicProgress` and options.
+    /// Reads completed-byte counters, `dir`, and `info_hash` from the group.
+    /// Transfer speeds are always zero in a stopped result, matching aria2's
+    /// `gatherStoppedDownload` contract; live speeds remain on the active
+    /// `RequestGroup` status path.
     pub fn fill_from_group(&mut self, group: &super::RequestGroup) {
         self.total_length = group.total_length();
         self.completed_length = group.completed_length();
         self.upload_length = group.upload_length();
-        self.download_speed = group.download_speed();
-        self.upload_speed = group.upload_speed();
+        self.download_speed = 0;
+        self.upload_speed = 0;
         self.session_time = group.elapsed_time().map_or(0, |elapsed| elapsed.as_secs());
         self.dir = group.options().dir.clone().unwrap_or_default();
-        self.info_hash = group.info_hash_hex().unwrap_or_default();
+        self.info_hash = group
+            .info_hash_hex()
+            .or_else(|| group.get_bt_info_hash_hex())
+            .unwrap_or_default();
         self.in_memory_download = group.is_in_memory_download();
 
+        #[cfg(feature = "bittorrent")]
+        {
+            self.bt_metadata = group.get_download_context().and_then(|context| {
+                context
+                    .get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|value| value.downcast_ref::<TorrentAttribute>())
+                    .map(BittorrentResultMetadata::from_torrent_attribute)
+            });
+
+            let option_bool = |name: &str, default: bool| {
+                self.option_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.get(name))
+                    .and_then(crate::request::request_group::option_value_to_string)
+                    .and_then(|value| value.parse::<bool>().ok())
+                    .unwrap_or(default)
+            };
+            let resumable_result = match self.code {
+                DownloadResultCode::Finished | DownloadResultCode::Removed => {
+                    option_bool("force-save", false)
+                }
+                DownloadResultCode::ResourceNotFound | DownloadResultCode::MaxFileNotFound => {
+                    option_bool("save-not-found", true)
+                }
+                _ => true,
+            };
+            if resumable_result {
+                self.bt_metadata_data = group.bt_metadata_data().map(std::sync::Arc::new);
+            }
+        }
+
         let fallback_path = {
-            let options = group.options();
-            let name = group
-                .output_name()
-                .or_else(|| options.out.clone())
-                .or_else(|| {
-                    group.uris().first().and_then(|uri| {
-                        uri.rsplit('/')
-                            .next()
-                            .map(|name| name.split(['?', '#']).next().unwrap_or(name))
-                            .map(str::to_owned)
-                            .filter(|name| !name.is_empty())
+            if let Some(path) = group.resolved_output_path() {
+                path
+            } else {
+                let options = group.options();
+                let name = group
+                    .output_name()
+                    .or_else(|| options.out.clone())
+                    .or_else(|| {
+                        group
+                            .uris()
+                            .first()
+                            .map(|uri| crate::validation::uri::sanitize_filename_from_uri(uri))
                     })
-                })
-                .unwrap_or_default();
-            match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
-                Some(dir) if !name.is_empty() => std::path::PathBuf::from(dir)
-                    .join(name)
-                    .to_string_lossy()
-                    .into_owned(),
-                _ => name,
+                    .unwrap_or_default();
+                match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
+                    Some(dir) if !name.is_empty() => std::path::PathBuf::from(dir)
+                        .join(name)
+                        .to_string_lossy()
+                        .into_owned(),
+                    _ => name,
+                }
             }
         };
+        let resolved_path = group.resolved_output_path();
+        let completion = bt_completion_bitfield(group);
         let files = if let Some(context) = group.get_download_context() {
             context
                 .get_file_entries()
                 .iter()
                 .enumerate()
                 .map(|(index, file)| {
-                    let completed_length = self
-                        .completed_length
-                        .saturating_sub(file.offset())
-                        .min(file.length());
-                    let uris = file
-                        .uris()
-                        .into_iter()
+                    let path = if index == 0 {
+                        resolved_path
+                            .clone()
+                            .unwrap_or_else(|| file.path().to_string())
+                    } else {
+                        file.path().to_string()
+                    };
+                    let completed_length = completion
+                        .as_ref()
+                        .map(|bitfield| {
+                            bitfield.get_offset_completed_length(file.offset(), file.length())
+                        })
+                        .unwrap_or_else(|| {
+                            self.completed_length
+                                .saturating_sub(file.offset())
+                                .min(file.length())
+                        });
+                    let (remaining_uris, spent_uris, _) = file.uri_state_snapshot();
+                    let uris = spent_uris
+                        .iter()
+                        .chain(remaining_uris.iter())
+                        .cloned()
                         .map(|uri| {
-                            let status = if file.remaining_uris().iter().any(|value| value == &uri)
-                            {
+                            let status = if remaining_uris.iter().any(|value| value == &uri) {
                                 "waiting"
-                            } else if file.spent_uris().iter().any(|value| value == &uri) {
+                            } else if spent_uris.iter().any(|value| value == &uri) {
                                 "used"
                             } else {
                                 "spent"
@@ -311,7 +416,7 @@ impl DownloadResult {
 
                     FileEntry {
                         index: index + 1,
-                        path: file.path().to_string(),
+                        path,
                         length: file.length(),
                         completed_length,
                         selected: file.is_requested(),
@@ -366,6 +471,17 @@ impl DownloadResult {
     }
 }
 
+fn bt_completion_bitfield(group: &super::RequestGroup) -> Option<BitfieldMan> {
+    let piece_length = group.get_bt_piece_length() as u64;
+    let bitfield = group.get_bt_bitfield()?;
+    if piece_length == 0 || bitfield.is_empty() {
+        return None;
+    }
+    let mut completion = BitfieldMan::new(piece_length, group.get_total_length_atomic());
+    completion.set_bitfield(&bitfield);
+    Some(completion)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +501,156 @@ mod tests {
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].path, "file.zip");
         assert_eq!(result.files[0].length, 4096);
+    }
+
+    #[test]
+    fn fill_from_group_uses_the_safe_decoded_url_segment() {
+        let group = crate::request::request_group::RequestGroup::new(
+            GroupId::new(2),
+            vec!["https://example.com/releases/my%20file.zip?token=ignored#fragment".to_string()],
+            crate::request::request_group::DownloadOptions::default(),
+        );
+        group.set_total_length(4096);
+
+        let mut result = DownloadResult::finished();
+        result.fill_from_group(&group);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "my file.zip");
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn stopped_metadata_snapshot_matches_session_save_policy() {
+        use crate::session::session_serializer::{
+            serialize_groups_with_results, should_save_download_result,
+        };
+
+        let mut info = std::collections::BTreeMap::new();
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+        info.insert(b"length".to_vec(), BencodeValue::Int(1));
+        info.insert(
+            b"name".to_vec(),
+            BencodeValue::Bytes(b"snapshot.bin".to_vec()),
+        );
+        info.insert(b"piece length".to_vec(), BencodeValue::Int(16));
+        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 20]));
+        let mut torrent = std::collections::BTreeMap::new();
+        torrent.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.invalid/announce".to_vec()),
+        );
+        torrent.insert(b"info".to_vec(), BencodeValue::Dict(info));
+        let metadata = BencodeValue::Dict(torrent).encode();
+        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&metadata)
+            .expect("fixture torrent metadata parses")
+            .info_hash
+            .as_hex();
+        let group = crate::request::request_group::RequestGroup::new(
+            GroupId::new(3),
+            vec![format!("bt://{info_hash}")],
+            crate::request::request_group::DownloadOptions::default(),
+        );
+        group.set_bt_metadata_data(metadata.to_vec());
+
+        let cases = [
+            (
+                DownloadResultCode::Finished,
+                Some(("force-save", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::Finished,
+                Some(("force-save", true)),
+                true,
+            ),
+            (
+                DownloadResultCode::Removed,
+                Some(("force-save", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::Removed,
+                Some(("force-save", true)),
+                true,
+            ),
+            (DownloadResultCode::InProgress, None, true),
+            (
+                DownloadResultCode::ResourceNotFound,
+                Some(("save-not-found", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::ResourceNotFound,
+                Some(("save-not-found", true)),
+                true,
+            ),
+            (
+                DownloadResultCode::MaxFileNotFound,
+                Some(("save-not-found", false)),
+                false,
+            ),
+            (
+                DownloadResultCode::MaxFileNotFound,
+                Some(("save-not-found", true)),
+                true,
+            ),
+            (DownloadResultCode::TimeOut, None, true),
+        ];
+
+        for (index, (code, option, expected_save)) in cases.into_iter().enumerate() {
+            let snapshot = option
+                .map(|(key, value)| {
+                    std::collections::HashMap::from([(
+                        key.to_string(),
+                        serde_json::Value::Bool(value),
+                    )])
+                })
+                .unwrap_or_default();
+            let mut result = DownloadResult::new(
+                GroupId::new(10 + index as u64),
+                DownloadStatus::Complete,
+                code,
+            );
+            result.set_option_snapshot(Some(snapshot));
+            result.fill_from_group(&group);
+
+            assert_eq!(
+                result.bt_metadata_data().is_some(),
+                expected_save,
+                "metadata retention for {code:?} with option {option:?}"
+            );
+            assert_eq!(
+                should_save_download_result(&result),
+                expected_save,
+                "session-save policy for {code:?} with option {option:?}"
+            );
+            let serialized =
+                serialize_groups_with_results(&[], &[result]).expect("session results serialize");
+            assert_eq!(
+                serialized.contains("aria2-rust-bt-metadata-data="),
+                expected_save,
+                "serialized metadata for {code:?} with option {option:?}"
+            );
+            if code == DownloadResultCode::Finished && expected_save {
+                use base64::Engine as _;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(
+                        serialized
+                            .split("aria2-rust-bt-metadata-data=")
+                            .nth(1)
+                            .expect("serialized torrent metadata option")
+                            .split_whitespace()
+                            .next()
+                            .expect("base64 metadata value"),
+                    )
+                    .expect("serialized metadata is base64");
+                let decoded: Vec<u8> =
+                    serde_json::from_slice(&decoded).expect("metadata descriptor is JSON bytes");
+                assert_eq!(decoded, metadata);
+            }
+        }
     }
 
     #[test]

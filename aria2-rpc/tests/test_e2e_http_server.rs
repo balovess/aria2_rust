@@ -178,6 +178,15 @@ async fn e2e_jsonp_get_query_compatibility() {
     assert!(body.starts_with("aria2Callback({"));
     assert!(body.ends_with("})"));
     assert!(body.contains("\"id\":\"jsonp-1\""));
+    let payload = body
+        .strip_prefix("aria2Callback(")
+        .and_then(|body| body.strip_suffix(")"))
+        .expect("JSONP response must have one callback wrapper");
+    let payload: Value = serde_json::from_str(payload).expect("JSONP payload must be JSON");
+    assert_eq!(payload["jsonrpc"], "2.0");
+    assert_eq!(payload["id"], "jsonp-1");
+    assert!(payload["result"]["version"].is_string());
+    assert!(payload.get("error").is_none());
 }
 
 #[tokio::test]
@@ -613,6 +622,7 @@ async fn e2e_auth_wrong_token() {
     .await;
     assert_eq!(status, 400);
     assert_error_code(&resp, 1);
+    assert_eq!(resp["error"]["message"], "Unauthorized");
 }
 
 #[tokio::test]
@@ -623,6 +633,7 @@ async fn e2e_auth_no_token() {
     let (status, resp) = rpc_call_with_status(&client, &base, "aria2.getVersion", json!([])).await;
     assert_eq!(status, 400);
     assert_error_code(&resp, 1);
+    assert_eq!(resp["error"]["message"], "Unauthorized");
 }
 
 #[tokio::test]
@@ -985,6 +996,8 @@ async fn e2e_ws_jsonrpc_get_version() {
         "expected 'result' field in WS response, got: {resp}"
     );
     assert_eq!(resp["id"], 1, "response id should match request id");
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert!(resp.get("error").is_none());
     assert!(
         resp["result"]["version"].is_string(),
         "version should be a string"
@@ -1028,10 +1041,80 @@ async fn e2e_ws_binary_jsonrpc_request_matches_original_non_control_frame_behavi
     .expect("response should be valid JSON");
 
     assert_eq!(response["id"], "binary-frame");
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert!(response.get("error").is_none());
     assert!(
         response["result"]["version"].is_string(),
         "expected getVersion response, got: {response}"
     );
+}
+
+/// The configured WebSocket size limit must produce a JSON-RPC parse error
+/// while keeping the connection usable for the next request.
+#[tokio::test]
+async fn e2e_ws_oversized_request_returns_parse_error_and_keeps_connection() {
+    let config = ServerConfig::default().with_max_request_size(1024);
+    let (base, _guard) = start_test_server_with_config(None, 5, config).await;
+    let ws_url = base.replace("http://", "ws://");
+    let (ws, _) = connect_async(format!("{ws_url}/jsonrpc"))
+        .await
+        .expect("WS upgrade failed");
+    let (mut tx, mut rx) = ws.split();
+
+    use tokio_tungstenite::tungstenite::Message;
+    let oversized = json!({
+        "jsonrpc": "2.0",
+        "method": "aria2.getVersion",
+        "params": [],
+        "id": "too-large",
+        "padding": "x".repeat(2048),
+    })
+    .to_string();
+    assert!(oversized.len() > 1024);
+    tx.send(Message::Text(oversized))
+        .await
+        .expect("send oversized request failed");
+
+    let message = tokio::time::timeout(Duration::from_secs(5), rx.next())
+        .await
+        .expect("timeout waiting for oversized-request response")
+        .expect("WS stream ended")
+        .expect("WS message error");
+    let parse_error: Value = serde_json::from_str(
+        &message
+            .into_text()
+            .expect("parse error must be a text frame"),
+    )
+    .expect("parse error must be valid JSON");
+    assert_eq!(parse_error["jsonrpc"], "2.0");
+    assert_eq!(parse_error["id"], Value::Null);
+    assert_eq!(parse_error["error"]["code"], -32700);
+    assert_eq!(parse_error["error"]["message"], "Parse error.");
+
+    tx.send(Message::Text(
+        json!({
+            "jsonrpc": "2.0",
+            "method": "aria2.getVersion",
+            "params": [],
+            "id": "after-error",
+        })
+        .to_string(),
+    ))
+    .await
+    .expect("connection must remain writable after parse error");
+    let message = tokio::time::timeout(Duration::from_secs(5), rx.next())
+        .await
+        .expect("timeout waiting for recovery response")
+        .expect("WS stream ended after parse error")
+        .expect("WS recovery response failed");
+    let response: Value = serde_json::from_str(
+        &message
+            .into_text()
+            .expect("recovery response must be a text frame"),
+    )
+    .expect("recovery response must be valid JSON");
+    assert_eq!(response["id"], "after-error");
+    assert!(response["result"]["version"].is_string());
 }
 
 /// Verify that a WebSocket client can send a batch JSON-RPC request and

@@ -9,7 +9,7 @@ use crate::error::{Aria2Error, Result};
 ///
 /// Writes the entire `buf` at `offset` without modifying the file cursor,
 /// preserving `pwrite(2)` semantics while guaranteeing a complete write.
-pub(super) fn write_all_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> Result<()> {
+pub(crate) fn write_all_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> Result<()> {
     while !buf.is_empty() {
         let n = positioned_write(file, buf, offset)?;
         if n == 0 {
@@ -26,7 +26,7 @@ pub(super) fn write_all_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64
 /// Positioned read that loops to fill as much of `buf` as possible.
 ///
 /// Returns the number of bytes read (may be less than `buf.len()` at EOF).
-pub(super) fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> Result<usize> {
+pub(crate) fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> Result<usize> {
     let mut filled = 0usize;
     let mut current_offset = offset;
     while filled < buf.len() {

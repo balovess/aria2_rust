@@ -1,43 +1,25 @@
-//! Filename determination from Content-Disposition header or URL path.
+//! Resolve a safe local filename from an HTTP response and its effective URL.
 //!
-//! Priority order (matching C++ `HttpResponse::determineFilename()`):
-//! 1. `Content-Disposition: attachment; filename="..."` or `filename*=...`
-//! 2. URL path basename (percent-decoded, safe-path-ified)
-//! 3. "index.html" if URL path ends with `/`
-//!
-//! The Content-Disposition parsing delegates to the full RFC 6266 state-machine
-//! parser in `content_disposition.rs`, which mirrors the C++ implementation in
-//! `util.cc::parse_content_disposition()`. This ensures correct handling of:
-//! - `filename*` (RFC 5987 extended form with charset/language)
-//! - `filename` (quoted or unquoted, with backslash escaping)
-//! - Duplicate parameter rejection
-//! - `defaultUTF8` mode (validating quoted-string bytes as UTF-8 or ISO-8859-1)
-//! - Directory-traversal and path-separator rejection
+//! The module owns one small interface for the policy: an unambiguous
+//! Content-Disposition value wins, then the final URL path segment, then the
+//! aria2 compatibility fallback. HTTP parsing and local filename
+//! normalization remain separate so the safety policy is applied uniformly.
 
 use tracing::debug;
 
-use crate::http::content_disposition::parse_content_disposition;
+use crate::http::content_disposition::parse_content_disposition_with_default_utf8;
 use crate::http::header_processor::HttpResponseHead;
-use crate::util::uri;
 
-/// Default filename when the URI path ends with `/`.
-/// Matches C++ `Request::DEFAULT_FILE`.
-pub(crate) const DEFAULT_FILE: &str = "index.html";
-
-/// Determine the output filename from Content-Disposition header or URL path.
+/// Determine the output filename from response metadata or the effective URL.
 ///
-/// Priority order (matching C++ `HttpResponse::determineFilename()`):
-/// 1. `Content-Disposition: attachment; filename="..."` or `filename*=...`
-///    — Filenames containing `/` or `\` are rejected per C++
-///    `getContentDispositionFilename()` which checks
-///    `res.find_first_of("/\\\\") == std::string::npos`.
-/// 2. URL path basename (percent-decoded, safe-path-ified)
-/// 3. "index.html" if URL path ends with `/`
+/// A caller that already has an explicit output path must bypass this
+/// function. The returned value is always a safe basename.
 ///
 /// # Arguments
 ///
 /// * `response_head` - Parsed HTTP response headers.
-/// * `request_url` - The URL of the original request.
+/// * `request_url` - The URL associated with this response. After a redirect,
+///   callers should pass the final response URL.
 /// * `content_disposition_default_utf8` - Whether to treat Content-Disposition
 ///   filename as UTF-8 by default (maps to C++ `PREF_CONTENT_DISPOSITION_DEFAULT_UTF8`).
 ///
@@ -49,101 +31,87 @@ pub fn determine_filename(
     request_url: &str,
     content_disposition_default_utf8: bool,
 ) -> String {
-    // Try Content-Disposition header first
-    if let Some(cd) = response_head.header("content-disposition")
-        && let Some(filename) =
-            parse_content_disposition_filename(cd, content_disposition_default_utf8)
+    if let Some(filename) =
+        content_disposition_filename(response_head, content_disposition_default_utf8)
     {
         debug!(
             filename = %filename,
             source = "Content-Disposition",
             "Filename determined"
         );
-        // C++ getContentDispositionFilename does NOT apply createSafePath
-        // to Content-Disposition filenames — they are rejected outright
-        // if they contain path separators. Since the RFC 6266 parser's
-        // is_dir_traversal check already handles most cases, and we
-        // additionally reject filenames with '/' or '\' below, the
-        // filename returned here is safe to use directly.
         return filename;
     }
 
-    // Fall back to URL path
-    let url_filename = extract_filename_from_url(request_url);
-    debug!(filename = %url_filename, source = "URL", "Filename determined");
-    url_filename
+    let filename = crate::validation::uri::sanitize_filename_from_uri(request_url);
+    debug!(filename = %filename, source = "URL", "Filename determined");
+    filename
 }
 
-/// Extract filename from a URL's path component.
+/// Determine a filename directly from a reqwest response.
 ///
-/// Percent-decodes the path, takes the basename, and applies safe-path rules.
-/// Returns "index.html" if the path ends with `/` or is empty.
+/// This is the reqwest response entry point used by the download engine.
+/// Keeping the conversion here prevents the reqwest path from growing a
+/// second Content-Disposition parser or a second URL sanitization policy.
+pub(crate) fn determine_filename_from_response(
+    response: &reqwest::Response,
+    content_disposition_default_utf8: bool,
+) -> String {
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().ok()?.to_owned(),
+            ))
+        })
+        .collect();
+    let head = HttpResponseHead::new(
+        format!("{:?}", response.version()),
+        response.status().as_u16(),
+        response
+            .status()
+            .canonical_reason()
+            .unwrap_or_default()
+            .to_owned(),
+        headers,
+    );
+    determine_filename(
+        &head,
+        response.url().as_str(),
+        content_disposition_default_utf8,
+    )
+}
+
+/// Return the only usable Content-Disposition value.
 ///
-/// Matches C++ `HttpRequest::getFile()` + `util::percentDecode()` +
-/// `util::createSafePath()` flow.
-pub(crate) fn extract_filename_from_url(url: &str) -> String {
-    // Parse the URL to get the path
-    let path = match url::Url::parse(url) {
-        Ok(parsed) => parsed.path().to_string(),
-        Err(_) => {
-            // Fallback: try to extract path manually
-            match url.find("://") {
-                Some(scheme_end) => {
-                    let after_scheme = &url[scheme_end + 3..];
-                    match after_scheme.find('/') {
-                        Some(pos) => after_scheme[pos..].to_string(),
-                        None => "/".to_string(),
-                    }
-                }
-                None => url.to_string(),
-            }
+/// Multiple values are ambiguous and are ignored as a group. This makes the
+/// result independent of header ordering and intermediary behaviour.
+fn content_disposition_filename(
+    response_head: &HttpResponseHead,
+    default_utf8: bool,
+) -> Option<String> {
+    let values = response_head.header_all("content-disposition");
+    let value = match values.as_slice() {
+        [] => return None,
+        [value] => value,
+        _ => {
+            debug!(
+                count = values.len(),
+                "Ignoring duplicate Content-Disposition headers"
+            );
+            return None;
         }
     };
 
-    // Percent-decode the path using the proper byte-level decoder.
-    // Unlike the old `percent_decode_str` which used `byte as char`
-    // (breaking multi-byte UTF-8), `uri::percent_decode` collects
-    // raw bytes and validates as UTF-8, matching C++ `percentDecode()`.
-    let decoded = uri::percent_decode(&path);
-
-    // Extract basename
-    let basename = match decoded.rfind('/') {
-        Some(pos) if pos + 1 < decoded.len() => &decoded[pos + 1..],
-        _ => return create_safe_path(DEFAULT_FILE),
-    };
-
-    if basename.is_empty() {
-        create_safe_path(DEFAULT_FILE)
-    } else {
-        create_safe_path(basename)
-    }
-}
-
-/// Create a safe path by replacing directory separators and other unsafe chars.
-///
-/// Matches C++ `util::createSafePath()`. Applied only to URL-derived filenames;
-/// Content-Disposition filenames are rejected rather than sanitized if they
-/// contain path separators.
-pub(crate) fn create_safe_path(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
-    for ch in name.chars() {
-        match ch {
-            '/' | '\\' => result.push('_'),
-            '\0' => {} // Strip null bytes
-            _ => result.push(ch),
-        }
-    }
-    if result.is_empty() {
-        DEFAULT_FILE.to_string()
-    } else {
-        result
-    }
+    let candidate = parse_content_disposition_filename(value, default_utf8)?;
+    crate::validation::uri::sanitize_filename_candidate(&candidate)
 }
 
 /// Parse filename from Content-Disposition header value using the full
 /// RFC 6266 state-machine parser.
 ///
-/// This delegates to `content_disposition::parse_content_disposition()` which
+/// This delegates to `content_disposition::parse_content_disposition_with_default_utf8()` which
 /// handles:
 /// - `filename*` (RFC 5987 extended form: `charset'language'percent-encoded-value`)
 /// - `filename` (quoted with backslash escaping, or unquoted token)
@@ -157,8 +125,8 @@ pub(crate) fn create_safe_path(name: &str) -> String {
 /// `res.find_first_of("/\\") == std::string::npos`.
 ///
 /// Returns `None` if no valid filename is found or the filename is rejected.
-fn parse_content_disposition_filename(cd_value: &str, _default_utf8: bool) -> Option<String> {
-    let result = parse_content_disposition(cd_value);
+fn parse_content_disposition_filename(cd_value: &str, default_utf8: bool) -> Option<String> {
+    let result = parse_content_disposition_with_default_utf8(cd_value, default_utf8);
 
     // If parsing failed (disposition_type is empty), no valid filename
     if result.disposition_type.is_empty() {
@@ -195,6 +163,7 @@ fn parse_content_disposition_filename(cd_value: &str, _default_utf8: bool) -> Op
 mod tests {
     use super::*;
     use crate::http::header_processor::HttpHeaderProcessor;
+    use crate::validation::uri::sanitize_filename_candidate as sanitize_filename;
 
     /// Helper: parse raw HTTP response bytes into HttpResponseHead.
     fn parse_head(raw: &[u8]) -> HttpResponseHead {
@@ -236,6 +205,24 @@ mod tests {
             false,
         );
         assert_eq!(filename, "\u{65e5}\u{672c}\u{8a9e}.txt");
+    }
+
+    #[test]
+    fn test_filename_from_url_decodes_only_after_extracting_segment() {
+        let head = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+        let filename = determine_filename(
+            &head,
+            "https://example.com/archive/dir%2Freport.txt?token=ignored#fragment",
+            false,
+        );
+        assert_eq!(filename, "report.txt");
+    }
+
+    #[test]
+    fn test_filename_from_url_preserves_invalid_utf8_as_replacement() {
+        let head = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+        let filename = determine_filename(&head, "https://example.com/%FF.bin", false);
+        assert_eq!(filename, "\u{fffd}.bin");
     }
 
     // ── Content-Disposition filename tests ──────────────────────────────
@@ -343,14 +330,72 @@ mod tests {
         assert_eq!(filename, "original.txt");
     }
 
-    // ── create_safe_path tests ──────────────────────────────────────────
+    // ── filename normalization tests ────────────────────────────────────
 
     #[test]
-    fn test_create_safe_path() {
-        assert_eq!(create_safe_path("normal.txt"), "normal.txt");
-        assert_eq!(create_safe_path("path/to/file.txt"), "path_to_file.txt");
-        assert_eq!(create_safe_path("win\\path"), "win_path");
-        assert_eq!(create_safe_path("null\0byte"), "nullbyte");
+    fn test_sanitize_filename() {
+        assert_eq!(
+            sanitize_filename("normal.txt"),
+            Some("normal.txt".to_string())
+        );
+        assert_eq!(
+            sanitize_filename("path/to/file.txt"),
+            Some("file.txt".to_string())
+        );
+        assert_eq!(sanitize_filename("win\\path"), Some("path".to_string()));
+        assert_eq!(
+            sanitize_filename("null\0byte"),
+            Some("nullbyte".to_string())
+        );
+        assert_eq!(sanitize_filename("CON.txt"), Some("_CON.txt".to_string()));
+        assert_eq!(sanitize_filename("CON "), Some("_CON".to_string()));
+        assert_eq!(sanitize_filename("COM1."), Some("_COM1".to_string()));
+        assert_eq!(sanitize_filename(".."), None);
+    }
+
+    #[test]
+    fn test_sanitize_filename_handles_reserved_names_and_utf8_length() {
+        for (input, expected) in [
+            ("PRN.txt", "_PRN.txt"),
+            ("AUX", "_AUX"),
+            ("NUL.log", "_NUL.log"),
+            ("LPT9.csv", "_LPT9.csv"),
+            ("COM0.txt", "COM0.txt"),
+        ] {
+            assert_eq!(sanitize_filename(input), Some(expected.to_owned()));
+        }
+
+        let filename = sanitize_filename(&"界".repeat(100)).unwrap();
+        assert_eq!(filename, "界".repeat(85));
+        assert_eq!(filename.len(), 255);
+    }
+
+    #[test]
+    fn test_content_disposition_default_utf8_is_honored() {
+        let head = parse_head(
+            "HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=\"café.txt\"\r\n\r\n"
+                .as_bytes(),
+        );
+
+        assert_eq!(
+            determine_filename(&head, "https://example.com/fallback.txt", true),
+            "café.txt"
+        );
+        assert_eq!(
+            determine_filename(&head, "https://example.com/fallback.txt", false),
+            "cafÃ©.txt"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_content_disposition_headers_fall_back_to_url() {
+        let head = parse_head(
+            b"HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=first.txt\r\nContent-Disposition: attachment; filename=second.txt\r\n\r\n",
+        );
+        assert_eq!(
+            determine_filename(&head, "https://example.com/fallback.txt", false),
+            "fallback.txt"
+        );
     }
 
     // ── No Content-Disposition falls back to URL ────────────────────────

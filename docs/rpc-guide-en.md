@@ -61,6 +61,12 @@ Invoke-RestMethod -Uri http://127.0.0.1:6800/jsonrpc -Method Post -ContentType '
 {"jsonrpc":"2.0","id":2,"method":"aria2.tellStatus","params":["0123456789abcdef",["gid","status","totalLength","completedLength","downloadSpeed","dir"]]}
 ```
 
+GID parameters also accept a unique high-order hexadecimal prefix, matching
+aria2's `GroupId::expandUnique` behavior. Ambiguous prefixes are rejected.
+GIDs use hexadecimal digits only (no `0x` prefix). A malformed, missing, or
+ambiguous GID is reported as aria2's execution error (code `1`), with the
+diagnostic distinguishing `Invalid GID`, `is not found`, and `is not unique`.
+
 ### Batch requests
 
 HTTP JSON-RPC accepts an array of requests. Read-only status calls can also be grouped with `system.multicall`:
@@ -114,9 +120,12 @@ The compatibility baseline is the official C++ aria2 1.37.0 JSON-RPC/XML-RPC con
 | Files/URIs/servers | `getFiles`, `getUris`, `getServers` | Provided | Compatibility baseline |
 | BT task status | `infoHash`, `numSeeders`, `seeder`, `bitfield`, `pieceLength`, `numPieces`, `connections`, etc. | Provided | Compatibility baseline |
 | BT peers | Standard `getPeers` fields and string wire types | Provided; discovery source is internal only | Compatibility baseline |
+| BT peer connection counts | No dedicated upstream RPC | `getPeerStats` | Extension |
+| BT peer details | Keep upstream `getPeers` unchanged | `getPeerDetails` | Extension |
 | Global statistics | `getGlobalStat` speeds and task counts | Provided | Compatibility baseline |
 | Version/options/session/system | Corresponding upstream methods | Provided | Compatibility baseline |
 | DHT internals | No dedicated upstream RPC | `getDhtStatus` | Extension |
+| Manual DHT maintenance | No dedicated upstream RPC | `saveDhtState`, `evictDhtNodes` | Extension |
 | Tracker runtime snapshot | Upstream has no `getTrackers` | `getTrackers` | Extension |
 | Browser session context | Not present upstream | `updateBrowserContext`, `clearBrowserContext` | Extension |
 
@@ -135,6 +144,27 @@ Upstream method responses must not contain extension fields. Runtime data such a
 | `aria2.changePosition` | `gid`, `pos`, `how` (`POS_SET`/`POS_CUR`/`POS_END`) | New position |
 | `aria2.changeUri` | `gid`, `fileIndex`, `delUris`, `addUris` | `OK` |
 
+`changeUri` uses a one-based `fileIndex` and applies to the addressed file
+entry even when that file is currently unselected. It returns the number of
+deleted and added URIs as string-valued numbers.
+
+The `uris` parameter of `addTorrent` supplies additional WebSeed endpoints.
+They are merged, sorted, and deduplicated with the torrent's `url-list`; they
+are not Tracker URLs. Single- and multi-file torrents expand endpoints against
+their file layout. Each piece request reads only the overlapping file ranges,
+and HTTP clients are reused by origin. The BT session schedules up to four
+WebSeed piece requests concurrently with peer downloads, using exclusive piece
+reservations. Network workers only fetch data; the BT session remains the sole
+owner of hash verification, writing, and completion accounting. A piece is
+scheduled this way only when WebSeeds cover all its file-backed ranges;
+partially covered pieces still use peers and the failure fallback. This is a
+coarser scheduling unit than upstream's per-file segments sharing PieceStorage.
+For an active task, `changeUri` updates the affected WebSeed queue, resets the
+scheduler scan, and wakes an idle scheduler; requests already in flight are
+not forcibly canceled. Failed pieces are retried up to the task's `max-tries`
+limit, observing `retry-wait`; peers can still fetch those pieces concurrently.
+A URI change triggers a new scan and resets WebSeed retry counts.
+
 ### Status and files
 
 | Method | Parameters | Result |
@@ -146,8 +176,12 @@ Upstream method responses must not contain extension fields. Runtime data such a
 | `aria2.getFiles` | `gid` | File object array |
 | `aria2.getServers` | `gid` | Server object array; normally active tasks only |
 | `aria2.getPeers` | `gid` | Peer object array; requires BitTorrent |
-| `aria2.getTrackers` | `gid` | Live tracker runtime array; requires BitTorrent |
+| `aria2.getPeerStats` | `gid` | Current connected peer/seeder/leecher counts; requires BitTorrent |
+| `aria2.getPeerDetails` | `gid` | Detailed current peer snapshot; requires BitTorrent |
+| `aria2.getTrackers` | `gid` | Per-URL tracker runtime snapshot; requires BitTorrent |
 | `aria2.getDhtStatus` | none | Aggregate DHT status for active BT/magnet tasks; requires BitTorrent |
+| `aria2.saveDhtState` | none | Immediately save routing tables and BEP 44 items for active DHT engines; requires BitTorrent |
+| `aria2.evictDhtNodes` | none | Immediately evict bad nodes and try cached replacements; returns `[evicted, replacement_attempts]`; requires BitTorrent |
 | `aria2.getGlobalStat` | none | Global speeds and task counts |
 
 `aria2.getFiles(gid)` is the standard query for file paths, total lengths,
@@ -160,6 +194,11 @@ standalone URL-inspection method:
 - A magnet link needs metadata exchange before its file names and lengths are available.
 - `dry-run` only performs HTTP/FTP availability and length probing; it is not a general file-list API.
 
+`aria2.getUris(gid)` follows the original RPC implementation and returns the
+URI entries associated with the first `FileEntry` only. For a multi-file task,
+use `getFiles` to inspect each file's URI list; `getUris` does not flatten URI
+entries from all files.
+
 The Python and Node.js bindings expose this as `client.get_files(gid)` and
 `client.getFiles(gid)` respectively.
 
@@ -169,7 +208,10 @@ BitTorrent status details: `bittorrent` is a nested torrent metadata object. It
 contains tiered `announceList` and, when present, `comment`, `creationDate`,
 `mode`, and `info.name`. Piece progress is exposed through `bitfield`,
 `pieceLength`, and `numPieces`; BT runtime statistics also include `seeder`,
-`numSeeders`, `verifiedLength`, and `verifyIntegrityPending`.
+`numSeeders`, `verifiedLength`, and `verifyIntegrityPending`. `numSeeders` is
+the number of currently connected seeder peers; it is not the Tracker swarm's
+`complete` count. `verifiedLength` and `verifyIntegrityPending` describe
+integrity-check progress and queued verification state, respectively.
 `completedPieces` and `missingPieces` are internal runtime statistics and are
 not part of the upstream `tellStatus` wire response. Lengths, speeds, and
 counters that belong to the aria2-compatible status contract are serialized as
@@ -178,26 +220,104 @@ strings on the wire.
 `aria2.getPeers` reports currently active connections, not historical peers. In
 addition to the standard `peerId`, `ip`, `port`, `amChoking`, `peerChoking`,
 `downloadSpeed`, and `seeder` fields, `bitfield` is the peer's raw piece
-bitfield encoded as lowercase hexadecimal and is omitted when unknown. The
-first discovery source (`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
+bitfield encoded as lowercase hexadecimal. The field is always present; an
+empty string means the peer bitfield is not known. The first discovery source
+(`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
 `unknown`) is retained internally and is not emitted in the upstream response.
 Port, speed, boolean, and seeder values follow aria2's string wire format.
 
-`aria2.getTrackers` returns a live tracker snapshot for the specified GID. Each
+`aria2.getPeerStats(gid)` returns `{ "peerCount": "...", "seeders": "...", "leechers": "...", "unknown": "..." }`.
+Counts cover currently active connections; unknown seeder state is counted separately
+as `unknown`, not as a leecher. Counts use aria2's string wire format. This is a Rust extension, not an
+upstream aria2 RPC. It differs from tracker-reported whole-swarm counts in `getTrackers`
+and does not report DHT nodes.
+
+`aria2.getPeerDetails(gid)` is a separate extension and does not change upstream
+`getPeers` wire data. It returns the same active-peer snapshot with `source`,
+`progressPercent`, cumulative `uploadedBytes`/`downloadedBytes`, current and lifetime
+average speeds, local-perspective structured `flags`, and directional request counts.
+Byte counters are decimal strings; average speeds are lifetime bytes divided by connection
+age. Values without an authoritative source are omitted: `client` is absent until a BEP 10
+client name is received. `outstandingRequestsToPeer` counts requests sent to a peer whose
+responses are still pending; `outstandingRequestsFromPeer` counts peer upload blocks still
+queued locally. Neither is cumulative. `progressPercent` is
+calculated from the peer's advertised bitfield and torrent piece count, omitted if the
+bitfield is unknown; seeders report 100%.
+
+`aria2.getTrackers` returns a point-in-time runtime snapshot for the specified
+GID. It is not a claim that every tracker is currently live or online. Each
 entry contains `uri`, 1-based `tier`, `current`, `lastAttempt`, `announceReady`,
 `allFailed`, `inFlight`, `interval`, `minInterval`, `seeders`, `leechers`,
-`trackerId`, and optional `secondsSinceLastSuccess`. The snapshot is published
+`trackerId`, optional `lastFailureKind`, and optional `secondsSinceLastSuccess`.
+Failure kinds are `network`, `timeout`, `remoteTemporary`, `trackerRejected`,
+and `malformedResponse`; a successful announce clears that URL's most recent
+failure category. The snapshot is published
 by the executing BitTorrent command and is removed when that command exits.
 `current` identifies the next tracker selected by the announce state machine;
 `lastAttempt` identifies the most recently attempted tracker. In this extension
 interface `interval` is serialized as a string; other tracker numbers and
-boolean state use native JSON types.
+boolean state use native JSON types. Each URL also includes `status`,
+`snapshotAtUnixMillis`, optional `lastSuccessAtUnixMillis`, and optional
+`downloaded`. Timestamps are decimal Unix milliseconds; `downloaded` is the
+Tracker-reported completed torrent count, not bytes, and is present only when supplied
+by an HTTP bencoded response. `seeders` and `leechers` are omitted when the tracker did
+not provide the corresponding valid `complete` or `incomplete` value; an explicit zero is
+preserved as zero. The scheduling flags describe
+announce state, not a universal realtime/online status for all URLs.
+`status` is a per-URL observation: `announcing`, `succeeded`, `failed`, `ready`,
+`idle`, or `unknown`. `unknown` means the URL has not produced an announce
+result and has no attempt-specific runtime record; it is not a failure signal.
 
 `aria2.getDhtStatus` is process-wide. It aggregates the DHT engines registered
 by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
-`running`, or `shuttingDown`) plus `totalNodes`, `goodNodes`, and
-`pendingTransactions`. The three counters use aria2's string wire format. With
-no active DHT engine, the result is `stopped` with zero counters.
+`running`, or `shuttingDown`) plus `totalNodes`, `goodNodes`,
+`pendingTransactions`, `questionableNodes`, `badNodes`, `cachedNodes`, and
+`bucketCount`. It also reports `persistenceEnabled`,
+`persistenceMaxAgeSecs`, `cleanupIntervalSecs`, and `saveIntervalSecs` for
+the active DHT configuration. Numeric fields use aria2's string wire format;
+`persistenceEnabled` is a native JSON boolean. With no active DHT engine, the
+result is `stopped` with zero counters and persistence disabled. `totalNodes`/
+`goodNodes` are DHT routing-table node counts; they are not BitTorrent seeder
+counts.
+
+`aria2.saveDhtState` and `aria2.evictDhtNodes` take no parameters. The save
+operation reuses the automatic save chain's serialization lock, routing-table
+merge, and BEP 44 persistence logic. The eviction operation reuses the
+periodic cleanup path's bad-node eviction and cached replacement logic. With
+no active DHT engine they return an execution error. They affect only DHT
+engines registered in the current process and do not change `dht-*` options;
+automatic maintenance continues on its configured schedule.
+
+Public tracker catalog settings are global options and can be inspected or
+changed through the normal option methods. The standard defaults are:
+
+```json
+{
+  "enable-public-trackers": "true",
+  "bt-tracker-source": "https://cf.trackerslist.com/best.txt",
+  "bt-tracker-update-interval": "86400"
+}
+```
+
+The catalog is refreshed periodically and newly available URLs are appended
+after torrent/user tracker tiers with duplicates removed. See the
+[configuration guide](configuration-guide-en.md#public-tracker-catalog) for
+the exclusion and multi-source rules.
+
+The response extension `announce-list` is also parsed and appended as new tiers.
+Duplicate URLs are discarded, and the torrent, user, and public-catalog tiers are
+never replaced. This makes torrent metadata, user configuration, the public
+catalog, and tracker-discovered URLs one observable discovery chain.
+
+`getTrackers` is the tracker health surface: `allFailed`, `announceReady`,
+`lastAttempt`, `lastFailureKind`, `secondsSinceLastSuccess`, and `inFlight` expose
+per-task health and current request concurrency. Startup can announce to up to
+three public trackers concurrently in addition to the torrent's own tracker
+schedule; catalog URLs outside the active slots remain idle. Enabling this
+extension sends the info hash, peer ID, listening port, and transfer counters
+to those public trackers. Public-catalog source fetching is internally
+bounded to four concurrent sources, preventing an unbounded refresh fan-out;
+this guard does not change the original tracker RPC response.
 
 ### Options, session, and process
 
@@ -211,8 +331,11 @@ no active DHT engine, the result is `stopped` with zero counters.
 | `aria2.getSessionInfo` | none | `sessionId` |
 | `aria2.saveSession` | none | `OK` |
 | `aria2.removeDownloadResult` | `gid` | `OK` |
+| `aria2.removeDownloadFiles` | `gid` | `OK` |
 | `aria2.purgeDownloadResult` | none | `OK` |
 | `aria2.shutdown` / `forceShutdown` | none | `OK` |
+
+`aria2.removeDownloadFiles(gid)` removes the selected output files for that stopped task and recursively for its `followedBy` children. Any task that has not reached the stopped-results list is rejected, including paused tasks. The stopped result is retained; missing output files are treated as already removed. Directories and `.aria2` control files are left in place. If a descendant's stopped result has already been purged, cleanup returns an error because its output paths are no longer known.
 
 ### Browser session context
 
@@ -233,7 +356,7 @@ The same request can be sent through `POST /jsonrpc` or the existing `ws://host:
 
 `system.listMethods` returns methods supported by the current build. `system.listNotifications` returns event names. `system.multicall` accepts an array of `{"methodName":"...","params":[...]}` objects.
 
-The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, `aria2.getTrackers`, `aria2.getDhtStatus`, and `aria2.addMetalink` as applicable; an all-features build exposes 40 methods.
+The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.removeDownloadFiles`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, `aria2.getPeerStats`, `aria2.getPeerDetails`, `aria2.getTrackers`, `aria2.getDhtStatus`, `aria2.saveDhtState`, `aria2.evictDhtNodes`, and `aria2.addMetalink` as applicable; an all-features build exposes 45 methods.
 
 ## 7. Errors and limits
 

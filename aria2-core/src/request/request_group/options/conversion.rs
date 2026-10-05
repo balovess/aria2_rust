@@ -39,27 +39,12 @@ impl DownloadOptions {
         Self::from_option_strings(&string_options)
     }
 
-    /// Build per-download options from an RPC option map.
-    ///
-    /// aria2's JSON-RPC and XML-RPC interfaces use strings for option values;
-    /// arrays are accepted for cumulative options such as `header` and are
-    /// joined with newlines before entering the shared string parser. Numeric
-    /// and boolean JSON values are accepted as a harmless extension for
-    /// existing Rust clients, then canonicalized to the same string form.
-    pub fn from_rpc_options(
-        options: &std::collections::HashMap<String, serde_json::Value>,
-    ) -> Self {
-        Self::try_from_rpc_options(options).unwrap_or_default()
-    }
-
     /// Fallibly build per-download options from an RPC option map.
     ///
     /// The registry is the validation seam for task creation. Unknown option
     /// names remain ignored, matching aria2's RPC option gatherer, while
     /// known options must pass the same type, range, and enum checks as the
-    /// configuration path. The infallible [`Self::from_rpc_options`] helper is
-    /// retained for compatibility with older in-process callers; external
-    /// adapters must use this method so invalid values cannot become defaults.
+    /// configuration path.
     pub fn try_from_rpc_options(
         options: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<Self, String> {

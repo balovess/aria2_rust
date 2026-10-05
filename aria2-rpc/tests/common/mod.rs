@@ -553,6 +553,15 @@ impl RpcBackend for FakeBackend {
                 }
                 Ok(BackendResult::response(BackendResponse::Text("OK".into())))
             }
+            BackendRequest::RemoveDownloadFiles { gid } => {
+                let state = self.lock_state()?;
+                if !state.tasks.contains_key(&gid)
+                    && !state.stopped.iter().any(|task| task.gid == gid)
+                {
+                    return Err(Self::execution(format!("GID {gid} not found")));
+                }
+                Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+            }
             BackendRequest::GetGlobalOption => Ok(BackendResult::response(
                 BackendResponse::Options(self.lock_state()?.global_options.clone()),
             )),
@@ -630,6 +639,28 @@ impl RpcBackend for FakeBackend {
                 }
                 Ok(BackendResult::response(BackendResponse::Peers(Vec::new())))
             }
+            BackendRequest::GetPeerStats { gid } => {
+                let state = self.lock_state()?;
+                if !state.tasks.contains_key(&gid)
+                    && !state.stopped.iter().any(|task| task.gid == gid)
+                {
+                    return Err(Self::execution(format!("GID {gid} not found")));
+                }
+                Ok(BackendResult::response(BackendResponse::PeerStats(
+                    aria2_rpc::PeerStats::default(),
+                )))
+            }
+            BackendRequest::GetPeerDetails { gid } => {
+                let state = self.lock_state()?;
+                if !state.tasks.contains_key(&gid)
+                    && !state.stopped.iter().any(|task| task.gid == gid)
+                {
+                    return Err(Self::execution(format!("GID {gid} not found")));
+                }
+                Ok(BackendResult::response(BackendResponse::PeerDetails(
+                    Vec::new(),
+                )))
+            }
             BackendRequest::GetTrackers { gid } => {
                 let state = self.lock_state()?;
                 if !state.tasks.contains_key(&gid)
@@ -644,6 +675,12 @@ impl RpcBackend for FakeBackend {
             BackendRequest::GetDhtStatus => Ok(BackendResult::response(
                 BackendResponse::DhtStatus(aria2_rpc::DhtStatus::default()),
             )),
+            BackendRequest::SaveDhtState => {
+                Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+            }
+            BackendRequest::EvictDhtNodes => {
+                Ok(BackendResult::response(BackendResponse::Counts([0, 0])))
+            }
             BackendRequest::PauseAll | BackendRequest::ForcePauseAll => {
                 let mut state = self.lock_state()?;
                 let mut events = Vec::new();

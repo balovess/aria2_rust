@@ -141,7 +141,7 @@ pub struct FtpActiveDataListener {
 }
 
 impl FtpActiveDataListener {
-    pub(crate) fn new(listener: TcpListener, local_addr: std::net::SocketAddr) -> Self {
+    pub fn new(listener: TcpListener, local_addr: std::net::SocketAddr) -> Self {
         Self {
             listener,
             local_addr,
@@ -160,10 +160,15 @@ impl FtpActiveDataListener {
 
     /// Accept the server's active-mode data connection.
     pub async fn accept(self) -> Result<TcpStream, String> {
-        self.listener
-            .accept()
+        self.accept_with_peer()
             .await
             .map(|(stream, _)| stream)
             .map_err(|e| format!("Failed to accept FTP active data connection: {}", e))
+    }
+
+    /// Accept the connection while retaining the peer address for callers
+    /// that apply their own network policy or diagnostics.
+    pub async fn accept_with_peer(self) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+        self.listener.accept().await
     }
 }

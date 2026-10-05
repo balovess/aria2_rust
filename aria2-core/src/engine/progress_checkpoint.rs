@@ -34,9 +34,10 @@ impl ProgressCheckpoint {
     ) -> u64 {
         let has_compatible_checkpoint = matches!(
             ControlFile::load(&ControlFile::control_path_for(output_path)).await,
-            Ok(Some(control_file))
-                if control_file.total_length() == total_length
-                    && control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8)
+                Ok(Some(control_file))
+                    if control_file.total_length() == total_length
+                    && (control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8)
+                        || control_file.uses_native_layout())
         );
         if continue_download || has_compatible_checkpoint {
             existing_length
@@ -72,7 +73,8 @@ impl ProgressCheckpoint {
             match ControlFile::load(&path).await {
                 Ok(Some(control_file))
                     if control_file.total_length() == total_length
-                        && control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8) =>
+                        && (control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8)
+                            || control_file.uses_native_layout()) =>
                 {
                     Some(control_file)
                 }

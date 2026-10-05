@@ -61,6 +61,12 @@ Invoke-RestMethod -Uri http://127.0.0.1:6800/jsonrpc -Method Post -ContentType '
 {"jsonrpc":"2.0","id":2,"method":"aria2.tellStatus","params":["0123456789abcdef",["gid","status","totalLength","completedLength","downloadSpeed","dir"]]}
 ```
 
+所有 GID 参数也接受唯一的高位十六进制前缀，这与 aria2 原版的
+`GroupId::expandUnique` 行为一致；前缀有歧义时会拒绝请求。
+GID 只能使用十六进制字符，不接受 `0x` 前缀。格式错误、找不到或有歧义的
+GID 都按 aria2 的执行错误（错误码 `1`）返回，错误信息分别区分
+`Invalid GID`、`is not found` 和 `is not unique`。
+
 ### 批量请求
 
 HTTP JSON-RPC 接受请求数组。多个只读状态请求也可以使用 aria2 的 `system.multicall`：
@@ -117,9 +123,12 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | 文件/URI/服务器 | `getFiles`、`getUris`、`getServers` | 已提供 | 兼容基线 |
 | BT 任务状态 | `infoHash`、`numSeeders`、`seeder`、`bitfield`、`pieceLength`、`numPieces`、`connections` 等 | 已提供 | 兼容基线 |
 | BT Peer | `getPeers` 的标准字段及字符串 wire 类型 | 已提供；发现来源仅保留在内部 | 兼容基线 |
+| BT Peer 连接统计 | 原版没有专用 RPC | `getPeerStats` | 扩展 |
+| BT Peer 详细快照 | 原版 `getPeers` 保持不变 | `getPeerDetails` | 扩展 |
 | 全局统计 | `getGlobalStat` 的速度和任务计数 | 已提供 | 兼容基线 |
 | 版本/选项/会话/系统 | 原版对应方法 | 已提供 | 兼容基线 |
 | DHT 内部统计 | 原版没有专用 RPC | `getDhtStatus` | 扩展 |
+| DHT 手动维护 | 原版没有专用 RPC | `saveDhtState`、`evictDhtNodes` | 扩展 |
 | Tracker 运行快照 | 原版没有 `getTrackers` | `getTrackers` | 扩展 |
 | 浏览器会话上下文 | 原版没有 | `updateBrowserContext`、`clearBrowserContext` | 扩展 |
 
@@ -138,6 +147,21 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.changePosition` | `gid`, `pos`, `how` (`POS_SET`/`POS_CUR`/`POS_END`) | 新位置 |
 | `aria2.changeUri` | `gid`, `fileIndex`, `delUris`, `addUris` | `OK` |
 
+`changeUri` 的 `fileIndex` 从 1 开始，即使目标文件当前未选中，也会操作指定的
+文件条目。返回值中的删除数和新增数按字符串数字序列化。
+
+`addTorrent` 的 `uris` 参数是额外的 WebSeed 地址，会与 torrent 元数据中的
+`url-list` 合并、排序并去重，作为 BT WebSeed 源，不是 Tracker 地址。单文件与多文件
+torrent 均按文件布局展开地址；多文件请求只读取 piece 覆盖的文件范围，并按源站复用
+HTTP 客户端。BT 会话最多并发调度 4 个 WebSeed piece 请求，并通过独占 piece 预留与
+Peer 下载并行；网络任务只取数，piece 校验、写盘和完成记账由 BT 会话串行完成。只有
+所有文件范围都可由 WebSeed 覆盖的 piece 才进入该调度；部分覆盖的 piece 仍走 Peer
+下载及失败回退，因此与原版按文件分段、共享 PieceStorage 的调度粒度仍不同。
+运行中的 `changeUri` 会更新相应文件的 WebSeed 队列、重置调度扫描位置并唤醒空闲调度器；
+已经在途的请求不会被强制取消。当前 URI 队列的一轮请求失败后不会紧密循环重试；该 piece
+会按任务的 `max-tries` 限次重试，并遵循 `retry-wait`；Peer 仍可并行获取该 piece。URI
+变更会重新扫描并重置 WebSeed 重试计数。
+
 ### 状态与文件
 
 | 方法 | 参数 | 返回 |
@@ -149,8 +173,12 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.getFiles` | `gid` | 文件对象数组 |
 | `aria2.getServers` | `gid` | 服务器对象数组；通常仅 active 任务可用 |
 | `aria2.getPeers` | `gid` | peer 对象数组；需 BitTorrent |
-| `aria2.getTrackers` | `gid` | tracker 运行状态数组；需 BitTorrent |
+| `aria2.getPeerStats` | `gid` | 当前连接 peer/seeder/leecher 数；需 BitTorrent |
+| `aria2.getPeerDetails` | `gid` | 当前 peer 详细快照；需 BitTorrent |
+| `aria2.getTrackers` | `gid` | 按 URL 返回的 tracker 运行快照；需 BitTorrent |
 | `aria2.getDhtStatus` | 无 | 当前活动 BT/magnet 任务聚合的 DHT 状态；需 BitTorrent |
+| `aria2.saveDhtState` | 无 | 立即保存所有活动 DHT 引擎的路由表和 BEP 44 项；需 BitTorrent |
+| `aria2.evictDhtNodes` | 无 | 立即淘汰 bad 节点并尝试缓存替换；返回 `[淘汰数, 替换尝试数]`；需 BitTorrent |
 | `aria2.getGlobalStat` | 无 | 全局速度和任务计数 |
 
 `aria2.getFiles(gid)` 是查询文件名、路径、总大小和已完成大小的标准接口，
@@ -162,6 +190,10 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 - magnet 必须先完成 metadata exchange，文件名和大小才会出现；
 - `dry-run` 只执行 HTTP/FTP 可用性和长度探测，不应当被当作通用文件列表接口。
 
+`aria2.getUris(gid)` 遵循原版 RPC 实现，只返回第一个 `FileEntry` 关联的 URI
+条目。多文件任务应使用 `getFiles` 查看每个文件的 URI 列表；`getUris` 不会
+把所有文件的 URI 展平合并。
+
 Python 和 Node.js binding 分别对应 `client.get_files(gid)` 与
 `client.getFiles(gid)`。
 
@@ -171,29 +203,91 @@ BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对�
 `announceList`，以及已存在时的 `comment`、`creationDate`、`mode` 和
 `info.name`。piece 进度通过原版定义的 `bitfield`、`pieceLength` 和
 `numPieces` 返回；BT 运行统计还包括 `seeder`、`numSeeders`、
-`verifiedLength` 和 `verifyIntegrityPending`。`completedPieces` 和
+`verifiedLength` 和 `verifyIntegrityPending`。其中 `numSeeders` 是当前已连接、
+被识别为 seeder 的 Peer 数，不是 Tracker swarm 的 `complete` 做种数；
+`verifiedLength` 与 `verifyIntegrityPending` 分别表示完整性校验进度和排队
+状态。`completedPieces` 和
 `missingPieces` 是内部运行时统计，不属于原版 `tellStatus` wire 响应。
 长度、速度、计数等兼容字段按 aria2 wire 格式序列化为字符串。
 
 `aria2.getPeers` 返回当前仍处于活动状态的连接，不是历史 peer 记录。除标准
 字段 `peerId`、`ip`、`port`、`amChoking`、`peerChoking`、`downloadSpeed`、
-`uploadSpeed` 和 `seeder` 外，`bitfield` 是 peer 原始 piece 位图的十六进制字符串（未知时省略）。
-发现来源（`tracker`、`dht`、`pex`、`lpd`、`incoming` 或 `unknown`）仅作为内部运行时数据保存，不进入原版响应。端口、
+`uploadSpeed` 和 `seeder` 外，`bitfield` 是 peer 原始 piece 位图的小写十六进制字符串。
+该字段始终存在；空字符串表示当前未知 peer 位图。发现来源（`tracker`、`dht`、
+`pex`、`lpd`、`incoming` 或 `unknown`）仅作为内部运行时数据保存，不进入原版响应。端口、
 速度、布尔值和 seeder 状态遵循 aria2 的字符串 wire 格式。
 
-`aria2.getTrackers` 返回指定 GID 的实时 tracker 快照，每个元素包含
-`uri`、1-based `tier`、`current`、`lastAttempt`、`announceReady`、
+`aria2.getPeerStats(gid)` 返回 `{ "peerCount": "...", "seeders": "...", "leechers": "...", "unknown": "..." }`，
+统计该任务当前活动连接；未知 seeder 状态单独计入 `unknown`，不伪装成 leecher。
+这是 Rust 扩展，不是原版 aria2 RPC。它与 `getTrackers` 中 tracker 上报的整个 swarm
+统计不同，也不表示 DHT 已发现的节点数。
+
+`aria2.getPeerDetails(gid)` 是独立扩展，不改变原版 `getPeers` wire 格式。它按同一活动
+peer 快照返回 `source`、`progressPercent`、累计 `uploadedBytes`/`downloadedBytes`、当前和
+生命周期平均速度、`flags`（均为本机视角）以及双向请求数。字节计数使用十进制字符串；
+均速为该连接生命周期累计字节/连接时长。无权威来源的数据省略：未收到 BEP 10
+客户端标识时不返回 `client`。`outstandingRequestsToPeer` 是本端已发给 peer 且尚未收到
+响应的 block 请求数；`outstandingRequestsFromPeer` 是 peer 请求本端上传、仍在本端上传
+队列中的 block 数；二者都不是累计请求次数。`progressPercent` 按 peer 已通告 bitfield
+与 torrent piece 总数计算，bitfield 未知时省略；seeder 为 100%。
+
+`aria2.getTrackers` 返回指定 GID 的某一时点运行快照，并不表示每个 tracker
+当前都在线或正在实时返回数据。每个元素包含 `uri`、1-based `tier`、`current`、`lastAttempt`、`announceReady`、
 `allFailed`、`inFlight`、`interval`、`minInterval`、`seeders`、`leechers`、
-`trackerId` 和可选的 `secondsSinceLastSuccess`。状态来自正在执行的 BT
+`trackerId`、可选的 `lastFailureKind` 和可选的 `secondsSinceLastSuccess`。失败类别
+包括 `network`、`timeout`、`remoteTemporary`、`trackerRejected`、`malformedResponse`；
+announce 成功后清除该 URL 的最近失败类别。状态来自正在执行的 BT
 命令；命令退出后不再保留该 GID 的运行快照。`current` 是下一次选择的
 tracker，`lastAttempt` 是最近一次尝试的 tracker。该扩展接口中
 `interval` 按字符串返回，其他 tracker 数字和布尔状态按 JSON 原生类型返回。
+另外提供逐 URL 的 `status`、`snapshotAtUnixMillis`、`lastSuccessAtUnixMillis` 和可选
+`downloaded`；时间为 Unix 毫秒十进制字符串，`downloaded` 是 Tracker 上报的已完成
+torrent 数而非字节，仅 HTTP bencode 响应提供时返回。
+当 tracker 没有提供对应的有效 `complete` 或 `incomplete` 值时，`seeders`
+或 `leechers` 字段会省略；明确返回的 `0` 会保留为真实零值。这些调度字段
+描述 announce 状态，不能把所有 URL 解读为统一的实时/在线状态。
+`status` 是逐 URL 的观察标签：`announcing`、`succeeded`、`failed`、`ready`、
+`idle` 或 `unknown`。`unknown` 表示该 URL 尚无 announce 结果和尝试级运行记录，
+不表示失败。
 
 `aria2.getDhtStatus` 是进程级聚合接口，汇总当前活动 BT/magnet 命令注册的
 DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
-`shuttingDown`）以及 `totalNodes`、`goodNodes`、`pendingTransactions`。
-三个计数按 aria2 wire 格式返回字符串；没有活动 DHT 引擎时返回 stopped 和
-零计数。
+`shuttingDown`）以及 `totalNodes`、`goodNodes`、`pendingTransactions`、
+`questionableNodes`、`badNodes`、`cachedNodes` 和 `bucketCount`。同时返回当前
+DHT 配置的 `persistenceEnabled`、`persistenceMaxAgeSecs`、
+`cleanupIntervalSecs` 和 `saveIntervalSecs`。数字字段按 aria2 wire 格式返回
+字符串，`persistenceEnabled` 是 JSON 原生布尔值。没有活动 DHT 引擎时返回
+`stopped`、零计数，并将持久化标记设为 false。
+其中 `totalNodes`/`goodNodes` 是 DHT 路由表节点计数，不是 BitTorrent 的做种数。
+
+`aria2.saveDhtState` 和 `aria2.evictDhtNodes` 不需要参数。前者复用自动保存链的
+串行化锁、路由表合并和 BEP 44 保存逻辑；后者复用周期 cleanup 的 bad 节点淘汰及
+缓存替换逻辑。没有活动 DHT 引擎时返回执行错误。两个命令只影响当前进程内已经
+注册的 DHT 引擎，不改变 `dht-*` 配置；自动维护仍按配置周期继续运行。
+
+公共 Tracker 列表配置属于全局选项，可通过常规选项方法查询和修改。标准默认值为：
+
+```json
+{
+  "enable-public-trackers": "true",
+  "bt-tracker-source": "https://cf.trackerslist.com/best.txt",
+  "bt-tracker-update-interval": "86400"
+}
+```
+
+列表会按周期刷新，新获得的 URL 会在 torrent/用户 Tracker tier 之后追加，且会
+去重。排除规则和多源配置见[参数配置说明](configuration-guide-cn.md#公共-tracker-列表)。
+
+Tracker 响应中的扩展 `announce-list` 也会被解析并追加到现有 tier，重复 URL
+会被丢弃，原 torrent、用户配置和公共列表不会被替换。这使得 torrent 元数据、
+用户配置、公共列表和 tracker 动态返回列表形成一条可观察的完整发现链。
+
+`getTrackers` 是 tracker 健康状态的 RPC 面：`allFailed`、`announceReady`、
+`lastAttempt`、`lastFailureKind`、`secondsSinceLastSuccess` 和 `inFlight` 可用于判断每个任务的
+tracker 状态与当前请求并发。每个任务启动时最多并发 announce 3 个公共 tracker，另加 torrent
+自身的 tracker 调度；未选入活动槽位的 catalog URL 保持 idle。启用该扩展会向这些公共 tracker
+发送 info-hash、peer-id、监听端口和传输计数。公共列表源的抓取并发固定限制为 4，避免多源更新
+造成无界连接；该限制属于内部保护，不改变原版 tracker RPC 响应。
 
 ### 选项、会话与进程
 
@@ -207,8 +301,11 @@ DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
 | `aria2.getSessionInfo` | 无 | `sessionId` |
 | `aria2.saveSession` | 无 | `OK` |
 | `aria2.removeDownloadResult` | `gid` | `OK` |
+| `aria2.removeDownloadFiles` | `gid` | `OK` |
 | `aria2.purgeDownloadResult` | 无 | `OK` |
 | `aria2.shutdown` / `forceShutdown` | 无 | `OK` |
+
+`aria2.removeDownloadFiles(gid)` 会删除该已停止任务及其 `followedBy` 子任务的已选输出文件，并递归处理所有后代。尚未进入停止结果列表的任务（包括暂停任务）会被拒绝。此操作会保留停止结果；文件不存在时视为已清理。目录和 `.aria2` 控制文件会保留。如果某个子任务的停止结果已被清除，因无法再得知其输出路径，操作会返回错误。
 
 ### 浏览器会话上下文
 
@@ -229,7 +326,7 @@ DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
 
 `system.listMethods` 返回当前构建实际支持的方法；`system.listNotifications` 返回事件名；`system.multicall` 接收 `[{"methodName":"...","params":[...]}]` 数组。
 
-当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.getTrackers`、`aria2.getDhtStatus`、`aria2.addMetalink`；全 feature 构建共 40 个方法。
+当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.removeDownloadFiles`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.getPeerStats`、`aria2.getPeerDetails`、`aria2.getTrackers`、`aria2.getDhtStatus`、`aria2.saveDhtState`、`aria2.evictDhtNodes`、`aria2.addMetalink`；全 feature 构建共 45 个方法。
 
 ## 7. 错误与限制
 

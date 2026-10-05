@@ -59,6 +59,13 @@ export interface UriEntry {
   status: 'used' | 'waiting';
 }
 
+/** Queue-position operation accepted by aria2.changePosition. */
+export const enum PositionMode {
+  SetFromStart = 'POS_SET',
+  MoveFromStart = 'POS_CUR',
+  SetFromEnd = 'POS_END',
+}
+
 export interface ServerInfo {
   uri: string;
   currentUri: string;
@@ -82,11 +89,46 @@ export interface PeerInfo {
   seeder?: string;
 }
 
+export interface TrackerInfo {
+  uri: string;
+  tier: number;
+  current: boolean;
+  lastAttempt: boolean;
+  announceReady: boolean;
+  allFailed: boolean;
+  inFlight: number;
+  interval: string;
+  minInterval: number;
+  seeders: number;
+  leechers: number;
+  trackerId: string;
+  lastFailureKind?: TrackerFailureKind;
+  secondsSinceLastSuccess?: number;
+}
+
+export type TrackerFailureKind =
+  | 'network'
+  | 'timeout'
+  | 'remoteTemporary'
+  | 'trackerRejected'
+  | 'malformedResponse';
+
+export interface DhtStatus {
+  state: string;
+  totalNodes: string;
+  goodNodes: string;
+  pendingTransactions: string;
+  peerInfoHashes: string;
+  storedPeers: string;
+  peerStorageEvictions: string;
+  maxPeerInfoHashes: string;
+}
+
 export interface DownloadEvent {
   type: EventType;
   gid: string;
   errorCode?: number;
-  files?: unknown[];
+  files?: FileInfo[];
 }
 
 export const enum EventType {
@@ -96,7 +138,6 @@ export const enum EventType {
   DownloadComplete = 'aria2.onDownloadComplete',
   DownloadError = 'aria2.onDownloadError',
   BtDownloadComplete = 'aria2.onBtDownloadComplete',
-  BtDownloadError = 'aria2.onBtDownloadError',
 }
 
 export const enum DownloadStatus {

@@ -187,6 +187,44 @@ Options currently marked as unsupported compatibility entries are: `interface`, 
 
 These cover seeding, DHT/IPv6 DHT, PEX, LPD/uTP, trackers, peers, file selection, and event hooks. BitTorrent hook options are `on-bt-download-complete` and `on-bt-download-error`.
 
+#### Public tracker catalog
+
+The public tracker options are enabled by default for BitTorrent:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `enable-public-trackers` | `true` | Add trackers from the public catalog to BitTorrent tasks |
+| `bt-tracker-source` | `https://cf.trackerslist.com/best.txt` | One or more newline-separated catalog URLs |
+| `bt-tracker-update-interval` | `86400` | Catalog refresh interval in seconds; must be at least `1` |
+
+Catalog trackers are appended after torrent and explicit user trackers. URLs
+already present in any tracker tier are not added again. Refreshes can append
+new trackers to a running task without replacing its existing tiers. Use
+`bt-exclude-tracker` for exclusions; `*` excludes all public trackers. These
+three catalog options are also exposed through `aria2.getGlobalOption` and can
+be changed with `aria2.changeGlobalOption`.
+
+#### DHT maintenance chain
+
+The DHT maintenance settings are available through the config file, CLI, and RPC.
+They are copied into the task option snapshot and applied when the DHT engine starts:
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `dht-refresh-check-interval` | `300` | Bucket refresh check period (seconds) |
+| `dht-token-rotation-interval` | `600` | Token rotation period (seconds) |
+| `dht-node-contact-interval` | `900` | Node keep-alive period (seconds) |
+| `dht-cleanup-interval` | `300` | Peer/transaction cleanup and bad-node eviction period (seconds) |
+| `dht-save-interval` | `1800` | Routing-table and BEP 44 checkpoint period (seconds) |
+| `dht-bootstrap-timeout` | `60` | Background bootstrap deadline (seconds) |
+| `dht-max-concurrent-lookups` | `16` | Maximum concurrent DHT lookups |
+| `dht-persistence-max-age` | `86400` | Maximum accepted snapshot age (seconds) |
+
+The persisted local node ID is reused. Snapshots older than
+`dht-persistence-max-age` are ignored on load and are not merged back during a
+save. `aria2.getDhtStatus` exposes the current `questionableNodes`, `badNodes`,
+`cachedNodes`, `bucketCount`, persistence settings, and maintenance periods.
+
 ### Advanced: disk, bandwidth, and process limits
 
 `file-allocation`, `secure-falloc`, `mmap-threshold`, `max-concurrent-downloads`, `max-overall-download-limit`, `max-download-limit`, `max-overall-upload-limit`, `max-upload-limit`, `piece-length`, `disk-cache`, `stop`, `force-save`, `save-server-stat-interval`, `socket-recv-buffer-size`, `dscp`, `max-resume-failure-tries`, `log-max-size`, and `log-max-files`.

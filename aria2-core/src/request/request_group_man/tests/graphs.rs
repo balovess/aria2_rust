@@ -34,7 +34,7 @@ impl crate::engine::download_event_hooks::DownloadEventListener for MetadataList
 #[test]
 fn test_add_metalink_graph_is_metadata_first_and_dependency_gated() {
     let man = RequestGroupMan::new();
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),
@@ -64,7 +64,7 @@ fn metadata_dependency_emits_resolved_event_for_payload_gid() {
     let man = RequestGroupMan::new();
     let metadata_gid = GroupId::new(52);
     let payload_gid = GroupId::new(53);
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new_memory(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),
@@ -72,10 +72,9 @@ fn metadata_dependency_emits_resolved_event_for_payload_gid() {
         payload_gid,
     )
     .unwrap();
-    graph
-        .metadata
-        .recover()
-        .set_in_memory_data(crate::engine::bt_download_command_tests::build_test_torrent());
+    graph.metadata.recover().set_in_memory_data(
+        crate::engine::bittorrent::download::command_tests::build_test_torrent(),
+    );
     man.add_metalink_graph(graph).unwrap();
 
     let hooks = crate::engine::download_event_hooks::DownloadEventHooks::new();
@@ -109,7 +108,7 @@ fn test_add_metalink_graph_rejects_duplicate_without_insertion() {
         DownloadOptions::default(),
     )
     .unwrap();
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),
@@ -239,7 +238,11 @@ fn failed_completion_dependency_does_not_leave_reserved_group_stuck() {
         man.add_restored_group(prerequisite).unwrap();
         man.add_restored_group(dependent).unwrap();
 
-        man.resolve_dependencies_for_status(prerequisite_gid, prerequisite_status);
+        man.resolve_dependencies_for_status_with_events(
+            prerequisite_gid,
+            prerequisite_status,
+            None,
+        );
 
         assert!(
             man.find_group(dependent_gid).is_none(),
@@ -260,7 +263,7 @@ fn failed_completion_dependency_does_not_leave_reserved_group_stuck() {
 #[test]
 fn test_failed_metadata_with_direct_fallback_releases_payload() {
     let man = RequestGroupMan::new();
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new_with_fallback(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new_with_fallback(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),
@@ -271,9 +274,10 @@ fn test_failed_metadata_with_direct_fallback_releases_payload() {
     .unwrap();
     man.add_metalink_graph(graph).unwrap();
 
-    man.resolve_dependencies_for_status(
+    man.resolve_dependencies_for_status_with_events(
         GroupId::new(30),
         DownloadStatus::Error("metadata unavailable".to_string()),
+        None,
     );
 
     let payload = man.find_group(GroupId::new(31)).expect("payload retained");
@@ -339,7 +343,7 @@ fn completed_stopped_result_includes_followed_by_child_gids() {
 #[test]
 fn test_failed_torrent_only_metadata_is_stopped_as_error() {
     let man = RequestGroupMan::new();
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),
@@ -349,9 +353,10 @@ fn test_failed_torrent_only_metadata_is_stopped_as_error() {
     .unwrap();
     man.add_metalink_graph(graph).unwrap();
 
-    man.resolve_dependencies_for_status(
+    man.resolve_dependencies_for_status_with_events(
         GroupId::new(40),
         DownloadStatus::Error("metadata unavailable".to_string()),
+        None,
     );
 
     assert!(man.find_group(GroupId::new(41)).is_none());
@@ -368,7 +373,7 @@ fn test_remove_rejects_dependency_blocked_metalink_payload() {
     let man = RequestGroupMan::new();
     let metadata_gid = GroupId::new(50);
     let payload_gid = GroupId::new(51);
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),
@@ -394,7 +399,7 @@ fn test_remove_rejects_dependency_blocked_metalink_payload() {
     );
     assert!(man.find_group(metadata_gid).is_some());
     assert!(man.find_group(payload_gid).is_some());
-    assert_eq!(man.stopped_count(), 0);
+    assert_eq!(man.stopped_results_len(), 0);
 }
 
 #[test]

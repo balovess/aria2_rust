@@ -18,6 +18,14 @@ pub struct DownloadOptions {
     /// server supports ranges and `split` is greater than one.
     pub force_sequential: bool,
     pub max_connection_per_server: Option<u16>,
+    /// Maximum independent HTTP/2 client pools available for Range traffic
+    /// per server. The effective session count is capped by `-x`.
+    pub max_http2_sessions_per_server: Option<u16>,
+    /// Fixed per-connection HTTP/2 Range stream limit; never auto-tuned.
+    pub max_http2_streams_per_session: Option<u16>,
+    /// HTTP protocol selection: automatic negotiation, forced HTTP/1.1, or
+    /// forced HTTP/2.
+    pub http_version: crate::http::HttpVersion,
     pub max_download_limit: Option<u64>,
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,
@@ -124,6 +132,22 @@ pub struct DownloadOptions {
     pub peer_agent: String,
     /// DHT message timeout, in seconds.
     pub dht_message_timeout: u64,
+    /// DHT bucket refresh check interval, in seconds.
+    pub dht_refresh_check_interval: u64,
+    /// DHT token rotation interval, in seconds.
+    pub dht_token_rotation_interval: u64,
+    /// DHT node keep-alive interval, in seconds.
+    pub dht_node_contact_interval: u64,
+    /// DHT cleanup and eviction interval, in seconds.
+    pub dht_cleanup_interval: u64,
+    /// DHT routing-table persistence interval, in seconds.
+    pub dht_save_interval: u64,
+    /// DHT bootstrap timeout, in seconds.
+    pub dht_bootstrap_timeout: u64,
+    /// Maximum concurrent DHT lookups.
+    pub dht_max_concurrent_lookups: usize,
+    /// Maximum age of a persisted DHT snapshot, in seconds.
+    pub dht_persistence_max_age: u64,
     /// Enable IPv6 DHT transport.
     pub enable_dht6: bool,
     /// IPv6 DHT listen address.
@@ -184,8 +208,8 @@ pub struct DownloadOptions {
     // ------------------------------------------------------------------
     // Choking algorithm configuration (BT tit-for-tat)
     // ------------------------------------------------------------------
-    /// Maximum number of peers to unchoke simultaneously during seeding.
-    /// Default: 4. Set to enable the choking algorithm.
+    /// Maximum number of peers to unchoke simultaneously during BT download or seeding,
+    /// including the optimistic slot. Default: 4.
     pub bt_max_upload_slots: Option<u32>,
 
     /// Interval in seconds between optimistic unchokes.
@@ -286,6 +310,10 @@ pub struct DownloadOptions {
     pub metalink_enable_unique_protocol: bool,
     /// Minimum range size used by segment and piece selection.
     pub min_split_size: Option<u64>,
+    /// Minimum size for adaptive HTTP Range requests after an explicit server
+    /// size rejection. Independent of the fixed piece length persisted for
+    /// resume support.
+    pub min_http_range_size: Option<u64>,
     /// Whether parameterized URI expansion is enabled for this task.
     pub parameterized_uri: bool,
     /// Whether a spent URI may be reused after a failed mirror attempt.

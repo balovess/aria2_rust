@@ -129,6 +129,8 @@ fn serialize_status(
     add_optional!("bitfield", &status.bitfield);
     add_number!("pieceLength", &status.piece_length);
     add_number!("numPieces", &status.num_pieces);
+    add_number!("completedPieces", &status.completed_pieces);
+    add_number!("missingPieces", &status.missing_pieces);
     add_optional!("followedBy", &status.followed_by);
     add_optional!("belongsTo", &status.belongs_to);
     add_optional!("infoHash", &status.info_hash);
@@ -212,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_status_projection_rejects_internal_piece_extensions() {
+    fn status_projection_includes_requested_piece_count_extensions() {
         let status = StatusInfo::new("gid-bt")
             .with_num_pieces(10)
             .with_completed_pieces(9)
@@ -229,7 +231,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(value["numPieces"], "10");
-        assert!(value.get("completedPieces").is_none());
-        assert!(value.get("missingPieces").is_none());
+        assert_eq!(value["completedPieces"], "9");
+        assert_eq!(value["missingPieces"], "1");
     }
 }

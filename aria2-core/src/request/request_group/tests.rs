@@ -19,6 +19,7 @@ fn test_bt_peer_snapshots_roundtrip() {
     let group = RequestGroup::new(GroupId::new(99), Vec::new(), DownloadOptions::default());
     let snapshot = super::BtPeerSnapshot {
         peer_id: [1; 20],
+        client: Some("peer-test/1.0".into()),
         addr: "127.0.0.1:6881".parse().expect("valid test address"),
         is_incoming: false,
         source: BtPeerSource::Tracker,
@@ -31,6 +32,10 @@ fn test_bt_peer_snapshots_roundtrip() {
         avg_download_speed: 6,
         am_choking: true,
         peer_choking: false,
+        am_interested: true,
+        peer_interested: false,
+        outstanding_upload_requests: 0,
+        outstanding_download_requests: 1,
         seeder: Some(true),
         connection_duration_secs: 7,
         last_data_age_secs: 8,
@@ -62,6 +67,7 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     for (port, seeder) in [(6881, true), (6882, false)] {
         peers.push(super::BtPeerSnapshot {
             peer_id: [port as u8; 20],
+            client: None,
             addr: format!("127.0.0.1:{port}")
                 .parse()
                 .expect("valid peer address"),
@@ -76,6 +82,10 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
             avg_download_speed: 1,
             am_choking: false,
             peer_choking: false,
+            am_interested: false,
+            peer_interested: false,
+            outstanding_upload_requests: 0,
+            outstanding_download_requests: 0,
             seeder: Some(seeder),
             connection_duration_secs: 1,
             last_data_age_secs: 0,
@@ -581,6 +591,34 @@ fn test_effective_min_split_size_uses_task_snapshot_and_runtime_override() {
     assert_eq!(group.effective_min_split_size(), 4 * 1024 * 1024);
 }
 
+#[test]
+fn min_http_range_size_change_is_reserved_and_keeps_piece_budget_independent() {
+    let mut group = RequestGroup::new(
+        GroupId::new(13),
+        vec!["http://example.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert_eq!(
+        group.options().min_http_range_size,
+        Some(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES)
+    );
+    group
+        .try_update_option("min-http-range-size", serde_json::json!("32K"))
+        .expect("min-http-range-size should accept a valid reserved-task update");
+    assert_eq!(group.options().min_http_range_size, Some(32 * 1024));
+    assert_eq!(
+        group.options().min_split_size,
+        Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+    );
+    assert!(
+        group
+            .try_update_option("min-http-range-size", serde_json::json!("512"))
+            .is_err()
+    );
+    assert_eq!(group.options().min_http_range_size, Some(32 * 1024));
+}
+
 // ==================== BT Metadata Tests ====================
 
 #[test]
@@ -672,54 +710,102 @@ fn test_bt_info_hash_hex() {
 }
 
 #[test]
-fn test_update_option_new_runtime_changeable() {
+fn test_try_update_option_new_runtime_changeable() {
     let gid = GroupId::new(1);
     let uris = vec!["http://example.com/file".to_string()];
     let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
 
     // max-connection-per-server
-    assert!(group.update_option("max-connection-per-server", serde_json::json!(4)));
+    assert!(
+        group
+            .try_update_option("max-connection-per-server", serde_json::json!(4))
+            .unwrap()
+    );
     assert_eq!(group.options().max_connection_per_server, Some(4));
 
     // bt-max-upload-slots
-    assert!(group.update_option("bt-max-upload-slots", serde_json::json!(8)));
+    assert!(
+        group
+            .try_update_option("bt-max-upload-slots", serde_json::json!(8))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_max_upload_slots, Some(8));
 
     // bt-snubbed-timeout
-    assert!(group.update_option("bt-snubbed-timeout", serde_json::json!(120)));
+    assert!(
+        group
+            .try_update_option("bt-snubbed-timeout", serde_json::json!(120))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_snubbed_timeout, Some(120));
 
     // bt-optimistic-unchoke-interval
-    assert!(group.update_option("bt-optimistic-unchoke-interval", serde_json::json!(45)));
+    assert!(
+        group
+            .try_update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
 
     // bt-endgame-threshold
-    assert!(group.update_option("bt-endgame-threshold", serde_json::json!(50)));
+    assert!(
+        group
+            .try_update_option("bt-endgame-threshold", serde_json::json!(50))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_endgame_threshold, 50);
 
     // seed-time
-    assert!(group.update_option("seed-time", serde_json::json!(3600)));
+    assert!(
+        group
+            .try_update_option("seed-time", serde_json::json!(3600))
+            .unwrap()
+    );
     assert_eq!(group.options().seed_time, Some(3600.0));
 
     // seed-ratio
-    assert!(group.update_option("seed-ratio", serde_json::json!(2.0)));
+    assert!(
+        group
+            .try_update_option("seed-ratio", serde_json::json!(2.0))
+            .unwrap()
+    );
     assert_eq!(group.options().seed_ratio, Some(2.0));
 
     // RPC clients send option values as strings, including aria2 size suffixes.
-    assert!(group.update_option("max-download-limit", serde_json::json!("100K")));
+    assert!(
+        group
+            .try_update_option("max-download-limit", serde_json::json!("100K"))
+            .unwrap()
+    );
     assert_eq!(group.options().max_download_limit, Some(100 * 1024));
-    assert!(group.update_option("max-tries", serde_json::json!("7")));
+    assert!(
+        group
+            .try_update_option("max-tries", serde_json::json!("7"))
+            .unwrap()
+    );
     assert_eq!(group.options().max_retries, 7);
-    assert!(group.update_option("bt-force-encrypt", serde_json::json!("true")));
+    assert!(
+        group
+            .try_update_option("bt-force-encrypt", serde_json::json!("true"))
+            .unwrap()
+    );
     assert!(group.options().bt_force_encrypt);
 
     // bt-seed-unverified
-    assert!(group.update_option("bt-seed-unverified", serde_json::json!("true")));
+    assert!(
+        group
+            .try_update_option("bt-seed-unverified", serde_json::json!("true"))
+            .unwrap()
+    );
     assert!(group.options().bt_seed_unverified);
 
     // Canonical reserved options without a dedicated execution field still
     // use the shared registry validator and remain visible after applying.
-    assert!(group.update_option("allow-overwrite", serde_json::json!("true")));
+    assert!(
+        group
+            .try_update_option("allow-overwrite", serde_json::json!("true"))
+            .unwrap()
+    );
     assert_eq!(
         group.runtime_options().get("allow-overwrite"),
         Some(&serde_json::json!("true"))
@@ -755,7 +841,11 @@ fn test_update_option_new_runtime_changeable() {
     assert_eq!(group.options().enable_dht, previous_dht);
 
     // Unknown option returns false
-    assert!(!group.update_option("unknown-option", serde_json::json!(1)));
+    assert!(
+        !group
+            .try_update_option("unknown-option", serde_json::json!(1))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -866,6 +956,25 @@ fn test_download_result_preserves_effective_option_snapshot() {
 }
 
 #[test]
+fn stopped_download_result_zeroes_transfer_speeds() {
+    let group = RequestGroup::new(
+        GroupId::new(44),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_total_length(1024);
+    group.set_download_speed_cached(512);
+    group.set_upload_speed_cached(256);
+    group.mark_complete();
+
+    let result = group.create_download_result();
+
+    assert_eq!(result.status, super::status::DownloadStatus::Complete);
+    assert_eq!(result.download_speed, 0);
+    assert_eq!(result.upload_speed, 0);
+}
+
+#[test]
 fn test_command_counter_does_not_underflow() {
     let group = RequestGroup::new(
         GroupId::new(1),
@@ -889,25 +998,89 @@ fn test_runtime_option_updates_populate_execution_fields() {
         DownloadOptions::default(),
     );
 
-    assert!(group.update_option("check-integrity", serde_json::json!("true")));
-    assert!(group.update_option("conditional-get", serde_json::json!("true")));
-    assert!(group.update_option("connect-timeout", serde_json::json!("12")));
-    assert!(group.update_option("lowest-speed-limit", serde_json::json!("4K")));
-    assert!(group.update_option("timeout", serde_json::json!("30")));
-    assert!(group.update_option("remote-time", serde_json::json!("true")));
-    assert!(group.update_option("ftp-pasv", serde_json::json!("false")));
-    assert!(group.update_option("ftp-user", serde_json::json!("alice")));
-    assert!(group.update_option("ftp-passwd", serde_json::json!("secret")));
-    assert!(group.update_option("http-auth-challenge", serde_json::json!("true")));
-    assert!(group.update_option("http-user", serde_json::json!("bob")));
-    assert!(group.update_option("http-passwd", serde_json::json!("password")));
-    assert!(group.update_option("metalink-location", serde_json::json!("JP")));
-    assert!(group.update_option("metalink-version", serde_json::json!("4.0")));
-    assert!(group.update_option("follow-metalink", serde_json::json!("mem")));
-    assert!(group.update_option(
-        "bt-tracker",
-        serde_json::json!("https://tracker.test/announce")
-    ));
+    assert!(
+        group
+            .try_update_option("check-integrity", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("conditional-get", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("connect-timeout", serde_json::json!("12"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("lowest-speed-limit", serde_json::json!("4K"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("timeout", serde_json::json!("30"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("remote-time", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("ftp-pasv", serde_json::json!("false"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("ftp-user", serde_json::json!("alice"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("ftp-passwd", serde_json::json!("secret"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("http-auth-challenge", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("http-user", serde_json::json!("bob"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("http-passwd", serde_json::json!("password"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("metalink-location", serde_json::json!("JP"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("metalink-version", serde_json::json!("4.0"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("follow-metalink", serde_json::json!("mem"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option(
+                "bt-tracker",
+                serde_json::json!("https://tracker.test/announce")
+            )
+            .unwrap()
+    );
 
     let options = group.options();
     assert!(options.check_integrity);

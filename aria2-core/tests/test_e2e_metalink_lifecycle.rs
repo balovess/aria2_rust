@@ -8,8 +8,8 @@ mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
-use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
+use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
+use aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{
     DownloadOptions, DownloadStatus, FollowMode, GroupId, RequestGroup,
@@ -166,8 +166,9 @@ async fn metalink_engine_promotes_torrent_payload_and_preserves_mapping() {
 
     let mut gids = [GroupId::new(900), GroupId::new(901)].into_iter();
     let mut graphs = MetalinkToRequestGroup::new()
-        .create_torrent_graphs_from_bytes(&document, &options, &mut gids)
-        .unwrap();
+        .create_groups_from_bytes(&document, &options, &mut gids)
+        .unwrap()
+        .torrent_graphs;
     assert_eq!(graphs.len(), 1);
     let graph = graphs.pop().unwrap();
     let metadata = Arc::clone(&graph.metadata);
@@ -207,8 +208,30 @@ async fn metalink_engine_promotes_torrent_payload_and_preserves_mapping() {
         .to_owned();
     assert_eq!(mapped_entry, mapped_path.to_string_lossy());
 
-    tokio::time::timeout(Duration::from_secs(30), engine_task)
-        .await
+    let mut engine_task = engine_task;
+    let engine_result = tokio::time::timeout(Duration::from_secs(30), &mut engine_task).await;
+    if engine_result.is_err() {
+        let (payload_status, completed_length) = {
+            let payload_state = payload.recover();
+            (payload_state.status(), payload_state.completed_length())
+        };
+        eprintln!(
+            "Metalink lifecycle diagnostic: payload_status={:?}, completed={}/{}, output_len={:?}, http_requests={:?}, tracker_queries={:?}",
+            payload_status,
+            completed_length,
+            total_size,
+            std::fs::metadata(&mapped_path)
+                .ok()
+                .map(|metadata| metadata.len()),
+            server
+                .take_request_log()
+                .iter()
+                .map(|request| request.path.clone())
+                .collect::<Vec<_>>(),
+            tracker.captured_queries().await,
+        );
+    }
+    engine_result
         .expect("Metalink engine lifecycle timed out")
         .expect("Metalink engine task panicked")
         .expect("Metalink engine returned an error");
@@ -218,12 +241,31 @@ async fn metalink_engine_promotes_torrent_payload_and_preserves_mapping() {
     assert_eq!(payload_gid, GroupId::new(901));
     assert!(!directory.path().join("payload.torrent").exists());
 
-    let metadata_requests = server
-        .take_request_log()
-        .into_iter()
+    let http_requests = server.take_request_log();
+    let web_seed_requests = http_requests
+        .iter()
+        .filter(|request| request.path == web_seed_path)
+        .count();
+    assert!(
+        web_seed_requests > 0,
+        "torrent url-list web seed was not used"
+    );
+
+    let metadata_requests = http_requests
+        .iter()
         .filter(|request| request.path == "/payload.torrent")
         .count();
     assert_eq!(metadata_requests, 1, "metadata must be downloaded once");
+
+    let tracker_queries = tracker.captured_queries().await;
+    for event in ["started", "completed", "stopped"] {
+        assert!(
+            tracker_queries
+                .iter()
+                .any(|query| query.contains(&format!("event={event}"))),
+            "tracker did not receive event={event}: {tracker_queries:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -359,8 +401,9 @@ async fn metalink_engine_force_halt_preserves_resume_state() {
 
     let mut gids = [GroupId::new(703)].into_iter();
     let mut groups = MetalinkToRequestGroup::new()
-        .create_resource_groups_from_bytes(&document, &options, &mut gids)
-        .unwrap();
+        .create_groups_from_bytes(&document, &options, &mut gids)
+        .unwrap()
+        .resource_groups;
     assert_eq!(groups.len(), 1);
     let group = groups.pop().unwrap();
     let group_man = Arc::new(RequestGroupMan::new());
@@ -470,7 +513,7 @@ async fn metalink_follow_mem_engine_creates_child_without_source_file() {
         parent.followed_by.len(),
         1,
         "parent result did not record a Metalink child: {parent:?}; stopped_count={}",
-        group_man.stopped_count()
+        group_man.stopped_results_len()
     );
 
     let child = group_man

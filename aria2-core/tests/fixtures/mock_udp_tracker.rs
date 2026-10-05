@@ -15,6 +15,14 @@ pub struct MockUdpTracker {
 #[allow(dead_code)]
 impl MockUdpTracker {
     pub async fn start() -> Self {
+        Self::start_with_peers(vec![
+            "192.168.1.1:6881".parse().expect("valid mock peer address"),
+            "10.0.0.1:6882".parse().expect("valid mock peer address"),
+        ])
+        .await
+    }
+
+    pub async fn start_with_peers(peers: Vec<SocketAddr>) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind UDP tracker");
         socket
             .set_read_timeout(Some(std::time::Duration::from_millis(50)))
@@ -53,8 +61,12 @@ impl MockUdpTracker {
                         response.extend_from_slice(&1800i32.to_be_bytes());
                         response.extend_from_slice(&5i32.to_be_bytes());
                         response.extend_from_slice(&10i32.to_be_bytes());
-                        response.extend_from_slice(&[192, 168, 1, 1, 0x1A, 0xE1]);
-                        response.extend_from_slice(&[10, 0, 0, 1, 0x1A, 0xE2]);
+                        for peer in &peers {
+                            if let SocketAddr::V4(peer) = peer {
+                                response.extend_from_slice(&peer.ip().octets());
+                                response.extend_from_slice(&peer.port().to_be_bytes());
+                            }
+                        }
                     }
                     2 if len >= 36 => {
                         response.extend_from_slice(&2i32.to_be_bytes());

@@ -172,15 +172,11 @@ pub struct MetaUrlEntry {
 }
 
 impl MetaUrlEntry {
-    /// Default priority for unsorted/unspecified metaurl entries.
-    /// Matches C++ `MetalinkResource::getLowestPriority()` = 999999.
-    pub const LOWEST_PRIORITY: i32 = 999999;
-
     pub fn new(url: &str, mediatype: MediaType) -> Self {
         Self {
             url: url.trim().to_string(),
             mediatype,
-            priority: Self::LOWEST_PRIORITY,
+            priority: LOWEST_PRIORITY,
             name: None,
         }
     }

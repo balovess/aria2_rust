@@ -65,6 +65,14 @@ impl DownloadStatus {
         matches!(self, Self::Active | Self::Waiting)
     }
 
+    /// Whether the task reached a terminal outcome.
+    ///
+    /// Metadata resolution is reported as a separate event and is not a wire
+    /// status variant, so it is deliberately absent from this predicate.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Complete | Self::Error(_) | Self::Removed)
+    }
+
     pub fn is_stopped(&self) -> bool {
         !self.is_active()
     }
@@ -166,7 +174,7 @@ pub struct StatusInfo {
         deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
-    pub connections: Option<u16>,
+    pub connections: Option<u32>,
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
@@ -209,7 +217,7 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub num_pieces: Option<u32>,
-    /// Number of locally verified pieces (BitTorrent only).
+    /// Rust extension: number of locally verified pieces.
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
@@ -217,7 +225,7 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub completed_pieces: Option<u32>,
-    /// Number of pieces still missing locally (BitTorrent only).
+    /// Rust extension: number of pieces still missing locally.
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
@@ -336,7 +344,7 @@ impl StatusInfo {
         self.error_message = Some(m.into());
         self
     }
-    pub fn with_connections(mut self, c: u16) -> Self {
+    pub fn with_connections(mut self, c: u32) -> Self {
         self.connections = Some(c);
         self
     }

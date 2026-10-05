@@ -385,26 +385,16 @@ fn runtime_policy_names_are_unique_and_registered() {
         .chain(RUNTIME_CHANGEABLE_OPTIONS)
         .chain(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS)
     {
-        #[cfg(feature = "bittorrent")]
-        let feature_gated = false;
-        #[cfg(not(feature = "bittorrent"))]
-        let feature_gated = name.starts_with("bt-")
-            || matches!(
-                *name,
-                "enable-peer-exchange"
-                    | "follow-torrent"
-                    | "index-out"
-                    | "max-overall-upload-limit"
-                    | "max-upload-limit"
-                    | "seed-ratio"
-                    | "seed-time"
-                    | "select-file"
-            );
-
-        if !feature_gated {
+        if super::runtime::is_option_available(name) {
             assert!(
                 registry.contains(name),
                 "runtime policy '{}' has no registered option in this build",
+                name
+            );
+        } else {
+            assert!(
+                !registry.contains(name),
+                "feature-gated runtime policy '{}' must not be registered in this build",
                 name
             );
         }
@@ -970,7 +960,7 @@ fn bittorrent_execution_options_round_trip_through_task_session() {
 fn initial_option_snapshot_is_reserved_for_wire_fidelity_only() {
     assert_eq!(
         super::runtime::INITIAL_SNAPSHOT_WIRE_OPTIONS,
-        &["min-split-size"],
+        &["min-http-range-size", "min-split-size"],
         "raw snapshot preservation must not become an execution fallback"
     );
 }

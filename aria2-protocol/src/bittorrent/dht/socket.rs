@@ -40,12 +40,16 @@ impl DhtSocket {
             .map_err(|e| format!("DHT send_to {} failed: {}", addr, e))
     }
 
+    pub(crate) async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf).await
+    }
+
     pub async fn recv_with_timeout(
         &self,
         buf: &mut [u8],
         timeout: std::time::Duration,
     ) -> Result<(usize, SocketAddr), String> {
-        match tokio::time::timeout(timeout, self.socket.recv_from(buf)).await {
+        match tokio::time::timeout(timeout, self.recv_from(buf)).await {
             Ok(Ok((n, addr))) => Ok((n, addr)),
             Ok(Err(e)) => Err(format!("DHT recv error: {}", e)),
             Err(_) => Err("DHT recv timeout".to_string()),
@@ -54,10 +58,6 @@ impl DhtSocket {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
-    }
-
-    pub fn shared_socket(&self) -> Arc<UdpSocket> {
-        self.socket.clone()
     }
 
     /// Create a DhtSocket for testing without binding a real port.
@@ -143,17 +143,6 @@ mod tests {
 
         assert!(result.is_err(), "recv with short timeout should fail");
         assert!(result.unwrap_err().contains("timeout"));
-    }
-
-    #[tokio::test]
-    async fn test_shared_socket_same_instance() {
-        let sock = DhtSocket::bind(0).await.unwrap();
-        let s1 = sock.shared_socket();
-        let s2 = sock.shared_socket();
-        assert!(
-            Arc::ptr_eq(&s1, &s2),
-            "shared_socket should return same Arc"
-        );
     }
 
     #[tokio::test]

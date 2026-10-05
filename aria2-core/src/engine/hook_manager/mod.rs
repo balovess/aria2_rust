@@ -10,7 +10,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
-// Re-export all public types from sub-modules for backward compatibility
+// Public hook API.
 pub use builtin::{ExecHook, MoveHook, RenameHook, TouchHook};
 pub use types::{DownloadStats, DownloadStatus, HookContext, PostDownloadHook};
 

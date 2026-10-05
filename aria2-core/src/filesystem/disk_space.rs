@@ -198,9 +198,13 @@ pub async fn check_disk_space_async(
     required_bytes: u64,
 ) -> std::result::Result<(), String> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || check_disk_space(&path, required_bytes))
+    crate::filesystem::disk_io_pool::shared()
+        .run(
+            move || check_disk_space(&path, required_bytes).map_err(crate::error::Aria2Error::Io),
+            "disk space check",
+        )
         .await
-        .map_err(|error| format!("disk space check task failed: {error}"))?
+        .map_err(|error| error.to_string())
 }
 
 // =========================================================================

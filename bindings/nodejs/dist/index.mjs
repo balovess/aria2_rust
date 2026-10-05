@@ -36,6 +36,18 @@ var TimeoutError = class extends Aria2Error {
 };
 
 // src/transport.ts
+function isAuthRpcError(code, message) {
+  if (code === -32001) return true;
+  const normalized = message.toLowerCase();
+  return [
+    "unauthorized",
+    "auth fail",
+    "authentication",
+    "authorization",
+    "invalid token",
+    "token required"
+  ].some((marker) => normalized.includes(marker));
+}
 function buildParams(token, params) {
   const result = [];
   if (token) {
@@ -49,12 +61,17 @@ var HttpTransport = class {
   token;
   timeout;
   nextId = 1;
+  closed = false;
+  pending = /* @__PURE__ */ new Map();
   constructor(url, options) {
     this.url = url;
     this.token = options?.token ?? options?.secret;
     this.timeout = options?.timeout ?? 3e4;
   }
   async sendRequest(method, params) {
+    if (this.closed) {
+      throw new ConnectionError("Transport closed");
+    }
     const id = this.nextId++;
     const request = {
       jsonrpc: "2.0",
@@ -64,6 +81,8 @@ var HttpTransport = class {
     };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
+    const pendingRequest = { controller, closed: false };
+    this.pending.set(id, pendingRequest);
     try {
       const response = await fetch(this.url, {
         method: "POST",
@@ -81,12 +100,21 @@ var HttpTransport = class {
         throw new ConnectionError("Invalid JSON response");
       }
       if (data.error) {
+        if (isAuthRpcError(data.error.code, data.error.message)) {
+          throw new AuthError(data.error.message);
+        }
         throw new RpcError(data.error.message, data.error.code);
+      }
+      if (!response.ok) {
+        throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
       }
       return data.result;
     } catch (err) {
-      if (err instanceof RpcError || err instanceof ConnectionError) {
+      if (err instanceof RpcError || err instanceof AuthError || err instanceof ConnectionError) {
         throw err;
+      }
+      if (pendingRequest.closed) {
+        throw new ConnectionError("Transport closed");
       }
       if (err instanceof DOMException && err.name === "AbortError") {
         throw new TimeoutError(`Request timed out after ${this.timeout}ms`);
@@ -97,9 +125,16 @@ var HttpTransport = class {
       throw new ConnectionError(err instanceof Error ? err.message : String(err));
     } finally {
       clearTimeout(timer);
+      this.pending.delete(id);
     }
   }
   async close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pendingRequest of this.pending.values()) {
+      pendingRequest.closed = true;
+      pendingRequest.controller.abort();
+    }
   }
 };
 var WebSocketTransport = class {
@@ -111,6 +146,9 @@ var WebSocketTransport = class {
   pending = /* @__PURE__ */ new Map();
   onEvent = null;
   connectPromise = null;
+  pendingWs = null;
+  pendingConnectReject = null;
+  closed = false;
   constructor(url, options, onEvent) {
     this.url = url;
     this.token = options?.token ?? options?.secret;
@@ -121,6 +159,9 @@ var WebSocketTransport = class {
     this.onEvent = handler;
   }
   async ensureConnection() {
+    if (this.closed) {
+      throw new ConnectionError("Transport closed");
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
     }
@@ -130,21 +171,43 @@ var WebSocketTransport = class {
     }
     this.connectPromise = new Promise((resolve, reject) => {
       const ws = new WebSocket(this.url);
-      ws.once("open", () => {
+      let settled = false;
+      const cleanup = () => {
+        ws.removeListener("open", openHandler);
+        ws.removeListener("error", errorHandler);
+        ws.removeListener("close", closeHandler);
+        if (this.pendingWs === ws) this.pendingWs = null;
+        if (this.pendingConnectReject === rejectConnection) {
+          this.pendingConnectReject = null;
+        }
+      };
+      const rejectConnection = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.connectPromise = null;
+        reject(error);
+      };
+      const openHandler = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.ws = ws;
         this.connectPromise = null;
         resolve();
-      });
-      ws.once("error", (err) => {
-        this.ws = null;
-        this.connectPromise = null;
-        reject(new ConnectionError(err.message));
-      });
-      ws.once("close", () => {
-        this.ws = null;
-        this.connectPromise = null;
+      };
+      const errorHandler = (err) => {
+        rejectConnection(new ConnectionError(err.message));
+      };
+      const closeHandler = () => {
+        rejectConnection(new ConnectionError("WebSocket connection closed"));
         this.rejectAllPending(new ConnectionError("WebSocket connection closed"));
-      });
+      };
+      this.pendingWs = ws;
+      this.pendingConnectReject = rejectConnection;
+      ws.once("open", openHandler);
+      ws.once("error", errorHandler);
+      ws.once("close", closeHandler);
       ws.on("message", (data) => {
         this.handleMessage(data);
       });
@@ -158,11 +221,14 @@ var WebSocketTransport = class {
     } catch {
       return;
     }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return;
+    }
     const obj = parsed;
-    if ("method" in obj && !("id" in obj)) {
+    if (typeof obj.method === "string" && !("id" in obj)) {
       const notification = obj;
       if (this.onEvent) {
-        this.onEvent(notification.method, notification.params);
+        this.onEvent(notification.method, Array.isArray(notification.params) ? notification.params : []);
       }
       return;
     }
@@ -172,8 +238,13 @@ var WebSocketTransport = class {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(response.id);
-      if (response.error) {
-        pending.reject(new RpcError(response.error.message, response.error.code));
+      if (response.error && typeof response.error === "object") {
+        pending.reject(new RpcError(
+          typeof response.error.message === "string" ? response.error.message : "Unknown RPC error",
+          typeof response.error.code === "number" ? response.error.code : -1
+        ));
+      } else if ("error" in response) {
+        pending.reject(new RpcError("Malformed RPC error response", -1));
       } else {
         pending.resolve(response.result);
       }
@@ -201,23 +272,49 @@ var WebSocketTransport = class {
         reject(new TimeoutError(`Request timed out after ${this.timeout}ms`));
       }, this.timeout);
       this.pending.set(id, { resolve, reject, timer });
-      this.ws.send(JSON.stringify(request), (err) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(new ConnectionError(err.message));
-        }
-      });
+      const ws = this.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new ConnectionError("WebSocket is not connected"));
+        return;
+      }
+      try {
+        ws.send(JSON.stringify(request), (err) => {
+          if (err) {
+            clearTimeout(timer);
+            this.pending.delete(id);
+            reject(new ConnectionError(err.message));
+          }
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new ConnectionError(err instanceof Error ? err.message : String(err)));
+      }
     });
   }
   async close() {
+    if (this.closed) return;
+    this.closed = true;
+    const pendingReject = this.pendingConnectReject;
+    this.pendingConnectReject = null;
+    if (this.pendingWs) {
+      const pendingWs = this.pendingWs;
+      pendingWs.removeAllListeners();
+      pendingWs.once("error", () => {
+      });
+      pendingWs.terminate();
+      this.pendingWs = null;
+    }
+    this.connectPromise = null;
+    pendingReject?.(new ConnectionError("Transport closed"));
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.close();
       this.ws = null;
     }
     this.rejectAllPending(new ConnectionError("Transport closed"));
-    this.connectPromise = null;
   }
 };
 
@@ -226,6 +323,12 @@ import { EventEmitter } from "events";
 import WebSocket2 from "ws";
 
 // src/types.ts
+var PositionMode = /* @__PURE__ */ ((PositionMode2) => {
+  PositionMode2["SetFromStart"] = "POS_SET";
+  PositionMode2["MoveFromStart"] = "POS_CUR";
+  PositionMode2["SetFromEnd"] = "POS_END";
+  return PositionMode2;
+})(PositionMode || {});
 var EventType = /* @__PURE__ */ ((EventType2) => {
   EventType2["DownloadStart"] = "aria2.onDownloadStart";
   EventType2["DownloadPause"] = "aria2.onDownloadPause";
@@ -233,7 +336,6 @@ var EventType = /* @__PURE__ */ ((EventType2) => {
   EventType2["DownloadComplete"] = "aria2.onDownloadComplete";
   EventType2["DownloadError"] = "aria2.onDownloadError";
   EventType2["BtDownloadComplete"] = "aria2.onBtDownloadComplete";
-  EventType2["BtDownloadError"] = "aria2.onBtDownloadError";
   return EventType2;
 })(EventType || {});
 var DownloadStatus = /* @__PURE__ */ ((DownloadStatus2) => {
@@ -253,18 +355,26 @@ var EVENT_MAP = {
   ["aria2.onDownloadStop" /* DownloadStop */]: "downloadStop",
   ["aria2.onDownloadComplete" /* DownloadComplete */]: "downloadComplete",
   ["aria2.onDownloadError" /* DownloadError */]: "downloadError",
-  ["aria2.onBtDownloadComplete" /* BtDownloadComplete */]: "btDownloadComplete",
-  ["aria2.onBtDownloadError" /* BtDownloadError */]: "btDownloadError"
+  ["aria2.onBtDownloadComplete" /* BtDownloadComplete */]: "btDownloadComplete"
 };
+var TERMINAL_EVENT_NAMES = [
+  "downloadStop",
+  "downloadComplete",
+  "downloadError",
+  "btDownloadComplete"
+];
 var MAX_RECONNECT_RETRIES = 5;
 var BASE_RECONNECT_DELAY = 1e3;
 var Aria2EventEmitter = class extends EventEmitter {
   wsUrl;
   ws = null;
+  pendingWs = null;
   reconnectAttempts = 0;
   reconnectTimer = null;
   closed = false;
   connectPromise = null;
+  pendingConnectReject = null;
+  terminalWaiters = /* @__PURE__ */ new Set();
   constructor(wsUrl, _options) {
     super();
     this.wsUrl = wsUrl;
@@ -287,11 +397,108 @@ var Aria2EventEmitter = class extends EventEmitter {
       this.connectPromise = null;
     }
   }
+  /**
+   * Wait for a terminal event for one GID without polling status.
+   *
+   * Events for other GIDs and non-terminal transitions are ignored. Register
+   * the wait before submitting a task when a fast completion must not be
+   * missed. The timeout covers waiting for the event after the WebSocket is
+   * connected; omit it for an unbounded download.
+   */
+  async waitForTerminal(gid, timeoutMs) {
+    if (typeof gid !== "string" || gid.length === 0) {
+      throw new TypeError("gid must be a non-empty string");
+    }
+    if (timeoutMs !== void 0 && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      throw new TypeError("timeoutMs must be a positive number or undefined");
+    }
+    let timer = null;
+    let settled = false;
+    let cleanup = () => {
+    };
+    let startTimer = () => {
+    };
+    let rejectClosed = () => {
+    };
+    const result = new Promise((resolve, reject) => {
+      const onEvent = (event) => {
+        if (event.gid !== gid) return;
+        settled = true;
+        cleanup();
+        resolve(event);
+      };
+      cleanup = () => {
+        for (const eventName of TERMINAL_EVENT_NAMES) {
+          this.off(eventName, onEvent);
+        }
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        this.terminalWaiters.delete(rejectClosed);
+      };
+      for (const eventName of TERMINAL_EVENT_NAMES) {
+        this.on(eventName, onEvent);
+      }
+      startTimer = () => {
+        if (timeoutMs === void 0 || settled) return;
+        timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new TimeoutError(`Timed out waiting for terminal event for GID ${gid}`));
+        }, timeoutMs);
+      };
+      rejectClosed = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      this.terminalWaiters.add(rejectClosed);
+    });
+    try {
+      await this.connect();
+      startTimer();
+      return await result;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  }
   async doConnect() {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket2(this.wsUrl);
-      const openHandler = () => {
+      this.pendingWs = ws;
+      let settled = false;
+      const cleanup = () => {
+        ws.removeListener("open", openHandler);
         ws.removeListener("error", errorHandler);
+        ws.removeListener("close", closeHandler);
+        if (this.pendingWs === ws) {
+          this.pendingWs = null;
+        }
+        if (this.pendingConnectReject === rejectPendingConnection) {
+          this.pendingConnectReject = null;
+        }
+      };
+      const rejectConnection = (message) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new ConnectionError(message));
+      };
+      const rejectPendingConnection = (error) => {
+        rejectConnection(error.message);
+      };
+      const openHandler = () => {
+        if (this.closed) {
+          rejectConnection("Emitter has been closed");
+          ws.close();
+          return;
+        }
+        settled = true;
+        cleanup();
         this.ws = ws;
         this.reconnectAttempts = 0;
         this.setupMessageHandler(ws);
@@ -299,11 +506,17 @@ var Aria2EventEmitter = class extends EventEmitter {
         resolve();
       };
       const errorHandler = (err) => {
-        ws.removeListener("open", openHandler);
-        reject(new ConnectionError(err.message));
+        rejectConnection(this.closed ? "Emitter has been closed" : err.message);
       };
+      const closeHandler = (code) => {
+        rejectConnection(
+          this.closed ? "Emitter has been closed" : `WebSocket closed before connection established (code ${code})`
+        );
+      };
+      this.pendingConnectReject = rejectPendingConnection;
       ws.once("open", openHandler);
       ws.once("error", errorHandler);
+      ws.once("close", closeHandler);
     });
   }
   setupMessageHandler(ws) {
@@ -314,17 +527,33 @@ var Aria2EventEmitter = class extends EventEmitter {
       } catch {
         return;
       }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return;
+      }
       const obj = parsed;
-      if (!("method" in obj)) return;
+      if (typeof obj.method !== "string") return;
       const method = obj.method;
       const eventName = EVENT_MAP[method];
       if (!eventName) return;
-      const params = obj.params ?? [];
-      const gid = params[0]?.gid ?? String(params[0]);
+      const params = Array.isArray(obj.params) ? obj.params : [];
+      const details = params[0];
+      const detailsObject = details !== null && typeof details === "object" && !Array.isArray(details) ? details : void 0;
+      const gid = detailsObject?.gid;
+      if (typeof gid !== "string" || gid.length === 0) return;
       const event = {
         type: method,
         gid
       };
+      const errorCode = detailsObject?.errorCode;
+      if (typeof errorCode === "number" && Number.isSafeInteger(errorCode)) {
+        event.errorCode = errorCode;
+      } else if (typeof errorCode === "string" && /^-?\d+$/.test(errorCode)) {
+        const parsed2 = Number(errorCode);
+        if (Number.isSafeInteger(parsed2)) event.errorCode = parsed2;
+      }
+      if (Array.isArray(detailsObject?.files)) {
+        event.files = detailsObject.files;
+      }
       this.emit(eventName, event);
     });
   }
@@ -364,6 +593,14 @@ var Aria2EventEmitter = class extends EventEmitter {
   }
   async close() {
     this.closed = true;
+    for (const reject of this.terminalWaiters) {
+      reject(new ConnectionError("Emitter has been closed"));
+    }
+    this.terminalWaiters.clear();
+    const pendingWs = this.pendingWs;
+    const pendingReject = this.pendingConnectReject;
+    this.pendingConnectReject = null;
+    pendingReject?.(new ConnectionError("Emitter has been closed"));
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -373,6 +610,15 @@ var Aria2EventEmitter = class extends EventEmitter {
       this.ws.close();
       this.ws = null;
     }
+    if (pendingWs) {
+      pendingWs.removeAllListeners();
+      pendingWs.once("error", () => {
+      });
+      pendingWs.terminate();
+      if (this.pendingWs === pendingWs) {
+        this.pendingWs = null;
+      }
+    }
     this.connectPromise = null;
     this.removeAllListeners();
   }
@@ -380,6 +626,101 @@ var Aria2EventEmitter = class extends EventEmitter {
 
 // src/client.ts
 var DEFAULT_URL = "http://localhost:6800/jsonrpc";
+function parseObjectResult(result, method) {
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
+function parseObjectListResult(result, method) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  for (const [index, item] of result.entries()) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result;
+}
+function parseArrayResult(result, method) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
+function parseStringListResult(result, method, expectedLength) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  if (expectedLength !== void 0 && result.length !== expectedLength) {
+    throw new Aria2Error(
+      `Unexpected result length for ${method}: expected ${expectedLength}, got ${result.length}`
+    );
+  }
+  for (const [index, item] of result.entries()) {
+    if (typeof item !== "string") {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result;
+}
+function parseChangeUriCounts(result) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error("Unexpected result type for changeUri");
+  }
+  if (result.length !== 2) {
+    throw new Aria2Error(
+      `Unexpected result length for changeUri: expected 2, got ${result.length}`
+    );
+  }
+  return result.map((item, index) => {
+    if (typeof item === "string" && /^(0|[1-9]\d*)$/.test(item)) return item;
+    if (typeof item === "number" && Number.isSafeInteger(item) && item >= 0) {
+      return String(item);
+    }
+    throw new Aria2Error(`Unexpected item type for changeUri at index ${index}`);
+  });
+}
+function parseStringResult(result, method) {
+  if (typeof result !== "string") {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
+function requireNonNegativeInteger(value, name) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative safe integer`);
+  }
+}
+function requireStringList(value, name, allowEmpty = true) {
+  if (!Array.isArray(value) || !allowEmpty && value.length === 0) {
+    throw new TypeError(`${name} must be a non-empty string array`);
+  }
+  if (value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`${name} must contain only strings`);
+  }
+}
+function requirePositionMode(value) {
+  if (value !== "POS_SET" && value !== "POS_CUR" && value !== "POS_END") {
+    throw new TypeError("mode must be POS_SET, POS_CUR, or POS_END");
+  }
+}
+function requireBuffer(value, name) {
+  if (!Buffer.isBuffer(value)) {
+    throw new TypeError(`${name} must be a Buffer`);
+  }
+}
+function requireGid(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("gid must be a non-empty string");
+  }
+}
+function requireRecord(value, name) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+}
 function httpToWs(url) {
   if (url.startsWith("https://")) {
     return url.replace("https://", "wss://");
@@ -404,157 +745,279 @@ var Aria2Client = class {
     }
   }
   async ensureEventEmitter() {
+    const emitter = this.getOrCreateEventEmitter();
+    await emitter.connect();
+    return emitter;
+  }
+  getOrCreateEventEmitter() {
     if (this.eventEmitter) {
       return this.eventEmitter;
     }
     const wsUrl = httpToWs(this.url);
     this.eventEmitter = new Aria2EventEmitter(wsUrl, this.options);
-    await this.eventEmitter.connect();
     return this.eventEmitter;
   }
+  /** Connect the notification WebSocket before starting a download. */
+  async connectEvents() {
+    return this.ensureEventEmitter();
+  }
+  async call(method, params = []) {
+    return await this.transport.sendRequest(method, params);
+  }
   async addUri(uris, options, position) {
+    requireStringList(uris, "uris", false);
+    if (options !== void 0) requireRecord(options, "options");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [uris];
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.addUri", params);
+    const result = await this.transport.sendRequest("aria2.addUri", params);
+    return parseStringResult(result, "addUri");
   }
   async addTorrent(torrent, options, webSeedUris, position) {
+    requireBuffer(torrent, "torrent");
+    if (options !== void 0) requireRecord(options, "options");
+    if (webSeedUris !== void 0) requireStringList(webSeedUris, "webSeedUris");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [torrent.toString("base64")];
     if (webSeedUris !== void 0 || options !== void 0 || position !== void 0) {
       params.push(webSeedUris ?? []);
     }
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.addTorrent", params);
+    const result = await this.transport.sendRequest("aria2.addTorrent", params);
+    return parseStringResult(result, "addTorrent");
   }
   async addMetalink(metalink, options, position) {
+    requireBuffer(metalink, "metalink");
+    if (options !== void 0) requireRecord(options, "options");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [metalink.toString("base64")];
     if (options !== void 0) params.push(options);
     else if (position !== void 0) params.push({});
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.addMetalink", params);
+    const result = await this.transport.sendRequest("aria2.addMetalink", params);
+    return parseStringListResult(result, "addMetalink");
   }
   async remove(gid) {
-    return await this.transport.sendRequest("aria2.remove", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.remove", [gid]);
+    return parseStringResult(result, "remove");
   }
   async pause(gid) {
-    return await this.transport.sendRequest("aria2.pause", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.pause", [gid]);
+    return parseStringResult(result, "pause");
   }
   async unpause(gid) {
-    return await this.transport.sendRequest("aria2.unpause", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.unpause", [gid]);
+    return parseStringResult(result, "unpause");
   }
   async forcePause(gid) {
-    return await this.transport.sendRequest("aria2.forcePause", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.forcePause", [gid]);
+    return parseStringResult(result, "forcePause");
   }
   async forceRemove(gid) {
-    return await this.transport.sendRequest("aria2.forceRemove", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.forceRemove", [gid]);
+    return parseStringResult(result, "forceRemove");
   }
   async pauseAll() {
-    return await this.transport.sendRequest("aria2.pauseAll", []);
+    const result = await this.transport.sendRequest("aria2.pauseAll", []);
+    return parseStringResult(result, "pauseAll");
   }
   async forcePauseAll() {
-    return await this.transport.sendRequest("aria2.forcePauseAll", []);
+    const result = await this.transport.sendRequest("aria2.forcePauseAll", []);
+    return parseStringResult(result, "forcePauseAll");
   }
   async unpauseAll() {
-    return await this.transport.sendRequest("aria2.unpauseAll", []);
+    const result = await this.transport.sendRequest("aria2.unpauseAll", []);
+    return parseStringResult(result, "unpauseAll");
   }
   async changePosition(gid, position, mode) {
-    return await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
+    requireGid(gid);
+    requireNonNegativeInteger(position, "position");
+    requirePositionMode(mode);
+    const result = await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
+    if (typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
+      return result;
+    }
+    if (typeof result === "string" && /^(0|[1-9]\d*)$/.test(result)) {
+      const parsed = Number(result);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+    throw new Aria2Error(`Unexpected result type for changePosition: ${typeof result}`);
   }
   async changeUri(gid, fileIndex, deleteUris, addUris, position) {
+    requireGid(gid);
+    requireNonNegativeInteger(fileIndex, "fileIndex");
+    requireStringList(deleteUris, "deleteUris");
+    requireStringList(addUris, "addUris");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [gid, fileIndex, deleteUris, addUris];
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.changeUri", params);
+    const result = await this.transport.sendRequest("aria2.changeUri", params);
+    return parseChangeUriCounts(result);
   }
   async tellStatus(gid, keys) {
+    requireGid(gid);
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [gid];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellStatus", params);
+    const result = await this.transport.sendRequest("aria2.tellStatus", params);
+    return parseObjectResult(result, "tellStatus");
   }
   async getFiles(gid) {
-    return await this.transport.sendRequest("aria2.getFiles", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.getFiles", [gid]);
+    return parseObjectListResult(result, "getFiles");
   }
   async getUris(gid) {
-    return await this.transport.sendRequest("aria2.getUris", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.getUris", [gid]);
+    return parseObjectListResult(result, "getUris");
   }
   async getServers(gid) {
-    return await this.transport.sendRequest("aria2.getServers", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.getServers", [gid]);
+    return parseObjectListResult(result, "getServers");
   }
   async getPeers(gid) {
-    return await this.transport.sendRequest("aria2.getPeers", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.getPeers", [gid]);
+    return parseObjectListResult(result, "getPeers");
+  }
+  async getTrackers(gid) {
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.getTrackers", [gid]);
+    return parseObjectListResult(result, "getTrackers");
+  }
+  async getDhtStatus() {
+    const result = await this.transport.sendRequest("aria2.getDhtStatus", []);
+    return parseObjectResult(result, "getDhtStatus");
   }
   async tellActive(keys) {
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellActive", params);
+    const result = await this.transport.sendRequest("aria2.tellActive", params);
+    return parseObjectListResult(result, "tellActive");
   }
   async tellWaiting(offset, num, keys) {
+    requireNonNegativeInteger(offset, "offset");
+    requireNonNegativeInteger(num, "num");
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [offset, num];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellWaiting", params);
+    const result = await this.transport.sendRequest("aria2.tellWaiting", params);
+    return parseObjectListResult(result, "tellWaiting");
   }
   async tellStopped(offset, num, keys) {
+    requireNonNegativeInteger(offset, "offset");
+    requireNonNegativeInteger(num, "num");
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [offset, num];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellStopped", params);
+    const result = await this.transport.sendRequest("aria2.tellStopped", params);
+    return parseObjectListResult(result, "tellStopped");
   }
   async getGlobalStat() {
-    return await this.transport.sendRequest("aria2.getGlobalStat", []);
+    const result = await this.transport.sendRequest("aria2.getGlobalStat", []);
+    return parseObjectResult(result, "getGlobalStat");
   }
   async purgeDownloadResult() {
-    return await this.transport.sendRequest("aria2.purgeDownloadResult", []);
+    const result = await this.transport.sendRequest("aria2.purgeDownloadResult", []);
+    return parseStringResult(result, "purgeDownloadResult");
   }
   async removeDownloadResult(gid) {
-    return await this.transport.sendRequest("aria2.removeDownloadResult", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.removeDownloadResult", [gid]);
+    return parseStringResult(result, "removeDownloadResult");
   }
   async getGlobalOption() {
-    return await this.transport.sendRequest("aria2.getGlobalOption", []);
+    const result = await this.transport.sendRequest("aria2.getGlobalOption", []);
+    return parseObjectResult(result, "getGlobalOption");
   }
   async changeGlobalOption(options) {
-    return await this.transport.sendRequest("aria2.changeGlobalOption", [options]);
+    requireRecord(options, "options");
+    const result = await this.transport.sendRequest("aria2.changeGlobalOption", [options]);
+    return parseStringResult(result, "changeGlobalOption");
   }
   async getOption(gid) {
-    return await this.transport.sendRequest("aria2.getOption", [gid]);
+    requireGid(gid);
+    const result = await this.transport.sendRequest("aria2.getOption", [gid]);
+    return parseObjectResult(result, "getOption");
   }
   async changeOption(gid, options) {
-    return await this.transport.sendRequest("aria2.changeOption", [gid, options]);
+    requireGid(gid);
+    requireRecord(options, "options");
+    const result = await this.transport.sendRequest("aria2.changeOption", [gid, options]);
+    return parseStringResult(result, "changeOption");
   }
   async getVersion() {
-    return await this.transport.sendRequest("aria2.getVersion", []);
+    const result = await this.transport.sendRequest("aria2.getVersion", []);
+    return parseObjectResult(result, "getVersion");
   }
   async getSessionInfo() {
-    return await this.transport.sendRequest("aria2.getSessionInfo", []);
+    const result = await this.transport.sendRequest("aria2.getSessionInfo", []);
+    return parseObjectResult(result, "getSessionInfo");
   }
   async shutdown() {
-    return await this.transport.sendRequest("aria2.shutdown", []);
+    const result = await this.transport.sendRequest("aria2.shutdown", []);
+    return parseStringResult(result, "shutdown");
   }
   async forceShutdown() {
-    return await this.transport.sendRequest("aria2.forceShutdown", []);
+    const result = await this.transport.sendRequest("aria2.forceShutdown", []);
+    return parseStringResult(result, "forceShutdown");
   }
   async saveSession() {
-    return await this.transport.sendRequest("aria2.saveSession", []);
+    const result = await this.transport.sendRequest("aria2.saveSession", []);
+    return parseStringResult(result, "saveSession");
   }
   async updateBrowserContext(context) {
-    return await this.transport.sendRequest("aria2.updateBrowserContext", [context]);
+    const result = await this.transport.sendRequest("aria2.updateBrowserContext", [context]);
+    return parseStringResult(result, "updateBrowserContext");
   }
   async clearBrowserContext() {
-    return await this.transport.sendRequest("aria2.clearBrowserContext", []);
+    const result = await this.transport.sendRequest("aria2.clearBrowserContext", []);
+    return parseStringResult(result, "clearBrowserContext");
   }
   async systemMulticall(calls) {
-    return await this.transport.sendRequest("system.multicall", [calls]);
+    if (!Array.isArray(calls)) throw new TypeError("calls must be an array");
+    for (const [index, call] of calls.entries()) {
+      if (call === null || typeof call !== "object" || typeof call.methodName !== "string" || call.methodName.length === 0 || call.params !== void 0 && !Array.isArray(call.params)) {
+        throw new TypeError(`calls[${index}] must contain a methodName and optional params array`);
+      }
+    }
+    const result = await this.transport.sendRequest("system.multicall", [calls]);
+    return parseArrayResult(result, "system.multicall");
   }
   async systemListMethods() {
-    return await this.transport.sendRequest("system.listMethods", []);
+    const result = await this.transport.sendRequest("system.listMethods", []);
+    return parseStringListResult(result, "system.listMethods");
   }
   async systemListNotifications() {
-    return await this.transport.sendRequest("system.listNotifications", []);
+    const result = await this.transport.sendRequest("system.listNotifications", []);
+    return parseStringListResult(result, "system.listNotifications");
+  }
+  registerEventListener(event, handler, once) {
+    const emitter = this.getOrCreateEventEmitter();
+    if (once) emitter.once(event, handler);
+    else emitter.on(event, handler);
+    void this.ensureEventEmitter().catch(() => {
+    });
+    return this;
   }
   on(event, handler) {
-    this.ensureEventEmitter().then((emitter) => {
-      emitter.on(event, handler);
-    }).catch(() => {
-      throw new ConnectionError(`Failed to connect event emitter for event: ${event}`);
-    });
+    return this.registerEventListener(event, handler, false);
+  }
+  once(event, handler) {
+    return this.registerEventListener(event, handler, true);
+  }
+  off(event, handler) {
+    this.eventEmitter?.off(event, handler);
     return this;
   }
   async close() {
@@ -582,6 +1045,7 @@ export {
   ConnectionError,
   DownloadStatus,
   EventType,
+  PositionMode,
   RpcError,
   TimeoutError
 };

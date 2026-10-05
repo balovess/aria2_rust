@@ -1,6 +1,6 @@
 //! Runtime option updates and rate limiter management.
 //!
-//! Implements `RequestGroup::update_option()` for dynamically changing
+//! Implements `RequestGroup::try_update_option()` for dynamically changing
 //! download options at runtime (e.g. via `aria2.changeOption`), and
 //! the `set_rate_limiter` / `set_download_context` methods.
 
@@ -233,6 +233,46 @@ pub(super) fn apply_rpc_option(
             opts.max_connection_per_server = Some(value);
             Ok(true)
         }
+        "max-http2-sessions-per-server" => {
+            let value = rpc_option_u16(value, key)?;
+            if value == 0 {
+                return Err(format!("Option '{}' must be greater than zero", key));
+            }
+            opts.max_http2_sessions_per_server = Some(value);
+            Ok(true)
+        }
+        "max-http2-streams-per-session" => {
+            let value = rpc_option_u16(value, key)?;
+            if !(1..=256).contains(&value) {
+                return Err(format!("Option '{}' must be between 1 and 256", key));
+            }
+            opts.max_http2_streams_per_session = Some(value);
+            Ok(true)
+        }
+        "min-http-range-size" => {
+            let value = rpc_option_size(value, key)?;
+            if !(crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES
+                ..=crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES)
+                .contains(&value)
+            {
+                return Err(format!(
+                    "Option '{}' must be between {} and {} bytes",
+                    key,
+                    crate::constants::HTTP_RANGE_SIZE_FLOOR_MIN_BYTES,
+                    crate::constants::HTTP_RANGE_SIZE_FLOOR_MAX_BYTES
+                ));
+            }
+            opts.min_http_range_size = Some(value);
+            Ok(true)
+        }
+        "http-version" => {
+            let value = rpc_option_string(value, key)?;
+            let Some(version) = crate::http::HttpVersion::parse_option(&value) else {
+                return Err(format!("Option '{}' must be one of: auto, 1.1, 2", key));
+            };
+            opts.http_version = version;
+            Ok(true)
+        }
         "max-file-not-found" => {
             opts.max_file_not_found = rpc_option_u32(value, key)?;
             Ok(true)
@@ -280,7 +320,15 @@ pub(super) fn apply_rpc_option(
         | "bt-timeout"
         | "bt-request-timeout"
         | "peer-connection-timeout"
-        | "dht-message-timeout" => {
+        | "dht-message-timeout"
+        | "dht-refresh-check-interval"
+        | "dht-token-rotation-interval"
+        | "dht-node-contact-interval"
+        | "dht-cleanup-interval"
+        | "dht-save-interval"
+        | "dht-bootstrap-timeout"
+        | "dht-persistence-max-age"
+        | "dht-max-concurrent-lookups" => {
             let value = rpc_option_u64(value, key)?;
             if value == 0 {
                 return Err(format!("Option '{}' must be greater than zero", key));
@@ -291,6 +339,17 @@ pub(super) fn apply_rpc_option(
                 "bt-request-timeout" => opts.bt_request_timeout = value,
                 "peer-connection-timeout" => opts.peer_connection_timeout = value,
                 "dht-message-timeout" => opts.dht_message_timeout = value,
+                "dht-refresh-check-interval" => opts.dht_refresh_check_interval = value,
+                "dht-token-rotation-interval" => opts.dht_token_rotation_interval = value,
+                "dht-node-contact-interval" => opts.dht_node_contact_interval = value,
+                "dht-cleanup-interval" => opts.dht_cleanup_interval = value,
+                "dht-save-interval" => opts.dht_save_interval = value,
+                "dht-bootstrap-timeout" => opts.dht_bootstrap_timeout = value,
+                "dht-persistence-max-age" => opts.dht_persistence_max_age = value,
+                "dht-max-concurrent-lookups" => {
+                    opts.dht_max_concurrent_lookups = usize::try_from(value)
+                        .map_err(|_| format!("Option '{}' is too large", key))?;
+                }
                 _ => unreachable!("BitTorrent duration option handled above"),
             }
             Ok(true)

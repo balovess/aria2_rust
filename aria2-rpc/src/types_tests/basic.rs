@@ -23,7 +23,10 @@ fn test_status_info_builder() {
 #[test]
 fn test_download_status_variants() {
     assert!(DownloadStatus::Active.is_active());
+    assert!(!DownloadStatus::Paused.is_terminal());
     assert!(DownloadStatus::Complete.is_stopped());
+    assert!(DownloadStatus::Complete.is_terminal());
+    assert!(DownloadStatus::Error("test".to_string()).is_terminal());
     assert!(DownloadStatus::Removed.is_stopped());
     assert_eq!(DownloadStatus::Error("test".to_string()).as_str(), "error");
 }

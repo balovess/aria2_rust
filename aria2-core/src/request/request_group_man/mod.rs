@@ -21,10 +21,23 @@ use tracing::info;
 use reserved::ReservedQueue;
 use stopped::StoppedResults;
 
-pub use reserved::PositionMode as ChangePositionMode;
+pub use reserved::PositionMode;
 
 use super::global_net_stat::GlobalNetStat;
 use super::request_group::{ActivitySignal, GroupId, RequestGroup};
+
+/// Result of resolving an RPC GID or high-order hexadecimal prefix.
+///
+/// aria2 distinguishes malformed, missing, and ambiguous GIDs. Keeping that
+/// distinction at the manager boundary prevents adapters from guessing with
+/// a synthetic numeric ID and accidentally targeting a real task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupIdResolution {
+    Resolved(GroupId),
+    NotFound,
+    NotUnique,
+    Invalid,
+}
 
 /// Request group manager with active/reserved/stopped queue split.
 ///

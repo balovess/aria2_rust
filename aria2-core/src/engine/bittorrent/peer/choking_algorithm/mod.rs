@@ -1,0 +1,353 @@
+//! BitTorrent choking algorithm implementation (tit-for-tat strategy)
+//!
+//! Module structure:
+//! - [ChokingAlgorithm] - Main struct and public API
+//! - [selection] - Unchoke candidate selection (tit-for-tat rotation)
+//! - [optimistic] - Optimistic unchoke logic (round-robin)
+//! - [tests] - Comprehensive test suite
+
+mod optimistic;
+mod selection;
+
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use super::stats::PeerStats;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PeerIdentity {
+    pub peer_id: [u8; 20],
+    pub addr: std::net::SocketAddr,
+}
+
+impl From<&PeerStats> for PeerIdentity {
+    fn from(peer: &PeerStats) -> Self {
+        Self {
+            peer_id: peer.peer_id,
+            addr: peer.addr,
+        }
+    }
+}
+
+/// Identity-based choke decision returned by the modern API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityChokeAction {
+    Unchoke(PeerIdentity),
+    Choke(PeerIdentity),
+    NoChange(PeerIdentity),
+}
+
+impl IdentityChokeAction {
+    pub fn identity(&self) -> PeerIdentity {
+        match self {
+            Self::Unchoke(identity) | Self::Choke(identity) | Self::NoChange(identity) => *identity,
+        }
+    }
+}
+
+/// Configuration for the choking algorithm
+#[derive(Debug, Clone)]
+pub struct ChokingConfig {
+    /// Maximum number of peers to unchoke simultaneously, including the optimistic slot (default: 4)
+    pub max_upload_slots: usize,
+    /// Interval in seconds between optimistic unchokes (default: 30)
+    pub optimistic_unchoke_interval_secs: u64,
+    /// Timeout in seconds after which a peer is considered snubbed (default: 60)
+    pub snubbed_timeout_secs: u64,
+    /// Interval in seconds between choke rotations (default: 10)
+    pub choke_rotation_interval_secs: u64,
+}
+
+impl Default for ChokingConfig {
+    fn default() -> Self {
+        Self {
+            max_upload_slots: 4,
+            optimistic_unchoke_interval_secs: 30,
+            snubbed_timeout_secs: 60,
+            choke_rotation_interval_secs: 10,
+        }
+    }
+}
+
+/// BitTorrent choking algorithm implementation (tit-for-tat strategy)
+///
+/// This implements the standard BT choking algorithm:
+/// - Up to `max_upload_slots - 1` interested peers get regular unchoke slots
+/// - One slot is reserved for optimistic unchoke when the limit is nonzero
+/// - Snubbed peers are penalized heavily
+///
+/// The algorithm minimizes churn by only changing state when necessary.
+pub struct ChokingAlgorithm {
+    pub(crate) peers: Vec<PeerStats>,
+    pub(crate) config: ChokingConfig,
+    /// Explicitly snubbed peer identities (separate from PeerStats.is_snubbed).
+    pub(crate) snubbed_peers: HashSet<PeerIdentity>,
+    /// Identity of the current optimistically unchoked peer (for rotation).
+    pub(crate) current_optimistic_peer: Option<PeerIdentity>,
+    /// Round-robin counter for optimistic unchoke rotation.
+    pub(crate) optimistic_rotation_counter: usize,
+    /// Time of the last regular choke decision.
+    last_choke_rotation: Instant,
+}
+
+impl ChokingAlgorithm {
+    /// Create a new choking algorithm with the given configuration
+    pub fn new(config: ChokingConfig) -> Self {
+        Self {
+            peers: Vec::new(),
+            config,
+            snubbed_peers: HashSet::new(),
+            current_optimistic_peer: None,
+            optimistic_rotation_counter: 0,
+            last_choke_rotation: Instant::now(),
+        }
+    }
+
+    /// Add a peer to be managed by the algorithm
+    pub fn add_peer(&mut self, stats: PeerStats) {
+        self.peers.push(stats);
+    }
+
+    /// Remove peers by stable network identity, preserving remaining order.
+    pub fn remove_peers_by_identity(&mut self, identities: &[PeerIdentity]) {
+        self.peers
+            .retain(|peer| !identities.contains(&PeerIdentity::from(peer)));
+        self.snubbed_peers
+            .retain(|identity| !identities.contains(identity));
+        if self
+            .current_optimistic_peer
+            .is_some_and(|identity| identities.contains(&identity))
+        {
+            self.current_optimistic_peer = None;
+        }
+        self.optimistic_rotation_counter %= self.peers.len().max(1);
+    }
+
+    pub fn remove_peers_by_addr(&mut self, addresses: &[std::net::SocketAddr]) {
+        self.peers.retain(|peer| !addresses.contains(&peer.addr));
+        self.snubbed_peers
+            .retain(|identity| !addresses.contains(&identity.addr));
+        if self
+            .current_optimistic_peer
+            .is_some_and(|identity| addresses.contains(&identity.addr))
+        {
+            self.current_optimistic_peer = None;
+        }
+        self.optimistic_rotation_counter %= self.peers.len().max(1);
+    }
+
+    /// Remove peers by their indexes in the active connection list.
+    pub fn remove_peers(&mut self, indices: &[usize]) {
+        let mut removed = vec![false; self.peers.len()];
+        for &index in indices {
+            if let Some(slot) = removed.get_mut(index) {
+                *slot = true;
+            }
+        }
+        self.peers = self
+            .peers
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, peer)| (!removed[index]).then_some(peer))
+            .collect();
+        self.snubbed_peers.retain(|identity| {
+            self.peers
+                .iter()
+                .any(|peer| PeerIdentity::from(peer) == *identity)
+        });
+        if self.current_optimistic_peer.is_some_and(|identity| {
+            !self
+                .peers
+                .iter()
+                .any(|peer| PeerIdentity::from(peer) == identity)
+        }) {
+            self.current_optimistic_peer = None;
+        }
+        self.optimistic_rotation_counter %= self.peers.len().max(1);
+    }
+
+    /// Returns the number of peers being managed
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Returns true if there are no peers
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    /// Rotate choke state while returning stable peer identities.
+    pub fn rotate_choke_by_identity(&mut self) -> Vec<IdentityChokeAction> {
+        self.last_choke_rotation = Instant::now();
+        selection::rotate_choke_by_identity(self)
+    }
+
+    /// Return the next scheduled choke decision deadline, if periodic
+    /// rotation is enabled.
+    pub fn next_choke_rotation_deadline(&self) -> Option<Instant> {
+        let interval = self.config.choke_rotation_interval_secs;
+        (interval > 0).then(|| self.last_choke_rotation + Duration::from_secs(interval))
+    }
+
+    /// Whether the scheduled choke decision is due at `now`.
+    pub fn choke_rotation_due(&self, now: Instant) -> bool {
+        self.next_choke_rotation_deadline()
+            .is_some_and(|deadline| now >= deadline)
+    }
+
+    /// Select an optimistic-un choke target using stable identity.
+    pub fn optimistically_unchoke_by_identity(&mut self) -> Option<PeerIdentity> {
+        optimistic::optimistically_unchoke_by_identity(self)
+    }
+
+    /// Called whenever we receive data from a peer.
+    /// Automatically unsnubs the peer if it was in the explicit snubbed set.
+    pub fn on_data_received_by_identity(&mut self, identity: PeerIdentity, bytes: u64) {
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| PeerIdentity::from(&**peer) == identity)
+        {
+            peer.on_data_received(bytes);
+        }
+        self.snubbed_peers.remove(&identity);
+    }
+
+    pub fn on_data_received(&mut self, peer_idx: usize, bytes: u64) {
+        if let Some(peer) = self.peers.get_mut(peer_idx) {
+            peer.on_data_received(bytes);
+        }
+        // Auto-unsnub: receiving data means the peer is responsive again
+        self.unsnub_peer(peer_idx);
+    }
+
+    /// Explicitly mark a peer as snubbed (algorithm-level).
+    ///
+    /// This adds the peer to the snubbed_peers set, which causes
+    /// calculate_peer_score to return -1000 for this peer, ensuring
+    /// they always get choked on the next rotation.
+    pub fn mark_peer_snubbed(&mut self, peer_id: usize) {
+        if let Some(peer) = self.peers.get(peer_id)
+            && self.snubbed_peers.insert(PeerIdentity::from(peer))
+        {
+            tracing::debug!("[BT] Peer {} explicitly marked as snubbed", peer.addr);
+        }
+    }
+
+    /// Remove a peer from the explicit snubbed set (they sent data again).
+    ///
+    /// Returns true if the peer was actually in the snubbed set (newly un-snubbed),
+    /// false if they were not snubbed.
+    pub fn unsnub_peer(&mut self, peer_id: usize) -> bool {
+        let Some(identity) = self.peers.get(peer_id).map(PeerIdentity::from) else {
+            return false;
+        };
+        if self.snubbed_peers.remove(&identity) {
+            tracing::debug!("[BT] Peer {} un-snubbed (data received)", identity.addr);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the number of explicitly snubbed peers.
+    pub fn snubbed_count(&self) -> usize {
+        self.snubbed_peers.len()
+    }
+
+    /// Check all peers for snubbed status
+    /// Returns indices of newly snubbed peers
+    pub fn check_snubbed_peers(&mut self) -> Vec<usize> {
+        selection::check_snubbed_peers_internal(self)
+    }
+
+    /// Score function: higher = better peer to keep unchoked
+    ///
+    /// Score components:
+    ///   1. Download speed contribution (how much they give us): weight 0.5
+    ///   2. Upload speed contribution (reciprocity): weight 0.3
+    ///   3. Snubbed penalty: -1000 if snubbed (either in PeerStats or algorithm set)
+    ///   4. Interest bonus: +50 if peer_interested
+    ///   5. New peer bonus (time since unchoke < 60s): +30 (anti-churn)
+    #[allow(dead_code)] // Used by tests via ChokingAlgorithm::calculate_peer_score
+    pub(crate) fn calculate_peer_score(peer: &PeerStats, is_explicitly_snubbed: bool) -> f64 {
+        selection::calculate_peer_score(peer, is_explicitly_snubbed)
+    }
+
+    /// Get mutable reference to peer stats
+    pub fn get_peer_mut(&mut self, idx: usize) -> Option<&mut PeerStats> {
+        self.peers.get_mut(idx)
+    }
+
+    /// Get reference to peer stats
+    pub fn get_peer(&self, idx: usize) -> Option<&PeerStats> {
+        self.peers.get(idx)
+    }
+
+    /// Refresh one tracked peer from the live connection snapshot while
+    /// retaining the algorithm's stable identity and rotation state.
+    pub fn sync_peer_by_identity(&mut self, snapshot: &PeerStats) {
+        let identity = PeerIdentity::from(snapshot);
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| PeerIdentity::from(&**peer) == identity)
+        {
+            Self::replace_live_snapshot(peer, snapshot);
+        }
+    }
+
+    /// Synchronize live peer snapshots in one indexed pass.
+    ///
+    /// Reuses the algorithm-owned rotation state while replacing connection
+    /// statistics. The identity index makes synchronization O(peers + updates)
+    /// instead of performing one full peer scan for every connection.
+    pub fn sync_peers_by_identity<'a>(
+        &mut self,
+        snapshots: impl IntoIterator<Item = &'a PeerStats>,
+    ) {
+        let indices = self.peers.iter().enumerate().fold(
+            HashMap::with_capacity(self.peers.len()),
+            |mut indices, (index, peer)| {
+                indices.entry(PeerIdentity::from(peer)).or_insert(index);
+                indices
+            },
+        );
+
+        for snapshot in snapshots {
+            let identity = PeerIdentity::from(snapshot);
+            if let Some(&index) = indices.get(&identity)
+                && let Some(peer) = self.peers.get_mut(index)
+            {
+                Self::replace_live_snapshot(peer, snapshot);
+            }
+        }
+    }
+
+    fn replace_live_snapshot(peer: &mut PeerStats, snapshot: &PeerStats) {
+        let last_unchoke_at = peer.last_unchoke_at;
+        let last_optimistic_unchoke_at = peer.last_optimistic_unchoke_at;
+        let opt_unchoking = peer.opt_unchoking;
+        let is_snubbed = peer.is_snubbed;
+        let snub_count = peer.snub_count;
+        *peer = snapshot.clone();
+        peer.last_unchoke_at = last_unchoke_at;
+        peer.last_optimistic_unchoke_at = last_optimistic_unchoke_at;
+        peer.opt_unchoking = opt_unchoking;
+        peer.is_snubbed = is_snubbed;
+        peer.snub_count = snub_count;
+    }
+
+    /// Get all peers as a slice
+    pub fn peers(&self) -> &[PeerStats] {
+        &self.peers
+    }
+
+    /// Get reference to configuration
+    pub fn config(&self) -> &ChokingConfig {
+        &self.config
+    }
+}
+
+#[cfg(test)]
+mod tests;

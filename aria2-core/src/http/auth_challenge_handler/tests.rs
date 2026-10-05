@@ -7,7 +7,7 @@ mod tests {
 
     use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
     use crate::http::auth_challenge_handler::{AuthChallengeResult, handle_auth_challenge};
-    use crate::http::request_response::HttpMethod;
+    use crate::http::request::HttpMethod;
     use crate::http::skip_response::{AuthScheme, HttpAuthChallenge};
 
     fn make_url(url_str: &str) -> url::Url {

@@ -1,0 +1,563 @@
+//! BT Piece Selector - Piece selection strategies
+//!
+//! This module implements various piece selection algorithms to optimize
+//! download performance in BitTorrent clients.
+//!
+//! # Strategies
+//!
+//! - **Sequential**: Download pieces in order (simple, predictable)
+//! - **Rarest First**: Prioritize pieces that fewest peers have (improves swarm health)
+//! - **Random**: Random selection for diversity
+//! - **Endgame Mode**: Aggressively request all remaining pieces when few are left
+//!
+//! # Architecture Reference
+//!
+//! Based on original aria2 C++ structure:
+//! - `src/PieceSelector.h` - Piece selection interface
+//! - `src/RarestPieceSelector.cc/h` - Rarest first implementation
+//! - `src/PriorityPieceSelector.cc/h` - Priority-based selection
+//! - `src/StreamPieceSelector.cc/h` - Sequential streaming
+
+use tracing::{debug, info, warn};
+
+use crate::config::PiecePriorityRule;
+use crate::constants;
+use crate::download::file_entry::FileEntry;
+
+/// Endgame mode threshold: enable when this many pieces remain
+pub const ENDGAME_THRESHOLD: u32 = constants::BT_ENDGAME_THRESHOLD as u32;
+
+/// Compute the piece indices selected by aria2's `bt-prioritize-piece` rules.
+///
+/// Each file contributes the pieces intersecting its first or last `SIZE`
+/// bytes. The result is sorted and deduplicated, matching
+/// `aria2_original::parsePrioritizePieceRange`; the core picker shuffles
+/// the final set when it installs it.
+pub fn prioritized_piece_indices(
+    rules: &[PiecePriorityRule],
+    file_entries: &[FileEntry],
+    piece_length: u64,
+) -> Result<Vec<u32>, String> {
+    if piece_length == 0 {
+        return Err("piece length must be greater than zero".to_string());
+    }
+
+    let mut indices = Vec::new();
+    for rule in rules {
+        for entry in file_entries {
+            let length = entry.length();
+            if length == 0 {
+                continue;
+            }
+            let end_offset = entry
+                .offset()
+                .checked_add(length)
+                .ok_or_else(|| "file offset exceeds u64::MAX".to_string())?;
+            let size = match rule {
+                PiecePriorityRule::Head { size } | PiecePriorityRule::Tail { size } => {
+                    (*size).min(length)
+                }
+            };
+            if size == 0 {
+                continue;
+            }
+
+            let (first_piece, last_piece) = match rule {
+                PiecePriorityRule::Head { .. } => (
+                    entry.offset() / piece_length,
+                    (entry.offset() + size - 1) / piece_length,
+                ),
+                PiecePriorityRule::Tail { .. } => (
+                    (end_offset - size) / piece_length,
+                    (end_offset - 1) / piece_length,
+                ),
+            };
+            indices.extend(first_piece..=last_piece);
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+        .into_iter()
+        .map(|index| {
+            u32::try_from(index)
+                .map_err(|_| format!("piece index {} exceeds the BitTorrent index range", index))
+        })
+        .collect()
+}
+
+/// Calculate the pieces intersecting the requested files in a torrent
+/// context.
+///
+/// A piece is selected when any byte of it belongs to a requested file. This
+/// preserves BitTorrent's piece-hash granularity: a piece spanning a selected
+/// and an unselected file is downloaded as one unit. `None` means that no
+/// selective filter is active; `Some(empty)` is a valid filter that selects no
+/// pieces.
+pub fn allowed_piece_indices(
+    context: &crate::download::DownloadContext,
+    piece_length: u64,
+    num_pieces: u32,
+) -> Option<Vec<u32>> {
+    let entries = context.get_file_entries();
+    if entries.len() <= 1 || entries.iter().all(|entry| entry.is_requested()) {
+        return None;
+    }
+
+    let mut allowed = vec![false; num_pieces as usize];
+    if piece_length == 0 || allowed.is_empty() {
+        return Some(Vec::new());
+    }
+
+    for entry in entries.iter().filter(|entry| entry.is_requested()) {
+        if entry.length() == 0 {
+            continue;
+        }
+        let start = usize::try_from(entry.offset() / piece_length).unwrap_or(allowed.len());
+        let end_offset = entry.offset().saturating_add(entry.length());
+        let end = end_offset
+            .saturating_sub(1)
+            .checked_div(piece_length)
+            .and_then(|index| usize::try_from(index).ok())
+            .unwrap_or(allowed.len().saturating_sub(1));
+        let start = start.min(allowed.len());
+        let end = end.min(allowed.len().saturating_sub(1));
+        if start <= end {
+            allowed[start..=end].fill(true);
+        }
+    }
+
+    Some(
+        allowed
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, allowed)| allowed.then_some(index as u32))
+            .collect(),
+    )
+}
+
+/// Piece selector configuration
+#[derive(Debug, Clone)]
+pub struct PieceSelectorConfig {
+    /// Enable endgame mode when remaining pieces <= threshold
+    pub endgame_threshold: u32,
+    /// Prefer rarest pieces first (improves swarm health)
+    pub prefer_rarest: bool,
+    /// Use strict priority for sequential/priority mode
+    pub strict_priority: bool,
+}
+
+impl Default for PieceSelectorConfig {
+    fn default() -> Self {
+        Self {
+            endgame_threshold: ENDGAME_THRESHOLD,
+            prefer_rarest: true,
+            strict_priority: false,
+        }
+    }
+}
+
+/// Result of piece selection operation
+pub struct PieceSelectionResult {
+    /// Index of the selected piece (if any)
+    pub piece_index: Option<usize>,
+    /// Whether we're in endgame mode
+    pub is_endgame: bool,
+    /// Number of pieces remaining
+    pub remaining_count: usize,
+}
+
+/// BT Piece Selector - Manages which piece to download next
+///
+/// Integrates the core PiecePicker with download-specific file priorities and
+/// higher-level strategy logic including endgame mode detection.
+pub struct BtPieceSelector {
+    config: PieceSelectorConfig,
+    num_pieces: u32,
+}
+
+impl BtPieceSelector {
+    /// Create a new piece selector with default configuration
+    pub fn new(num_pieces: u32) -> Self {
+        Self {
+            config: PieceSelectorConfig::default(),
+            num_pieces,
+        }
+    }
+
+    /// Create a piece selector with custom configuration
+    pub fn with_config(num_pieces: u32, config: PieceSelectorConfig) -> Self {
+        Self { config, num_pieces }
+    }
+
+    /// Select the next piece to download
+    ///
+    /// Implements the main selection strategy:
+    /// 1. Check if we should enter endgame mode
+    /// 2. Apply the configured strategy (rarest first / sequential / random)
+    /// 3. Return the selected piece index or None if no pieces available
+    ///
+    /// # Arguments
+    /// * `piece_picker` - The mutable piece picker from aria2-protocol
+    /// * `remaining` - Number of incomplete pieces
+    ///
+    /// # Returns
+    /// * `PieceSelectionResult` containing the selected piece and state info
+    pub fn select_next_piece(
+        &self,
+        piece_picker: &mut crate::engine::bittorrent::piece::PiecePicker,
+        remaining: usize,
+    ) -> PieceSelectionResult {
+        let is_endgame = remaining > 0 && remaining <= self.config.endgame_threshold as usize;
+
+        if is_endgame && !piece_picker.endgame_candidates().is_empty() {
+            warn!("[BT] === ENDGAME MODE === ({} pieces remaining)", remaining);
+        }
+
+        let next_piece_idx = if is_endgame {
+            // In endgame mode, pick from endgame candidates.
+            piece_picker.pick_next()
+        } else {
+            // The scheduler is not selecting for one peer here, so avoid
+            // allocating an all-ones bitfield and use the picker fast path.
+            piece_picker.pick_next_without_endgame()
+        }
+        .map(|v| v as usize);
+
+        debug!(
+            "[BT] Selected piece: {:?} (endgame={}, remaining={})",
+            next_piece_idx, is_endgame, remaining
+        );
+
+        PieceSelectionResult {
+            piece_index: next_piece_idx,
+            is_endgame,
+            remaining_count: remaining,
+        }
+    }
+
+    /// Select the next piece for a specific peer, considering BEP 6 AllowedFast
+    ///
+    /// When a peer is choked but has granted us AllowedFast access to some pieces,
+    /// this method prioritizes those pieces before falling back to normal selection.
+    ///
+    /// # Arguments
+    /// * `piece_picker` - The mutable piece picker
+    /// * `peer_conn` - The peer connection (for checking allowed_fast set)
+    /// * `peer_bitfield` - The peer's bitfield (pieces they have)
+    /// * `is_choked` - Whether this peer has choked us
+    /// * `remaining` - Number of incomplete pieces
+    ///
+    /// # Returns
+    /// * `PieceSelectionResult` with the optimal piece for this peer
+    pub fn select_next_piece_for_peer(
+        &self,
+        piece_picker: &mut crate::engine::bittorrent::piece::PiecePicker,
+        peer_conn: &crate::engine::bittorrent::peer::connection::BtPeerConn,
+        peer_bitfield: &[u8],
+        is_choked: bool,
+        remaining: usize,
+    ) -> PieceSelectionResult {
+        // If peer is choked BUT has allowed us some pieces, prefer those
+        if is_choked && !peer_conn.peer_allowed_fast_set().is_empty() {
+            debug!(
+                "[BT] Peer is choked but has {} allowed fast pieces, checking...",
+                peer_conn.peer_allowed_fast_set().len()
+            );
+
+            for &fast_idx in peer_conn.peer_allowed_fast_set() {
+                // Check if piece is needed and peer has it
+                if piece_picker.is_allowed(fast_idx)
+                    && let Some(info) = piece_picker.get_piece_info(fast_idx)
+                    && !info.is_completed
+                    && !info.in_progress
+                    && Self::is_bitfield_set(peer_bitfield, fast_idx)
+                {
+                    info!("[BT] Using AllowedFast piece {} despite choke", fast_idx);
+                    return PieceSelectionResult {
+                        piece_index: Some(fast_idx as usize),
+                        is_endgame: false,
+                        remaining_count: remaining,
+                    };
+                }
+            }
+
+            debug!("[BT] No suitable AllowedFast piece found, falling back");
+        }
+
+        // Fall back to normal selection
+        self.select_next_piece(piece_picker, remaining)
+    }
+
+    /// Check if a bitfield has a specific piece index set (MSB-first ordering)
+    fn is_bitfield_set(bitfield: &[u8], piece_index: u32) -> bool {
+        let byte_idx = (piece_index as usize) / 8;
+        let bit_idx = 7 - ((piece_index as usize) % 8);
+
+        if byte_idx >= bitfield.len() {
+            return false;
+        }
+
+        (bitfield[byte_idx] & (1 << bit_idx)) != 0
+    }
+
+    /// Calculate the actual length of a specific piece
+    ///
+    /// The last piece may be shorter than the standard piece length.
+    ///
+    /// # Arguments
+    /// * `piece_index` - Index of the piece
+    /// * `piece_length` - Standard piece length
+    /// * `total_size` - Total torrent size in bytes
+    ///
+    /// # Returns
+    /// * Actual byte length of the specified piece
+    pub fn calculate_piece_length(
+        &self,
+        piece_index: usize,
+        piece_length: u32,
+        total_size: u64,
+    ) -> u32 {
+        if piece_index == self.num_pieces as usize - 1
+            && !total_size.is_multiple_of(piece_length as u64)
+        {
+            (total_size % piece_length as u64) as u32
+        } else {
+            piece_length
+        }
+    }
+
+    /// Calculate number of blocks in a piece
+    ///
+    /// # Arguments
+    /// * `piece_length` - Length of the piece in bytes
+    /// * `block_size` - Size of each block (typically 16KB)
+    ///
+    /// # Returns
+    /// * Number of blocks needed to transfer this piece
+    pub fn calculate_num_blocks(piece_length: u32, block_size: u32) -> u32 {
+        piece_length.div_ceil(block_size)
+    }
+
+    /// Initialize peer frequency tracking for rarest-first strategy
+    ///
+    /// Updates the piece picker with frequency data from peers' bitfields
+    /// to enable rarest-first selection.
+    ///
+    /// # Arguments
+    /// * `piece_picker` - Mutable reference to the piece picker
+    /// * `peer_tracker` - Peer bitfield tracker with frequency data
+    pub fn initialize_frequencies(
+        &self,
+        piece_picker: &mut crate::engine::bittorrent::piece::PiecePicker,
+        peer_tracker: &crate::engine::bittorrent::piece::PeerBitfieldTracker,
+    ) {
+        piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
+
+        info!(
+            "[BT] Piece selection initialized: {} pieces, {} peers tracked",
+            self.num_pieces,
+            peer_tracker.peer_count()
+        );
+    }
+
+    /// Check if download is complete
+    ///
+    /// # Arguments
+    /// * `piece_picker` - Reference to the piece picker
+    ///
+    /// # Returns
+    /// * `true` if all pieces are marked complete
+    pub fn is_complete(piece_picker: &crate::engine::bittorrent::piece::PiecePicker) -> bool {
+        piece_picker.is_complete()
+    }
+
+    /// Get total number of pieces
+    pub fn num_pieces(&self) -> u32 {
+        self.num_pieces
+    }
+}
+
+/// Helper functions for piece management
+///
+/// Build a bitfield vector from completed pieces
+///
+/// Creates a bitfield representation where each bit indicates whether
+/// the corresponding piece has been completed.
+///
+/// # Arguments
+/// * `num_pieces` - Total number of pieces
+/// * `is_completed` - Function that returns true if a piece index is complete
+///
+/// # Returns
+/// * Vector of bytes representing the bitfield (MSB first)
+pub fn build_bitfield_from_completed<F>(num_pieces: u32, is_completed: F) -> Vec<u8>
+where
+    F: Fn(u32) -> bool,
+{
+    let bf_len = (num_pieces as usize).div_ceil(8);
+    let mut bitfield = vec![0u8; bf_len];
+
+    for i in 0..num_pieces {
+        if is_completed(i) {
+            let byte_idx = (i as usize) / 8;
+            let bit_idx = 7 - ((i as usize) % 8); // MSB first
+            if byte_idx < bitfield.len() {
+                bitfield[byte_idx] |= 1 << bit_idx;
+            }
+        }
+    }
+
+    bitfield
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PiecePriorityRule;
+    use crate::download::file_entry::FileEntry;
+
+    #[test]
+    fn test_endgame_threshold_constant() {
+        assert_eq!(ENDGAME_THRESHOLD, 20);
+    }
+
+    #[test]
+    fn test_piece_selector_config_default() {
+        let config = PieceSelectorConfig::default();
+        assert_eq!(config.endgame_threshold, 20);
+        assert!(config.prefer_rarest);
+        assert!(!config.strict_priority);
+    }
+
+    #[test]
+    fn test_calculate_piece_length_normal() {
+        let selector = BtPieceSelector::new(100);
+        let length = selector.calculate_piece_length(50, 256 * 1024, 100 * 256 * 1024);
+        assert_eq!(length, 256 * 1024); // Normal piece
+    }
+
+    #[test]
+    fn test_calculate_piece_length_last_piece_shorter() {
+        let selector = BtPieceSelector::new(10);
+        // Total size = 10 * 1024 - 100 = 9900 (last piece is shorter)
+        let total_size = 10 * 1024u64 - 100;
+        let length = selector.calculate_piece_length(9, 1024, total_size);
+        assert_eq!(length, 924); // Last piece is shorter
+    }
+
+    #[test]
+    fn test_calculate_num_blocks_exact() {
+        let blocks = BtPieceSelector::calculate_num_blocks(16384, 16384);
+        assert_eq!(blocks, 1); // Exactly one block
+    }
+
+    #[test]
+    fn test_calculate_num_blocks_partial() {
+        let blocks = BtPieceSelector::calculate_num_blocks(20000, 16384);
+        assert_eq!(blocks, 2); // Two blocks (16384 + 3616)
+    }
+
+    #[test]
+    fn test_build_bitfield_all_complete() {
+        let bf = build_bitfield_from_completed(16, |_| true);
+        assert_eq!(bf.len(), 2); // 16 bits = 2 bytes
+        assert_eq!(bf[0], 0xFF); // All ones
+        assert_eq!(bf[1], 0xFF);
+    }
+
+    #[test]
+    fn test_build_bitfield_none_complete() {
+        let bf = build_bitfield_from_completed(8, |_| false);
+        assert_eq!(bf.len(), 1); // 8 bits = 1 byte
+        assert_eq!(bf[0], 0x00); // All zeros
+    }
+
+    #[test]
+    fn test_build_bitfield_mixed() {
+        let bf = build_bitfield_from_completed(8, |i| i % 2 == 0);
+        assert_eq!(bf.len(), 1);
+        assert_eq!(bf[0], 0xAA); // 10101010
+    }
+
+    #[test]
+    fn test_piece_selection_result_default() {
+        let result = PieceSelectionResult {
+            piece_index: None,
+            is_endgame: false,
+            remaining_count: 100,
+        };
+        assert!(result.piece_index.is_none());
+        assert!(!result.is_endgame);
+        assert_eq!(result.remaining_count, 100);
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_match_head_and_tail_file_ranges() {
+        let entries = vec![FileEntry::new("a".into(), 4096, 0, Vec::new())];
+
+        assert_eq!(
+            prioritized_piece_indices(&[PiecePriorityRule::Head { size: 1025 }], &entries, 1024,)
+                .unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            prioritized_piece_indices(&[PiecePriorityRule::Tail { size: 1025 }], &entries, 1024,)
+                .unwrap(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_deduplicates_file_boundaries() {
+        let entries = vec![
+            FileEntry::new("a".into(), 1500, 0, Vec::new()),
+            FileEntry::new("b".into(), 1500, 1500, Vec::new()),
+        ];
+
+        assert_eq!(
+            prioritized_piece_indices(
+                &[
+                    PiecePriorityRule::Head { size: 1024 },
+                    PiecePriorityRule::Tail { size: 1024 },
+                ],
+                &entries,
+                1024,
+            )
+            .unwrap(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_rejects_zero_piece_length() {
+        let entries = vec![FileEntry::new("a".into(), 1, 0, Vec::new())];
+        assert!(prioritized_piece_indices(&[], &entries, 0).is_err());
+    }
+
+    #[test]
+    fn test_allowed_piece_indices_follow_requested_files() {
+        let mut context = crate::download::DownloadContext::new_default();
+        context.set_file_entries(vec![
+            FileEntry::new("a".into(), 4, 0, Vec::new()),
+            FileEntry::new("b".into(), 4, 4, Vec::new()),
+            FileEntry::new("c".into(), 4, 8, Vec::new()),
+        ]);
+        context.set_file_filter(vec![2]);
+
+        assert_eq!(allowed_piece_indices(&context, 4, 3), Some(vec![1]));
+    }
+
+    #[test]
+    fn test_allowed_piece_indices_include_piece_spanning_file_boundary() {
+        let mut context = crate::download::DownloadContext::new_default();
+        context.set_file_entries(vec![
+            FileEntry::new("a".into(), 3, 0, Vec::new()),
+            FileEntry::new("b".into(), 3, 3, Vec::new()),
+        ]);
+        context.set_file_filter(vec![2]);
+
+        assert_eq!(allowed_piece_indices(&context, 4, 2), Some(vec![0, 1]));
+    }
+}

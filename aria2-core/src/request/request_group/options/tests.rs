@@ -7,8 +7,6 @@ fn follow_mode_preserves_all_wire_values() {
     assert_eq!(FollowMode::parse("false"), Some(FollowMode::Disabled));
     assert_eq!(FollowMode::parse("mem"), Some(FollowMode::Memory));
     assert_eq!(FollowMode::parse("invalid"), None);
-    assert_eq!(FollowMode::from_bool(true), FollowMode::Follow);
-    assert_eq!(FollowMode::from_bool(false), FollowMode::Disabled);
     assert_eq!(FollowMode::Memory.as_str(), "mem");
 }
 
@@ -143,7 +141,7 @@ fn rpc_option_map_uses_aria2_wire_strings() {
         serde_json::json!(["X-One: 1", "X-Two: 2"]),
     );
 
-    let options = DownloadOptions::from_rpc_options(&values);
+    let options = DownloadOptions::try_from_rpc_options(&values).unwrap();
 
     assert_eq!(options.max_download_limit, Some(100 * 1024));
     assert_eq!(options.max_retries, 7);
@@ -153,6 +151,32 @@ fn rpc_option_map_uses_aria2_wire_strings() {
         Some("1=first.iso\n2=second.iso")
     );
     assert_eq!(options.header, vec!["X-One: 1", "X-Two: 2"]);
+}
+
+#[test]
+fn min_http_range_size_is_a_separate_rpc_option() {
+    let values = HashMap::from([("min-http-range-size".to_string(), serde_json::json!("128K"))]);
+
+    let options = DownloadOptions::try_from_rpc_options(&values).unwrap();
+    assert_eq!(options.min_http_range_size, Some(128 * 1024));
+    assert_eq!(
+        options.min_split_size,
+        Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+    );
+}
+
+#[test]
+fn min_http_range_size_rpc_validation_enforces_configured_bounds() {
+    for invalid in ["512", "2G"] {
+        let values = HashMap::from([(
+            "min-http-range-size".to_string(),
+            serde_json::json!(invalid),
+        )]);
+        assert!(
+            DownloadOptions::try_from_rpc_options(&values).is_err(),
+            "expected {invalid} to be rejected"
+        );
+    }
 }
 
 #[test]

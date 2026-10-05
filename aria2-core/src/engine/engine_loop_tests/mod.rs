@@ -7,6 +7,7 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
     EngineLoopContext {
         group_man: Arc::new(RequestGroupMan::new()),
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         auto_save: None,
         auto_save_dirty_signal: None,
         event_hooks: Arc::new(DownloadEventHooks::new()),
@@ -24,12 +25,14 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
         ),
         #[cfg(feature = "bittorrent")]
         bt_registry: Arc::new(std::sync::RwLock::new(
-            crate::engine::bt_registry::BtRegistry::new(),
+            crate::engine::bittorrent::registry::BtRegistry::new(),
         )),
         #[cfg(feature = "bittorrent")]
-        bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+        bt_listener: Arc::new(
+            crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+        ),
         #[cfg(feature = "bittorrent")]
-        lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+        lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
     }
 }
 
@@ -38,7 +41,7 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
 /// that never converges would otherwise hang CI instead of failing.
 async fn run_until_exit(
     ctx: EngineLoopContext,
-    cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
+    cmd_rx: EngineCommandReceiver,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     budget: Duration,
 ) {

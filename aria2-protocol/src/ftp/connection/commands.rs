@@ -178,23 +178,6 @@ impl FtpConnection {
             self.noop().await?;
         }
     }
-
-    /// Start the legacy placeholder keep-alive task.
-    ///
-    /// This method only emits a tick and never sends `NOOP`. Use
-    /// [`Self::run_keepalive`] when the caller owns the connection exclusively.
-    #[deprecated(note = "use run_keepalive with an exclusively owned connection")]
-    pub fn start_keepalive(&self) -> Option<tokio::task::JoinHandle<()>> {
-        let keepalive_duration = self.options.keepalive_interval?;
-
-        Some(tokio::spawn(async move {
-            let mut ticker = interval(keepalive_duration);
-            loop {
-                ticker.tick().await;
-                debug!("FTP keep-alive tick");
-            }
-        }))
-    }
 }
 
 #[cfg(test)]

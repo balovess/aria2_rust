@@ -14,7 +14,7 @@ impl crate::config::OptionRegistry {
             // must remain distinguishable from an omitted option because it
             // explicitly disables the seed-time criterion.
             default_value: OptionValue::None,
-            description: "Seeding time in minutes (0=infinite)".into(),
+            description: "Seeding time in minutes (0 disables seeding)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
@@ -48,6 +48,37 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-max-upload-slots".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::None,
+            min: Some(0),
+            max: Some(u32::MAX as u64),
+            description: "Maximum number of peers to unchoke (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-optimistic-unchoke-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::None,
+            min: Some(0),
+            max: Some(i64::MAX as u64),
+            description: "Seconds between optimistic unchoke rotations (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-snubbed-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::None,
+            min: Some(1),
+            max: Some(i64::MAX as u64),
+            description: "Seconds without peer data before treating it as snubbed (Rust extension)"
+                .into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "bt-max-open-files".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(100),
@@ -68,7 +99,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-save-metadata".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(true),
+            default_value: OptionValue::Bool(false),
             description: "Save metadata as .torrent file".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -257,7 +288,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-load-saved-metadata".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(true),
+            default_value: OptionValue::Bool(false),
             description: "Load saved metadata from previous session".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -319,20 +350,22 @@ impl crate::config::OptionRegistry {
             cumulative_delimiter: Some("\n"),
             description: "Remote public tracker list sources".into(),
             category: OptionCategory::BitTorrent,
-            // Rust-only extension. Keep it out of the original
-            // getGlobalOption/getOption projections while retaining the
-            // explicit extension option for local configuration and RPC.
-            expose_in_aria2_rpc: false,
+            // Rust-only extension: expose it explicitly so RPC clients can
+            // inspect and change the public tracker catalog configuration.
+            expose_in_aria2_rpc: true,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "bt-tracker-update-interval".into(),
             opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(86_400),
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL
+                    .as_secs() as i64,
+            ),
             min: Some(1),
             description: "Public tracker list refresh interval in seconds".into(),
             category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: false,
+            expose_in_aria2_rpc: true,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -341,7 +374,7 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Bool(true),
             description: "Use public trackers in addition to torrent trackers".into(),
             category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: false,
+            expose_in_aria2_rpc: true,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -392,6 +425,63 @@ impl crate::config::OptionRegistry {
             min: Some(1),
             max: Some(60),
             description: "DHT message timeout in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        for (name, default, description) in [
+            (
+                "dht-refresh-check-interval",
+                300,
+                "DHT bucket refresh check interval in seconds",
+            ),
+            (
+                "dht-token-rotation-interval",
+                600,
+                "DHT token rotation interval in seconds",
+            ),
+            (
+                "dht-node-contact-interval",
+                900,
+                "DHT node contact interval in seconds",
+            ),
+            (
+                "dht-cleanup-interval",
+                300,
+                "DHT cleanup and eviction interval in seconds",
+            ),
+            (
+                "dht-save-interval",
+                1800,
+                "DHT routing-table save interval in seconds",
+            ),
+            (
+                "dht-bootstrap-timeout",
+                60,
+                "DHT bootstrap timeout in seconds",
+            ),
+            (
+                "dht-persistence-max-age",
+                24 * 60 * 60,
+                "Maximum age of a persisted DHT snapshot in seconds",
+            ),
+        ] {
+            self.register(OptionDef {
+                name: name.into(),
+                opt_type: OptionType::Integer,
+                default_value: OptionValue::Int(default),
+                min: Some(1),
+                description: description.into(),
+                category: OptionCategory::BitTorrent,
+                ..Default::default()
+            });
+        }
+        self.register(OptionDef {
+            name: "dht-max-concurrent-lookups".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(16),
+            min: Some(1),
+            max: Some(1024),
+            description: "Maximum concurrent DHT lookup tasks".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

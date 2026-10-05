@@ -88,14 +88,21 @@ impl TokenBucket {
     /// Create an unlimited token bucket — `acquire` / `try_acquire` always
     /// succeed instantly without consuming any real tokens.
     pub fn unlimited() -> Self {
+        Self::unlimited_with_burst(None)
+    }
+
+    pub(crate) fn unlimited_with_burst(burst_bytes: Option<u64>) -> Self {
         let anchor = Instant::now();
         let (rate_changed, _) = watch::channel(0u64);
-        // Use a large but safe value to avoid overflow on arithmetic.
-        let huge = u64::MAX / 4;
+        // Unlimited calls bypass token accounting. Keep only the normal burst
+        // reserve so a later switch to a finite rate starts bounded.
+        let capacity_milli = burst_bytes
+            .unwrap_or(constants::DEFAULT_BURST_BYTES as u64)
+            .saturating_mul(1000);
         Self {
-            tokens_milli: AtomicU64::new(huge),
-            capacity_milli: huge,
-            rate_milli_per_sec: AtomicU64::new(huge),
+            tokens_milli: AtomicU64::new(capacity_milli),
+            capacity_milli,
+            rate_milli_per_sec: AtomicU64::new(u64::MAX / 4),
             last_refill_elapsed_ns: AtomicU64::new(0),
             unlimited: AtomicBool::new(true),
             anchor,
@@ -291,6 +298,39 @@ impl TokenBucket {
         }
     }
 
+    /// Return the monotonic wait required before `acquire(bytes)` can make
+    /// progress. This is a scheduling hint: another concurrent caller may
+    /// consume tokens first, so callers must still retry the acquisition.
+    pub(crate) fn time_until_acquire(&self, bytes: u64) -> Duration {
+        if self.unlimited.load(Ordering::Relaxed) {
+            return Duration::ZERO;
+        }
+
+        self.refill();
+        let needed_milli = bytes.saturating_mul(1000);
+        let current = self.tokens_milli.load(Ordering::Relaxed);
+        if current >= needed_milli {
+            return Duration::ZERO;
+        }
+
+        let rate_milli = self.rate_milli_per_sec.load(Ordering::Relaxed);
+        if rate_milli == 0 {
+            // `acquire` treats this defensive configuration as unlimited.
+            return Duration::ZERO;
+        }
+
+        let deficit_milli = needed_milli - current;
+        let wait_ns = (deficit_milli as u128)
+            .saturating_mul(NS_PER_SEC as u128)
+            .div_ceil(rate_milli as u128)
+            .min(u64::MAX as u128) as u64;
+        Duration::from_nanos(wait_ns.max(1))
+    }
+
+    pub(crate) fn subscribe_rate_changes(&self) -> watch::Receiver<u64> {
+        self.rate_changed.subscribe()
+    }
+
     /// Non-blocking attempt to acquire `bytes` tokens.
     /// Returns `true` if tokens were available and deducted, `false` otherwise.
     pub fn try_acquire(&self, bytes: u64) -> bool {
@@ -312,6 +352,30 @@ impl TokenBucket {
             ) {
                 Ok(_) => return true,
                 Err(_) => continue,
+            }
+        }
+    }
+
+    /// Return previously acquired tokens after a queued transfer is canceled.
+    /// The balance is capped at the configured burst capacity.
+    pub fn refund(&self, bytes: u64) {
+        if self.unlimited.load(Ordering::Relaxed) {
+            return;
+        }
+        let refunded_milli = bytes.saturating_mul(1000);
+        let mut current = self.tokens_milli.load(Ordering::Relaxed);
+        loop {
+            let refunded = current
+                .saturating_add(refunded_milli)
+                .min(self.capacity_milli);
+            match self.tokens_milli.compare_exchange_weak(
+                current,
+                refunded,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
             }
         }
     }

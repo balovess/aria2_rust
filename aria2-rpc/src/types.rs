@@ -1,7 +1,6 @@
 //! RPC data model types.
 //!
-//! The concrete models are grouped by responsibility while this module keeps
-//! the historical public paths stable.
+//! The concrete models are grouped by responsibility.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +18,8 @@ pub use session::{
 };
 pub use status::{BittorrentInfo, BittorrentMetaInfo, DownloadStatus, FileInfo, StatusInfo};
 pub use transfer::{
-    PeerInfo, ServerInfo, ServerInfoIndex, TrackerInfo, UriEntry, UriInfo, UriStatus,
+    PeerDetails, PeerFlags, PeerInfo, PeerStats, ServerInfo, ServerInfoIndex, TrackerInfo,
+    UriEntry, UriStatus,
 };
 
 #[cfg(test)]

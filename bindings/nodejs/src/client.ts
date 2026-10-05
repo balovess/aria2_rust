@@ -10,9 +10,12 @@ import type {
   UriEntry,
   ServerInfoIndex,
   PeerInfo,
+  TrackerInfo,
+  DhtStatus,
   ClientOptions,
 } from './types.js';
-import { ConnectionError } from './errors.js';
+import { Aria2Error } from './errors.js';
+import type { PositionMode } from './types.js';
 
 const DEFAULT_URL = 'http://localhost:6800/jsonrpc';
 const WS_EVENT_NAMES = [
@@ -22,10 +25,127 @@ const WS_EVENT_NAMES = [
   'downloadComplete',
   'downloadError',
   'btDownloadComplete',
-  'btDownloadError',
 ] as const;
 
 type WsEventName = (typeof WS_EVENT_NAMES)[number];
+
+function parseObjectResult<T extends object = Record<string, unknown>>(
+  result: unknown,
+  method: string,
+): T {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result as T;
+}
+
+function parseObjectListResult<T>(result: unknown, method: string): T[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  for (const [index, item] of result.entries()) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result as T[];
+}
+
+function parseArrayResult(result: unknown, method: string): unknown[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
+
+function parseStringListResult(
+  result: unknown,
+  method: string,
+  expectedLength?: number,
+): string[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  if (expectedLength !== undefined && result.length !== expectedLength) {
+    throw new Aria2Error(
+      `Unexpected result length for ${method}: expected ${expectedLength}, got ${result.length}`,
+    );
+  }
+  for (const [index, item] of result.entries()) {
+    if (typeof item !== 'string') {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result;
+}
+
+function parseChangeUriCounts(result: unknown): string[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error('Unexpected result type for changeUri');
+  }
+  if (result.length !== 2) {
+    throw new Aria2Error(
+      `Unexpected result length for changeUri: expected 2, got ${result.length}`,
+    );
+  }
+  return result.map((item, index) => {
+    if (typeof item === 'string' && /^(0|[1-9]\d*)$/.test(item)) return item;
+    if (typeof item === 'number' && Number.isSafeInteger(item) && item >= 0) {
+      return String(item);
+    }
+    throw new Aria2Error(`Unexpected item type for changeUri at index ${index}`);
+  });
+}
+
+function parseStringResult(result: unknown, method: string): string {
+  if (typeof result !== 'string') {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
+
+function requireNonNegativeInteger(value: unknown, name: string): asserts value is number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative safe integer`);
+  }
+}
+
+function requireStringList(
+  value: unknown,
+  name: string,
+  allowEmpty = true,
+): asserts value is string[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    throw new TypeError(`${name} must be a non-empty string array`);
+  }
+  if (value.some((item) => typeof item !== 'string')) {
+    throw new TypeError(`${name} must contain only strings`);
+  }
+}
+
+function requirePositionMode(value: unknown): asserts value is PositionMode {
+  if (value !== 'POS_SET' && value !== 'POS_CUR' && value !== 'POS_END') {
+    throw new TypeError('mode must be POS_SET, POS_CUR, or POS_END');
+  }
+}
+
+function requireBuffer(value: unknown, name: string): asserts value is Buffer {
+  if (!Buffer.isBuffer(value)) {
+    throw new TypeError(`${name} must be a Buffer`);
+  }
+}
+
+function requireGid(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError('gid must be a non-empty string');
+  }
+}
+
+function requireRecord(value: unknown, name: string): asserts value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+}
 
 function httpToWs(url: string): string {
   if (url.startsWith('https://')) {
@@ -55,14 +175,28 @@ export class Aria2Client {
   }
 
   private async ensureEventEmitter(): Promise<Aria2EventEmitter> {
+    const emitter = this.getOrCreateEventEmitter();
+    await emitter.connect();
+    return emitter;
+  }
+
+  private getOrCreateEventEmitter(): Aria2EventEmitter {
     if (this.eventEmitter) {
       return this.eventEmitter;
     }
 
     const wsUrl = httpToWs(this.url);
     this.eventEmitter = new Aria2EventEmitter(wsUrl, this.options);
-    await this.eventEmitter.connect();
     return this.eventEmitter;
+  }
+
+  /** Connect the notification WebSocket before starting a download. */
+  async connectEvents(): Promise<Aria2EventEmitter> {
+    return this.ensureEventEmitter();
+  }
+
+  async call<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
+    return (await this.transport.sendRequest(method, params)) as T;
   }
 
   async addUri(
@@ -70,10 +204,14 @@ export class Aria2Client {
     options?: Record<string, unknown>,
     position?: number,
   ): Promise<string> {
+    requireStringList(uris, 'uris', false);
+    if (options !== undefined) requireRecord(options, 'options');
+    if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [uris];
     if (options !== undefined || position !== undefined) params.push(options ?? {});
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.addUri', params)) as string;
+    const result = await this.transport.sendRequest('aria2.addUri', params);
+    return parseStringResult(result, 'addUri');
   }
 
   async addTorrent(
@@ -82,13 +220,18 @@ export class Aria2Client {
     webSeedUris?: string[],
     position?: number,
   ): Promise<string> {
+    requireBuffer(torrent, 'torrent');
+    if (options !== undefined) requireRecord(options, 'options');
+    if (webSeedUris !== undefined) requireStringList(webSeedUris, 'webSeedUris');
+    if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [torrent.toString('base64')];
     if (webSeedUris !== undefined || options !== undefined || position !== undefined) {
       params.push(webSeedUris ?? []);
     }
     if (options !== undefined || position !== undefined) params.push(options ?? {});
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.addTorrent', params)) as string;
+    const result = await this.transport.sendRequest('aria2.addTorrent', params);
+    return parseStringResult(result, 'addTorrent');
   }
 
   async addMetalink(
@@ -96,47 +239,75 @@ export class Aria2Client {
     options?: Record<string, unknown>,
     position?: number,
   ): Promise<string[]> {
+    requireBuffer(metalink, 'metalink');
+    if (options !== undefined) requireRecord(options, 'options');
+    if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [metalink.toString('base64')];
     if (options !== undefined) params.push(options);
     else if (position !== undefined) params.push({});
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.addMetalink', params)) as string[];
+    const result = await this.transport.sendRequest('aria2.addMetalink', params);
+    return parseStringListResult(result, 'addMetalink');
   }
 
   async remove(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.remove', [gid])) as string;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.remove', [gid]);
+    return parseStringResult(result, 'remove');
   }
 
   async pause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.pause', [gid])) as string;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.pause', [gid]);
+    return parseStringResult(result, 'pause');
   }
 
   async unpause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.unpause', [gid])) as string;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.unpause', [gid]);
+    return parseStringResult(result, 'unpause');
   }
 
   async forcePause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forcePause', [gid])) as string;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.forcePause', [gid]);
+    return parseStringResult(result, 'forcePause');
   }
 
   async forceRemove(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forceRemove', [gid])) as string;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.forceRemove', [gid]);
+    return parseStringResult(result, 'forceRemove');
   }
 
   async pauseAll(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.pauseAll', [])) as string;
+    const result = await this.transport.sendRequest('aria2.pauseAll', []);
+    return parseStringResult(result, 'pauseAll');
   }
 
   async forcePauseAll(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forcePauseAll', [])) as string;
+    const result = await this.transport.sendRequest('aria2.forcePauseAll', []);
+    return parseStringResult(result, 'forcePauseAll');
   }
 
   async unpauseAll(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.unpauseAll', [])) as string;
+    const result = await this.transport.sendRequest('aria2.unpauseAll', []);
+    return parseStringResult(result, 'unpauseAll');
   }
 
-  async changePosition(gid: string, position: number, mode: string): Promise<number> {
-    return (await this.transport.sendRequest('aria2.changePosition', [gid, position, mode])) as number;
+  async changePosition(gid: string, position: number, mode: PositionMode): Promise<number> {
+    requireGid(gid);
+    requireNonNegativeInteger(position, 'position');
+    requirePositionMode(mode);
+    const result = await this.transport.sendRequest('aria2.changePosition', [gid, position, mode]);
+    if (typeof result === 'number' && Number.isSafeInteger(result) && result >= 0) {
+      return result;
+    }
+    if (typeof result === 'string' && /^(0|[1-9]\d*)$/.test(result)) {
+      const parsed = Number(result);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+    throw new Aria2Error(`Unexpected result type for changePosition: ${typeof result}`);
   }
 
   async changeUri(
@@ -146,129 +317,218 @@ export class Aria2Client {
     addUris: string[],
     position?: number,
   ): Promise<string[]> {
+    requireGid(gid);
+    requireNonNegativeInteger(fileIndex, 'fileIndex');
+    requireStringList(deleteUris, 'deleteUris');
+    requireStringList(addUris, 'addUris');
+    if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [gid, fileIndex, deleteUris, addUris];
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.changeUri', params)) as string[];
+    const result = await this.transport.sendRequest('aria2.changeUri', params);
+    return parseChangeUriCounts(result);
   }
 
   async tellStatus(gid: string, keys?: string[]): Promise<StatusInfo> {
+    requireGid(gid);
+    if (keys !== undefined) requireStringList(keys, 'keys');
     const params: unknown[] = [gid];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellStatus', params)) as StatusInfo;
+    const result = await this.transport.sendRequest('aria2.tellStatus', params);
+    return parseObjectResult<StatusInfo>(result, 'tellStatus');
   }
 
   async getFiles(gid: string): Promise<FileInfo[]> {
-    return (await this.transport.sendRequest('aria2.getFiles', [gid])) as FileInfo[];
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.getFiles', [gid]);
+    return parseObjectListResult<FileInfo>(result, 'getFiles');
   }
 
   async getUris(gid: string): Promise<UriEntry[]> {
-    return (await this.transport.sendRequest('aria2.getUris', [gid])) as UriEntry[];
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.getUris', [gid]);
+    return parseObjectListResult<UriEntry>(result, 'getUris');
   }
 
   async getServers(gid: string): Promise<ServerInfoIndex[]> {
-    return (await this.transport.sendRequest('aria2.getServers', [gid])) as ServerInfoIndex[];
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.getServers', [gid]);
+    return parseObjectListResult<ServerInfoIndex>(result, 'getServers');
   }
 
   async getPeers(gid: string): Promise<PeerInfo[]> {
-    return (await this.transport.sendRequest('aria2.getPeers', [gid])) as PeerInfo[];
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.getPeers', [gid]);
+    return parseObjectListResult<PeerInfo>(result, 'getPeers');
+  }
+
+  async getTrackers(gid: string): Promise<TrackerInfo[]> {
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.getTrackers', [gid]);
+    return parseObjectListResult<TrackerInfo>(result, 'getTrackers');
+  }
+
+  async getDhtStatus(): Promise<DhtStatus> {
+    const result = await this.transport.sendRequest('aria2.getDhtStatus', []);
+    return parseObjectResult<DhtStatus>(result, 'getDhtStatus');
   }
 
   async tellActive(keys?: string[]): Promise<StatusInfo[]> {
+    if (keys !== undefined) requireStringList(keys, 'keys');
     const params: unknown[] = [];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellActive', params)) as StatusInfo[];
+    const result = await this.transport.sendRequest('aria2.tellActive', params);
+    return parseObjectListResult<StatusInfo>(result, 'tellActive');
   }
 
   async tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]> {
+    requireNonNegativeInteger(offset, 'offset');
+    requireNonNegativeInteger(num, 'num');
+    if (keys !== undefined) requireStringList(keys, 'keys');
     const params: unknown[] = [offset, num];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellWaiting', params)) as StatusInfo[];
+    const result = await this.transport.sendRequest('aria2.tellWaiting', params);
+    return parseObjectListResult<StatusInfo>(result, 'tellWaiting');
   }
 
   async tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]> {
+    requireNonNegativeInteger(offset, 'offset');
+    requireNonNegativeInteger(num, 'num');
+    if (keys !== undefined) requireStringList(keys, 'keys');
     const params: unknown[] = [offset, num];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellStopped', params)) as StatusInfo[];
+    const result = await this.transport.sendRequest('aria2.tellStopped', params);
+    return parseObjectListResult<StatusInfo>(result, 'tellStopped');
   }
 
   async getGlobalStat(): Promise<GlobalStat> {
-    return (await this.transport.sendRequest('aria2.getGlobalStat', [])) as GlobalStat;
+    const result = await this.transport.sendRequest('aria2.getGlobalStat', []);
+    return parseObjectResult<GlobalStat>(result, 'getGlobalStat');
   }
 
   async purgeDownloadResult(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.purgeDownloadResult', [])) as string;
+    const result = await this.transport.sendRequest('aria2.purgeDownloadResult', []);
+    return parseStringResult(result, 'purgeDownloadResult');
   }
 
   async removeDownloadResult(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.removeDownloadResult', [gid])) as string;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.removeDownloadResult', [gid]);
+    return parseStringResult(result, 'removeDownloadResult');
   }
 
   async getGlobalOption(): Promise<Record<string, unknown>> {
-    return (await this.transport.sendRequest('aria2.getGlobalOption', [])) as Record<string, unknown>;
+    const result = await this.transport.sendRequest('aria2.getGlobalOption', []);
+    return parseObjectResult(result, 'getGlobalOption');
   }
 
   async changeGlobalOption(options: Record<string, unknown>): Promise<string> {
-    return (await this.transport.sendRequest('aria2.changeGlobalOption', [options])) as string;
+    requireRecord(options, 'options');
+    const result = await this.transport.sendRequest('aria2.changeGlobalOption', [options]);
+    return parseStringResult(result, 'changeGlobalOption');
   }
 
   async getOption(gid: string): Promise<Record<string, unknown>> {
-    return (await this.transport.sendRequest('aria2.getOption', [gid])) as Record<string, unknown>;
+    requireGid(gid);
+    const result = await this.transport.sendRequest('aria2.getOption', [gid]);
+    return parseObjectResult(result, 'getOption');
   }
 
   async changeOption(gid: string, options: Record<string, unknown>): Promise<string> {
-    return (await this.transport.sendRequest('aria2.changeOption', [gid, options])) as string;
+    requireGid(gid);
+    requireRecord(options, 'options');
+    const result = await this.transport.sendRequest('aria2.changeOption', [gid, options]);
+    return parseStringResult(result, 'changeOption');
   }
 
   async getVersion(): Promise<VersionInfo> {
-    return (await this.transport.sendRequest('aria2.getVersion', [])) as VersionInfo;
+    const result = await this.transport.sendRequest('aria2.getVersion', []);
+    return parseObjectResult<VersionInfo>(result, 'getVersion');
   }
 
   async getSessionInfo(): Promise<SessionInfo> {
-    return (await this.transport.sendRequest('aria2.getSessionInfo', [])) as SessionInfo;
+    const result = await this.transport.sendRequest('aria2.getSessionInfo', []);
+    return parseObjectResult<SessionInfo>(result, 'getSessionInfo');
   }
 
   async shutdown(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.shutdown', [])) as string;
+    const result = await this.transport.sendRequest('aria2.shutdown', []);
+    return parseStringResult(result, 'shutdown');
   }
 
   async forceShutdown(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forceShutdown', [])) as string;
+    const result = await this.transport.sendRequest('aria2.forceShutdown', []);
+    return parseStringResult(result, 'forceShutdown');
   }
 
   async saveSession(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.saveSession', [])) as string;
+    const result = await this.transport.sendRequest('aria2.saveSession', []);
+    return parseStringResult(result, 'saveSession');
   }
 
   async updateBrowserContext(context: unknown): Promise<string> {
-    return (await this.transport.sendRequest('aria2.updateBrowserContext', [context])) as string;
+    const result = await this.transport.sendRequest('aria2.updateBrowserContext', [context]);
+    return parseStringResult(result, 'updateBrowserContext');
   }
 
   async clearBrowserContext(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.clearBrowserContext', [])) as string;
+    const result = await this.transport.sendRequest('aria2.clearBrowserContext', []);
+    return parseStringResult(result, 'clearBrowserContext');
   }
 
   async systemMulticall(
     calls: Array<{ methodName: string; params?: unknown[] }>,
   ): Promise<unknown[]> {
-    return (await this.transport.sendRequest('system.multicall', [calls])) as unknown[];
+    if (!Array.isArray(calls)) throw new TypeError('calls must be an array');
+    for (const [index, call] of calls.entries()) {
+      if (
+        call === null ||
+        typeof call !== 'object' ||
+        typeof call.methodName !== 'string' ||
+        call.methodName.length === 0 ||
+        (call.params !== undefined && !Array.isArray(call.params))
+      ) {
+        throw new TypeError(`calls[${index}] must contain a methodName and optional params array`);
+      }
+    }
+    const result = await this.transport.sendRequest('system.multicall', [calls]);
+    return parseArrayResult(result, 'system.multicall');
   }
 
   async systemListMethods(): Promise<string[]> {
-    return (await this.transport.sendRequest('system.listMethods', [])) as string[];
+    const result = await this.transport.sendRequest('system.listMethods', []);
+    return parseStringListResult(result, 'system.listMethods');
   }
 
   async systemListNotifications(): Promise<string[]> {
-    return (await this.transport.sendRequest('system.listNotifications', [])) as string[];
+    const result = await this.transport.sendRequest('system.listNotifications', []);
+    return parseStringListResult(result, 'system.listNotifications');
+  }
+
+  private registerEventListener(
+    event: WsEventName | 'reconnecting' | 'close',
+    handler: (...args: unknown[]) => void,
+    once: boolean,
+  ): this {
+    const emitter = this.getOrCreateEventEmitter();
+    if (once) emitter.once(event, handler);
+    else emitter.on(event, handler);
+    void this.ensureEventEmitter().catch(() => {
+      // Listener registration is intentionally fire-and-forget for compatibility. Callers
+      // that need connection errors can await `connectEvents()` instead.
+    });
+    return this;
   }
 
   on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
-    this.ensureEventEmitter()
-      .then((emitter) => {
-        emitter.on(event, handler);
-      })
-      .catch(() => {
-        throw new ConnectionError(`Failed to connect event emitter for event: ${event}`);
-      });
+    return this.registerEventListener(event, handler, false);
+  }
+
+  once(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
+    return this.registerEventListener(event, handler, true);
+  }
+
+  off(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
+    this.eventEmitter?.off(event, handler);
     return this;
   }
 

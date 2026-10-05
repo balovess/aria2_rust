@@ -69,13 +69,12 @@ from aria2_rust_client import Aria2Client, EventType
 
 async def main():
     async with Aria2Client("ws://localhost:6800/jsonrpc") as client:
-        # Subscribe to all events
-        async for event in client.subscribe_events():
-            print(f"Event: {event.event_type}, GID: {event.gid}")
-            
-        # Or filter specific event types
-        async for event in client.subscribe_events(filter=[EventType.DownloadStart, EventType.DownloadComplete]):
-            print(f"Download event: {event.event_type}")
+        # Use filter=[EventType.DOWNLOAD_START, EventType.DOWNLOAD_COMPLETE]
+        # to subscribe only to selected event types.
+        subscriber = await client.subscribe_events()
+        async with subscriber:
+            async for event in subscriber:
+                print(f"Event: {event.event_type}, GID: {event.gid}")
 
 asyncio.run(main())
 ```
@@ -114,13 +113,15 @@ not listed here can still be called through the transport layer.
 - `force_pause(gid)` - Force pause
 - `force_remove(gid)` - Force remove
 - `pause_all()` / `force_pause_all()` / `unpause_all()` - Batch task control
-- `change_position(gid, position, mode)` - Change queue position
+- `change_position(gid, position, mode)` - Change queue position (`PositionMode.SET_FROM_START`, `PositionMode.MOVE_FROM_START`, or `PositionMode.SET_FROM_END`)
 - `change_uri(gid, file_index, delete_uris, add_uris, position=None)` - Replace task URIs
 
 **Status Queries:**
 - `tell_status(gid, keys=None)` - Get task status
 - `get_files(gid)` - Get file paths, sizes, completion, and URI metadata for a task
 - `get_uris(gid)` / `get_servers(gid)` / `get_peers(gid)` - Get transfer connection metadata
+- `get_trackers(gid)` - Get BitTorrent tracker runtime state
+- `get_dht_status()` - Get process-wide BitTorrent DHT counters
 - `tell_active(keys=None)` - Get active tasks
 - `tell_waiting(offset, num, keys=None)` - Get waiting tasks
 - `tell_stopped(offset, num, keys=None)` - Get stopped tasks
@@ -131,6 +132,9 @@ not listed here can still be called through the transport layer.
 
 **System methods:**
 - `system_multicall(calls)` / `system_list_methods()` / `system_list_notifications()`
+
+**Custom RPC methods:**
+- `call(method, params=None)` - Call an extension or any method not wrapped above
 
 `get_files(gid)` is the direct binding for aria2's `aria2.getFiles` method:
 
@@ -162,6 +166,10 @@ metadata can be queried even when the task is created with `pause=true`.
 
 **Event Subscription:**
 - `subscribe_events(filter=None)` - Subscribe to download events
+- `EventSubscriber.wait_for_terminal(gid, timeout=None)` - Wait for
+  `stop`, `complete`, `error`, or BitTorrent completion for one GID without
+  polling; create the subscription before submitting fast tasks
+- `async with subscriber` - Close the event WebSocket automatically
 
 **Lifecycle:**
 - `close()` - Close connection
@@ -182,8 +190,12 @@ class StatusInfo:
     error_code: Optional[str]
     status: DownloadStatus
     dir: Optional[str]
-    files: List[FileInfo]
+    files: Optional[List[FileInfo]]
+    followed_by: Optional[List[str]]
 ```
+
+When `tell_status` is called with a restricted `keys` list, omitted fields
+remain `None`; an explicitly returned empty list remains `[]`.
 
 #### GlobalStat
 

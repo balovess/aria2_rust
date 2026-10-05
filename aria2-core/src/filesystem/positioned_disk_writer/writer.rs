@@ -7,14 +7,19 @@ use tracing::debug;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
 
-use super::platform_io::{read_exact_at, write_all_at};
+#[cfg(unix)]
+#[cfg(unix)]
+use crate::filesystem::disk_adaptor::advise_drop_cache;
+
+use super::platform_io::write_all_at;
 
 /// A disk writer that performs positioned (offset-based) I/O via OS-native
 /// `pwrite`/`seek_write` syscalls.
 ///
 /// The file descriptor is shared through an [`Arc`], and blocking filesystem
-/// calls are dispatched to Tokio's blocking pool. Positioned reads and writes
-/// do not mutate the file cursor, so they do not need a per-write mutex.
+/// calls are dispatched to the shared bounded disk I/O pool. Positioned reads
+/// and writes do not mutate the file cursor, so they do not need a per-write
+/// mutex.
 ///
 /// Uses [`std::fs::File`] (not `tokio::fs::File`) because `FileExt::write_at`
 /// is a synchronous method available only on `std::fs::File`. The syscall is
@@ -42,12 +47,34 @@ impl PositionedDiskWriter {
         }
     }
 
+    /// Read a range and ask the OS to drop the corresponding page-cache
+    /// entries. This hint is best effort and does not change the returned data.
+    pub async fn read_data_drop_cache(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
+        let (data, _) = self
+            .read_owned_at(offset, length as usize, "positioned read")
+            .await?;
+        #[cfg(unix)]
+        if let Some(file) = self.shared_file() {
+            let data_length = data.len() as u64;
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        advise_drop_cache(file.as_ref(), offset, data_length);
+                        Ok(())
+                    },
+                    "drop disk cache hint",
+                )
+                .await?;
+        }
+        Ok(data)
+    }
+
     /// Returns the configured total size, if any.
     pub fn total_size(&self) -> Option<u64> {
         self.total_size
     }
 
-    /// Lazily open the underlying file on Tokio's blocking pool.
+    /// Lazily open the underlying file on the shared disk I/O pool.
     async fn ensure_open(&mut self) -> Result<()> {
         if self.file.is_some() {
             return Ok(());
@@ -55,9 +82,12 @@ impl PositionedDiskWriter {
 
         let path = self.path.clone();
         let total_size = self.total_size;
-        let file = tokio::task::spawn_blocking(move || open_file(&path, total_size))
-            .await
-            .map_err(|e| Aria2Error::Io(format!("positioned writer open task failed: {e}")))??;
+        let file = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || open_file(&path, total_size),
+                "positioned writer open",
+            )
+            .await?;
         self.file = Some(Arc::new(file));
         Ok(())
     }
@@ -66,6 +96,103 @@ impl PositionedDiskWriter {
         self.file.as_ref().cloned().ok_or_else(|| {
             Aria2Error::Io("file not open after ensure_open - invariant violated".into())
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn shared_file(&self) -> Option<Arc<std::fs::File>> {
+        self.file.as_ref().cloned()
+    }
+
+    async fn write_owned_at<T>(&mut self, offset: u64, data: T, context: &'static str) -> Result<()>
+    where
+        T: AsRef<[u8]> + Send + 'static,
+    {
+        self.ensure_open().await?;
+        let file = self.file_handle()?;
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || write_all_at(file.as_ref(), data.as_ref(), offset),
+                context,
+            )
+            .await
+    }
+
+    pub(crate) async fn write_slice_at(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+        context: &'static str,
+    ) -> Result<()> {
+        self.write_owned_at(offset, data.to_vec(), context).await
+    }
+
+    pub(crate) async fn read_owned_at(
+        &mut self,
+        offset: u64,
+        length: usize,
+        context: &'static str,
+    ) -> Result<(Vec<u8>, usize)> {
+        self.ensure_open().await?;
+        let file = self.file_handle()?;
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    let mut data = vec![0u8; length];
+                    let read = super::platform_io::read_exact_at(file.as_ref(), &mut data, offset)?;
+                    Ok((data, read))
+                },
+                context,
+            )
+            .await
+    }
+
+    pub(crate) async fn close_without_sync(&mut self, context: &'static str) -> Result<()> {
+        if let Some(file) = self.file.take() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        drop(file);
+                        Ok(())
+                    },
+                    context,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn truncate_with_context(
+        &mut self,
+        length: u64,
+        context: &'static str,
+    ) -> Result<()> {
+        self.ensure_open().await?;
+        let file = self.file_handle()?;
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || file.set_len(length).map_err(Aria2Error::from),
+                context,
+            )
+            .await
+    }
+
+    pub(crate) async fn len_with_context(&self, context: &'static str) -> Result<u64> {
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        file.metadata()
+                            .map(|metadata| metadata.len())
+                            .map_err(Aria2Error::from)
+                    },
+                    context,
+                )
+                .await
+        } else if let Some(size) = self.total_size {
+            Ok(size)
+        } else {
+            Ok(0)
+        }
     }
 
     /// Returns the raw file descriptor of the underlying file, if open.
@@ -82,6 +209,12 @@ impl PositionedDiskWriter {
         self.file
             .as_ref()
             .map(std::os::unix::io::AsRawFd::as_raw_fd)
+    }
+
+    #[cfg(windows)]
+    pub fn raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        use std::os::windows::io::AsRawHandle;
+        self.file.as_ref().map(|file| file.as_raw_handle())
     }
 }
 
@@ -124,45 +257,30 @@ impl SeekableDiskWriter for PositionedDiskWriter {
     }
 
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        self.write_bytes_at(offset, bytes::Bytes::copy_from_slice(data))
-            .await
+        self.write_slice_at(offset, data, "positioned write").await
     }
 
     /// Zero-copy write: accepts `Bytes` directly. Since `pwrite` takes `&[u8]`,
     /// we simply dereference the `Bytes` (no copy — `Bytes` derefs to `[u8]`).
     async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
-        self.ensure_open().await?;
-        let file = self.file_handle()?;
-        tokio::task::spawn_blocking(move || write_all_at(file.as_ref(), &data, offset))
-            .await
-            .map_err(|e| Aria2Error::Io(format!("positioned write task failed: {e}")))?
+        self.write_owned_at(offset, data, "positioned write").await
     }
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        self.ensure_open().await?;
         if buf.is_empty() {
+            self.ensure_open().await?;
             return Ok(0);
         }
-        let file = self.file_handle()?;
-        let len = buf.len();
-        let (data, n) = tokio::task::spawn_blocking(move || {
-            let mut data = vec![0u8; len];
-            let n = read_exact_at(file.as_ref(), &mut data, offset)?;
-            Ok::<_, Aria2Error>((data, n))
-        })
-        .await
-        .map_err(|e| Aria2Error::Io(format!("positioned read task failed: {e}")))??;
+        let (data, n) = self
+            .read_owned_at(offset, buf.len(), "positioned read")
+            .await?;
         buf[..n].copy_from_slice(&data[..n]);
         Ok(n)
     }
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
-        self.ensure_open().await?;
-        let file = self.file_handle()?;
-        tokio::task::spawn_blocking(move || file.set_len(length))
+        self.truncate_with_context(length, "positioned truncate")
             .await
-            .map_err(|e| Aria2Error::Io(format!("positioned truncate task failed: {e}")))??;
-        Ok(())
     }
 
     async fn flush(&mut self) -> Result<()> {
@@ -185,16 +303,7 @@ impl SeekableDiskWriter for PositionedDiskWriter {
     }
 
     async fn len(&self) -> Result<u64> {
-        if let Some(file) = self.file.as_ref().cloned() {
-            tokio::task::spawn_blocking(move || file.metadata().map(|metadata| metadata.len()))
-                .await
-                .map_err(|e| Aria2Error::Io(format!("positioned metadata task failed: {e}")))?
-                .map_err(Aria2Error::from)
-        } else if let Some(size) = self.total_size {
-            Ok(size)
-        } else {
-            Ok(0)
-        }
+        self.len_with_context("positioned metadata").await
     }
 
     fn path(&self) -> &Path {
@@ -206,11 +315,33 @@ impl SeekableDiskWriter for PositionedDiskWriter {
             // Ensure all buffered data reaches stable storage before closing.
             // This is the ONLY place sync_all (fsync) is called — the hot-path
             // flush() intentionally skips it for throughput.
-            tokio::task::spawn_blocking(move || file.sync_all())
-                .await
-                .map_err(|e| Aria2Error::Io(format!("positioned close task failed: {e}")))??;
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || file.sync_all().map_err(Aria2Error::from),
+                    "positioned close",
+                )
+                .await?;
         }
         self.file = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::filesystem::disk_writer::SeekableDiskWriter;
+
+    #[tokio::test]
+    async fn read_data_drop_cache_returns_requested_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop-cache.bin");
+        tokio::fs::write(&path, b"drop cache data").await.unwrap();
+
+        let mut writer = PositionedDiskWriter::new(&path, None);
+        SeekableDiskWriter::open(&mut writer).await.unwrap();
+        let data = writer.read_data_drop_cache(5, 5).await.unwrap();
+        assert_eq!(&data, b"cache");
+        SeekableDiskWriter::close(&mut writer).await.unwrap();
     }
 }

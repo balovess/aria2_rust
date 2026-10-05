@@ -80,7 +80,7 @@ pub(super) async fn run_deadline_maintenance(
     if !timed_out.is_empty() {
         let man = &ctx.group_man;
         for gid in timed_out {
-            if let Some(group) = man.get_group(gid) {
+            if let Some(group) = man.find_group(gid) {
                 let request_context = group.recover().latest_connection_context();
                 let uris = group.recover().get_all_uris();
                 if let Some(uri) = uris.first()
@@ -165,7 +165,7 @@ pub(super) async fn request_shutdown_and_wait(
     if let Some(shutdown) = running.shutdown.take() {
         shutdown.cancel();
     }
-    let completed = match tokio::time::timeout(wait, &mut running._handle).await {
+    match tokio::time::timeout(wait, &mut running._handle).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
             warn!(%error, "Download task panicked during shutdown");
@@ -174,15 +174,14 @@ pub(super) async fn request_shutdown_and_wait(
         Err(_) => {
             warn!("Download task shutdown timed out");
             running._handle.abort();
+            match (&mut running._handle).await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => warn!(%error, "Download task failed while joining after abort"),
+            }
             false
         }
-    };
-    if !completed {
-        // A previously-consumed shutdown token must not turn cleanup into a
-        // no-op. Force the same bounded lifecycle regardless of token state.
-        running._handle.abort();
     }
-    completed
 }
 
 /// Wake allocation waiters before waiting for their owning download task.
