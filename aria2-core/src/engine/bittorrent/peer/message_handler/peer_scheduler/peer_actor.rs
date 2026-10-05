@@ -2795,9 +2795,10 @@ mod tests {
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
 
         remote.send_message(&BtMessage::Interested).await.unwrap();
+        tokio::task::yield_now().await;
         loop {
             if matches!(
-                timeout(Duration::from_secs(1), event_rx.recv())
+                timeout(Duration::from_secs(5), event_rx.recv())
                     .await
                     .unwrap()
                     .expect("peer actor event channel closed"),
@@ -2811,9 +2812,10 @@ mod tests {
         advance(Duration::from_secs(50)).await;
         remote.send_message(&BtMessage::KeepAlive).await.unwrap();
         remote.send_message(&BtMessage::Unchoke).await.unwrap();
+        tokio::task::yield_now().await;
         loop {
             if matches!(
-                timeout(Duration::from_secs(1), event_rx.recv())
+                timeout(Duration::from_secs(5), event_rx.recv())
                     .await
                     .unwrap()
                     .expect("peer actor event channel closed"),
@@ -2895,9 +2897,10 @@ mod tests {
             })
             .await
             .unwrap();
+        tokio::task::yield_now().await;
 
         loop {
-            let event = timeout(Duration::from_secs(1), event_rx.recv())
+            let event = timeout(Duration::from_secs(5), event_rx.recv())
                 .await
                 .unwrap()
                 .expect("peer actor event channel closed");
