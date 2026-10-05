@@ -56,6 +56,10 @@
 //! The implemented catalog follows the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
+// `async_trait` marks its boxed futures as `must_use`; Clippy 1.99 also sees
+// the wrapped `Result` and flags the generated trait methods as double-must-use.
+#![allow(clippy::double_must_use)]
+
 pub mod backend;
 pub mod constants;
 pub mod engine;

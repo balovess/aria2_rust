@@ -204,20 +204,23 @@ impl OutboundNetworkPolicy {
         source.in_flight.fetch_add(1, Ordering::Relaxed);
         let result = connect_from(source.address, remote).await;
         source.in_flight.fetch_sub(1, Ordering::Relaxed);
-        if result.is_err() {
-            source
-                .failures
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_add(1))
-                })
-                .ok();
-        } else {
-            source
-                .failures
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_sub(1))
-                })
-                .ok();
+        let failed = result.is_err();
+        let mut failures = source.failures.load(Ordering::Relaxed);
+        loop {
+            let updated = if failed {
+                failures.saturating_add(1)
+            } else {
+                failures.saturating_sub(1)
+            };
+            match source.failures.compare_exchange_weak(
+                failures,
+                updated,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => failures = observed,
+            }
         }
         result
     }
