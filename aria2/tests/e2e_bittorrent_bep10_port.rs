@@ -148,9 +148,16 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let mut peer = TcpStream::connect(("127.0.0.1", listen_port))
-        .await
-        .expect("connect an incoming test peer");
+    let connect_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut peer = loop {
+        match TcpStream::connect(("127.0.0.1", listen_port)).await {
+            Ok(peer) => break peer,
+            Err(_) if tokio::time::Instant::now() < connect_deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("connect an incoming test peer: {error}"),
+        }
+    };
     let transport_endpoint = peer
         .local_addr()
         .expect("incoming peer has a temporary TCP source endpoint");
