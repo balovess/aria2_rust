@@ -234,6 +234,7 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
             .is_some_and(|result| result.starts_with("OK.")),
         "shutdown must return aria2's successful result: {shutdown}"
     );
+    drop(socket);
     assert!(
         aria2
             .wait_for_exit(GRACEFUL_SHUTDOWN_EXIT_TIMEOUT)

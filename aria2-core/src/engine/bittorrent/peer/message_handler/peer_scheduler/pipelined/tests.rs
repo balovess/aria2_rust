@@ -151,15 +151,26 @@ async fn active_download_actor_serves_upload_request_on_same_peer_connection() {
     assert_eq!(result.pex_peers.len(), 1);
     assert_eq!(result.pex_peers[0].ip, "127.0.0.1");
     assert_eq!(result.pex_peers[0].port, 6882);
-    // The download pipeline consumes and applies peer events while it runs;
-    // the actor snapshot below verifies the upload event was observed.
+    assert_eq!(remote.await.unwrap(), locally_verified_piece);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while swarm.actor(actor_id).unwrap().stats.uploaded_bytes != 16 {
+            let mut events = swarm
+                .lease_event_receiver()
+                .expect("peer event receiver must be available after download completion");
+            events
+                .recv()
+                .await
+                .expect("peer actor must publish its completed upload");
+        }
+    })
+    .await
+    .expect("upload byte event must update the peer actor snapshot");
     let stats = &swarm.actor(actor_id).unwrap().stats;
     assert_eq!(stats.uploaded_bytes, 16);
     assert!(stats.upload_speed > 0.0);
     assert!(!stats.am_choking);
     assert!(choking_algo.peers()[0].peer_interested);
     assert!(!choking_algo.peers()[0].am_choking);
-    assert_eq!(remote.await.unwrap(), locally_verified_piece);
     swarm.shutdown_all().await;
 }
 
