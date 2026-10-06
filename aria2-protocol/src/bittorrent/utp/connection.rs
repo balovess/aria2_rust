@@ -8,6 +8,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use super::congestion::LedbatController;
 use super::packet::{PacketType, UtpPacket, UtpPacketError};
 
 mod receive;
@@ -65,9 +66,6 @@ pub enum ConnectionError {
     Aborted,
 }
 
-/// Default initial congestion window
-const INITIAL_CWND: u32 = 2 * 1400;
-
 /// Maximum receive buffer size per connection
 const RECV_BUFFER_SIZE: usize = 64 * 1024;
 
@@ -101,7 +99,7 @@ pub struct UtpConnection {
     remote_addr: Option<SocketAddr>,
 
     /// Congestion window size in bytes.
-    congestion_window: u32,
+    congestion: LedbatController,
 
     /// Current round-trip time estimate
     srtt: Duration,
@@ -124,9 +122,6 @@ pub struct UtpConnection {
 
     /// Receive window size
     recv_window: u32,
-
-    /// Bytes in flight (sent but not acknowledged)
-    bytes_in_flight: u32,
 }
 
 impl UtpConnection {
@@ -140,7 +135,7 @@ impl UtpConnection {
             ack_nr: 0,
             syn_seq_nr: 0,
             remote_addr: None,
-            congestion_window: INITIAL_CWND,
+            congestion: LedbatController::with_mss(1400),
             srtt: Duration::from_millis(100),
             rto: Duration::from_secs(1),
             recv_buffer: Vec::with_capacity(RECV_BUFFER_SIZE),
@@ -151,7 +146,6 @@ impl UtpConnection {
             peer_window: 0,
             last_activity: Instant::now(),
             recv_window: RECV_BUFFER_SIZE as u32,
-            bytes_in_flight: 0,
         }
     }
 
@@ -174,7 +168,7 @@ impl UtpConnection {
         Ok(syn)
     }
 
-    pub(crate) fn retransmit_packet(&self, seq_nr: u16) -> Option<UtpPacket> {
+    pub(crate) fn retransmit_packet(&mut self, seq_nr: u16) -> Option<UtpPacket> {
         if self.state == ConnectionState::SynSent && seq_nr == self.syn_seq_nr {
             return Some(UtpPacket::syn(
                 self.local_conn_id,
@@ -184,7 +178,8 @@ impl UtpConnection {
             ));
         }
 
-        self.send_buffer
+        let packet = self
+            .send_buffer
             .iter()
             .find(|packet| packet.seq_nr == seq_nr)
             .cloned()
@@ -192,7 +187,11 @@ impl UtpConnection {
                 packet.ack_nr = self.ack_nr;
                 packet.wnd_size = self.recv_window;
                 packet
-            })
+            });
+        if packet.is_some() {
+            self.congestion.on_loss();
+        }
+        packet
     }
 
     /// Accept an incoming connection (server-side) - creates SYN-ACK packet
@@ -271,10 +270,11 @@ impl UtpConnection {
         let mut packets = Vec::new();
         let mut offset = 0;
         let available = self
-            .congestion_window
+            .congestion
+            .get_window_size()
             .min(self.peer_window)
             .min(SEND_BUFFER_SIZE as u32)
-            .saturating_sub(self.bytes_in_flight) as usize;
+            .saturating_sub(self.congestion.get_bytes_in_flight()) as usize;
 
         while offset < data.len() {
             let remaining = available.saturating_sub(offset);
@@ -294,7 +294,7 @@ impl UtpConnection {
             );
 
             self.send_buffer.push_back(packet.clone());
-            self.bytes_in_flight += chunk_size as u32;
+            self.congestion.on_data_sent(chunk_size as u32);
             self.seq_nr = self.seq_nr.wrapping_add(1);
             offset += chunk_size;
 
@@ -382,14 +382,21 @@ impl UtpConnection {
             return Vec::new();
         }
         let mut acknowledged = Vec::new();
+        let mut bytes_acknowledged = 0u32;
         while self
             .send_buffer
             .front()
             .is_some_and(|sent| packet.ack_nr.wrapping_sub(sent.seq_nr) < 0x8000)
         {
             let sent = self.send_buffer.pop_front().unwrap();
-            self.bytes_in_flight -= sent.payload.len() as u32;
+            bytes_acknowledged = bytes_acknowledged.saturating_add(sent.payload.len() as u32);
             acknowledged.push(sent.seq_nr);
+        }
+        if bytes_acknowledged > 0 {
+            self.congestion.on_ack_received(
+                u64::from(packet.timestamp_difference_microseconds),
+                bytes_acknowledged,
+            );
         }
         acknowledged
     }
@@ -465,7 +472,7 @@ impl UtpConnection {
 
     /// Get congestion window size
     pub fn congestion_window(&self) -> u32 {
-        self.congestion_window
+        self.congestion.get_window_size()
     }
 
     /// Get receive window size
@@ -475,7 +482,7 @@ impl UtpConnection {
 
     /// Get bytes in flight
     pub fn bytes_in_flight(&self) -> u32 {
-        self.bytes_in_flight
+        self.congestion.get_bytes_in_flight()
     }
 
     /// Get idle time since last activity
@@ -577,5 +584,35 @@ mod tests {
         let mut conn = UtpConnection::new();
         let result = conn.check_timeout(Duration::from_secs(3600));
         assert!(!result);
+    }
+
+    #[test]
+    fn send_window_tracks_ledbat_ack_growth_and_timeout_loss() {
+        let mut conn = UtpConnection::new();
+        let syn = conn.connect(test_addr()).unwrap();
+        conn.on_packet_received(&UtpPacket::syn_ack(
+            syn.connection_id,
+            40,
+            syn.seq_nr,
+            65_536,
+        ))
+        .unwrap();
+
+        assert_eq!(conn.congestion_window(), 2 * 1400);
+        assert_eq!(conn.send_data(&vec![0x33; 2800]).unwrap().len(), 2);
+        assert_eq!(conn.bytes_in_flight(), 2800);
+
+        let mut ack = UtpPacket::ack(syn.connection_id, 2, 40, 65_536);
+        ack.timestamp_difference_microseconds = 50_000;
+        conn.on_packet_received(&ack).unwrap();
+        assert_eq!(conn.bytes_in_flight(), 1400);
+        assert!(conn.congestion_window() > 2 * 1400);
+        assert_eq!(conn.send_data(&vec![0x44; 1400]).unwrap().len(), 1);
+
+        let before_loss = conn.congestion_window();
+        let retransmission = conn.retransmit_packet(3).unwrap();
+        assert_eq!(retransmission.seq_nr, 3);
+        assert!(conn.congestion_window() < before_loss);
+        assert_eq!(conn.bytes_in_flight(), 2800);
     }
 }
