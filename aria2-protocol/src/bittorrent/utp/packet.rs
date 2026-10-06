@@ -146,7 +146,7 @@ impl UtpPacket {
 
     /// Create a SYN-ACK packet (server response to SYN)
     pub fn syn_ack(connection_id: u16, seq_nr: u16, ack_nr: u16, wnd_size: u32) -> Self {
-        let mut packet = Self::new(PacketType::StSyn);
+        let mut packet = Self::new(PacketType::StAck);
         packet.connection_id = connection_id;
         packet.seq_nr = seq_nr;
         packet.ack_nr = ack_nr;

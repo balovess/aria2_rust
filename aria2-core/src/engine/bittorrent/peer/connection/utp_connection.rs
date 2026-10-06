@@ -188,10 +188,15 @@ impl UtpPeerConnection {
     async fn wait_until_established(&self, timeout: std::time::Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let readiness = {
+            let (readiness, timer_delay) = {
                 let mut socket = self.socket.lock().await;
                 let mut scratch = [];
                 let _ = socket.recv(self.conn_id, &mut scratch).map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e.to_string(),
+                    })
+                })?;
+                socket.process_timers().map_err(|e| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                         message: e.to_string(),
                     })
@@ -210,11 +215,14 @@ impl UtpPeerConnection {
                             },
                         ));
                     }
-                    Ok(_) => socket.readiness_socket().map_err(|e| {
-                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                            message: e.to_string(),
-                        })
-                    })?,
+                    Ok(_) => {
+                        let readiness = socket.readiness_socket().map_err(|e| {
+                            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                                message: e.to_string(),
+                            })
+                        })?;
+                        (readiness, socket.next_timer_delay())
+                    }
                     Err(e) => {
                         return Err(Aria2Error::Recoverable(
                             RecoverableError::TemporaryNetworkFailure {
@@ -233,7 +241,7 @@ impl UtpPeerConnection {
                     },
                 ));
             }
-            tokio::time::timeout(remaining, readiness.readable())
+            tokio::time::timeout(remaining, wait_for_socket_event(&readiness, timer_delay))
                 .await
                 .map_err(|_| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -252,7 +260,7 @@ impl UtpPeerConnection {
     /// while waiting for network readiness.
     async fn recv_available(&self, buf: &mut [u8]) -> Result<Option<usize>> {
         loop {
-            let readiness = {
+            let (readiness, timer_delay) = {
                 let mut socket = self.socket.lock().await;
                 match socket.recv(self.conn_id, buf) {
                     Ok(len) if len > 0 => return Ok(Some(len)),
@@ -272,11 +280,17 @@ impl UtpPeerConnection {
                             return Ok(None);
                         }
 
-                        socket.readiness_socket().map_err(|e| {
+                        socket.process_timers().map_err(|e| {
                             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                                 message: e.to_string(),
                             })
-                        })?
+                        })?;
+                        let readiness = socket.readiness_socket().map_err(|e| {
+                            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                                message: e.to_string(),
+                            })
+                        })?;
+                        (readiness, socket.next_timer_delay())
                     }
                     Err(e) => {
                         return Err(Aria2Error::Recoverable(
@@ -288,11 +302,13 @@ impl UtpPeerConnection {
                 }
             };
 
-            readiness.readable().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: e.to_string(),
-                })
-            })?;
+            wait_for_socket_event(&readiness, timer_delay)
+                .await
+                .map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e.to_string(),
+                    })
+                })?;
         }
     }
 
@@ -413,5 +429,19 @@ impl UtpPeerConnection {
         socket
             .connection_stats(self.conn_id)
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))
+    }
+}
+
+async fn wait_for_socket_event(
+    socket: &tokio::net::UdpSocket,
+    timer_delay: Option<std::time::Duration>,
+) -> std::io::Result<()> {
+    if let Some(delay) = timer_delay {
+        tokio::select! {
+            readiness = socket.readable() => readiness,
+            _ = tokio::time::sleep(delay) => Ok(()),
+        }
+    } else {
+        socket.readable().await
     }
 }

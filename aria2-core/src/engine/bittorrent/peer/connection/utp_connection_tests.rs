@@ -164,3 +164,86 @@ async fn connect_accepts_bep52_v2_response_over_utp() {
         .unwrap();
     assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
 }
+
+#[tokio::test]
+async fn connect_retransmits_syn_after_deadline_without_external_polling() {
+    use aria2_protocol::bittorrent::message::handshake::Handshake;
+    use aria2_protocol::bittorrent::utp::{PacketType, UtpPacket, UtpSocket};
+
+    let info_hash = [27u8; 20];
+    let local_peer_id = [28u8; 20];
+    let remote_peer_id = [29u8; 20];
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let peer_address = peer.local_addr().unwrap();
+    let peer_task = tokio::spawn(async move {
+        let mut buffer = [0; 2048];
+        let (length, client_address) = peer.recv_from(&mut buffer).await.unwrap();
+        let initial_syn = UtpPacket::from_bytes(&buffer[..length]).unwrap();
+        assert_eq!(initial_syn.packet_type().unwrap(), PacketType::StSyn);
+
+        let (length, retry_address) =
+            tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut buffer))
+                .await
+                .expect("uTP connect loop should retransmit SYN on its timer")
+                .unwrap();
+        assert_eq!(retry_address, client_address);
+        let retried_syn = UtpPacket::from_bytes(&buffer[..length]).unwrap();
+        assert_eq!(retried_syn.packet_type().unwrap(), PacketType::StSyn);
+        assert_eq!(retried_syn.connection_id, initial_syn.connection_id);
+        assert_eq!(retried_syn.seq_nr, initial_syn.seq_nr);
+
+        peer.send_to(
+            &UtpPacket::syn_ack(initial_syn.connection_id, 70, initial_syn.seq_nr, 65_536)
+                .to_bytes(),
+            client_address,
+        )
+        .await
+        .unwrap();
+
+        let (length, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        let request = UtpPacket::from_bytes(&buffer[..length]).unwrap();
+        assert_eq!(request.packet_type().unwrap(), PacketType::StData);
+        let request_handshake = Handshake::parse(&request.payload).unwrap();
+        assert_eq!(request_handshake.info_hash, info_hash);
+        let response = Handshake::new(&info_hash, &remote_peer_id).to_bytes();
+        peer.send_to(
+            &UtpPacket::data(
+                initial_syn.connection_id,
+                71,
+                request.seq_nr,
+                65_536,
+                response.to_vec(),
+            )
+            .to_bytes(),
+            client_address,
+        )
+        .await
+        .unwrap();
+    });
+
+    let shared_socket = Arc::new(Mutex::new(UtpSocket::bind("127.0.0.1:0").unwrap()));
+    shared_socket
+        .lock()
+        .await
+        .set_connect_timeout(Duration::from_secs(5));
+    let connection = tokio::time::timeout(
+        Duration::from_secs(4),
+        UtpPeerConnection::connect_with_shared_socket_hybrid(
+            shared_socket,
+            peer_address,
+            &info_hash,
+            None,
+            &local_peer_id,
+            Duration::from_secs(3),
+            false,
+        ),
+    )
+    .await
+    .expect("uTP connection timers should be driven by the async wait")
+    .expect("peer handshake should succeed after SYN retransmission");
+    assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
+    peer_task.await.unwrap();
+}
