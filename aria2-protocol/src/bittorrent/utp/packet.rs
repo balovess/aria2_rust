@@ -10,6 +10,8 @@ pub const UTP_VERSION: u8 = 1;
 /// Size of uTP header in bytes
 pub const UTP_HEADER_SIZE: usize = 20;
 
+const SELECTIVE_ACK_EXTENSION: u8 = 1;
+
 /// Packet type constants as defined in BEP 29
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -114,8 +116,13 @@ pub struct UtpPacket {
     pub seq_nr: u16,
     /// Acknowledgment number (16 bits, big-endian)
     pub ack_nr: u16,
-    /// Optional payload (only for DATA and SYN packets)
+    /// Raw bytes after the fixed header, including extensions and application data.
     pub payload: Vec<u8>,
+}
+
+pub(crate) struct PacketExtensions<'a> {
+    pub selective_ack: Option<&'a [u8]>,
+    pub application_payload: &'a [u8],
 }
 
 impl UtpPacket {
@@ -312,6 +319,55 @@ impl UtpPacket {
     /// Calculate the local delay sample for this packet's remote send timestamp.
     pub fn calculate_timestamp_diff(&self, local_timestamp: u32) -> u32 {
         local_timestamp.wrapping_sub(self.timestamp_microseconds)
+    }
+
+    pub(crate) fn parse_extensions(&self) -> Result<PacketExtensions<'_>, UtpPacketError> {
+        let mut extension_type = self.extension;
+        let mut offset = 0;
+        let mut selective_ack = None;
+
+        while extension_type != 0 {
+            if self.payload.len().saturating_sub(offset) < 2 {
+                return Err(UtpPacketError::InvalidExtension(extension_type));
+            }
+            let next_extension = self.payload[offset];
+            let extension_length = usize::from(self.payload[offset + 1]);
+            let extension_start = offset + 2;
+            let extension_end = extension_start
+                .checked_add(extension_length)
+                .filter(|end| *end <= self.payload.len())
+                .ok_or(UtpPacketError::InvalidExtension(extension_type))?;
+
+            if extension_type == SELECTIVE_ACK_EXTENSION {
+                if extension_length < 4 || !extension_length.is_multiple_of(4) {
+                    return Err(UtpPacketError::InvalidExtension(extension_type));
+                }
+                if selective_ack.is_some() {
+                    return Err(UtpPacketError::InvalidExtension(extension_type));
+                }
+                selective_ack = Some(&self.payload[extension_start..extension_end]);
+            }
+
+            extension_type = next_extension;
+            offset = extension_end;
+        }
+
+        Ok(PacketExtensions {
+            selective_ack,
+            application_payload: &self.payload[offset..],
+        })
+    }
+
+    pub(crate) fn set_selective_ack(&mut self, mask: &[u8]) {
+        debug_assert!(mask.len() >= 4);
+        debug_assert!(mask.len().is_multiple_of(4));
+        debug_assert!(mask.len() <= usize::from(u8::MAX));
+
+        self.extension = SELECTIVE_ACK_EXTENSION;
+        self.payload.clear();
+        self.payload.reserve(mask.len() + 2);
+        self.payload.extend_from_slice(&[0, mask.len() as u8]);
+        self.payload.extend_from_slice(mask);
     }
 }
 
@@ -553,5 +609,28 @@ mod tests {
         assert_eq!(format!("{}", PacketType::StAck), "ACK");
         assert_eq!(format!("{}", PacketType::StFin), "FIN");
         assert_eq!(format!("{}", PacketType::StReset), "RESET");
+    }
+
+    #[test]
+    fn extension_chain_skips_unknown_extensions_and_separates_application_payload() {
+        let mut packet = UtpPacket::data(1, 2, 0, 1024, vec![]);
+        packet.extension = 42;
+        packet.payload = [1, 1, 0xAA, 0, 4, 0x05, 0, 0, 0, b'o', b'k'].to_vec();
+
+        let extensions = packet.parse_extensions().unwrap();
+        assert_eq!(extensions.selective_ack, Some([0x05, 0, 0, 0].as_slice()));
+        assert_eq!(extensions.application_payload, b"ok");
+    }
+
+    #[test]
+    fn selective_ack_extension_requires_a_nonempty_32_bit_multiple() {
+        let mut packet = UtpPacket::ack(1, 0, 1, 1024);
+        packet.extension = SELECTIVE_ACK_EXTENSION;
+        packet.payload = [0, 3, 0x01, 0, 0].to_vec();
+
+        assert!(matches!(
+            packet.parse_extensions(),
+            Err(UtpPacketError::InvalidExtension(SELECTIVE_ACK_EXTENSION))
+        ));
     }
 }

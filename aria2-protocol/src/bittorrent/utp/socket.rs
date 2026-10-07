@@ -345,15 +345,37 @@ impl UtpSocket {
             PacketType::StData | PacketType::StAck | PacketType::StFin => {
                 let conn_id = self.find_connection_for_packet(packet, addr)?;
                 if let Some(conn_id) = conn_id {
-                    let (response_packets, acknowledged, state, keepalive_interval) = {
+                    let (
+                        response_packets,
+                        acknowledged,
+                        fast_retransmissions,
+                        retransmission_timeout,
+                        state,
+                        keepalive_interval,
+                    ) = {
                         let conn = self.connections.get_mut(&conn_id);
                         if let Some(conn) = conn {
-                            let (response_packets, acknowledged) =
-                                conn.on_packet_received_with_acknowledgements(packet)?;
+                            let handling = conn.on_packet_received_with_acknowledgements(packet)?;
+                            let mut congestion_loss_applied = false;
+                            let mut fast_retransmissions = Vec::new();
+                            for seq_nr in handling.fast_retransmit {
+                                if let Some(retransmission) =
+                                    conn.retransmit_packet(seq_nr, !congestion_loss_applied)
+                                {
+                                    if retransmission.packet_type().ok() == Some(PacketType::StData)
+                                    {
+                                        congestion_loss_applied = true;
+                                    }
+                                    conn.record_packet_sent(seq_nr);
+                                    fast_retransmissions.push((seq_nr, retransmission));
+                                }
+                            }
                             let keepalive_interval = self.keepalive_interval;
                             (
-                                response_packets,
-                                acknowledged,
+                                handling.response_packets,
+                                handling.acknowledged,
+                                fast_retransmissions,
+                                conn.rto(),
                                 conn.state(),
                                 keepalive_interval,
                             )
@@ -370,6 +392,16 @@ impl UtpSocket {
                     for seq_nr in acknowledged {
                         self.timers
                             .cancel_timer(conn_id, TimerType::Retransmit(seq_nr));
+                    }
+                    for (seq_nr, retransmission) in fast_retransmissions {
+                        self.timers
+                            .cancel_timer(conn_id, TimerType::Retransmit(seq_nr));
+                        self.send_packet(&retransmission, addr)?;
+                        self.timers.set_timer(
+                            conn_id,
+                            TimerType::Retransmit(seq_nr),
+                            retransmission_timeout,
+                        );
                     }
                     match state {
                         ConnectionState::Closed => {

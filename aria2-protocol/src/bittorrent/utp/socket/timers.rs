@@ -35,7 +35,7 @@ impl UtpSocket {
                     if let Some(conn) = conn {
                         let is_timeout = conn.check_timeout(self.idle_timeout);
                         let remote_addr = conn.remote_addr();
-                        let packet = conn.retransmit_packet(seq_nr);
+                        let packet = conn.retransmit_packet(seq_nr, true);
                         (is_timeout, remote_addr, packet)
                     } else {
                         return Ok(());

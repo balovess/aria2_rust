@@ -77,6 +77,15 @@ struct SentPacket {
     packet: UtpPacket,
     sent_at: Instant,
     retransmitted: bool,
+    selectively_acked: bool,
+    selectively_acked_after: u16,
+    fast_retransmitted: bool,
+}
+
+pub(crate) struct PacketHandling {
+    pub response_packets: Vec<UtpPacket>,
+    pub acknowledged: Vec<u16>,
+    pub fast_retransmit: Vec<u16>,
 }
 
 /// uTP Connection implementing the BEP 29 state machine
@@ -124,6 +133,8 @@ pub struct UtpConnection {
     pending_receive_bytes: usize,
     accepted_syn_seq: Option<u16>,
     peer_window: u32,
+    last_peer_ack_nr: Option<u16>,
+    duplicate_ack_count: u8,
     local_fin_acked: bool,
     remote_fin_received: bool,
 
@@ -158,6 +169,8 @@ impl UtpConnection {
             pending_receive_bytes: 0,
             accepted_syn_seq: None,
             peer_window: 0,
+            last_peer_ack_nr: None,
+            duplicate_ack_count: 0,
             local_fin_acked: false,
             remote_fin_received: false,
             last_activity: now,
@@ -188,6 +201,7 @@ impl UtpConnection {
             self.recv_window,
         );
         self.stamp_packet(&mut packet);
+        self.add_selective_ack(&mut packet);
         packet
     }
 
@@ -268,13 +282,13 @@ impl UtpConnection {
         packet: &UtpPacket,
     ) -> Result<Vec<UtpPacket>, ConnectionError> {
         self.on_packet_received_with_acknowledgements(packet)
-            .map(|(responses, _)| responses)
+            .map(|handling| handling.response_packets)
     }
 
     pub(crate) fn on_packet_received_with_acknowledgements(
         &mut self,
         packet: &UtpPacket,
-    ) -> Result<(Vec<UtpPacket>, Vec<u16>), ConnectionError> {
+    ) -> Result<PacketHandling, ConnectionError> {
         if packet.connection_id != self.local_conn_id {
             return Err(ConnectionError::InvalidPacket(
                 "Unexpected connection ID".to_string(),
@@ -310,6 +324,7 @@ impl UtpConnection {
         let mut packets = self
             .send_buffer
             .iter()
+            .filter(|sent| !sent.selectively_acked)
             .map(|sent| {
                 let mut packet = sent.packet.clone();
                 packet.ack_nr = self.ack_nr;
