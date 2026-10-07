@@ -312,6 +312,12 @@ impl App {
         set_f64!("seed-time", b.seed_time);
         set_f64!("seed-ratio", b.seed_ratio);
         set_u64!("bt-max-peers", b.bt_max_peers);
+        set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
+        set_u64!(
+            "bt-optimistic-unchoke-interval",
+            b.bt_optimistic_unchoke_interval
+        );
+        set_u64!("bt-snubbed-timeout", b.bt_snubbed_timeout);
         set_str!("bt-request-peer-speed-limit", b.bt_request_peer_speed_limit);
         set_u64!("bt-max-open-files", b.bt_max_open_files);
         set_path!("bt-peer-blocklist", b.bt_peer_blocklist);

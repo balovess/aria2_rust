@@ -603,23 +603,36 @@ impl PidFileManager {
     /// Check if a process with the given PID is running.
     #[cfg(windows)]
     fn is_process_running(&self, pid: u32) -> bool {
-        use std::process::Command;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
 
-        // Use tasklist to check if process exists
-        let output = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
-            .output();
+        if pid == 0 {
+            return false;
+        }
 
-        if let Ok(output) = output {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.lines().any(|line| {
-                line.split(',')
-                    .nth(1)
-                    .map(|value| value.trim_matches('"') == pid.to_string())
-                    .unwrap_or(false)
-            })
-        } else {
-            false
+        // SYNCHRONIZE is sufficient to inspect process liveness and avoids
+        // tasklist's localization and access-denied output parsing problems.
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if process.is_null() {
+            // Invalid parameter means the PID does not identify a process.
+            // For access-denied and other errors, conservatively preserve the
+            // PID file rather than allowing a second daemon to start.
+            return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+        }
+
+        // SAFETY: OpenProcess returned an owned process handle, closed below.
+        let state = unsafe { WaitForSingleObject(process, 0) };
+        // SAFETY: `process` is a valid handle returned by OpenProcess.
+        unsafe { CloseHandle(process) };
+
+        match state {
+            WAIT_TIMEOUT => true,
+            WAIT_OBJECT_0 => false,
+            _ => true,
         }
     }
 

@@ -14,27 +14,27 @@ pub const UTP_HEADER_SIZE: usize = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PacketType {
-    /// SYN packet - initiates connection
-    StSyn = 0,
     /// DATA packet - contains payload
-    StData = 1,
+    StData = 0,
+    /// FIN packet - gracefully closes connection
+    StFin = 1,
     /// ACK packet - acknowledges received data
     StAck = 2,
-    /// FIN packet - gracefully closes connection
-    StFin = 3,
     /// RESET packet - abruptly closes connection
-    StReset = 4,
+    StReset = 3,
+    /// SYN packet - initiates connection
+    StSyn = 4,
 }
 
 impl PacketType {
     /// Convert from u8 to PacketType
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => Some(PacketType::StSyn),
-            1 => Some(PacketType::StData),
+            0 => Some(PacketType::StData),
+            1 => Some(PacketType::StFin),
             2 => Some(PacketType::StAck),
-            3 => Some(PacketType::StFin),
-            4 => Some(PacketType::StReset),
+            3 => Some(PacketType::StReset),
+            4 => Some(PacketType::StSyn),
             _ => None,
         }
     }
@@ -342,18 +342,18 @@ mod tests {
 
     #[test]
     fn test_packet_type_conversion() {
-        assert_eq!(PacketType::from_u8(0), Some(PacketType::StSyn));
-        assert_eq!(PacketType::from_u8(1), Some(PacketType::StData));
+        assert_eq!(PacketType::from_u8(0), Some(PacketType::StData));
+        assert_eq!(PacketType::from_u8(1), Some(PacketType::StFin));
         assert_eq!(PacketType::from_u8(2), Some(PacketType::StAck));
-        assert_eq!(PacketType::from_u8(3), Some(PacketType::StFin));
-        assert_eq!(PacketType::from_u8(4), Some(PacketType::StReset));
+        assert_eq!(PacketType::from_u8(3), Some(PacketType::StReset));
+        assert_eq!(PacketType::from_u8(4), Some(PacketType::StSyn));
         assert_eq!(PacketType::from_u8(5), None);
 
-        assert_eq!(PacketType::StSyn.to_u8(), 0);
-        assert_eq!(PacketType::StData.to_u8(), 1);
+        assert_eq!(PacketType::StData.to_u8(), 0);
+        assert_eq!(PacketType::StFin.to_u8(), 1);
         assert_eq!(PacketType::StAck.to_u8(), 2);
-        assert_eq!(PacketType::StFin.to_u8(), 3);
-        assert_eq!(PacketType::StReset.to_u8(), 4);
+        assert_eq!(PacketType::StReset.to_u8(), 3);
+        assert_eq!(PacketType::StSyn.to_u8(), 4);
     }
 
     #[test]

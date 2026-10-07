@@ -42,18 +42,12 @@ impl UtpSocket {
                     }
                 };
 
-                if is_timeout {
-                    self.close_connection_internal(conn_id)?;
-                } else if packet_to_send.is_some()
-                    && !self
-                        .timers
-                        .has_timer(conn_id, TimerType::Retransmit(seq_nr))
-                {
-                    self.close_connection_internal(conn_id)?;
-                } else if self
+                let retransmit_timer_exists = self
                     .timers
-                    .has_timer(conn_id, TimerType::Retransmit(seq_nr))
-                {
+                    .has_timer(conn_id, TimerType::Retransmit(seq_nr));
+                if is_timeout || (packet_to_send.is_some() && !retransmit_timer_exists) {
+                    self.close_connection_internal(conn_id)?;
+                } else if retransmit_timer_exists {
                     if let Some(packet) = packet_to_send {
                         if let Some(addr) = remote_addr {
                             self.send_packet(&packet, addr)?;

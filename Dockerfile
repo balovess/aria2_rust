@@ -4,7 +4,7 @@
 # 
 # Usage:
 #   docker build -t aria2-rust .
-#   docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads aria2-rust
+#   docker run -d --name aria2 -p 127.0.0.1:6800:6800 -v ~/downloads:/downloads aria2-rust
 
 # ============================================
 # Stage 1: Build

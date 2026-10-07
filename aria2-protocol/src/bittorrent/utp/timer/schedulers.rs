@@ -175,62 +175,64 @@ impl KeepaliveManager {
 
     /// Record activity (data sent or received)
     pub fn record_activity(&mut self) {
-        self.last_activity = Some(Instant::now());
+        self.record_activity_at(Instant::now());
+    }
+
+    /// Record activity at a caller-provided monotonic instant.
+    ///
+    /// This is useful when the caller owns a deterministic clock.
+    pub fn record_activity_at(&mut self, now: Instant) {
+        self.last_activity = Some(now);
     }
 
     /// Record keepalive sent
     pub fn record_keepalive_sent(&mut self) {
-        self.last_keepalive = Some(Instant::now());
+        self.record_keepalive_sent_at(Instant::now());
+    }
+
+    /// Record a keepalive sent at a caller-provided monotonic instant.
+    pub fn record_keepalive_sent_at(&mut self, now: Instant) {
+        self.last_keepalive = Some(now);
     }
 
     /// Check if keepalive should be sent
     pub fn should_send_keepalive(&self) -> bool {
+        self.should_send_keepalive_at(Instant::now())
+    }
+
+    /// Check whether a keepalive is due at a caller-provided monotonic instant.
+    pub fn should_send_keepalive_at(&self, now: Instant) -> bool {
         if !self.enabled {
             return false;
         }
 
-        let now = Instant::now();
-
-        // Check if we've been idle for the keepalive interval
-        if let Some(last_activity) = self.last_activity
-            && now.duration_since(last_activity) >= self.interval
-        {
-            return true;
-        }
-
-        // Check if we haven't sent a keepalive recently
-        if let Some(last_keepalive) = self.last_keepalive {
-            if now.duration_since(last_keepalive) >= self.interval {
-                return true;
-            }
-        } else {
-            // No keepalive sent yet, check if we've been idle
-            if self.last_activity.is_none() {
-                return true;
-            }
-        }
-
-        false
+        self.last_event()
+            .is_none_or(|last| now.saturating_duration_since(last) >= self.interval)
     }
 
     /// Get time until next keepalive
     pub fn next_keepalive(&self) -> Option<Duration> {
+        self.next_keepalive_at(Instant::now())
+    }
+
+    /// Get time until the next keepalive at a caller-provided monotonic instant.
+    pub fn next_keepalive_at(&self, now: Instant) -> Option<Duration> {
         if !self.enabled {
             return None;
         }
 
-        let now = Instant::now();
+        Some(self.last_event().map_or(self.interval, |last| {
+            self.interval
+                .saturating_sub(now.saturating_duration_since(last))
+        }))
+    }
 
-        // Calculate time since last activity
-        let idle_time = self
-            .last_activity
-            .map_or(Duration::ZERO, |t| now.duration_since(t));
-
-        // Calculate remaining time until keepalive
-        if idle_time >= self.interval {
-            Some(Duration::ZERO)
-        } else {
-            Some(self.interval - idle_time)
+    fn last_event(&self) -> Option<Instant> {
+        match (self.last_activity, self.last_keepalive) {
+            (Some(activity), Some(keepalive)) => Some(activity.max(keepalive)),
+            (Some(activity), None) => Some(activity),
+            (None, Some(keepalive)) => Some(keepalive),
+            (None, None) => None,
         }
     }
 

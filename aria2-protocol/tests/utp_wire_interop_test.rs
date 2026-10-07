@@ -25,6 +25,31 @@ async fn readable(socket: &UtpSocket) {
     .unwrap();
 }
 
+#[test]
+fn packet_type_values_match_bep29_wire_assignments() {
+    for (packet_type, wire_value) in [
+        (PacketType::StData, 0),
+        (PacketType::StFin, 1),
+        (PacketType::StAck, 2),
+        (PacketType::StReset, 3),
+        (PacketType::StSyn, 4),
+    ] {
+        let encoded = UtpPacket::new(packet_type).to_bytes();
+        assert_eq!(encoded[0] >> 4, wire_value, "encoding {packet_type}");
+
+        let mut wire_packet = [0; 20];
+        wire_packet[0] = (wire_value << 4) | 1;
+        assert_eq!(
+            UtpPacket::from_bytes(&wire_packet)
+                .unwrap()
+                .packet_type()
+                .unwrap(),
+            packet_type,
+            "decoding {packet_type}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn initiator_uses_directional_ids_and_rejects_wrong_endpoint_or_id() {
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();

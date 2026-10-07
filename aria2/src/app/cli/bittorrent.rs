@@ -21,6 +21,18 @@ pub struct BitTorrentArgs {
     #[arg(short = 'B', long = "bt-max-peers")]
     pub bt_max_peers: Option<u64>,
 
+    /// Maximum upload slots to unchoke
+    #[arg(long = "bt-max-upload-slots")]
+    pub bt_max_upload_slots: Option<u64>,
+
+    /// Seconds between optimistic unchoke rotations
+    #[arg(long = "bt-optimistic-unchoke-interval")]
+    pub bt_optimistic_unchoke_interval: Option<u64>,
+
+    /// Seconds without peer data before treating it as snubbed
+    #[arg(long = "bt-snubbed-timeout")]
+    pub bt_snubbed_timeout: Option<u64>,
+
     /// Min peer speed to stay connected
     #[arg(long = "bt-request-peer-speed-limit")]
     pub bt_request_peer_speed_limit: Option<String>,

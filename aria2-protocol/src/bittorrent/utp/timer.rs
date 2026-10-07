@@ -72,12 +72,6 @@ impl TimerEntry {
         }
     }
 
-    /// Check if the timer has expired
-    #[allow(dead_code)] // Utility method; not yet called from production code
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
-    }
-
     /// Get remaining time until expiration
     fn remaining(&self) -> Duration {
         let now = Instant::now();
@@ -504,6 +498,38 @@ mod tests {
         // Record activity
         manager.record_activity();
         assert!(!manager.should_send_keepalive());
+    }
+
+    #[test]
+    fn keepalive_deadline_resets_after_keepalive_and_new_activity() {
+        let origin = Instant::now();
+        let mut manager = KeepaliveManager::with_interval(Duration::from_secs(10));
+        manager.record_activity_at(origin);
+
+        let first_deadline = origin + Duration::from_secs(10);
+        assert!(manager.should_send_keepalive_at(first_deadline));
+        assert_eq!(
+            manager.next_keepalive_at(first_deadline),
+            Some(Duration::ZERO)
+        );
+
+        manager.record_keepalive_sent_at(first_deadline);
+        let after_keepalive = first_deadline + Duration::from_secs(1);
+        assert!(!manager.should_send_keepalive_at(after_keepalive));
+        assert_eq!(
+            manager.next_keepalive_at(after_keepalive),
+            Some(Duration::from_secs(9))
+        );
+
+        let activity = first_deadline + Duration::from_secs(3);
+        manager.record_activity_at(activity);
+        let after_activity = first_deadline + Duration::from_secs(5);
+        assert!(!manager.should_send_keepalive_at(after_activity));
+        assert_eq!(
+            manager.next_keepalive_at(after_activity),
+            Some(Duration::from_secs(8))
+        );
+        assert!(manager.should_send_keepalive_at(activity + Duration::from_secs(10)));
     }
 
     #[test]

@@ -988,7 +988,10 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         include_str!("../fixtures/compatibility_option_inventory.txt");
     const EXPECTED_RUST_EXTENSIONS: &[&str] = &[
         "bt-enable-web-seed",
+        "bt-max-upload-slots",
+        "bt-optimistic-unchoke-interval",
         "bt-peer-blocklist",
+        "bt-snubbed-timeout",
         "bt-tracker-source",
         "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
@@ -1043,7 +1046,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        245,
+        248,
         "all-features registry inventory changed"
     );
     assert_eq!(

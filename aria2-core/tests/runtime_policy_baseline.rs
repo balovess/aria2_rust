@@ -106,7 +106,12 @@ fn assert_policy_matches_baseline(
 
 #[test]
 fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions() {
-    let mut initial_extensions = vec!["bt-tracker-stopped-timeout"];
+    let mut initial_extensions = vec![
+        "bt-max-upload-slots",
+        "bt-optimistic-unchoke-interval",
+        "bt-snubbed-timeout",
+        "bt-tracker-stopped-timeout",
+    ];
     initial_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
@@ -131,7 +136,12 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         RUNTIME_GLOBAL_CHANGEABLE_OPTIONS,
         &global_extensions,
     );
-    let mut reserved_extensions = vec!["enable-public-trackers"];
+    let mut reserved_extensions = vec![
+        "bt-max-upload-slots",
+        "bt-optimistic-unchoke-interval",
+        "bt-snubbed-timeout",
+        "enable-public-trackers",
+    ];
     reserved_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);

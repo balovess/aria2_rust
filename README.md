@@ -112,8 +112,12 @@ irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
 
 **Docker (Linux amd64 image):**
 ```bash
-docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
+docker run -d --name aria2 -p 127.0.0.1:6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
 ```
+
+The RPC endpoint is unauthenticated unless `rpc-secret` is configured. This
+example publishes it only on the host's loopback interface; configure
+authentication and firewall rules before publishing it on other interfaces.
 
 **Package Managers:**
 
