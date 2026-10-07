@@ -101,7 +101,49 @@ fn file_layout_rejects_untrusted_info_dict_paths() {
     info.files.as_mut().unwrap()[0].path = vec!["..".to_string(), "outside.txt".to_string()];
 
     let result = MultiFileLayout::from_info_dict(&info, Path::new("/tmp/download"));
-    assert!(result.is_err(), "file layout accepted a parent-directory path");
+    assert!(
+        result.is_err(),
+        "file layout accepted a parent-directory path"
+    );
+}
+
+#[test]
+fn file_layout_rejects_untrusted_single_file_names() {
+    let mut info = make_single_file_info_dict();
+    info.name = "../outside.bin".to_string();
+
+    let result = MultiFileLayout::from_info_dict(&info, Path::new("/tmp/download"));
+    assert!(
+        result.is_err(),
+        "file layout accepted a parent-directory name"
+    );
+}
+
+#[test]
+fn file_layout_rejects_untrusted_v2_paths() {
+    let info = InfoDict {
+        name: "safe-root".to_string(),
+        piece_length: 16_384,
+        pieces: Vec::new(),
+        length: None,
+        files: None,
+        private: None,
+        meta_version: Some(2),
+        v2_files: Some(vec![
+            aria2_protocol::bittorrent::torrent::parser::V2FileEntry {
+                length: 1,
+                path: vec!["bad\0name".to_string()],
+                pieces_root: Some([1; 32]),
+            },
+        ]),
+        pieces_root: None,
+    };
+
+    let result = MultiFileLayout::from_info_dict(&info, Path::new("/tmp/download"));
+    assert!(
+        result.is_err(),
+        "file layout accepted a control character in a v2 path"
+    );
 }
 
 #[test]

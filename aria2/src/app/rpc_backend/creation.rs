@@ -44,7 +44,14 @@ impl CoreRpcBackend {
                 )
             {
                 let _ = self.group_man.remove_group_by_id(gid);
-                return Err(Self::invalid(error.to_string()));
+                let message = error.to_string();
+                return Err(
+                    if matches!(&error, aria2_core::error::Aria2Error::BittorrentParse(_)) {
+                        Self::execution(message)
+                    } else {
+                        Self::invalid(message)
+                    },
+                );
             }
         }
         {

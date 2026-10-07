@@ -99,9 +99,7 @@ impl BtDownloadCommand {
             let meta =
                 aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
                     .map_err(|error| {
-                        Aria2Error::Fatal(FatalError::Config(format!(
-                            "Torrent parse failed: {error}"
-                        )))
+                        Aria2Error::BittorrentParse(format!("Torrent parse failed: {error}"))
                     })?;
             let dir = output_dir
                 .map(str::to_owned)
@@ -207,7 +205,7 @@ impl BtDownloadCommand {
                 torrent_bytes,
             )
             .map_err(|error| {
-                Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {error}")))
+                Aria2Error::BittorrentParse(format!("Torrent parse failed: {error}"))
             })?;
         let local_metadata: Arc<[u8]> = local_metadata.into();
 
@@ -294,10 +292,10 @@ impl BtDownloadCommand {
             match MultiFileLayout::from_info_dict(&meta.info, &layout_base_dir) {
                 Ok(layout) => Some(layout),
                 Err(e) => {
-                    return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                    return Err(Aria2Error::BittorrentParse(format!(
                         "MultiFileLayout creation failed: {}",
                         e
-                    ))));
+                    )));
                 }
             }
         } else {

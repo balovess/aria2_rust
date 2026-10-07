@@ -49,9 +49,7 @@ impl BtDownloadCommand {
 
         let meta =
             aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
-                .map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("Torrent parse error: {}", e)))
-                })?;
+                .map_err(|e| Aria2Error::BittorrentParse(format!("Torrent parse error: {}", e)))?;
 
         {
             let g = self.group.recover();

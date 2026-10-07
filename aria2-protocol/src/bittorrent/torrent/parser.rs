@@ -4,6 +4,9 @@ use tracing::{debug, info};
 use crate::bittorrent::bencode::codec::BencodeValue;
 use crate::bittorrent::torrent::info_hash::InfoHash;
 
+mod optional_fields;
+mod path_validation;
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub length: u64,
@@ -34,41 +37,19 @@ pub struct InfoDict {
 impl InfoDict {
     /// Validate the root name and every v1/v2 output path before filesystem use.
     pub fn validate_paths(&self) -> Result<(), String> {
-        validate_path_components(std::slice::from_ref(&self.name))?;
+        path_validation::validate_components(std::slice::from_ref(&self.name))?;
         if let Some(files) = &self.files {
             for file in files {
-                validate_path_components(&file.path)?;
+                path_validation::validate_components(&file.path)?;
             }
         }
         if let Some(files) = &self.v2_files {
             for file in files {
-                validate_path_components(&file.path)?;
+                path_validation::validate_components(&file.path)?;
             }
         }
         Ok(())
     }
-}
-
-fn validate_path_components(components: &[String]) -> Result<(), String> {
-    if components.is_empty() {
-        return Err("file path is empty".to_string());
-    }
-    for component in components {
-        let bytes = component.as_bytes();
-        let has_windows_drive_prefix =
-            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.contains('/')
-            || component.contains('\\')
-            || has_windows_drive_prefix
-            || component.chars().any(char::is_control)
-        {
-            return Err(format!("unsafe torrent path component: {component:?}"));
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +101,7 @@ impl TorrentMeta {
             .ok_or("Missing announce field")?
             .to_string();
 
-        let announce_list = Self::parse_announce_list(&root);
+        let announce_list = optional_fields::parse_announce_list(&root);
 
         let info = root.dict_get(b"info").ok_or("Missing info dictionary")?;
 
@@ -152,8 +133,8 @@ impl TorrentMeta {
         let encoding = root.dict_get_str("encoding").map(|s| s.to_string());
 
         // Parse url-list (BEP 19 Web Seeds)
-        let web_seeds = Self::parse_url_list(&root);
-        let nodes = Self::parse_nodes(&root);
+        let web_seeds = optional_fields::parse_url_list(&root);
+        let nodes = optional_fields::parse_nodes(&root);
 
         let total_size = Self::compute_total_size(&info_dict);
         info!(
@@ -183,74 +164,13 @@ impl TorrentMeta {
         ))
     }
 
-    fn parse_announce_list(root: &BencodeValue) -> Vec<Vec<String>> {
-        match root.dict_get(b"announce-list") {
-            Some(BencodeValue::List(tiers)) => tiers
-                .iter()
-                .filter_map(|tier| {
-                    tier.as_list().map(|urls| {
-                        urls.iter()
-                            .filter_map(|u| u.as_str().map(|s| s.to_string()))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .filter(|t| !t.is_empty())
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Parse url-list field (BEP 19 Web Seeds)
-    ///
-    /// The url-list can be either:
-    /// - A single string (one URL)
-    /// - A list of strings (multiple fallback URLs)
-    fn parse_url_list(root: &BencodeValue) -> Vec<String> {
-        match root.dict_get(b"url-list") {
-            Some(BencodeValue::Bytes(url_bytes)) => {
-                // Single URL string
-                std::str::from_utf8(url_bytes)
-                    .map(|s| vec![s.to_string()])
-                    .unwrap_or_default()
-            }
-            Some(BencodeValue::List(items)) => {
-                // List of URL strings
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                    .collect()
-            }
-            _ => Vec::new(), // Missing or wrong type
-        }
-    }
-
-    fn parse_nodes(root: &BencodeValue) -> Vec<(String, u16)> {
-        root.dict_get(b"nodes")
-            .and_then(BencodeValue::as_list)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                let pair = entry.as_list()?;
-                if pair.len() != 2 {
-                    return None;
-                }
-                let host = pair[0].as_str()?.trim();
-                let port = pair[1].as_int()?.try_into().ok()?;
-                if port == 0 {
-                    return None;
-                }
-                (!host.is_empty()).then(|| (host.to_owned(), port))
-            })
-            .collect()
-    }
-
     fn parse_info_dict(info: &BencodeValue) -> Result<InfoDict, String> {
         let dict = info.as_dict().ok_or("info is not a dictionary type")?;
 
         let name = dict
             .get(&b"name"[..])
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .and_then(BencodeValue::as_bytes)
+            .map(path_validation::decode_component)
             .unwrap_or_else(|| "unnamed".to_string());
 
         let piece_length = dict
@@ -351,8 +271,13 @@ impl TorrentMeta {
                 .ok_or("file missing path field")?;
             let path: Vec<String> = path_val
                 .iter()
-                .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                .collect();
+                .map(|component| {
+                    let bytes = component
+                        .as_bytes()
+                        .ok_or_else(|| "file path element is not a byte string".to_string())?;
+                    Ok(path_validation::decode_component(bytes))
+                })
+                .collect::<Result<_, String>>()?;
             if path.is_empty() {
                 return Err("file path is empty".to_string());
             }
@@ -389,8 +314,7 @@ impl TorrentMeta {
                 .as_dict()
                 .ok_or("file tree node must be a dictionary")?;
             for (name, child) in dict {
-                let name = std::str::from_utf8(name)
-                    .map_err(|_| "file tree path component is not valid UTF-8")?;
+                let name = path_validation::decode_component(name);
                 if name.is_empty() {
                     if path.is_empty() {
                         return Err("file tree root cannot be a file".to_string());
@@ -417,7 +341,7 @@ impl TorrentMeta {
                         pieces_root,
                     });
                 } else {
-                    path.push(name.to_string());
+                    path.push(name);
                     walk(child, path, output)?;
                     path.pop();
                 }
@@ -654,624 +578,5 @@ impl TorrentMeta {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sha1::Digest;
-    use std::collections::BTreeMap;
-
-    fn make_simple_torrent() -> Vec<u8> {
-        let mut pieces_data = vec![0u8; 40];
-        for (i, piece) in pieces_data.iter_mut().enumerate().take(40) {
-            *piece = i as u8;
-        }
-
-        let mut info = BTreeMap::new();
-        info.insert(
-            b"name".to_vec(),
-            BencodeValue::Bytes(b"test_file.bin".to_vec()),
-        );
-        info.insert(b"length".to_vec(), BencodeValue::Int(1024));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(pieces_data));
-
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-
-        BencodeValue::Dict(root).encode()
-    }
-
-    fn make_torrent_with_name_and_path(name: &str, path: Option<&[&str]>) -> Vec<u8> {
-        let mut info = BTreeMap::from([
-            (
-                b"name".to_vec(),
-                BencodeValue::Bytes(name.as_bytes().to_vec()),
-            ),
-            (b"piece length".to_vec(), BencodeValue::Int(16_384)),
-            (b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 20])),
-        ]);
-        if let Some(components) = path {
-            let file = BTreeMap::from([
-                (b"length".to_vec(), BencodeValue::Int(1)),
-                (
-                    b"path".to_vec(),
-                    BencodeValue::List(
-                        components
-                            .iter()
-                            .map(|component| {
-                                BencodeValue::Bytes(component.as_bytes().to_vec())
-                            })
-                            .collect(),
-                    ),
-                ),
-            ]);
-            info.insert(
-                b"files".to_vec(),
-                BencodeValue::List(vec![BencodeValue::Dict(file)]),
-            );
-        } else {
-            info.insert(b"length".to_vec(), BencodeValue::Int(1));
-        }
-
-        let root = BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-            ),
-            (b"info".to_vec(), BencodeValue::Dict(info)),
-        ]);
-        BencodeValue::Dict(root).encode()
-    }
-
-    #[test]
-    fn test_parse_single_file_torrent() {
-        let data = make_simple_torrent();
-        let torrent = TorrentMeta::parse(&data).unwrap();
-
-        assert_eq!(torrent.announce, "http://tracker.example.com/announce");
-        assert_eq!(torrent.info.name, "test_file.bin");
-        assert_eq!(torrent.info.piece_length, 512);
-        assert_eq!(torrent.info.pieces.len(), 2);
-        assert_eq!(torrent.info.length, Some(1024));
-        assert!(torrent.is_single_file());
-        assert!(!torrent.is_private());
-        assert_eq!(torrent.num_pieces(), 2);
-        assert_eq!(torrent.total_size(), 1024);
-        assert_eq!(torrent.info.meta_version, None);
-        assert!(torrent.info_hash_v2.is_none());
-    }
-
-    #[test]
-    fn test_parse_v2_file_tree_and_piece_layers() {
-        let piece_hash = [0x22u8; 32];
-        let root_hash = crate::bittorrent::torrent::merkle::parent_hash(&piece_hash, &piece_hash);
-        let mut leaf = BTreeMap::new();
-        leaf.insert(b"length".to_vec(), BencodeValue::Int(32768));
-        leaf.insert(
-            b"pieces root".to_vec(),
-            BencodeValue::Bytes(root_hash.to_vec()),
-        );
-        let mut file_name = BTreeMap::new();
-        file_name.insert(b"".to_vec(), BencodeValue::Dict(leaf));
-        let mut file_tree = BTreeMap::new();
-        file_tree.insert(b"payload.bin".to_vec(), BencodeValue::Dict(file_name));
-
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"payload".to_vec()));
-        info.insert(b"meta version".to_vec(), BencodeValue::Int(2));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(16384));
-        info.insert(b"file tree".to_vec(), BencodeValue::Dict(file_tree));
-
-        let mut layers = BTreeMap::new();
-        layers.insert(
-            root_hash.to_vec(),
-            BencodeValue::Bytes(vec![piece_hash, piece_hash].into_iter().flatten().collect()),
-        );
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-        root.insert(b"piece layers".to_vec(), BencodeValue::Dict(layers));
-
-        let torrent = TorrentMeta::parse(&BencodeValue::Dict(root).encode()).unwrap();
-        assert_eq!(torrent.info.meta_version, Some(2));
-        assert_eq!(torrent.info.pieces.len(), 0);
-        assert!(torrent.info_hash_v2.is_some());
-        assert_eq!(
-            torrent.network_info_hash(),
-            torrent.info_hash_v2.unwrap()[..20]
-        );
-        let files = torrent.info.v2_files.as_ref().unwrap();
-        assert_eq!(files[0].path, vec!["payload.bin"]);
-        assert_eq!(files[0].pieces_root, Some(root_hash));
-        assert_eq!(
-            torrent.piece_layers.get(&root_hash),
-            Some(&vec![piece_hash, piece_hash])
-        );
-        assert_eq!(torrent.piece_space_size(), 32768);
-        assert_eq!(torrent.num_pieces(), 2);
-    }
-
-    #[test]
-    fn test_v2_file_tree_rejects_invalid_piece_root() {
-        let mut leaf = BTreeMap::new();
-        leaf.insert(b"length".to_vec(), BencodeValue::Int(1));
-        leaf.insert(b"pieces root".to_vec(), BencodeValue::Bytes(vec![0u8; 31]));
-        let mut named = BTreeMap::new();
-        named.insert(b"".to_vec(), BencodeValue::Dict(leaf));
-        let mut tree = BTreeMap::new();
-        tree.insert(b"file".to_vec(), BencodeValue::Dict(named));
-        let mut info = BTreeMap::new();
-        info.insert(b"meta version".to_vec(), BencodeValue::Int(2));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(1));
-        info.insert(b"file tree".to_vec(), BencodeValue::Dict(tree));
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://x".to_vec()),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-        assert!(TorrentMeta::parse(&BencodeValue::Dict(root).encode()).is_err());
-    }
-
-    #[test]
-    fn test_v2_empty_file_may_omit_pieces_root() {
-        let mut leaf = BTreeMap::new();
-        leaf.insert(b"length".to_vec(), BencodeValue::Int(0));
-        let mut named = BTreeMap::new();
-        named.insert(b"".to_vec(), BencodeValue::Dict(leaf));
-        let mut tree = BTreeMap::new();
-        tree.insert(b"empty".to_vec(), BencodeValue::Dict(named));
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"root".to_vec()));
-        info.insert(b"meta version".to_vec(), BencodeValue::Int(2));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(16384));
-        info.insert(b"file tree".to_vec(), BencodeValue::Dict(tree));
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-
-        let torrent = TorrentMeta::parse(&BencodeValue::Dict(root).encode()).unwrap();
-        assert_eq!(torrent.info.v2_files.unwrap()[0].pieces_root, None);
-    }
-
-    #[test]
-    fn test_rejects_unsupported_metainfo_version() {
-        let mut info = BTreeMap::new();
-        info.insert(b"meta version".to_vec(), BencodeValue::Int(3));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(16 * 1024));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 20]));
-        let root = BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://x".to_vec()),
-            ),
-            (b"info".to_vec(), BencodeValue::Dict(info)),
-        ]);
-        let error = TorrentMeta::parse(&BencodeValue::Dict(root).encode()).unwrap_err();
-        assert!(error.contains("unsupported BitTorrent metainfo version 3"));
-    }
-
-    #[test]
-    fn test_parse_multi_file_torrent() {
-        let pieces_data = vec![0u8; 40];
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"multi_dir".to_vec()));
-
-        let mut f1 = BTreeMap::new();
-        f1.insert(b"length".to_vec(), BencodeValue::Int(500));
-        f1.insert(
-            b"path".to_vec(),
-            BencodeValue::List(vec![
-                BencodeValue::Bytes(b"dir1".to_vec()),
-                BencodeValue::Bytes(b"file1.txt".to_vec()),
-            ]),
-        );
-
-        let mut f2 = BTreeMap::new();
-        f2.insert(b"length".to_vec(), BencodeValue::Int(524));
-        f2.insert(
-            b"path".to_vec(),
-            BencodeValue::List(vec![
-                BencodeValue::Bytes(b"dir2".to_vec()),
-                BencodeValue::Bytes(b"file2.dat".to_vec()),
-            ]),
-        );
-
-        info.insert(
-            b"files".to_vec(),
-            BencodeValue::List(vec![BencodeValue::Dict(f1), BencodeValue::Dict(f2)]),
-        );
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(pieces_data));
-
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-
-        let data = BencodeValue::Dict(root).encode();
-        let torrent = TorrentMeta::parse(&data).unwrap();
-
-        assert!(!torrent.is_single_file());
-        assert_eq!(torrent.info.files.as_ref().unwrap().len(), 2);
-        assert_eq!(torrent.total_size(), 1024);
-    }
-
-    #[test]
-    fn test_parse_with_optional_fields() {
-        let _data = make_simple_torrent();
-
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(
-            b"comment".to_vec(),
-            BencodeValue::Bytes(b"A test torrent".to_vec()),
-        );
-        root.insert(
-            b"created by".to_vec(),
-            BencodeValue::Bytes(b"aria2-rust-tester".to_vec()),
-        );
-        root.insert(b"creation date".to_vec(), BencodeValue::Int(1700000000));
-        root.insert(
-            b"nodes".to_vec(),
-            BencodeValue::List(vec![
-                BencodeValue::List(vec![
-                    BencodeValue::Bytes(b" router.example ".to_vec()),
-                    BencodeValue::Int(6881),
-                ]),
-                BencodeValue::List(vec![
-                    BencodeValue::Bytes(b"invalid-port".to_vec()),
-                    BencodeValue::Int(0),
-                ]),
-            ]),
-        );
-
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test.bin".to_vec()));
-        info.insert(b"length".to_vec(), BencodeValue::Int(100));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(50));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 40]));
-        info.insert(b"private".to_vec(), BencodeValue::Int(1));
-
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-
-        let data = BencodeValue::Dict(root).encode();
-        let t = TorrentMeta::parse(&data).unwrap();
-        assert_eq!(t.comment.as_deref(), Some("A test torrent"));
-        assert_eq!(t.created_by.as_deref(), Some("aria2-rust-tester"));
-        assert_eq!(t.creation_date, Some(1700000000));
-        assert_eq!(t.nodes, vec![("router.example".to_string(), 6881)]);
-        assert!(t.is_private());
-    }
-
-    #[test]
-    fn test_error_missing_fields() {
-        let empty = BencodeValue::Dict(BTreeMap::new()).encode();
-        assert!(TorrentMeta::parse(&empty).is_err());
-
-        let mut r = BTreeMap::new();
-        r.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://x".to_vec()),
-        );
-        let no_info = BencodeValue::Dict(r).encode();
-        assert!(TorrentMeta::parse(&no_info).is_err());
-    }
-
-    #[test]
-    fn torrent_parser_rejects_unsafe_output_paths() {
-        for name in [
-            "../outside",
-            "..\\outside",
-            "/outside",
-            "C:outside",
-            "bad\0name",
-        ] {
-            let torrent = make_torrent_with_name_and_path(name, None);
-            assert!(
-                TorrentMeta::parse(&torrent).is_err(),
-                "unsafe torrent root name was accepted: {name:?}"
-            );
-        }
-
-        let unsafe_paths: &[&[&str]] = &[
-            &[".."],
-            &["..", "outside"],
-            &["../outside"],
-            &["/outside"],
-            &["C:outside"],
-            &["bad\0name"],
-        ];
-        for path in unsafe_paths {
-            let torrent = make_torrent_with_name_and_path("safe-root", Some(*path));
-            assert!(
-                TorrentMeta::parse(&torrent).is_err(),
-                "unsafe torrent file path was accepted: {path:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_rejects_negative_single_file_length() {
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"file".to_vec()));
-        info.insert(b"length".to_vec(), BencodeValue::Int(-1));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(16_384));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(Vec::new()));
-        let root = BencodeValue::Dict(BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://x".to_vec()),
-            ),
-            (b"info".to_vec(), BencodeValue::Dict(info)),
-        ]));
-
-        let error = TorrentMeta::parse(&root.encode()).unwrap_err();
-        assert!(error.contains("file length must be non-negative"));
-    }
-
-    #[test]
-    fn test_rejects_negative_multi_file_length() {
-        let file = BencodeValue::Dict(BTreeMap::from([
-            (b"length".to_vec(), BencodeValue::Int(-1)),
-            (
-                b"path".to_vec(),
-                BencodeValue::List(vec![BencodeValue::Bytes(b"file".to_vec())]),
-            ),
-        ]));
-        let info = BencodeValue::Dict(BTreeMap::from([
-            (b"name".to_vec(), BencodeValue::Bytes(b"root".to_vec())),
-            (b"files".to_vec(), BencodeValue::List(vec![file])),
-            (b"piece length".to_vec(), BencodeValue::Int(16_384)),
-            (b"pieces".to_vec(), BencodeValue::Bytes(Vec::new())),
-        ]));
-        let root = BencodeValue::Dict(BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://x".to_vec()),
-            ),
-            (b"info".to_vec(), info),
-        ]));
-
-        let error = TorrentMeta::parse(&root.encode()).unwrap_err();
-        assert!(error.contains("file length must be non-negative"));
-    }
-
-    #[test]
-    fn test_info_hash_consistency() {
-        let data = make_simple_torrent();
-        let t1 = TorrentMeta::parse(&data).unwrap();
-        let t2 = TorrentMeta::parse(&data).unwrap();
-        assert_eq!(t1.info_hash.as_hex(), t2.info_hash.as_hex());
-
-        let (parsed, info_bytes) = TorrentMeta::parse_with_info_bytes(&data).unwrap();
-        assert_eq!(parsed.info_hash, t1.info_hash);
-        assert_eq!(
-            parsed.info_hash.bytes,
-            super::super::info_hash::InfoHash::from_info_bytes(&info_bytes).bytes
-        );
-        let (root, _) = BencodeValue::decode(&data).unwrap();
-        assert_eq!(info_bytes, root.dict_get(b"info").unwrap().encode());
-    }
-
-    #[test]
-    fn test_parse_hybrid_single_file_validates_both_layouts() {
-        let data = b"hybrid payload";
-        let sha1_piece: [u8; 20] = sha1::Sha1::digest(data).into();
-        let root = crate::bittorrent::torrent::merkle::file_root(data);
-        let leaf = BTreeMap::from([
-            (b"length".to_vec(), BencodeValue::Int(data.len() as i64)),
-            (b"pieces root".to_vec(), BencodeValue::Bytes(root.to_vec())),
-        ]);
-        let mut file_node = BTreeMap::new();
-        file_node.insert(Vec::new(), BencodeValue::Dict(leaf));
-        let mut file_tree = BTreeMap::new();
-        file_tree.insert(b"hybrid.bin".to_vec(), BencodeValue::Dict(file_node));
-        let info = BencodeValue::Dict(BTreeMap::from([
-            (b"file tree".to_vec(), BencodeValue::Dict(file_tree)),
-            (b"length".to_vec(), BencodeValue::Int(data.len() as i64)),
-            (b"meta version".to_vec(), BencodeValue::Int(2)),
-            (
-                b"name".to_vec(),
-                BencodeValue::Bytes(b"hybrid.bin".to_vec()),
-            ),
-            (b"piece length".to_vec(), BencodeValue::Int(16384)),
-            (b"pieces".to_vec(), BencodeValue::Bytes(sha1_piece.to_vec())),
-        ]));
-        let root_dict = BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://tracker.invalid/announce".to_vec()),
-            ),
-            (b"info".to_vec(), info),
-        ]);
-
-        let torrent = TorrentMeta::parse(&BencodeValue::Dict(root_dict).encode()).unwrap();
-        assert_eq!(torrent.info.meta_version, Some(2));
-        assert_eq!(torrent.info.pieces.len(), 1);
-        assert!(torrent.info_hash_v2.is_some());
-    }
-
-    #[test]
-    fn test_parse_hybrid_rejects_mismatched_v1_length() {
-        let root = crate::bittorrent::torrent::merkle::file_root(b"data");
-        let leaf = BTreeMap::from([
-            (b"length".to_vec(), BencodeValue::Int(4)),
-            (b"pieces root".to_vec(), BencodeValue::Bytes(root.to_vec())),
-        ]);
-        let mut file_node = BTreeMap::new();
-        file_node.insert(Vec::new(), BencodeValue::Dict(leaf));
-        let mut file_tree = BTreeMap::new();
-        file_tree.insert(b"file.bin".to_vec(), BencodeValue::Dict(file_node));
-        let info = BencodeValue::Dict(BTreeMap::from([
-            (b"file tree".to_vec(), BencodeValue::Dict(file_tree)),
-            (b"length".to_vec(), BencodeValue::Int(3)),
-            (b"meta version".to_vec(), BencodeValue::Int(2)),
-            (b"name".to_vec(), BencodeValue::Bytes(b"file.bin".to_vec())),
-            (b"piece length".to_vec(), BencodeValue::Int(16384)),
-            (b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 20])),
-        ]));
-        let root_dict = BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://tracker.invalid/announce".to_vec()),
-            ),
-            (b"info".to_vec(), info),
-        ]);
-        let error = TorrentMeta::parse(&BencodeValue::Dict(root_dict).encode()).unwrap_err();
-        assert!(error.contains("hybrid single-file layouts do not match"));
-    }
-
-    #[test]
-    fn test_parse_hybrid_rejects_padding_at_wrong_position() {
-        let piece_length = 16_384i64;
-        let files = [
-            (
-                "one.bin",
-                1i64,
-                crate::bittorrent::torrent::merkle::file_root(b"1"),
-            ),
-            (
-                "two.bin",
-                1i64,
-                crate::bittorrent::torrent::merkle::file_root(b"2"),
-            ),
-        ];
-        let mut file_tree = BTreeMap::new();
-        for (name, length, root) in files {
-            file_tree.insert(
-                name.as_bytes().to_vec(),
-                BencodeValue::Dict(BTreeMap::from([(
-                    Vec::new(),
-                    BencodeValue::Dict(BTreeMap::from([
-                        (b"length".to_vec(), BencodeValue::Int(length)),
-                        (b"pieces root".to_vec(), BencodeValue::Bytes(root.to_vec())),
-                    ])),
-                )])),
-            );
-        }
-        let content_file = |name: &[u8], length: i64| {
-            BencodeValue::Dict(BTreeMap::from([
-                (b"length".to_vec(), BencodeValue::Int(length)),
-                (
-                    b"path".to_vec(),
-                    BencodeValue::List(vec![BencodeValue::Bytes(name.to_vec())]),
-                ),
-            ]))
-        };
-        let padding = BencodeValue::Dict(BTreeMap::from([
-            (b"length".to_vec(), BencodeValue::Int(16_383)),
-            (
-                b"path".to_vec(),
-                BencodeValue::List(vec![
-                    BencodeValue::Bytes(b".pad".to_vec()),
-                    BencodeValue::Bytes(b"16383".to_vec()),
-                ]),
-            ),
-        ]));
-        let info = BencodeValue::Dict(BTreeMap::from([
-            (b"file tree".to_vec(), BencodeValue::Dict(file_tree)),
-            (b"meta version".to_vec(), BencodeValue::Int(2)),
-            (b"name".to_vec(), BencodeValue::Bytes(b"root".to_vec())),
-            (b"piece length".to_vec(), BencodeValue::Int(piece_length)),
-            (b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 40])),
-            (
-                b"files".to_vec(),
-                BencodeValue::List(vec![
-                    content_file(b"one.bin", 1),
-                    content_file(b"two.bin", 1),
-                    padding,
-                ]),
-            ),
-        ]));
-        let root = BencodeValue::Dict(BTreeMap::from([
-            (
-                b"announce".to_vec(),
-                BencodeValue::Bytes(b"http://x".to_vec()),
-            ),
-            (b"info".to_vec(), info),
-        ]));
-
-        let error = TorrentMeta::parse(&root.encode()).unwrap_err();
-        assert!(error.contains("hybrid padding files do not match"));
-    }
-
-    #[test]
-    fn test_parse_web_seeds_single() {
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test.bin".to_vec()));
-        info.insert(b"length".to_vec(), BencodeValue::Int(1024));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 40]));
-
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(
-            b"url-list".to_vec(),
-            BencodeValue::Bytes(b"http://webseed.example.com/file.bin".to_vec()),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-
-        let data = BencodeValue::Dict(root).encode();
-        let torrent = TorrentMeta::parse(&data).unwrap();
-
-        assert_eq!(torrent.web_seeds.len(), 1);
-        assert_eq!(torrent.web_seeds[0], "http://webseed.example.com/file.bin");
-    }
-
-    #[test]
-    fn test_parse_web_seeds_multiple() {
-        let mut info = BTreeMap::new();
-        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test.bin".to_vec()));
-        info.insert(b"length".to_vec(), BencodeValue::Int(2048));
-        info.insert(b"piece length".to_vec(), BencodeValue::Int(512));
-        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0u8; 80]));
-
-        let mut root = BTreeMap::new();
-        root.insert(
-            b"announce".to_vec(),
-            BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
-        );
-        root.insert(
-            b"url-list".to_vec(),
-            BencodeValue::List(vec![
-                BencodeValue::Bytes(b"http://seed1.example.com/file.bin".to_vec()),
-                BencodeValue::Bytes(b"http://seed2.example.com/file.bin".to_vec()),
-                BencodeValue::Bytes(b"https://seed3.example.com/file.bin".to_vec()),
-            ]),
-        );
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
-
-        let data = BencodeValue::Dict(root).encode();
-        let torrent = TorrentMeta::parse(&data).unwrap();
-
-        assert_eq!(torrent.web_seeds.len(), 3);
-        assert_eq!(torrent.web_seeds[0], "http://seed1.example.com/file.bin");
-        assert_eq!(torrent.web_seeds[1], "http://seed2.example.com/file.bin");
-        assert_eq!(torrent.web_seeds[2], "https://seed3.example.com/file.bin");
-    }
-
-    #[test]
-    fn test_parse_web_seeds_missing() {
-        let data = make_simple_torrent();
-        let torrent = TorrentMeta::parse(&data).unwrap();
-        assert!(torrent.web_seeds.is_empty());
-    }
-}
+#[path = "parser/tests.rs"]
+mod tests;

@@ -191,9 +191,7 @@ pub fn prepare_group_metadata(
     additional_web_seeds: &[String],
 ) -> Result<()> {
     let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
-        .map_err(|error| {
-            Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {error}")))
-        })?;
+        .map_err(|error| Aria2Error::BittorrentParse(format!("Torrent parse failed: {error}")))?;
     let dir = output_dir
         .map(str::to_owned)
         .or_else(|| options.dir.clone())

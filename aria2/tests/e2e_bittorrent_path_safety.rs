@@ -4,6 +4,7 @@
 mod support;
 
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+use base64::Engine as _;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -54,7 +55,10 @@ async fn wait_for_stopped_task(client: &RunningAria2) -> Value {
         if let Some(task) = stopped.as_array().and_then(|tasks| tasks.first()) {
             return task.clone();
         }
-        assert!(Instant::now() < deadline, "torrent task did not stop: {stopped}");
+        assert!(
+            Instant::now() < deadline,
+            "torrent task did not stop: {stopped}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -85,4 +89,30 @@ async fn cli_torrent_path_failure_uses_bittorrent_parse_result_code() {
         !temp.path().join("escaped.bin").exists(),
         "unsafe torrent path must not create an output outside --dir"
     );
+}
+
+#[test]
+fn rpc_add_torrent_parse_failure_uses_aria2_execution_error_code() {
+    let temp = tempfile::tempdir().expect("temporary test directory");
+    let client = RunningAria2::start_rpc(&[format!("--dir={}", temp.path().display())]);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(torrent_with_traversal_name());
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "aria2.addTorrent",
+        "params": [encoded, [], {}],
+    });
+    let response = client.post(
+        "/jsonrpc",
+        "application/json",
+        request.to_string().as_bytes(),
+    );
+    assert_eq!(response.status, 400, "RPC HTTP status: {}", response.status);
+    let response: Value = serde_json::from_slice(&response.body).expect("RPC JSON response");
+
+    // aria2_original's RpcMethod::execute catches this input-time
+    // RecoverableException and emits execution code 1; result code 26 is only
+    // available when a download task exists.
+    assert_eq!(response["error"]["code"], 1, "RPC response: {response}");
+    assert!(response.get("result").is_none(), "RPC response: {response}");
 }

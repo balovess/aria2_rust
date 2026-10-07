@@ -209,10 +209,7 @@ impl MagnetDownloadCommand {
         let is_private =
             aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
                 .map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!(
-                        "Fetched metadata parse failed: {}",
-                        e
-                    )))
+                    Aria2Error::BittorrentParse(format!("Fetched metadata parse failed: {}", e))
                 })?
                 .is_private();
 
