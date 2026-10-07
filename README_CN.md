@@ -117,8 +117,10 @@ irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
 **Docker（Linux amd64 镜像）：**
 
 ```bash
-docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
+docker run -d --name aria2 -p 127.0.0.1:6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
 ```
+
+RPC 默认不要求认证。此命令仅将端口发布到宿主机回环地址；Compose 网络中的其他容器仍可访问 RPC。不要将映射改为 `0.0.0.0` 或省略绑定地址，除非已配置 `rpc-secret` 并限制网络访问。
 
 ### 前置条件
 

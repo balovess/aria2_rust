@@ -316,7 +316,7 @@ impl WebSeedManager {
         }
         let piece_start = piece_index as u64 * self.piece_length as u64;
         let piece_end = piece_start.saturating_add(piece_data_length);
-        let (uri_generation, file_ranges) = {
+        let (uri_generation, context, file_ranges) = {
             let group = group.recover();
             let uri_generation = group.uri_generation();
             let context = group
@@ -326,14 +326,15 @@ impl WebSeedManager {
             let first = entries.partition_point(|entry| entry.last_offset() <= piece_start);
             let file_ranges = entries[first..]
                 .iter()
-                .take_while(|entry| entry.offset() < piece_end)
-                .filter_map(|entry| {
+                .enumerate()
+                .take_while(|(_, entry)| entry.offset() < piece_end)
+                .filter_map(|(index, entry)| {
                     let start = piece_start.max(entry.offset());
                     let end = piece_end.min(entry.last_offset());
-                    (start < end).then(|| (start, end, entry.offset(), entry.uris()))
+                    (start < end).then(|| (first + index, start, end, entry.offset(), entry.uris()))
                 })
                 .collect::<Vec<_>>();
-            (uri_generation, file_ranges)
+            (uri_generation, context, file_ranges)
         };
         self.uri_state.observe_generation(uri_generation);
 
@@ -345,7 +346,7 @@ impl WebSeedManager {
             .map_err(|_| "WebSeed piece exceeds addressable memory".to_string())?;
         let mut piece = vec![0; piece_length];
         let mut last_error = None;
-        for (start, end, file_offset, uris) in file_ranges {
+        for (file_entry_index, start, end, file_offset, uris) in file_ranges {
             if uris.is_empty() {
                 return Err(format!(
                     "No WebSeed URI is configured for piece {piece_index} file range {start}..{end}"
@@ -381,6 +382,17 @@ impl WebSeedManager {
                         continue;
                     }
                 };
+                if !context
+                    .get_file_entries()
+                    .get(file_entry_index)
+                    .is_some_and(|entry| entry.mark_uri_dispatched(uri))
+                {
+                    if probe_guard.is_some() {
+                        self.uri_state.mark_probed(uri, Some(uri_generation));
+                    }
+                    last_error = Some(format!("{uri}: URI was removed before the request started"));
+                    continue;
+                }
                 let result = client
                     .download_piece_into_with_response_status(
                         piece_index,

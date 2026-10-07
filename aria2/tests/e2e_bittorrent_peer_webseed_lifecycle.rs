@@ -269,10 +269,8 @@ async fn cli_removes_disconnected_peer_while_webseed_request_is_pending() {
     drop(placeholder_tracker);
 
     let tracker = MockTrackerServer::start(peer.addr.port()).await;
-    let torrent = torrent_with_web_seed(
-        &tracker.announce_url(),
-        &format!("http://{}/file.iso", web_seed.addr),
-    );
+    let web_seed_uri = format!("http://{}/file.iso", web_seed.addr);
+    let torrent = torrent_with_web_seed(&tracker.announce_url(), &web_seed_uri);
     let args = [
         format!("--dir={}", output_dir.path().display()),
         format!(
@@ -305,6 +303,14 @@ async fn cli_removes_disconnected_peer_while_webseed_request_is_pending() {
 
     peer.wait_connected().await;
     web_seed.wait_for_request().await;
+
+    let uris = rpc(&client, 5, "aria2.getUris", json!([gid]));
+    assert_eq!(uris.as_array().map(Vec::len), Some(1));
+    assert_eq!(uris[0]["uri"], web_seed_uri);
+    assert_eq!(
+        uris[0]["status"], "used",
+        "a WebSeed URI must become used once its range request is dispatched"
+    );
 
     let initial_peers = rpc(&client, 2, "aria2.getPeerDetails", json!([gid]));
     assert_eq!(initial_peers.as_array().map(Vec::len), Some(1));

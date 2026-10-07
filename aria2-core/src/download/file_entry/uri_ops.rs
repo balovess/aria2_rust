@@ -36,6 +36,26 @@ impl FileEntry {
         )
     }
 
+    /// Record that a shared URI source has been dispatched by a live download.
+    ///
+    /// Returns `false` if the URI was removed before the request started. A
+    /// previously dispatched URI remains usable for concurrent range requests.
+    pub(crate) fn mark_uri_dispatched(&self, uri: &str) -> bool {
+        let mut state = self.write_uri_state();
+        if let Some(index) = state
+            .remaining
+            .iter()
+            .position(|candidate| candidate == uri)
+        {
+            if let Some(dispatched) = state.remaining.remove(index) {
+                state.spent.push_back(dispatched);
+                return true;
+            }
+        }
+
+        state.spent.iter().any(|candidate| candidate == uri)
+    }
+
     /// Return whether this file has any configured or previously dispatched URI.
     pub fn has_uri_sources(&self) -> bool {
         let state = self.read_uri_state();

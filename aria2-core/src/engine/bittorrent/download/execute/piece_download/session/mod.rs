@@ -18,9 +18,17 @@ use crate::engine::bittorrent::download::execute::peer_session::TorrentSession;
 
 mod availability;
 mod initialization;
+mod lifecycle;
 pub(in crate::engine::bittorrent::download::execute) mod peer_dials;
+mod peer_events;
 mod piece;
+mod piece_batch;
+mod piece_completion;
+mod piece_storage;
+mod progress;
 mod run;
+mod wait;
+mod web_seed;
 
 pub(super) struct PieceDownloadSession<'a> {
     pub(super) command: &'a mut BtDownloadCommand,

@@ -1,6 +1,7 @@
 mod choke_api;
 mod constructor;
 mod integration_api;
+mod torrent_context;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,8 +16,8 @@ use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 // Re-export sub-module public items
-pub use constructor::prepare_group_metadata;
-pub(crate) use constructor::{
+pub use torrent_context::prepare_group_metadata;
+pub(crate) use torrent_context::{
     apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
 };
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;

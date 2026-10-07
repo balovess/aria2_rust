@@ -18,13 +18,13 @@ use super::endgame_requests::{
     PendingRequest, cancel_attempt_requests, cancel_completed_block_duplicates,
     fill_request_windows, record_failed_peer, take_peer_pending,
 };
-use super::normal_pipeline::piece_attempt_budget_exhausted;
 use super::peer_actor::{
     PeerEvent, PeerGeneration, apply_choke_round, apply_interest_change,
     rebalance_upload_slots_after_peer_disconnect,
 };
 use super::peer_registry::PeerSwarm;
 use super::peer_snapshot::PeerSchedulingSnapshot;
+use super::piece_attempt_budget_exhausted;
 use super::pipelined::BlockRequest;
 use super::wait_for_deadline;
 

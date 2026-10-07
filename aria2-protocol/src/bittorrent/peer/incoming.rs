@@ -208,6 +208,7 @@ pub async fn receive_with_policies(
     let policy = policies.get(&info_hash).copied().unwrap_or_default();
     responder.set_crypto_preferences(policy.force_encryption, policy.prefer_encryption);
     responder.receive_initiator_step2(&step2, &[info_hash])?;
+    let initial_payload = responder.take_receiver_initial_payload();
     let response = responder.build_receiver_step2()?;
     stream
         .write_all(&response)
@@ -216,9 +217,11 @@ pub async fn receive_with_policies(
     let mut crypto = responder.finalize()?;
 
     let mut handshake_bytes = [0u8; HANDSHAKE_LENGTH];
-    read_exact(&mut stream, &mut handshake_bytes).await?;
-    let mut handshake_data = handshake_bytes.to_vec();
-    crypto.decrypt(&mut handshake_data);
+    let initial_length = initial_payload.len();
+    handshake_bytes[..initial_length].copy_from_slice(&initial_payload);
+    read_exact(&mut stream, &mut handshake_bytes[initial_length..]).await?;
+    crypto.decrypt(&mut handshake_bytes[initial_length..]);
+    let handshake_data = handshake_bytes.to_vec();
     let handshake = Handshake::parse(&handshake_data).map_err(|error| {
         format!(
             "{error}; decrypted handshake prefix={:02x?}",

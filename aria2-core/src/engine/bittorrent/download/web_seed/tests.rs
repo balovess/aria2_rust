@@ -532,6 +532,13 @@ async fn live_web_seed_stops_reprobing_404_until_uri_configuration_changes() {
         assert_eq!(data, expected);
     }
 
+    let uri_states = group.recover().uri_entries();
+    assert_eq!(uri_states.len(), 2);
+    assert!(
+        uri_states.iter().all(|entry| entry.status == "used"),
+        "both dispatched WebSeed sources should be projected as used: {uri_states:?}"
+    );
+
     assert_eq!(
         dead_requests.load(std::sync::atomic::Ordering::Relaxed),
         1,
@@ -546,6 +553,23 @@ async fn live_web_seed_stops_reprobing_404_until_uri_configuration_changes() {
         .await
         .expect("healthy mirror should still serve after URI configuration changes");
     assert_eq!(data, b"IJKL");
+    let changed_uri_states = group.recover().uri_entries();
+    assert_eq!(
+        changed_uri_states
+            .iter()
+            .filter(|entry| entry.status == "used")
+            .count(),
+        2,
+        "previously dispatched URIs should remain used after adding a source"
+    );
+    assert_eq!(
+        changed_uri_states
+            .iter()
+            .filter(|entry| entry.status == "waiting")
+            .count(),
+        1,
+        "the newly added URI should remain waiting until selected"
+    );
 
     dead_server.await.expect("404 fixture should finish");
     healthy_server.await.expect("healthy fixture should finish");

@@ -8,6 +8,10 @@
 
 use std::time::Instant;
 
+pub(super) fn piece_attempt_budget_exhausted(attempts: u32, max_attempts: u32) -> bool {
+    max_attempts != 0 && attempts >= max_attempts
+}
+
 pub(super) async fn wait_for_deadline(deadline: Option<Instant>) {
     if let Some(deadline) = deadline {
         tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
