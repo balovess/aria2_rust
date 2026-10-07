@@ -96,6 +96,15 @@ fn test_from_info_dict_multi_file() {
 }
 
 #[test]
+fn file_layout_rejects_untrusted_info_dict_paths() {
+    let mut info = make_multi_file_info_dict();
+    info.files.as_mut().unwrap()[0].path = vec!["..".to_string(), "outside.txt".to_string()];
+
+    let result = MultiFileLayout::from_info_dict(&info, Path::new("/tmp/download"));
+    assert!(result.is_err(), "file layout accepted a parent-directory path");
+}
+
+#[test]
 fn test_from_info_dict_empty_files() {
     let info = InfoDict {
         name: "empty".to_string(),

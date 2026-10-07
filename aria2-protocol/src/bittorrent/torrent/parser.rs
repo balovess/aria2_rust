@@ -31,6 +31,46 @@ pub struct InfoDict {
     pub pieces_root: Option<[u8; 32]>,
 }
 
+impl InfoDict {
+    /// Validate the root name and every v1/v2 output path before filesystem use.
+    pub fn validate_paths(&self) -> Result<(), String> {
+        validate_path_components(std::slice::from_ref(&self.name))?;
+        if let Some(files) = &self.files {
+            for file in files {
+                validate_path_components(&file.path)?;
+            }
+        }
+        if let Some(files) = &self.v2_files {
+            for file in files {
+                validate_path_components(&file.path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_path_components(components: &[String]) -> Result<(), String> {
+    if components.is_empty() {
+        return Err("file path is empty".to_string());
+    }
+    for component in components {
+        let bytes = component.as_bytes();
+        let has_windows_drive_prefix =
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('/')
+            || component.contains('\\')
+            || has_windows_drive_prefix
+            || component.chars().any(char::is_control)
+        {
+            return Err(format!("unsafe torrent path component: {component:?}"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct TorrentMeta {
     pub announce: String,
@@ -272,7 +312,7 @@ impl TorrentMeta {
             None
         };
 
-        Ok(InfoDict {
+        let info_dict = InfoDict {
             name,
             piece_length,
             pieces,
@@ -282,7 +322,9 @@ impl TorrentMeta {
             meta_version,
             v2_files,
             pieces_root,
-        })
+        };
+        info_dict.validate_paths()?;
+        Ok(info_dict)
     }
 
     fn parse_files(dict: &BTreeMap<Vec<u8>, BencodeValue>) -> Result<Vec<FileEntry>, String> {
@@ -375,9 +417,6 @@ impl TorrentMeta {
                         pieces_root,
                     });
                 } else {
-                    if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
-                        return Err("file tree contains an unsafe path component".to_string());
-                    }
                     path.push(name.to_string());
                     walk(child, path, output)?;
                     path.pop();
@@ -645,6 +684,48 @@ mod tests {
         BencodeValue::Dict(root).encode()
     }
 
+    fn make_torrent_with_name_and_path(name: &str, path: Option<&[&str]>) -> Vec<u8> {
+        let mut info = BTreeMap::from([
+            (
+                b"name".to_vec(),
+                BencodeValue::Bytes(name.as_bytes().to_vec()),
+            ),
+            (b"piece length".to_vec(), BencodeValue::Int(16_384)),
+            (b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 20])),
+        ]);
+        if let Some(components) = path {
+            let file = BTreeMap::from([
+                (b"length".to_vec(), BencodeValue::Int(1)),
+                (
+                    b"path".to_vec(),
+                    BencodeValue::List(
+                        components
+                            .iter()
+                            .map(|component| {
+                                BencodeValue::Bytes(component.as_bytes().to_vec())
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]);
+            info.insert(
+                b"files".to_vec(),
+                BencodeValue::List(vec![BencodeValue::Dict(file)]),
+            );
+        } else {
+            info.insert(b"length".to_vec(), BencodeValue::Int(1));
+        }
+
+        let root = BTreeMap::from([
+            (
+                b"announce".to_vec(),
+                BencodeValue::Bytes(b"http://tracker.example.com/announce".to_vec()),
+            ),
+            (b"info".to_vec(), BencodeValue::Dict(info)),
+        ]);
+        BencodeValue::Dict(root).encode()
+    }
+
     #[test]
     fn test_parse_single_file_torrent() {
         let data = make_simple_torrent();
@@ -889,6 +970,39 @@ mod tests {
         );
         let no_info = BencodeValue::Dict(r).encode();
         assert!(TorrentMeta::parse(&no_info).is_err());
+    }
+
+    #[test]
+    fn torrent_parser_rejects_unsafe_output_paths() {
+        for name in [
+            "../outside",
+            "..\\outside",
+            "/outside",
+            "C:outside",
+            "bad\0name",
+        ] {
+            let torrent = make_torrent_with_name_and_path(name, None);
+            assert!(
+                TorrentMeta::parse(&torrent).is_err(),
+                "unsafe torrent root name was accepted: {name:?}"
+            );
+        }
+
+        let unsafe_paths: &[&[&str]] = &[
+            &[".."],
+            &["..", "outside"],
+            &["../outside"],
+            &["/outside"],
+            &["C:outside"],
+            &["bad\0name"],
+        ];
+        for path in unsafe_paths {
+            let torrent = make_torrent_with_name_and_path("safe-root", Some(*path));
+            assert!(
+                TorrentMeta::parse(&torrent).is_err(),
+                "unsafe torrent file path was accepted: {path:?}"
+            );
+        }
     }
 
     #[test]

@@ -38,6 +38,7 @@ pub struct MultiFileLayout {
 
 impl MultiFileLayout {
     pub fn from_info_dict(info: &InfoDict, base_dir: &Path) -> Result<Self, String> {
+        info.validate_paths()?;
         let piece_length = info.piece_length;
         let total_pieces =
             if info.meta_version == Some(2) {
