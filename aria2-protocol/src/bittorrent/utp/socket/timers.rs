@@ -59,30 +59,16 @@ impl UtpSocket {
                 }
             }
             TimerType::Keepalive => {
-                let (
-                    is_established,
-                    remote_conn_id,
-                    ack_nr,
-                    seq_nr,
-                    recv_window,
-                    remote_addr,
-                    keepalive_interval,
-                ) = {
+                let (is_established, state_packet, remote_addr, keepalive_interval) = {
                     let conn = self.connections.get(&conn_id);
                     if let Some(conn) = conn {
                         let is_established = conn.is_established();
-                        let remote_conn_id = conn.remote_connection_id();
-                        let ack_nr = conn.current_ack_nr();
-                        let seq_nr = conn.current_seq_nr();
-                        let recv_window = conn.receive_window();
+                        let state_packet = conn.state_packet();
                         let remote_addr = conn.remote_addr();
                         let keepalive_interval = self.keepalive_interval;
                         (
                             is_established,
-                            remote_conn_id,
-                            ack_nr,
-                            seq_nr,
-                            recv_window,
+                            state_packet,
                             remote_addr,
                             keepalive_interval,
                         )
@@ -92,9 +78,8 @@ impl UtpSocket {
                 };
 
                 if is_established {
-                    let ack = UtpPacket::ack(remote_conn_id, ack_nr, seq_nr, recv_window);
                     if let Some(addr) = remote_addr {
-                        self.send_packet(&ack, addr)?;
+                        self.send_packet(&state_packet, addr)?;
                     }
                     self.timers
                         .set_timer(conn_id, TimerType::Keepalive, keepalive_interval);

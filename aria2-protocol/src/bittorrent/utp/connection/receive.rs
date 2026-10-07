@@ -29,7 +29,12 @@ impl UtpConnection {
         }
         let acknowledged = self.acknowledge_sent(packet);
         let distance = packet.seq_nr.wrapping_sub(self.ack_nr);
-        if self.state != ConnectionState::Closing && distance > 0 && distance < 0x8000 {
+        let is_fin = packet.packet_type().ok() == Some(PacketType::StFin);
+        if self.state != ConnectionState::Closing
+            && (!self.remote_fin_received || is_fin)
+            && distance > 0
+            && distance < 0x8000
+        {
             let free = RECV_BUFFER_SIZE
                 .saturating_sub(self.recv_buffer.len() + self.pending_receive_bytes);
             if distance == 1 && packet.payload.len() <= free {
@@ -55,22 +60,17 @@ impl UtpConnection {
             }
         }
         self.update_receive_window();
-        Ok((
-            vec![UtpPacket::ack(
-                self.remote_conn_id,
-                self.ack_nr,
-                self.seq_nr,
-                self.recv_window,
-            )],
-            acknowledged,
-        ))
+        Ok((vec![self.state_packet()], acknowledged))
     }
 
     fn deliver_packet(&mut self, packet: &UtpPacket) {
         self.ack_nr = packet.seq_nr;
         if packet.packet_type().ok() == Some(PacketType::StFin) {
-            self.state = if self.state == ConnectionState::FinWait {
+            self.remote_fin_received = true;
+            self.state = if self.local_fin_acked {
                 ConnectionState::Closed
+            } else if self.state == ConnectionState::FinWait {
+                ConnectionState::FinWait
             } else {
                 ConnectionState::Closing
             };

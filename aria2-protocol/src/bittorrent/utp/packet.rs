@@ -309,11 +309,9 @@ impl UtpPacket {
         })
     }
 
-    /// Calculate the timestamp difference from a remote timestamp
-    pub fn calculate_timestamp_diff(&self, remote_timestamp: u32) -> u32 {
-        // Timestamp difference is the time since the remote packet was sent
-        // This is used for delay calculation
-        remote_timestamp.wrapping_sub(self.timestamp_difference_microseconds)
+    /// Calculate the local delay sample for this packet's remote send timestamp.
+    pub fn calculate_timestamp_diff(&self, local_timestamp: u32) -> u32 {
+        local_timestamp.wrapping_sub(self.timestamp_microseconds)
     }
 }
 
@@ -385,6 +383,15 @@ mod tests {
         assert_eq!(packet.seq_nr, 10);
         assert_eq!(packet.ack_nr, 5);
         assert_eq!(packet.payload, payload);
+    }
+
+    #[test]
+    fn timestamp_difference_uses_wrapping_local_minus_remote_time() {
+        let mut packet = UtpPacket::data(1, 2, 0, 1024, vec![1]);
+        packet.timestamp_microseconds = u32::MAX - 4;
+        packet.timestamp_difference_microseconds = 123_456;
+
+        assert_eq!(packet.calculate_timestamp_diff(7), 12);
     }
 
     #[test]

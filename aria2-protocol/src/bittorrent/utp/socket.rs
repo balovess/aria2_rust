@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::bittorrent::utp::connection::{ConnectionError, ConnectionState, UtpConnection};
 use crate::bittorrent::utp::packet::{PacketType, UtpPacket, UtpPacketError};
@@ -87,6 +87,7 @@ pub struct UtpSocket {
     timers: TimerManager,
     /// Local socket address
     local_addr: SocketAddr,
+    timestamp_origin: Instant,
     /// Connection timeout
     connect_timeout: Duration,
     /// Idle timeout for connections
@@ -122,6 +123,7 @@ impl UtpSocket {
             connections: HashMap::new(),
             timers: TimerManager::new(),
             local_addr,
+            timestamp_origin: Instant::now(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             keepalive_interval: DEFAULT_KEEPALIVE_INTERVAL,
@@ -282,6 +284,9 @@ impl UtpSocket {
         for packet in &packets {
             bytes_sent += packet.payload.len();
             self.send_packet(packet, remote_addr)?;
+            if let Some(conn) = self.connections.get_mut(&conn_id) {
+                conn.record_packet_sent(packet.seq_nr);
+            }
             self.timers
                 .set_timer(conn_id, TimerType::Retransmit(packet.seq_nr), rto);
         }
@@ -339,13 +344,18 @@ impl UtpSocket {
             PacketType::StData | PacketType::StAck | PacketType::StFin => {
                 let conn_id = self.find_connection_for_packet(packet, addr)?;
                 if let Some(conn_id) = conn_id {
-                    let (response_packets, acknowledged, keepalive_interval) = {
+                    let (response_packets, acknowledged, state, keepalive_interval) = {
                         let conn = self.connections.get_mut(&conn_id);
                         if let Some(conn) = conn {
                             let (response_packets, acknowledged) =
                                 conn.on_packet_received_with_acknowledgements(packet)?;
                             let keepalive_interval = self.keepalive_interval;
-                            (response_packets, acknowledged, keepalive_interval)
+                            (
+                                response_packets,
+                                acknowledged,
+                                conn.state(),
+                                keepalive_interval,
+                            )
                         } else {
                             return Ok(());
                         }
@@ -360,8 +370,26 @@ impl UtpSocket {
                         self.timers
                             .cancel_timer(conn_id, TimerType::Retransmit(seq_nr));
                     }
-                    self.timers
-                        .set_timer(conn_id, TimerType::Keepalive, keepalive_interval);
+                    match state {
+                        ConnectionState::Closed => {
+                            self.close_connection_internal(conn_id)?;
+                        }
+                        ConnectionState::Established => {
+                            self.timers.set_timer(
+                                conn_id,
+                                TimerType::Keepalive,
+                                keepalive_interval,
+                            );
+                        }
+                        ConnectionState::Closing => {
+                            self.timers.set_timer(
+                                conn_id,
+                                TimerType::IdleTimeout,
+                                self.idle_timeout,
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
             PacketType::StReset => {
@@ -377,7 +405,7 @@ impl UtpSocket {
     /// Handle incoming SYN packet
     fn handle_syn(&mut self, packet: &UtpPacket, addr: SocketAddr) -> Result<(), UtpSocketError> {
         let receive_id = packet.connection_id.wrapping_add(1);
-        if let Some(conn) = self.connections.get(&receive_id) {
+        if let Some(conn) = self.connections.get_mut(&receive_id) {
             if conn.remote_addr() == Some(addr)
                 && let Some(response) = conn.syn_response(packet)
             {
@@ -387,7 +415,8 @@ impl UtpSocket {
         }
 
         if self.connections.len() >= MAX_CONNECTIONS {
-            let reset = UtpPacket::reset(packet.connection_id);
+            let mut reset = UtpPacket::reset(packet.connection_id);
+            reset.timestamp_microseconds = self.timestamp_origin.elapsed().as_micros() as u32;
             self.send_packet(&reset, addr)?;
             return Err(UtpSocketError::MaxConnectionsReached);
         }
@@ -424,7 +453,44 @@ impl UtpSocket {
         if self.is_closed {
             return Err(UtpSocketError::SocketClosed);
         }
-        self.close_connection_internal(conn_id)?;
+        let state = match self.connections.get(&conn_id) {
+            Some(conn) => conn.state(),
+            None => return Ok(()),
+        };
+        if state == ConnectionState::FinWait {
+            return Ok(());
+        }
+        if !matches!(
+            state,
+            ConnectionState::Established | ConnectionState::Closing
+        ) {
+            self.close_connection_internal(conn_id)?;
+            return Ok(());
+        }
+
+        let (fin, remote_addr, rto) = {
+            let conn = self
+                .connections
+                .get_mut(&conn_id)
+                .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
+            let remote_addr = conn
+                .remote_addr()
+                .ok_or(UtpSocketError::AddressNotFound(conn_id))?;
+            (conn.close()?, remote_addr, conn.rto())
+        };
+
+        self.timers.cancel_timer(conn_id, TimerType::ConnectTimeout);
+        self.timers.cancel_timer(conn_id, TimerType::Keepalive);
+        self.timers.cancel_timer(conn_id, TimerType::IdleTimeout);
+        if let Err(error) = self.send_packet(&fin, remote_addr) {
+            self.close_connection_internal(conn_id)?;
+            return Err(error);
+        }
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.record_packet_sent(fin.seq_nr);
+        }
+        self.timers
+            .set_timer(conn_id, TimerType::Retransmit(fin.seq_nr), rto);
         Ok(())
     }
 
