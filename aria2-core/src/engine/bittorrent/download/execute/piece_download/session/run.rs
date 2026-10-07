@@ -265,9 +265,11 @@ impl PieceDownloadSession<'_> {
                 &mut web_seed_retries,
                 web_seed_concurrency,
             );
+            let mut joined_web_seed_task = false;
             while let Some(joined) = web_seed_tasks.try_join_next() {
                 match joined {
                     Ok((piece_index, result)) => {
+                        joined_web_seed_task = true;
                         active_web_seed_pieces.remove(&piece_index);
                         if self.complete_web_seed_piece(piece_index, result).await? {
                             self.refresh_download_progress();
@@ -276,6 +278,7 @@ impl PieceDownloadSession<'_> {
                         }
                     }
                     Err(error) => {
+                        joined_web_seed_task = true;
                         warn!(%error, "WebSeed worker terminated unexpectedly");
                         web_seed_tasks.abort_all();
                         for piece_index in active_web_seed_pieces.drain() {
@@ -292,6 +295,14 @@ impl PieceDownloadSession<'_> {
                 }
                 self.swarm.set_local_seeder(true);
                 break;
+            }
+
+            // Refill the WebSeed pipeline before an idle peer wait. The
+            // completion-drain above can empty the JoinSet after this loop's
+            // initial scheduling pass, while scan_cursor still has pieces
+            // that have never been requested.
+            if joined_web_seed_task {
+                continue;
             }
 
             // Phase 14 - B1: Check if we should enter endgame mode
