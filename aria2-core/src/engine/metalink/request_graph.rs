@@ -184,6 +184,7 @@ impl MetalinkRequestGraph {
             vec![format!("bt://{}", metadata_gid.to_hex_string())],
             options.clone(),
         )));
+        payload.recover().set_output_name(payload_name);
 
         // C++ Metalink2RequestGroup links the metadata group back to the
         // payload with belongsTo(payload_gid). `following`/`followedBy` are
@@ -292,6 +293,10 @@ mod tests {
 
         assert_eq!(graph.metadata.recover().gid(), GroupId::new(10));
         assert_eq!(graph.payload.recover().gid(), GroupId::new(11));
+        assert_eq!(
+            graph.payload.recover().output_name().as_deref(),
+            Some("payload.bin")
+        );
         assert_eq!(
             graph.metadata.recover().belongs_to_gid(),
             Some(GroupId::new(11))
