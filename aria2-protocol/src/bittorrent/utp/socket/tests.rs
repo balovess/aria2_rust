@@ -319,6 +319,65 @@ async fn received_fin_is_acknowledged_again_and_retired_after_idle_deadline() {
     ));
 }
 
+#[tokio::test]
+async fn unacknowledged_fin_retires_connection_after_retry_budget() {
+    let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
+    client.set_idle_timeout(Duration::from_secs(60));
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
+
+    let mut wire_buffer = [0; 2048];
+    let (syn_len, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
+    peer.send_to(
+        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    client.poll_recv().unwrap();
+
+    client.close_connection(conn_id).unwrap();
+    let (fin_len, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+    let fin = UtpPacket::from_bytes(&wire_buffer[..fin_len]).unwrap();
+    assert_eq!(fin.packet_type().unwrap(), PacketType::StFin);
+
+    for _ in 0..5 {
+        let retry_delay = client
+            .next_timer_delay()
+            .expect("unacknowledged FIN must keep a retry deadline");
+        tokio::time::sleep(retry_delay + Duration::from_millis(5)).await;
+        client.process_timers().unwrap();
+
+        let (retry_len, _) =
+            tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        let retry = UtpPacket::from_bytes(&wire_buffer[..retry_len]).unwrap();
+        assert_eq!(retry.packet_type().unwrap(), PacketType::StFin);
+        assert_eq!(retry.seq_nr, fin.seq_nr);
+    }
+
+    let final_deadline = client
+        .next_timer_delay()
+        .expect("retry budget should end at a final bounded deadline");
+    tokio::time::sleep(final_deadline + Duration::from_millis(5)).await;
+    client.process_timers().unwrap();
+    assert!(matches!(
+        client.connection_state(conn_id),
+        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
+    ));
+}
+
 #[test]
 fn test_socket_routes_syn_ack_to_outgoing_connection() {
     let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();

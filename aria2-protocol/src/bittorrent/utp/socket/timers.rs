@@ -44,6 +44,12 @@ impl UtpSocket {
 
                 if is_timeout {
                     self.close_connection_internal(conn_id)?;
+                } else if packet_to_send.is_some()
+                    && !self
+                        .timers
+                        .has_timer(conn_id, TimerType::Retransmit(seq_nr))
+                {
+                    self.close_connection_internal(conn_id)?;
                 } else if self
                     .timers
                     .has_timer(conn_id, TimerType::Retransmit(seq_nr))

@@ -448,7 +448,10 @@ impl UtpSocket {
             .map(|_| packet.connection_id))
     }
 
-    /// Close a connection gracefully
+    /// Initiate graceful connection close by sending FIN.
+    ///
+    /// The connection remains available for retransmission and ACK processing;
+    /// it is removed after the FIN is acknowledged or the connection times out.
     pub fn close_connection(&mut self, conn_id: u16) -> Result<(), UtpSocketError> {
         if self.is_closed {
             return Err(UtpSocketError::SocketClosed);
