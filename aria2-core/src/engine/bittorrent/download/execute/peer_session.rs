@@ -43,7 +43,15 @@ impl BtDownloadCommand {
                     message: "BitTorrent listener manager is not configured".to_string(),
                 })
             })?;
-            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy) = {
+            let (
+                listen_ports,
+                max_peers,
+                caretaker_id,
+                disable_ipv6,
+                crypto_policy,
+                enable_utp,
+                utp_listen_port,
+            ) = {
                 let group = self.group.recover();
                 let ports = group
                     .options()
@@ -68,6 +76,8 @@ impl BtDownloadCommand {
                             .eq_ignore_ascii_case("arc4")
                             || group.options().bt_force_encrypt,
                     },
+                    group.options().enable_utp,
+                    group.options().utp_listen_port,
                 )
             };
             let dht_enabled_ipv4 = !self.is_private && self.dht_engines.ipv4().is_some();
@@ -123,6 +133,27 @@ impl BtDownloadCommand {
             self.incoming_peers =
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(incoming_peers)));
             self.bt_peer_route = Some(route_handle);
+            if enable_utp {
+                let bind_ip = self
+                    .outbound_network_policy
+                    .addresses()
+                    .into_iter()
+                    .next()
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                self.utp_transport = Some(
+                    listener_manager
+                        .register_utp_transport(std::net::SocketAddr::new(
+                            bind_ip,
+                            utp_listen_port.unwrap_or(0),
+                        ))
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::Fatal(FatalError::Config(format!(
+                                "Failed to bind process uTP transport: {error}"
+                            )))
+                        })?,
+                );
+            }
             info!(
                 "[BT] Incoming peer route registered on TCP port {}",
                 listen_port

@@ -21,8 +21,8 @@ pub(in crate::engine::bittorrent::download::execute) struct PeerDialConfig {
     pub(in crate::engine::bittorrent::download::execute) piece_length: u32,
     pub(in crate::engine::bittorrent::download::execute) total_size: u64,
     pub(in crate::engine::bittorrent::download::execute) max_concurrent_dials: usize,
-    pub(in crate::engine::bittorrent::download::execute) utp_socket:
-        Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    pub(in crate::engine::bittorrent::download::execute) utp_transport:
+        Option<crate::engine::bittorrent::peer::utp_transport::UtpTransportHandle>,
     pub(in crate::engine::bittorrent::download::execute) outbound_network_policy:
         Arc<crate::network::OutboundNetworkPolicy>,
 }
@@ -52,7 +52,7 @@ impl PeerDialConfig {
             piece_length,
             total_size,
             max_concurrent_dials: command.peer_coordinator.max_concurrent_dials(),
-            utp_socket: command.utp_socket.clone(),
+            utp_transport: command.utp_transport.clone(),
             outbound_network_policy: Arc::clone(&command.outbound_network_policy),
         }
     }

@@ -383,7 +383,9 @@ async fn incoming_peer_with_existing_swarm_identity_is_rejected() {
     let incoming = PeerConnection::from_stream_with_peer(incoming_stream, [2u8; 20], false, false);
     incoming_sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: incoming,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                incoming,
+            ),
             endpoint: incoming_endpoint,
         })
         .await

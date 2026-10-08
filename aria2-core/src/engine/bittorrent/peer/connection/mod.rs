@@ -22,7 +22,6 @@ mod peer_conn;
 pub(crate) use peer_conn::PeerActorId;
 #[cfg(test)]
 pub(crate) use peer_conn::PeerActorStartup;
-pub use peer_conn::UtpConnectionOptions;
 mod session_resource;
 #[cfg(test)]
 mod tests;

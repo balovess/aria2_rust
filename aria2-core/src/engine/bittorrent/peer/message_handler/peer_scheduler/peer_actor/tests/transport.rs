@@ -108,21 +108,23 @@ async fn peer_actor_downloads_a_block_over_utp_after_handshake_handoff() {
         }
     });
 
-    let client_socket = Arc::new(tokio::sync::Mutex::new(
-        UtpSocket::bind("127.0.0.1:0").expect("bind uTP client socket"),
-    ));
-    let mut connection = BtPeerConn::connect_utp_with_policy(
+    let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let client_transport =
+        crate::engine::bittorrent::peer::utp_transport::UtpTransportHandle::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            incoming_tx,
+            shutdown.clone(),
+        )
+        .expect("bind uTP client actor");
+    let mut connection = BtPeerConn::connect_utp_with_transport(
         address,
         &info_hash,
         None,
-        crate::engine::bittorrent::peer::connection::UtpConnectionOptions {
-            local_peer_id,
-            timeout: Duration::from_secs(2),
-            listen_port: None,
-            shared_socket: Some(client_socket),
-            dht_enabled: false,
-        },
-        &crate::network::OutboundNetworkPolicy::direct(),
+        &local_peer_id,
+        Duration::from_secs(2),
+        false,
+        &client_transport,
     )
     .await
     .expect("BT handshake should complete over uTP");
@@ -247,4 +249,5 @@ async fn peer_actor_downloads_a_block_over_utp_after_handshake_handoff() {
 
     command_tx.send(PeerCommand::Shutdown).await.unwrap();
     worker.await.unwrap();
+    shutdown.cancel();
 }

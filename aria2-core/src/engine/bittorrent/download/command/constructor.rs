@@ -352,35 +352,6 @@ impl BtDownloadCommand {
             }
             Arc::new(std::sync::Mutex::new(storage))
         };
-        let utp_socket = if options.enable_utp {
-            let configured_source = policy.addresses().into_iter().next();
-            let socket = match options.utp_listen_port {
-                Some(port) => configured_source.map_or_else(
-                    || aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
-                    |source| {
-                        aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
-                            std::net::SocketAddr::new(source, port),
-                        )
-                    },
-                ),
-                None => configured_source.map_or_else(
-                    aria2_protocol::bittorrent::utp::UtpSocket::bind_any,
-                    |source| {
-                        aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
-                            std::net::SocketAddr::new(source, 0),
-                        )
-                    },
-                ),
-            }
-            .map_err(|error| {
-                Aria2Error::Fatal(FatalError::Config(format!(
-                    "Failed to bind uTP socket: {error}"
-                )))
-            })?;
-            Some(Arc::new(tokio::sync::Mutex::new(socket)))
-        } else {
-            None
-        };
         let bt_runtime =
             std::sync::Arc::new(super::BtRuntimeState::new(group.bt_max_peers_limit()));
         let mut command = Self {
@@ -470,7 +441,7 @@ impl BtDownloadCommand {
             peer_rejection: crate::engine::bittorrent::peer::storage::PeerRejectionState::shared(),
             peer_storage,
             incoming_peers: None,
-            utp_socket,
+            utp_transport: None,
             // Direct command users do not pass through DownloadEngine's
             // dependency injector. Give that public construction path a
             // listener manager; the engine replaces it with its shared

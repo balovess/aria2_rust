@@ -385,6 +385,65 @@ async fn duplicate_acks_before_outstanding_data_do_not_trigger_fast_retransmit()
 }
 
 #[tokio::test]
+async fn selectively_acked_fin_stays_pending_until_the_gap_is_cumulatively_acked() {
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
+    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
+    let syn = receive(&peer).await;
+    peer.send_to(
+        &UtpPacket::ack(conn_id, syn.seq_nr, 70, 65536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    readable(&client).await;
+    client.poll_recv().unwrap();
+
+    assert_eq!(client.send(conn_id, b"gap").unwrap(), 3);
+    assert_eq!(receive(&peer).await.seq_nr, 2);
+    client.close_connection(conn_id).unwrap();
+    assert_eq!(
+        receive(&peer).await.packet_type().unwrap(),
+        PacketType::StFin
+    );
+
+    let mut selective_ack = UtpPacket::ack(conn_id, 1, 71, 65536);
+    selective_ack.extension = 1;
+    selective_ack.payload = [0, 4, 1, 0, 0, 0].to_vec();
+    peer.send_to(&selective_ack.to_bytes(), client.local_addr())
+        .await
+        .unwrap();
+    readable(&client).await;
+    client.poll_recv().unwrap();
+    assert_eq!(client.connection_count(), 1);
+
+    let next_timer = client
+        .next_timer_delay()
+        .expect("DATA retransmit remains armed");
+    tokio::time::sleep(next_timer + Duration::from_millis(20)).await;
+    client.process_timers().unwrap();
+    let retransmission = receive(&peer).await;
+    assert_eq!(retransmission.packet_type().unwrap(), PacketType::StData);
+    assert_eq!(retransmission.seq_nr, 2);
+    let mut bytes = [0; 2048];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), peer.recv_from(&mut bytes))
+            .await
+            .is_err()
+    );
+
+    peer.send_to(
+        &UtpPacket::ack(conn_id, 3, 72, 65536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    readable(&client).await;
+    client.poll_recv().unwrap();
+    assert_eq!(client.connection_count(), 0);
+}
+
+#[tokio::test]
 async fn receive_orders_wrapping_sequences_deduplicates_and_keeps_ack_directions_separate() {
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();

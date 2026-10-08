@@ -20,13 +20,11 @@ pub use types::{BtPeerConnectionOptions, BtPeerCryptoPolicy, PeerConnectionResul
 // BtPeerInteraction — peer connection lifecycle manager
 // ======================================================================
 
-use futures::stream::{self, StreamExt};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
+use crate::engine::bittorrent::peer::utp_transport::UtpTransportHandle;
 use crate::error::Result;
 use crate::network::OutboundNetworkPolicy;
+use futures::stream::{self, StreamExt};
 use tracing::{debug, info};
 
 /// Maximum time to wait for additional peers after the first successful connection.
@@ -57,14 +55,14 @@ impl BtPeerInteraction {
     /// # Returns
     /// * `PeerConnectionResult` containing connected peers and failure count
     #[allow(clippy::too_many_arguments)]
-    pub async fn connect_to_peers(
+    pub(crate) async fn connect_to_peers(
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
         connection_options: &BtPeerConnectionOptions,
-        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        utp_transport: Option<UtpTransportHandle>,
         policy: &OutboundNetworkPolicy,
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
@@ -74,7 +72,7 @@ impl BtPeerInteraction {
         // so one slow peer cannot prevent the piece scheduler from starting.
         let mut results = stream::iter(peer_addrs.iter().cloned())
             .map(|addr| {
-                let utp_socket = utp_socket.clone();
+                let utp_transport = utp_transport.clone();
                 async move {
                     debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
                     let result = Self::connect_peer_ready(
@@ -84,7 +82,7 @@ impl BtPeerInteraction {
                         num_pieces,
                         piece_length,
                         total_length,
-                        utp_socket.clone(),
+                        utp_transport.clone(),
                         policy,
                     )
                     .await;
@@ -137,19 +135,24 @@ impl BtPeerInteraction {
     /// Establish and initialize one peer using the same crypto and protocol path
     /// as the initial peer batch.
     #[allow(clippy::too_many_arguments)]
-    pub async fn connect_peer_ready(
+    pub(crate) async fn connect_peer_ready(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
         connection_options: &BtPeerConnectionOptions,
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
-        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        utp_transport: Option<UtpTransportHandle>,
         policy: &OutboundNetworkPolicy,
     ) -> Result<BtPeerConn> {
-        let mut conn =
-            Self::connect_single_peer(addr, info_hash_raw, connection_options, utp_socket, policy)
-                .await?;
+        let mut conn = Self::connect_single_peer(
+            addr,
+            info_hash_raw,
+            connection_options,
+            utp_transport,
+            policy,
+        )
+        .await?;
         conn.set_timeouts(
             connection_options.keep_alive_interval,
             connection_options.peer_timeout,
@@ -178,24 +181,23 @@ impl BtPeerInteraction {
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
         connection_options: &BtPeerConnectionOptions,
-        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        utp_transport: Option<UtpTransportHandle>,
         policy: &OutboundNetworkPolicy,
     ) -> Result<BtPeerConn> {
-        if connection_options.enable_utp && !connection_options.crypto.require_mse {
+        if connection_options.enable_utp
+            && !connection_options.crypto.require_mse
+            && let Some(utp_transport) = utp_transport.as_ref()
+        {
             match addr.to_socket_addr() {
                 Ok(endpoint) => {
-                    let utp_result = BtPeerConn::connect_utp_with_policy(
+                    let utp_result = BtPeerConn::connect_utp_with_transport(
                         endpoint,
                         info_hash_raw,
                         connection_options.hybrid_info_hash_v2.as_ref(),
-                        crate::engine::bittorrent::peer::connection::UtpConnectionOptions {
-                            local_peer_id: connection_options.local_peer_id,
-                            timeout: connection_options.connection_timeout,
-                            listen_port: connection_options.utp_listen_port,
-                            shared_socket: utp_socket,
-                            dht_enabled: connection_options.dht_enabled,
-                        },
-                        policy,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                        connection_options.dht_enabled,
+                        utp_transport,
                     )
                     .await;
                     match utp_result {

@@ -22,11 +22,10 @@ impl BtDownloadCommand {
         context: &PeerActorAdmissionContext,
     ) -> bool {
         let endpoint = incoming.endpoint;
-        let mut connection =
-            crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming_tcp(
-                incoming.connection,
-                endpoint,
-            );
+        let mut connection = crate::engine::bittorrent::peer::connection::BtPeerConn::from_incoming(
+            incoming.connection,
+            endpoint,
+        );
         let (keep_alive_interval, peer_timeout) = {
             let group = self.group.recover();
             (

@@ -4,26 +4,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Mutex;
-
 use crate::engine::bittorrent::peer::stats::PeerStats;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::network::OutboundNetworkPolicy;
 
+use super::super::super::utp_transport::UtpTransportHandle;
 use super::super::types::{ConnectionType, SendBuffer};
 use super::super::utp_connection::UtpPeerConnection;
 use super::{BtPeerConn, InnerConnection, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
 
 use aria2_protocol::bittorrent::peer::mse::MseConnectionOptions;
-
-#[derive(Clone)]
-pub struct UtpConnectionOptions {
-    pub local_peer_id: [u8; 20],
-    pub timeout: std::time::Duration,
-    pub listen_port: Option<u16>,
-    pub shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
-    pub dht_enabled: bool,
-}
 
 impl BtPeerConn {
     // -----------------------------------------------------------------------
@@ -80,6 +70,7 @@ impl BtPeerConn {
         mut inner: InnerConnection,
         endpoint: std::net::SocketAddr,
         peer_id: Option<[u8; 20]>,
+        connection_type: ConnectionType,
     ) -> Self {
         if let InnerConnection::Tcp(connection) = &mut inner {
             connection.set_write_timeout(std::time::Duration::from_secs(PEER_TIMEOUT_SECS));
@@ -100,7 +91,7 @@ impl BtPeerConn {
             disconnected_gracefully: false,
             seeder: false,
             first_contact_time: now,
-            connection_type: ConnectionType::Tcp,
+            connection_type,
             peer_allowed_fast: HashSet::new(),
             am_allowed_fast: HashSet::new(),
             session_resource: None,
@@ -201,7 +192,39 @@ impl BtPeerConn {
         endpoint: std::net::SocketAddr,
     ) -> Self {
         let peer_id = conn.remote_peer_id().copied();
-        Self::from_incoming_transport(InnerConnection::Tcp(conn), endpoint, peer_id)
+        Self::from_incoming_transport(
+            InnerConnection::Tcp(conn),
+            endpoint,
+            peer_id,
+            ConnectionType::Tcp,
+        )
+    }
+
+    pub(crate) fn from_incoming_utp(
+        conn: UtpPeerConnection,
+        endpoint: std::net::SocketAddr,
+    ) -> Self {
+        let peer_id = conn.remote_peer_id();
+        Self::from_incoming_transport(
+            InnerConnection::Utp(conn),
+            endpoint,
+            peer_id,
+            ConnectionType::Utp,
+        )
+    }
+
+    pub(crate) fn from_incoming(
+        incoming: crate::engine::bittorrent::peer::listener::IncomingPeerConnection,
+        endpoint: std::net::SocketAddr,
+    ) -> Self {
+        match incoming {
+            crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(connection) => {
+                Self::from_incoming_tcp(connection, endpoint)
+            }
+            crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Utp(connection) => {
+                Self::from_incoming_utp(connection, endpoint)
+            }
+        }
     }
 
     /// Create a stub connection for unit testing.
@@ -269,41 +292,26 @@ impl BtPeerConn {
         }
     }
 
-    /// Connect via uTP using the selected outbound network policy.
-    pub async fn connect_utp_with_policy(
+    /// Connect via the process-owned uTP transport actor.
+    pub(crate) async fn connect_utp_with_transport(
         addr: std::net::SocketAddr,
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
-        options: UtpConnectionOptions,
-        policy: &OutboundNetworkPolicy,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+        transport: &UtpTransportHandle,
     ) -> Result<Self> {
-        let utp_conn = match options.shared_socket {
-            Some(socket) => {
-                UtpPeerConnection::connect_with_shared_socket_hybrid(
-                    socket,
-                    addr,
-                    info_hash_v1,
-                    info_hash_v2,
-                    &options.local_peer_id,
-                    options.timeout,
-                    options.dht_enabled,
-                )
-                .await?
-            }
-            None => {
-                UtpPeerConnection::connect_with_policy(
-                    addr,
-                    info_hash_v1,
-                    info_hash_v2,
-                    &options.local_peer_id,
-                    options.timeout,
-                    options.listen_port,
-                    options.dht_enabled,
-                    policy,
-                )
-                .await?
-            }
-        };
+        let utp_conn = UtpPeerConnection::connect_with_transport_hybrid(
+            transport,
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+            timeout,
+            dht_enabled,
+        )
+        .await?;
         Ok(Self::from_outgoing_transport(
             InnerConnection::Utp(utp_conn),
             addr.ip().to_string(),

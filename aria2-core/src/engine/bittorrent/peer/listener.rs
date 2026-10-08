@@ -15,12 +15,27 @@ use super::storage::{DefaultPeerStorage, PeerEntry};
 
 /// A successfully admitted incoming peer.
 pub struct IncomingPeer {
-    pub connection: aria2_protocol::bittorrent::peer::connection::PeerConnection,
+    pub connection: IncomingPeerConnection,
     pub endpoint: SocketAddr,
+}
+
+pub enum IncomingPeerConnection {
+    Tcp(aria2_protocol::bittorrent::peer::connection::PeerConnection),
+    Utp(super::connection::UtpPeerConnection),
+}
+
+impl IncomingPeerConnection {
+    pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
+        match self {
+            Self::Tcp(connection) => connection.remote_peer_id().copied(),
+            Self::Utp(connection) => connection.remote_peer_id(),
+        }
+    }
 }
 
 pub(crate) type IncomingPeerReceiver = Arc<tokio::sync::Mutex<mpsc::Receiver<IncomingPeer>>>;
 
+#[derive(Clone)]
 struct SharedRoute {
     id: u64,
     local_peer_id: [u8; 20],
@@ -63,6 +78,12 @@ pub struct BtPeerRouteConfig {
 pub struct BtPeerListenerManager {
     state: Arc<tokio::sync::Mutex<SharedListenerState>>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    utp_transports:
+        Arc<tokio::sync::Mutex<HashMap<SocketAddr, super::utp_transport::UtpTransportHandle>>>,
+    utp_incoming_tx: mpsc::Sender<super::utp_transport::IncomingUtpConnection>,
+    utp_incoming_rx: Arc<
+        tokio::sync::Mutex<Option<mpsc::Receiver<super::utp_transport::IncomingUtpConnection>>>,
+    >,
     shutdown: CancellationToken,
 }
 
@@ -75,6 +96,7 @@ pub struct BtPeerRouteHandle {
 
 impl BtPeerListenerManager {
     pub fn new() -> Self {
+        let (utp_incoming_tx, utp_incoming_rx) = mpsc::channel(128);
         Self {
             state: Arc::new(tokio::sync::Mutex::new(SharedListenerState {
                 listeners: Vec::new(),
@@ -82,8 +104,41 @@ impl BtPeerListenerManager {
                 next_route_id: 1,
             })),
             routes: Arc::new(RwLock::new(HashMap::new())),
+            utp_transports: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            utp_incoming_tx,
+            utp_incoming_rx: Arc::new(tokio::sync::Mutex::new(Some(utp_incoming_rx))),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Register or reuse the process-owned uTP actor for one local endpoint.
+    pub(crate) async fn register_utp_transport(
+        &self,
+        address: SocketAddr,
+    ) -> io::Result<super::utp_transport::UtpTransportHandle> {
+        let transport = {
+            let mut transports = self.utp_transports.lock().await;
+            if let Some(transport) = transports.get(&address) {
+                transport.clone()
+            } else {
+                let transport = super::utp_transport::UtpTransportHandle::bind(
+                    address,
+                    self.utp_incoming_tx.clone(),
+                    self.shutdown.clone(),
+                )?;
+                transports.insert(address, transport.clone());
+                transport
+            }
+        };
+
+        if let Some(receiver) = self.utp_incoming_rx.lock().await.take() {
+            tokio::spawn(run_shared_utp_listener(
+                receiver,
+                Arc::clone(&self.routes),
+                self.shutdown.clone(),
+            ));
+        }
+        Ok(transport)
     }
 
     /// Bind the process listener if necessary and register a route with its
@@ -149,6 +204,7 @@ impl BtPeerListenerManager {
         let mut state = self.state.lock().await;
         state.listeners.clear();
         state.local_addr = None;
+        self.utp_transports.lock().await.clear();
     }
 
     fn insert_route(
@@ -330,17 +386,7 @@ async fn run_shared_listener(
                 let routes = routes
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                routes.get(&info_hash).map(|route| SharedRoute {
-                    id: route.id,
-                    local_peer_id: route.local_peer_id,
-                    caretaker_id: route.caretaker_id,
-                    max_peers: Arc::clone(&route.max_peers),
-                    peer_storage: Arc::clone(&route.peer_storage),
-                    sender: route.sender.clone(),
-                    crypto_policy: route.crypto_policy,
-                    info_hash_v2: route.info_hash_v2,
-                    dht_enabled: route.dht_enabled,
-                })
+                routes.get(&info_hash).cloned()
             };
             let Some(route) = route else {
                 tracing::debug!(%endpoint, "Rejected incoming peer for unknown info-hash");
@@ -383,7 +429,7 @@ async fn run_shared_listener(
             if route
                 .sender
                 .send(IncomingPeer {
-                    connection,
+                    connection: IncomingPeerConnection::Tcp(connection),
                     endpoint,
                 })
                 .await
@@ -397,6 +443,109 @@ async fn run_shared_listener(
                     .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
             }
         });
+    }
+}
+
+async fn run_shared_utp_listener(
+    mut incoming: mpsc::Receiver<super::utp_transport::IncomingUtpConnection>,
+    routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let incoming = tokio::select! {
+            _ = shutdown.cancelled() => break,
+            incoming = incoming.recv() => incoming,
+        };
+        let Some(incoming) = incoming else { break };
+        let routes = Arc::clone(&routes);
+        tokio::spawn(async move { route_incoming_utp_peer(incoming, routes).await });
+    }
+}
+
+async fn route_incoming_utp_peer(
+    incoming: super::utp_transport::IncomingUtpConnection,
+    routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+) {
+    let endpoint = normalize_peer_endpoint(incoming.endpoint);
+    let (mut connection, handshake) =
+        match super::connection::UtpPeerConnection::receive_incoming_handshake(
+            incoming.connection,
+            endpoint,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                tracing::debug!(%endpoint, %error, "Rejected incoming uTP BitTorrent handshake");
+                return;
+            }
+        };
+    let info_hash = handshake.info_hash;
+    let route = routes
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&info_hash)
+        .cloned();
+    let Some(route) = route else {
+        tracing::debug!(%endpoint, info_hash = %hex::encode(info_hash), "Rejected incoming uTP peer for unknown info-hash");
+        return;
+    };
+    if route.crypto_policy.reject_plain {
+        tracing::debug!(%endpoint, "Rejected plaintext uTP peer because encryption is required");
+        return;
+    }
+    if let Err(error) = connection
+        .complete_incoming_handshake(
+            &handshake,
+            &route.local_peer_id,
+            route.info_hash_v2,
+            route.dht_enabled,
+        )
+        .await
+    {
+        tracing::debug!(%endpoint, %error, "Failed to complete incoming uTP handshake");
+        return;
+    }
+
+    let admitted = {
+        let mut storage = route
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let max_peers = route.max_peers.load(Ordering::Acquire);
+        if max_peers != 0 && storage.used_peers().len() >= max_peers {
+            false
+        } else {
+            let entry = PeerEntry::new(endpoint.ip().to_string(), endpoint.port());
+            let admitted = storage
+                .add_and_checkout_peer(entry, route.caretaker_id)
+                .is_some();
+            if admitted {
+                storage.set_peer_active(&endpoint.ip().to_string(), endpoint.port(), true);
+            }
+            admitted
+        }
+    };
+    if !admitted {
+        tracing::debug!(%endpoint, "Rejected incoming uTP peer at peer-storage admission");
+        return;
+    }
+    if route
+        .sender
+        .send(IncomingPeer {
+            connection: IncomingPeerConnection::Utp(connection),
+            endpoint,
+        })
+        .await
+        .is_err()
+    {
+        tracing::debug!(%endpoint, "Incoming uTP peer route receiver closed");
+        route
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
     }
 }
 
@@ -464,7 +613,7 @@ mod tests {
             .unwrap()
             .unwrap();
         first.await.unwrap();
-        assert_eq!(incoming_a.connection.remote_peer_id(), Some(&[3; 20]));
+        assert_eq!(incoming_a.connection.remote_peer_id(), Some([3; 20]));
 
         let second = tokio::spawn(connect_and_handshake(port, hash_b, [4; 20]));
         let incoming_b = tokio::time::timeout(std::time::Duration::from_secs(2), rx_b.recv())
@@ -472,7 +621,7 @@ mod tests {
             .unwrap()
             .unwrap();
         second.await.unwrap();
-        assert_eq!(incoming_b.connection.remote_peer_id(), Some(&[4; 20]));
+        assert_eq!(incoming_b.connection.remote_peer_id(), Some([4; 20]));
         assert!(rx_a.try_recv().is_err());
 
         drop(route_a);
@@ -591,7 +740,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(incoming.connection.remote_peer_id(), Some(&[9; 20]));
+        assert_eq!(incoming.connection.remote_peer_id(), Some([9; 20]));
     }
 
     #[tokio::test]

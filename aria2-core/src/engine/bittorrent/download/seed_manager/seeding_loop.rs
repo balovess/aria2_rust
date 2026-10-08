@@ -489,7 +489,7 @@ impl BtSeedManager {
                 return;
             }
         }
-        let mut connection = BtPeerConn::from_incoming_tcp(incoming.connection, endpoint);
+        let mut connection = BtPeerConn::from_incoming(incoming.connection, endpoint);
         if let Some(discovery) = self.peer_discovery.as_ref() {
             connection.set_timeouts(
                 discovery.connection_options.keep_alive_interval,

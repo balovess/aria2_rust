@@ -151,7 +151,7 @@ impl BtDownloadCommand {
             listen_port: self.listen_port,
             connection_options,
             total_size,
-            utp_socket: self.utp_socket.clone(),
+            utp_transport: self.utp_transport.clone(),
             outbound_network_policy: std::sync::Arc::clone(&self.outbound_network_policy),
             enable_peer_exchange: group_options.enable_peer_exchange && !self.is_private,
         };

@@ -111,7 +111,7 @@ async fn seeding_actor_sends_periodic_pex_with_recently_dropped_peers() {
                 [0x73; 20],
             ),
         total_size: 16,
-        utp_socket: None,
+        utp_transport: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         enable_peer_exchange: true,
     };

@@ -72,8 +72,8 @@ pub(crate) struct SeedPeerDiscovery {
     pub(crate) listen_port: u16,
     pub(crate) connection_options: BtPeerConnectionOptions,
     pub(crate) total_size: u64,
-    pub(crate) utp_socket:
-        Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    pub(crate) utp_transport:
+        Option<crate::engine::bittorrent::peer::utp_transport::UtpTransportHandle>,
     pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
     pub(crate) enable_peer_exchange: bool,
 }

@@ -28,3 +28,5 @@ mod stats_tests;
 pub mod storage;
 #[cfg(feature = "bittorrent")]
 pub mod upload_session;
+#[cfg(feature = "bittorrent")]
+pub(crate) mod utp_transport;

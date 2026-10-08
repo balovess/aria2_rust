@@ -183,7 +183,7 @@ impl BtSeedManager {
             .collect::<Vec<_>>();
         let info_hash = self.info_hash;
         let connection_options = discovery.connection_options.clone();
-        let utp_socket = discovery.utp_socket.clone();
+        let utp_transport = discovery.utp_transport.clone();
         let policy = Arc::clone(&discovery.outbound_network_policy);
         let piece_length = self.piece_provider.piece_length();
         let num_pieces = self.piece_provider.num_pieces();
@@ -196,7 +196,7 @@ impl BtSeedManager {
                 piece_length,
                 total_size,
                 &connection_options,
-                utp_socket,
+                utp_transport,
                 &policy,
             )
             .await

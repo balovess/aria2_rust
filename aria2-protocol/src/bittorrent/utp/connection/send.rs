@@ -303,6 +303,15 @@ impl UtpConnection {
 
         let distance = ack_nr.wrapping_sub(last_ack_nr);
         if distance == 0 {
+            let missing_sequence = ack_nr.wrapping_add(1);
+            let has_outstanding_gap = self
+                .send_buffer
+                .iter()
+                .any(|sent| sent.packet.seq_nr == missing_sequence && !sent.selectively_acked);
+            if !has_outstanding_gap {
+                self.duplicate_ack_count = 0;
+                return false;
+            }
             self.duplicate_ack_count = self.duplicate_ack_count.saturating_add(1);
             true
         } else if distance < 0x8000 {

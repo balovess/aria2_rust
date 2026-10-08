@@ -10,7 +10,6 @@
 //! - [`messages`] — protocol message senders, message reading, write helpers
 
 mod connect;
-pub use connect::UtpConnectionOptions;
 mod keepalive;
 mod messages;
 mod session;

@@ -27,7 +27,9 @@ async fn seeding_accepts_a_peer_after_download_has_no_initial_peers() {
         PeerConnection::from_stream_with_peer(server_stream, [2u8; 20], false, false);
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: peer_connection,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                peer_connection,
+            ),
             endpoint,
         })
         .await
@@ -79,7 +81,9 @@ async fn cancelled_seeding_loop_future_preserves_incoming_peer_and_actor_channel
         PeerConnection::from_stream_with_peer(server_stream, [2u8; 20], false, false);
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: peer_connection,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                peer_connection,
+            ),
             endpoint,
         })
         .await
@@ -179,7 +183,9 @@ async fn incoming_seed_peer_receives_piece_availability_before_interested() {
             .unwrap();
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                connection,
+            ),
             endpoint,
         })
         .await
@@ -244,7 +250,9 @@ async fn incoming_seed_peer_is_not_kept_as_a_raw_connection_when_swarm_is_closed
     let connection = PeerConnection::from_stream_with_peer(server, [0x62u8; 20], false, false);
     sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                connection,
+            ),
             endpoint,
         })
         .await

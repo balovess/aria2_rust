@@ -67,7 +67,7 @@ async fn seeding_discovery_sources_survive_storage_and_actor_admission() {
         listen_port: 0,
         connection_options,
         total_size: 16,
-        utp_socket: None,
+        utp_transport: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         enable_peer_exchange: true,
     };
@@ -231,11 +231,8 @@ async fn slow_tracker_announce_does_not_block_seeding_peer_events() {
     let (server_stream, endpoint) = peer_listener.accept().await.unwrap();
     incoming_sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: PeerConnection::from_stream_with_peer(
-                server_stream,
-                [0x83; 20],
-                false,
-                false,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                PeerConnection::from_stream_with_peer(server_stream, [0x83; 20], false, false),
             ),
             endpoint,
         })
@@ -303,7 +300,7 @@ async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
                 &options, [0x86; 20],
             ),
         total_size: 16,
-        utp_socket: None,
+        utp_transport: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         enable_peer_exchange: false,
     };
@@ -332,11 +329,8 @@ async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
     let (server_stream, endpoint) = listener.accept().await.unwrap();
     incoming_sender
         .send(crate::engine::bittorrent::peer::listener::IncomingPeer {
-            connection: PeerConnection::from_stream_with_peer(
-                server_stream,
-                [0x87; 20],
-                false,
-                false,
+            connection: crate::engine::bittorrent::peer::listener::IncomingPeerConnection::Tcp(
+                PeerConnection::from_stream_with_peer(server_stream, [0x87; 20], false, false),
             ),
             endpoint,
         })

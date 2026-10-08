@@ -193,7 +193,7 @@ impl BtDownloadCommand {
             piece_length,
             total_size,
             &connection_options,
-            self.utp_socket.clone(),
+            self.utp_transport.clone(),
             &outbound_network_policy,
         ));
         let conn_result = loop {

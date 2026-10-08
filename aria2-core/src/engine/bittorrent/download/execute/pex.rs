@@ -128,7 +128,7 @@ pub(in crate::engine::bittorrent::download::execute) async fn connect_discovered
             let num_pieces = config.num_pieces;
             let piece_length = config.piece_length;
             let total_size = config.total_size;
-            let utp_socket = config.utp_socket.clone();
+            let utp_transport = config.utp_transport.clone();
             let outbound_network_policy = std::sync::Arc::clone(&config.outbound_network_policy);
             async move {
                 let result = BtPeerInteraction::connect_peer_ready(
@@ -138,7 +138,7 @@ pub(in crate::engine::bittorrent::download::execute) async fn connect_discovered
                     num_pieces,
                     piece_length,
                     total_size,
-                    utp_socket,
+                    utp_transport,
                     &outbound_network_policy,
                 )
                 .await;
