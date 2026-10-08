@@ -102,6 +102,179 @@ pub(super) fn initial_bt_progress(
     (command_completed_length, checkpoint_completed_length)
 }
 
+impl BtDownloadCommand {
+    pub(super) async fn write_multi_file_piece_and_track(
+        &mut self,
+        piece_index: u32,
+        piece_data: &bytes::Bytes,
+        max_open_files: usize,
+    ) -> Result<()> {
+        let layout = self
+            .multi_file_layout
+            .as_ref()
+            .filter(|layout| layout.is_multi_file())
+            .ok_or_else(|| {
+                Aria2Error::FileIo(
+                    "Multi-file piece write requested without a multi-file layout".into(),
+                )
+            })?;
+        let touched_files = crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit_tracked(
+            layout,
+            piece_index,
+            piece_data,
+            layout.piece_length(),
+            max_open_files,
+        )
+        .await?;
+        self.dirty_multi_file_indices.extend(touched_files);
+        Ok(())
+    }
+
+    pub(super) async fn sync_checkpoint_payload(
+        &mut self,
+        writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
+    ) -> Result<()> {
+        if self
+            .multi_file_layout
+            .as_ref()
+            .is_some_and(|layout| layout.is_multi_file())
+        {
+            self.sync_dirty_multi_file_payload().await
+        } else {
+            writer.sync_data().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to durably sync BitTorrent checkpoint payload: {error}"
+                ))
+            })
+        }
+    }
+
+    pub(super) async fn sync_dirty_multi_file_payload(&mut self) -> Result<()> {
+        let Some(layout) = self
+            .multi_file_layout
+            .as_ref()
+            .filter(|layout| layout.is_multi_file())
+        else {
+            return Ok(());
+        };
+
+        let mut file_indices = self
+            .dirty_multi_file_indices
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        file_indices.sort_unstable();
+        for file_index in file_indices {
+            let file_path = layout
+                .file_absolute_path(file_index)
+                .ok_or_else(|| {
+                    Aria2Error::FileIo(format!("Invalid dirty BitTorrent file index {file_index}"))
+                })?
+                .to_path_buf();
+            let mut file_writer =
+                crate::filesystem::positioned_disk_writer::PositionedDiskWriter::new(
+                    &file_path, None,
+                );
+            file_writer.open().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to open dirty BitTorrent file {} for sync: {error}",
+                    file_path.display()
+                ))
+            })?;
+            let sync_result = file_writer.sync_data().await;
+            let close_result = file_writer
+                .close_without_sync("BT checkpoint file close")
+                .await;
+            sync_result.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to durably sync dirty BitTorrent file {}: {error}",
+                    file_path.display()
+                ))
+            })?;
+            close_result.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to close dirty BitTorrent file {} after sync: {error}",
+                    file_path.display()
+                ))
+            })?;
+        }
+        self.dirty_multi_file_indices.clear();
+        Ok(())
+    }
+
+    pub(super) async fn persist_checkpoint_after_piece(
+        &mut self,
+        writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
+        bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+        piece_bytes: u64,
+        in_flight_pieces: &[crate::filesystem::control_file::ControlFileInFlightPiece],
+    ) -> Result<()> {
+        let save_requested = self.group.recover().is_save_control_file_requested();
+        if self.checkpoint.is_none() {
+            if save_requested {
+                return Err(Aria2Error::FileIo(
+                    "Requested BitTorrent checkpoint is unavailable".into(),
+                ));
+            }
+            return Ok(());
+        }
+
+        self.checkpoint_bytes_since_save =
+            self.checkpoint_bytes_since_save.saturating_add(piece_bytes);
+        if !checkpoint_save_due(
+            save_requested,
+            self.checkpoint_bytes_since_save,
+            self.checkpoint_last_save,
+            Instant::now(),
+        ) {
+            return Ok(());
+        }
+        let bitfield_snapshot = snapshot_completed_bitfield(bitfield);
+
+        // Persist payload bytes before the bitfield so a restored checkpoint
+        // never advertises data that is still only in memory or page cache.
+        self.sync_checkpoint_payload(writer)
+            .await
+            .map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to sync BitTorrent checkpoint payload: {error}"
+                ))
+            })?;
+
+        let save_started = std::time::Instant::now();
+        let checkpoint = self
+            .checkpoint
+            .as_mut()
+            .expect("checkpoint presence was checked before syncing payload");
+        match checkpoint
+            .save_with_in_flight_pieces(&bitfield_snapshot, self.completed_bytes, in_flight_pieces)
+            .await
+        {
+            Ok(()) => {
+                self.checkpoint_bytes_since_save = 0;
+                self.checkpoint_last_save = std::time::Instant::now();
+                tracing::debug!(
+                    piece_bytes,
+                    save_ms = save_started.elapsed().as_millis() as u64,
+                    forced = save_requested,
+                    "BT checkpoint persisted"
+                );
+                if save_requested {
+                    self.group.recover().take_save_control_file_request();
+                }
+                Ok(())
+            }
+            Err(error) if save_requested => Err(Aria2Error::FileIo(format!(
+                "Failed to save requested BitTorrent checkpoint: {error}"
+            ))),
+            Err(error) => {
+                warn!(%error, "Failed to save BT checkpoint after piece completion");
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -389,178 +562,5 @@ mod tests {
         );
         assert_eq!(std::fs::read(first_file).unwrap(), b"ABCD");
         assert_eq!(std::fs::read(second_file).unwrap(), b"EFGH");
-    }
-}
-
-impl BtDownloadCommand {
-    pub(super) async fn write_multi_file_piece_and_track(
-        &mut self,
-        piece_index: u32,
-        piece_data: &bytes::Bytes,
-        max_open_files: usize,
-    ) -> Result<()> {
-        let layout = self
-            .multi_file_layout
-            .as_ref()
-            .filter(|layout| layout.is_multi_file())
-            .ok_or_else(|| {
-                Aria2Error::FileIo(
-                    "Multi-file piece write requested without a multi-file layout".into(),
-                )
-            })?;
-        let touched_files = crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit_tracked(
-            layout,
-            piece_index,
-            piece_data,
-            layout.piece_length(),
-            max_open_files,
-        )
-        .await?;
-        self.dirty_multi_file_indices.extend(touched_files);
-        Ok(())
-    }
-
-    pub(super) async fn sync_checkpoint_payload(
-        &mut self,
-        writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
-    ) -> Result<()> {
-        if self
-            .multi_file_layout
-            .as_ref()
-            .is_some_and(|layout| layout.is_multi_file())
-        {
-            self.sync_dirty_multi_file_payload().await
-        } else {
-            writer.sync_data().await.map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to durably sync BitTorrent checkpoint payload: {error}"
-                ))
-            })
-        }
-    }
-
-    pub(super) async fn sync_dirty_multi_file_payload(&mut self) -> Result<()> {
-        let Some(layout) = self
-            .multi_file_layout
-            .as_ref()
-            .filter(|layout| layout.is_multi_file())
-        else {
-            return Ok(());
-        };
-
-        let mut file_indices = self
-            .dirty_multi_file_indices
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-        file_indices.sort_unstable();
-        for file_index in file_indices {
-            let file_path = layout
-                .file_absolute_path(file_index)
-                .ok_or_else(|| {
-                    Aria2Error::FileIo(format!("Invalid dirty BitTorrent file index {file_index}"))
-                })?
-                .to_path_buf();
-            let mut file_writer =
-                crate::filesystem::positioned_disk_writer::PositionedDiskWriter::new(
-                    &file_path, None,
-                );
-            file_writer.open().await.map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to open dirty BitTorrent file {} for sync: {error}",
-                    file_path.display()
-                ))
-            })?;
-            let sync_result = file_writer.sync_data().await;
-            let close_result = file_writer
-                .close_without_sync("BT checkpoint file close")
-                .await;
-            sync_result.map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to durably sync dirty BitTorrent file {}: {error}",
-                    file_path.display()
-                ))
-            })?;
-            close_result.map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to close dirty BitTorrent file {} after sync: {error}",
-                    file_path.display()
-                ))
-            })?;
-        }
-        self.dirty_multi_file_indices.clear();
-        Ok(())
-    }
-
-    pub(super) async fn persist_checkpoint_after_piece(
-        &mut self,
-        writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
-        bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
-        piece_bytes: u64,
-        in_flight_pieces: &[crate::filesystem::control_file::ControlFileInFlightPiece],
-    ) -> Result<()> {
-        let save_requested = self.group.recover().is_save_control_file_requested();
-        if self.checkpoint.is_none() {
-            if save_requested {
-                return Err(Aria2Error::FileIo(
-                    "Requested BitTorrent checkpoint is unavailable".into(),
-                ));
-            }
-            return Ok(());
-        }
-
-        self.checkpoint_bytes_since_save =
-            self.checkpoint_bytes_since_save.saturating_add(piece_bytes);
-        if !checkpoint_save_due(
-            save_requested,
-            self.checkpoint_bytes_since_save,
-            self.checkpoint_last_save,
-            Instant::now(),
-        ) {
-            return Ok(());
-        }
-        let bitfield_snapshot = snapshot_completed_bitfield(bitfield);
-
-        // Persist payload bytes before the bitfield so a restored checkpoint
-        // never advertises data that is still only in memory or page cache.
-        self.sync_checkpoint_payload(writer)
-            .await
-            .map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to sync BitTorrent checkpoint payload: {error}"
-                ))
-            })?;
-
-        let save_started = std::time::Instant::now();
-        let checkpoint = self
-            .checkpoint
-            .as_mut()
-            .expect("checkpoint presence was checked before syncing payload");
-        match checkpoint
-            .save_with_in_flight_pieces(&bitfield_snapshot, self.completed_bytes, in_flight_pieces)
-            .await
-        {
-            Ok(()) => {
-                self.checkpoint_bytes_since_save = 0;
-                self.checkpoint_last_save = std::time::Instant::now();
-                tracing::debug!(
-                    piece_bytes,
-                    save_ms = save_started.elapsed().as_millis() as u64,
-                    forced = save_requested,
-                    "BT checkpoint persisted"
-                );
-                if save_requested {
-                    self.group.recover().take_save_control_file_request();
-                }
-                Ok(())
-            }
-            Err(error) if save_requested => Err(Aria2Error::FileIo(format!(
-                "Failed to save requested BitTorrent checkpoint: {error}"
-            ))),
-            Err(error) => {
-                warn!(%error, "Failed to save BT checkpoint after piece completion");
-                Ok(())
-            }
-        }
     }
 }
