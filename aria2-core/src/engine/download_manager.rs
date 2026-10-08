@@ -1496,10 +1496,16 @@ mod tests {
 
         let result = manager.add_torrent(vec![1, 2, 3], Vec::new(), DownloadOptions::default());
 
-        assert!(matches!(
-            result,
-            Err(DownloadManagerError::Preparation(Aria2Error::Fatal(_)))
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(DownloadManagerError::Preparation(
+                    Aria2Error::BittorrentParse(_)
+                ))
+            ),
+            "invalid torrent should retain the BitTorrent parse error: {:?}",
+            result.as_ref().err()
+        );
         assert_eq!(group_man.count(), 0);
     }
 

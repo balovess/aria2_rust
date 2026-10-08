@@ -3,6 +3,13 @@
 mod e2e_helpers;
 mod fixtures;
 
+use aria2_core::c_api::{
+    ARIA2_RUST_EVENT_BT_DOWNLOAD_COMPLETE, ARIA2_RUST_EVENT_DOWNLOAD_COMPLETE,
+    ARIA2_RUST_EVENT_DOWNLOAD_START, Aria2RustDownloadEventCallback, Aria2RustDownloadInfo,
+    Aria2RustDownloadStatus, Aria2RustKeyValue, Aria2RustSession, aria2_rust_add_torrent,
+    aria2_rust_get_download_info, aria2_rust_library_deinit, aria2_rust_library_init,
+    aria2_rust_run, aria2_rust_session_final, aria2_rust_session_new_with_download_event_callback,
+};
 use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
 use aria2_core::engine::bittorrent::persistence::progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats,
@@ -32,6 +39,54 @@ use fixtures::test_torrent_builder::{
     expected_piece_data,
 };
 use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct CApiDownloadEvents {
+    events: Mutex<Vec<(usize, u32, u64, usize)>>,
+}
+
+unsafe extern "C" fn capture_c_api_download_event(
+    session: *mut Aria2RustSession,
+    event: u32,
+    gid: u64,
+    user_data: *mut std::ffi::c_void,
+) -> i32 {
+    if user_data.is_null() {
+        return -1;
+    }
+    let events = unsafe { &*user_data.cast::<CApiDownloadEvents>() };
+    events
+        .events
+        .lock()
+        .unwrap()
+        .push((session as usize, event, gid, user_data as usize));
+    0
+}
+
+struct CApiLibraryGuard;
+
+impl Drop for CApiLibraryGuard {
+    fn drop(&mut self) {
+        let _ = aria2_rust_library_deinit();
+    }
+}
+
+struct CApiSessionGuard(*mut Aria2RustSession);
+
+impl CApiSessionGuard {
+    fn finalize(mut self) -> i32 {
+        let session = std::mem::replace(&mut self.0, std::ptr::null_mut());
+        unsafe { aria2_rust_session_final(session) }
+    }
+}
+
+impl Drop for CApiSessionGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { aria2_rust_session_final(self.0) };
+        }
+    }
+}
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -1339,6 +1394,150 @@ async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
             .any(|query| query.contains("event=started")),
         "default bt-hash-check-seed=true must enter the tracker lifecycle"
     );
+}
+
+#[tokio::test]
+async fn test_e2e_c_api_callback_reports_bt_payload_and_terminal_completion() {
+    let output_dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "c-api-callback.bin",
+        1024,
+        512,
+        &tracker_placeholder.announce_url(),
+    );
+    let metadata =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let piece_data = vec![
+        expected_piece_data(0, 512, 1024),
+        expected_piece_data(1, 512, 1024),
+    ];
+    let peer = MockBtPeerServer::start(metadata.info_hash.bytes, piece_data.clone()).await;
+    drop(tracker_placeholder);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent("c-api-callback.bin", 1024, 512, &tracker.announce_url());
+
+    let output_path = output_dir.path().join("c-api-callback.bin");
+    let dir_option = output_dir.path().to_string_lossy().into_owned();
+    let captured = Arc::new(CApiDownloadEvents::default());
+    let captured_by_session = Arc::clone(&captured);
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let c_api_worker = std::thread::spawn(move || {
+        let option_values = [
+            ("dir", dir_option),
+            ("enable-dht", "false".to_string()),
+            ("enable-public-trackers", "false".to_string()),
+            ("seed-time", "0.05".to_string()),
+            ("check-integrity", "true".to_string()),
+            ("file-allocation", "none".to_string()),
+        ];
+        let option_strings = option_values
+            .iter()
+            .map(|(name, value)| {
+                (
+                    std::ffi::CString::new(*name).unwrap(),
+                    std::ffi::CString::new(value.as_str()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let options = option_strings
+            .iter()
+            .map(|(name, value)| Aria2RustKeyValue {
+                name: name.as_ptr(),
+                value: value.as_ptr(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(aria2_rust_library_init(), 0);
+        let _library_guard = CApiLibraryGuard;
+        let user_data =
+            Arc::as_ptr(&captured_by_session) as *mut CApiDownloadEvents as *mut std::ffi::c_void;
+        let callback: Aria2RustDownloadEventCallback = capture_c_api_download_event;
+        let session = unsafe {
+            aria2_rust_session_new_with_download_event_callback(
+                options.as_ptr(),
+                options.len(),
+                Some(callback),
+                user_data,
+            )
+        };
+        assert!(!session.is_null());
+        let session_guard = CApiSessionGuard(session);
+        let mut gid = 0;
+        assert_eq!(
+            unsafe {
+                aria2_rust_add_torrent(
+                    session,
+                    torrent_data.as_ptr(),
+                    torrent_data.len(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    &mut gid,
+                )
+            },
+            0
+        );
+        let run_result = unsafe { aria2_rust_run(session, 0) };
+        let mut info = Aria2RustDownloadInfo::default();
+        let info_result = unsafe { aria2_rust_get_download_info(session, gid, &mut info) };
+        let file_data = std::fs::read(output_path).expect("C API BT output file");
+        let final_result = session_guard.finalize();
+        let events = captured_by_session.events.lock().unwrap().clone();
+        let _ = result_tx.send((
+            session as usize,
+            user_data as usize,
+            gid,
+            run_result,
+            info_result,
+            info,
+            final_result,
+            events,
+            file_data,
+        ));
+    });
+    let (
+        session_address,
+        user_data_address,
+        gid,
+        run_result,
+        info_result,
+        info,
+        final_result,
+        events,
+        downloaded_file,
+    ) = result_rx.await.expect("C API worker panicked");
+    c_api_worker.join().expect("C API worker thread panicked");
+    assert_eq!(run_result, 0);
+
+    let observed = events
+        .iter()
+        .map(|(event_session, event, event_gid, event_user_data)| {
+            assert_eq!(*event_session, session_address);
+            assert_eq!(*event_gid, gid);
+            assert_eq!(*event_user_data, user_data_address);
+            *event
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            ARIA2_RUST_EVENT_DOWNLOAD_START,
+            ARIA2_RUST_EVENT_BT_DOWNLOAD_COMPLETE,
+            ARIA2_RUST_EVENT_DOWNLOAD_COMPLETE,
+        ],
+        "the payload-complete callback must precede terminal completion"
+    );
+
+    assert_eq!(info_result, 0);
+    assert_eq!(info.status, Aria2RustDownloadStatus::Complete as u32);
+    assert_eq!(info.completed_length, 1024);
+    assert_eq!(downloaded_file, piece_data.concat());
+    let requested_pieces = peer.requested_pieces().await;
+    assert_eq!(requested_pieces, vec![0, 1]);
+
+    assert_eq!(final_result, 0);
 }
 
 #[tokio::test]

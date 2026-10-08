@@ -143,7 +143,6 @@ impl super::RequestGroupMan {
         for (gid, group) in to_move {
             let was_pause_requested = group.recover().is_pause_requested();
             let was_restart_requested = group.recover().is_restart_requested();
-            let was_halt_requested = group.recover().is_halt_requested();
 
             if self.active.remove(&gid).is_none() {
                 continue;
@@ -184,12 +183,13 @@ impl super::RequestGroupMan {
 
             // Fire on-download-pause hook for groups that are actually
             // pausing (not the reduce-to-limit auto-restart case).
-            if let (Some(hooks), true, false, false) = (
-                event_hooks,
-                was_pause_requested,
-                was_restart_requested,
-                was_halt_requested,
-            ) {
+            // Pause and force-pause both set the shared halt flag so the
+            // active command exits. The pause request is the authoritative
+            // discriminator; only scheduler-driven restart pauses suppress
+            // the user-visible pause event.
+            if let (Some(hooks), true, false) =
+                (event_hooks, was_pause_requested, was_restart_requested)
+            {
                 hooks.fire_event(DownloadEvent::Pause, &group.recover());
             }
 
