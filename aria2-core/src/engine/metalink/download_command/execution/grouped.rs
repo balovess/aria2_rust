@@ -1,11 +1,17 @@
 //! Grouped multi-file Metalink and torrent-metaurl execution.
 
+#[cfg(feature = "bittorrent")]
 use std::sync::Arc;
-use tracing::{info, warn};
+#[cfg(feature = "bittorrent")]
+use tracing::info;
+use tracing::warn;
 
 use super::MetalinkDownloadCommand;
+#[cfg(feature = "bittorrent")]
 use crate::engine::command::Command;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+#[cfg(feature = "bittorrent")]
+use crate::error::RecoverableError;
+use crate::error::{Aria2Error, FatalError, Result};
 #[cfg(feature = "bittorrent")]
 use crate::request::request_group::MetadataInfo;
 use crate::util::rwlock_ext::RwLockRecover;

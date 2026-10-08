@@ -131,6 +131,15 @@ impl SequentialDownloader {
                 let lifecycle_changed = lifecycle_notifier.notified();
                 tokio::pin!(lifecycle_changed);
                 lifecycle_changed.as_mut().enable();
+                // The state transition can race with entering this wait, and
+                // `notify_waiters` does not retain a permit for a future
+                // waiter. Recheck after registering so a pause/remove that
+                // happened just before `enable()` cannot strand the command
+                // in `stream.next()` until the peer sends another chunk.
+                if let Err(error) = self.check_cancelled() {
+                    finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
+                    return Err(error);
+                }
                 tokio::select! {
                     chunk = stream.next() => chunk,
                     _ = &mut lifecycle_changed => {

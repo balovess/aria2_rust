@@ -31,10 +31,11 @@
 //! # Duplicate detection in C++ vs. Rust
 //!
 //! C++ iterates `peerStorage_->getUsedPeers()` scanning all active peers.
-//! In Rust, `filter_duplicate_peer_connections()` scans the provided connection
-//! list and removes duplicates. For incoming connections (not yet implemented),
-//! the validation would happen in the per-peer interaction command when
-//! the handshake completes, checking against a shared peer storage.
+//! In Rust, `filter_duplicate_peer_connections()` filters an already-negotiated
+//! outbound connection batch. Incoming TCP peers are checked against the active
+//! `PeerSwarm` by `BtDownloadCommand::admit_incoming_peer_to_swarm`; the
+//! seeding loop performs the corresponding check before spawning an incoming
+//! peer actor. This helper is not the incoming-connection admission path.
 
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
 

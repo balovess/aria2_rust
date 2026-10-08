@@ -63,6 +63,19 @@ fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
     response["result"].clone()
 }
 
+fn read_log_tail(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn reserve_udp_port() -> u16 {
     UdpSocket::bind("127.0.0.1:0")
         .expect("reserve uTP listener port")
@@ -153,7 +166,13 @@ async fn connect_and_upload_one_piece(
         .expect("initiate incoming uTP connection");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let _ = socket.poll_recv().expect("complete uTP connection setup");
+        if let Err(error) = socket.poll_recv() {
+            panic!(
+                "uTP peer failed during connection setup: endpoint={address}, connection_id={conn_id}, state={:?}, error={error}; aria2 log tail:\n{}",
+                socket.connection_state(conn_id),
+                read_log_tail(log_path),
+            );
+        }
         match socket.connection_state(conn_id) {
             Ok(ConnectionState::Established) => break,
             Ok(ConnectionState::Closed | ConnectionState::Closing | ConnectionState::TimeWait) => {
@@ -217,18 +236,9 @@ async fn connect_and_upload_one_piece(
                     ]
                 ]),
             );
-            let log = std::fs::read_to_string(log_path).unwrap_or_default();
-            let log_tail = log
-                .lines()
-                .rev()
-                .take(80)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
             panic!(
-                "aria2 did not unchoke the interested peer; peers={peers}; status={status}; log tail:\n{log_tail}"
+                "aria2 did not unchoke the interested peer; peers={peers}; status={status}; log tail:\n{}",
+                read_log_tail(log_path)
             );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());

@@ -1,4 +1,4 @@
-use super::super::utp_transport::UtpTransportHandle;
+use super::super::utp_transport::{UtpTransportActor, UtpTransportHandle};
 use super::utp_connection::UtpPeerConnection;
 use aria2_protocol::bittorrent::utp::UtpSocket;
 use std::net::SocketAddr;
@@ -6,16 +6,17 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-fn start_transport() -> (UtpTransportHandle, CancellationToken) {
+fn start_transport() -> (UtpTransportHandle, UtpTransportActor, CancellationToken) {
     let (incoming_tx, _incoming_rx) = mpsc::channel(8);
     let shutdown = CancellationToken::new();
-    let transport = UtpTransportHandle::bind(
+    let actor = UtpTransportActor::bind(
         "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
         incoming_tx,
         shutdown.clone(),
     )
     .expect("uTP transport actor should bind");
-    (transport, shutdown)
+    let transport = actor.handle();
+    (transport, actor, shutdown)
 }
 
 #[tokio::test]
@@ -25,7 +26,7 @@ async fn actor_backed_connection_preserves_fragmented_bittorrent_frames() {
     let info_hash = [7u8; 20];
     let local_peer_id = [8u8; 20];
     let remote_peer_id = [9u8; 20];
-    let (transport, shutdown) = start_transport();
+    let (transport, actor, shutdown) = start_transport();
     let mut server = UtpSocket::bind("127.0.0.1:0").unwrap();
     let server_addr = server.local_addr();
 
@@ -77,6 +78,7 @@ async fn actor_backed_connection_preserves_fragmented_bittorrent_frames() {
     assert_eq!(frame, Some(vec![0, 0, 0, 1, 0]));
     server_task.await.unwrap();
     shutdown.cancel();
+    actor.join().await.unwrap();
 }
 
 #[tokio::test]
@@ -87,7 +89,7 @@ async fn actor_backed_connection_accepts_bep52_v2_response_over_utp() {
     let info_hash_v2 = [18u8; 32];
     let local_peer_id = [19u8; 20];
     let remote_peer_id = [20u8; 20];
-    let (transport, shutdown) = start_transport();
+    let (transport, actor, shutdown) = start_transport();
     let mut server = UtpSocket::bind("127.0.0.1:0").unwrap();
     let server_addr = server.local_addr();
 
@@ -131,6 +133,7 @@ async fn actor_backed_connection_accepts_bep52_v2_response_over_utp() {
     server_task.await.unwrap();
     assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
     shutdown.cancel();
+    actor.join().await.unwrap();
 }
 
 #[tokio::test]
@@ -141,7 +144,7 @@ async fn actor_drives_syn_retransmission_without_peer_owned_socket_polling() {
     let info_hash = [27u8; 20];
     let local_peer_id = [28u8; 20];
     let remote_peer_id = [29u8; 20];
-    let (transport, shutdown) = start_transport();
+    let (transport, actor, shutdown) = start_transport();
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let peer_address = peer.local_addr().unwrap();
     let peer_task = tokio::spawn(async move {
@@ -211,4 +214,5 @@ async fn actor_drives_syn_retransmission_without_peer_owned_socket_polling() {
     assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
     peer_task.await.unwrap();
     shutdown.cancel();
+    actor.join().await.unwrap();
 }

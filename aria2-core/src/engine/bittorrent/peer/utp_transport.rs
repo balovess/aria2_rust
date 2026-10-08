@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocket};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 const COMMAND_CAPACITY: usize = 256;
@@ -26,6 +27,12 @@ pub(crate) struct IncomingUtpConnection {
 #[derive(Clone)]
 pub(crate) struct UtpTransportHandle {
     command_tx: mpsc::Sender<Command>,
+}
+
+/// Owns the process-level actor task; connection users receive only its handle.
+pub(crate) struct UtpTransportActor {
+    handle: UtpTransportHandle,
+    task: JoinHandle<()>,
 }
 
 pub(crate) struct UtpConnectionHandle {
@@ -68,7 +75,7 @@ struct ActorConnection {
     close_requested: Arc<AtomicBool>,
 }
 
-impl UtpTransportHandle {
+impl UtpTransportActor {
     pub(crate) fn bind(
         address: SocketAddr,
         incoming_tx: mpsc::Sender<IncomingUtpConnection>,
@@ -78,7 +85,7 @@ impl UtpTransportHandle {
         let readiness = socket.readiness_socket().map_err(std::io::Error::other)?;
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let close_notify = Arc::new(Notify::new());
-        tokio::spawn(run_actor(
+        let task = tokio::spawn(run_actor(
             socket,
             readiness,
             command_rx,
@@ -87,9 +94,22 @@ impl UtpTransportHandle {
             Arc::clone(&close_notify),
             shutdown,
         ));
-        Ok(Self { command_tx })
+        Ok(Self {
+            handle: UtpTransportHandle { command_tx },
+            task,
+        })
     }
 
+    pub(crate) fn handle(&self) -> UtpTransportHandle {
+        self.handle.clone()
+    }
+
+    pub(crate) async fn join(self) -> Result<(), JoinError> {
+        self.task.await
+    }
+}
+
+impl UtpTransportHandle {
     pub(crate) async fn connect(
         &self,
         endpoint: SocketAddr,

@@ -110,13 +110,14 @@ async fn peer_actor_downloads_a_block_over_utp_after_handshake_handoff() {
 
     let (incoming_tx, _incoming_rx) = mpsc::channel(8);
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let client_transport =
-        crate::engine::bittorrent::peer::utp_transport::UtpTransportHandle::bind(
+    let client_transport_actor =
+        crate::engine::bittorrent::peer::utp_transport::UtpTransportActor::bind(
             "127.0.0.1:0".parse().unwrap(),
             incoming_tx,
             shutdown.clone(),
         )
         .expect("bind uTP client actor");
+    let client_transport = client_transport_actor.handle();
     let mut connection = BtPeerConn::connect_utp_with_transport(
         address,
         &info_hash,
@@ -250,4 +251,5 @@ async fn peer_actor_downloads_a_block_over_utp_after_handshake_handoff() {
     command_tx.send(PeerCommand::Shutdown).await.unwrap();
     worker.await.unwrap();
     shutdown.cancel();
+    client_transport_actor.join().await.unwrap();
 }

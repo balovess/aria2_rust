@@ -3,11 +3,17 @@
 use std::path::Path;
 use tracing::warn;
 
-use super::{MetalinkDownloadCommand, classify_metalink_http_status};
+use super::MetalinkDownloadCommand;
+#[cfg(feature = "bittorrent")]
+use super::classify_metalink_http_status;
 use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
+#[cfg(feature = "bittorrent")]
 use crate::engine::retry_policy::RetryPolicy;
-use crate::error::{Aria2Error, RecoverableError, Result};
+#[cfg(feature = "bittorrent")]
+use crate::error::RecoverableError;
+use crate::error::{Aria2Error, Result};
+#[cfg(feature = "bittorrent")]
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl MetalinkDownloadCommand {

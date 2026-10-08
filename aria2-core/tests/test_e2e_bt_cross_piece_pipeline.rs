@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 mod fixtures;
 
 use std::time::Duration;

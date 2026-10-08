@@ -1430,6 +1430,7 @@ async fn test_e2e_c_api_callback_reports_bt_payload_and_terminal_completion() {
             ("seed-time", "0.05".to_string()),
             ("check-integrity", "true".to_string()),
             ("file-allocation", "none".to_string()),
+            ("max-time", "15".to_string()),
         ];
         let option_strings = option_values
             .iter()
@@ -1507,7 +1508,10 @@ async fn test_e2e_c_api_callback_reports_bt_payload_and_terminal_completion() {
         final_result,
         events,
         downloaded_file,
-    ) = result_rx.await.expect("C API worker panicked");
+    ) = tokio::time::timeout(std::time::Duration::from_secs(40), result_rx)
+        .await
+        .expect("C API BitTorrent run timed out")
+        .expect("C API worker panicked");
     c_api_worker.join().expect("C API worker thread panicked");
     assert_eq!(run_result, 0);
 
@@ -1534,7 +1538,8 @@ async fn test_e2e_c_api_callback_reports_bt_payload_and_terminal_completion() {
     assert_eq!(info.status, Aria2RustDownloadStatus::Complete as u32);
     assert_eq!(info.completed_length, 1024);
     assert_eq!(downloaded_file, piece_data.concat());
-    let requested_pieces = peer.requested_pieces().await;
+    let mut requested_pieces = peer.requested_pieces().await;
+    requested_pieces.sort_unstable();
     assert_eq!(requested_pieces, vec![0, 1]);
 
     assert_eq!(final_result, 0);

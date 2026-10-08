@@ -226,6 +226,7 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "bittorrent")]
     use crate::request::request_group::DownloadOptions;
 
     #[test]

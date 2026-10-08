@@ -465,3 +465,14 @@ Do not add pass-through engine clients around these public interfaces.
   capability or a useful ownership boundary. Remove aliases and forwarding
   variants that duplicate the canonical entry point. The `engine` module
   layout follows internal ownership.
+- **Narrow** `DownloadManager` source organization into its submission/query facade,
+  per-download handle, and engine-lifecycle handle. Keep the crate-root
+  re-exports and observable behavior unchanged; organize its interface tests by
+  waiting, lifecycle, queries, and submissions.
+- **Keep** the BitTorrent process listener as the shared TCP/uTP info-hash
+  router. Its clones share one listener lifecycle, which is cancelled only when
+  the final manager owner is dropped; route handles still independently remove
+  their torrent registration. Each accept/dispatch loop owns and drains its
+  per-connection handshake tasks on shutdown; a peer-admission guard returns
+  storage ownership if bounded route delivery is cancelled. Keep its loopback
+  lifecycle tests in the adjacent `peer/listener/tests.rs` file.

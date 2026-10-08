@@ -660,7 +660,9 @@ fn c_api_event_callback_reports_pause_and_stop_for_active_http_download() {
         assert_eq!(run_result, 1);
         assert!(
             std::time::Instant::now() < stop_deadline,
-            "download never reached callback-confirmed Removed state"
+            "download never reached callback-confirmed Removed state; info_result={info_result}, status={}, events={:?}",
+            info.status,
+            capture.events.lock().unwrap()
         );
         std::thread::sleep(Duration::from_millis(2));
     }
