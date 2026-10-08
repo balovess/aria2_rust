@@ -1304,7 +1304,7 @@ async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
     assert_eq!(
         group.recover().status(),
         DownloadStatus::Active,
-        "BT payload completion is emitted while the task is still seeding"
+        "BT payload completion must not mark the task terminal before seeding"
     );
     assert_eq!(
         tokio::time::timeout(
