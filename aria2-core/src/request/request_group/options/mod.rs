@@ -86,7 +86,7 @@ pub struct DownloadOptions {
     /// Treat an existing BitTorrent payload as complete without verifying
     /// piece hashes. This is the C++ `--bt-seed-unverified` option.
     pub bt_seed_unverified: bool,
-    /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
+    /// Seeding time in minutes, matching aria2's `seed-time` option.
     pub seed_time: Option<f64>,
     /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
     pub seed_ratio: Option<f64>,

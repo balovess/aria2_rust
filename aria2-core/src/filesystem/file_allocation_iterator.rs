@@ -35,6 +35,7 @@ const BUF_SIZE: usize = 256 * 1024;
 ///
 /// - `FileAllocationIterator.h` — pure virtual base
 /// - `allocateChunk()`, `finished()`, `getCurrentLength()`, `getTotalLength()`
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait FileAllocationIterator: Send {
     /// Allocate one chunk of disk space.

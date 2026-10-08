@@ -57,6 +57,7 @@ async fn finalize_digest_async(digest: MessageDigest) -> Result<String> {
         .await
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait CheckIntegrityTask: Send + Sync {
     /// Total byte length of the data being validated.

@@ -23,6 +23,7 @@ pub use in_memory_provider::InMemoryPieceProvider;
 /// Implementations must report a piece available only after its integrity has
 /// been verified. Reads return the exact requested range, or `None` when the
 /// piece/range is unavailable; short reads are treated as unavailable data.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PieceDataProvider: Send + Sync {
     /// Read an exact byte range from a verified piece.
@@ -92,6 +93,7 @@ enum PendingUploadMessage {
     Message(BtMessage),
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait BtUploadTransport {
     fn supports_fast_extension(&self) -> bool {

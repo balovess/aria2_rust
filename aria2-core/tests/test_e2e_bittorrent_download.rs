@@ -1232,6 +1232,7 @@ async fn test_e2e_bt_complete_integrity_honors_hash_check_controls() {
 #[tokio::test]
 async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
     let dir = tmp_dir();
+    let mut events = DownloadEventHooks::shared().subscribe();
     let tracker_placeholder = MockTrackerServer::start(0).await;
     let placeholder = build_test_torrent(
         "complete-integrity-seed.bin",
@@ -1269,7 +1270,7 @@ async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
     .unwrap();
 
     let options = DownloadOptions {
-        seed_time: Some(0.0),
+        seed_time: Some(0.05), // aria2 seed-time is fractional minutes (3 seconds).
         enable_dht: false,
         enable_public_trackers: false,
         check_integrity: true,
@@ -1284,9 +1285,42 @@ async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
     )
     .unwrap();
     let group = command.group_handle();
-    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+    let execute = tokio::spawn(async move { command.execute().await });
+    let gid = GroupId::new(9103);
+    let gid_hex = gid.to_hex_string();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match events.recv().await.expect("BT lifecycle event") {
+                aria2_core::engine::download_event_hooks::DownloadNotification::Lifecycle {
+                    event: DownloadEvent::BtComplete,
+                    gid: event_gid,
+                } if event_gid == gid_hex => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("BT payload-completion event timed out");
+    assert_eq!(
+        group.recover().status(),
+        DownloadStatus::Active,
+        "BT payload completion is emitted while the task is still seeding"
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            events.recv_terminal_for(gid),
+        )
+        .await
+        .expect("terminal BT lifecycle event timed out")
+        .expect("terminal BT lifecycle stream closed"),
+        DownloadEvent::Complete,
+        "the task becomes terminal after its seeding phase"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), execute)
         .await
         .expect("default hash-check seed path timed out")
+        .expect("BT task panicked")
         .expect("default hash-check seed path failed");
 
     let snapshot = group.recover().status_snapshot();

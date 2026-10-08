@@ -37,6 +37,7 @@ pub struct ProgressUpdate {
     pub upload_speed: u64,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Command: Send + Sync {
     async fn execute(&mut self) -> Result<()>;

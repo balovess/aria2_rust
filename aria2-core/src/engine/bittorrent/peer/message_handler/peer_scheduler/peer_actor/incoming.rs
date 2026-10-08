@@ -42,7 +42,6 @@ impl IncomingMessageContext<'_> {
         } = self;
         let connection = &mut *connection;
         let requests = &mut *requests;
-        let event_tx = &*event_tx;
         let dht_engine = dht_engine.map(Arc::clone);
         let upload_provider = upload_provider.map(|provider| provider.as_ref());
 
@@ -112,7 +111,7 @@ impl IncomingMessageContext<'_> {
                     connection,
                     message,
                     dht_engine.clone(),
-                    upload_provider.as_deref(),
+                    upload_provider,
                 )
                 .await
                 {
@@ -311,7 +310,7 @@ impl IncomingMessageContext<'_> {
                     return IncomingMessageAction::Exit;
                 }
                 if peer_availability_change.is_some() || full_availability_change {
-                    match reconcile_peer_interest(actor_id, connection, &wanted_pieces, &event_tx)
+                    match reconcile_peer_interest(actor_id, connection, wanted_pieces, event_tx)
                         .await
                     {
                         Ok(true) => {}
@@ -372,21 +371,22 @@ impl IncomingMessageContext<'_> {
                     return IncomingMessageAction::Exit;
                 }
                 if shutdown_requested && !connection.has_pending_upload_messages() {
-                    return IncomingMessageAction::Exit;
+                    IncomingMessageAction::Exit
+                } else {
+                    IncomingMessageAction::Continue
                 }
-                IncomingMessageAction::Continue
             }
             Ok(None) => {
                 tracing::debug!(actor_id = actor_id.0, "BT peer closed its connection");
                 let _ = event_tx
                     .send(PeerEvent::GracefulDisconnected { actor_id })
                     .await;
-                return IncomingMessageAction::Exit;
+                IncomingMessageAction::Exit
             }
             Err(error) => {
                 tracing::debug!(actor_id = actor_id.0, %error, "BT peer message read failed");
                 let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
-                return IncomingMessageAction::Exit;
+                IncomingMessageAction::Exit
             }
         }
     }

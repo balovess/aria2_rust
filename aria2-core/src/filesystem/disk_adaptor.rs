@@ -7,6 +7,7 @@ use std::path::Path;
 ///
 /// `MultiDiskAdaptor` implements global offsets that span torrent files. Single-file
 /// I/O uses `PositionedDiskWriter` and the `SeekableDiskWriter` interface.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DiskAdaptor: Send + Sync {
     async fn open(&mut self, path: &Path) -> Result<()>;

@@ -93,8 +93,8 @@ pub enum DownloadEvent {
     /// Fired when a download is stopped (not complete, not error).
     /// C++: `PREF_ON_DOWNLOAD_STOP`
     Stop,
-    /// Fired when a BitTorrent download finishes completely
-    /// (all files downloaded and seeding complete).
+    /// Fired when a BitTorrent payload download completes. Seeding may
+    /// continue after this event.
     /// C++: `PREF_ON_BT_DOWNLOAD_COMPLETE`
     BtComplete,
 }
@@ -220,11 +220,11 @@ impl DownloadEvent {
     /// Whether this event can legitimately fire at most **once** for a given
     /// download.
     ///
-    /// `Complete`, `Error` and `BtComplete` are terminal one-shot transitions:
-    /// a download completes once, fails once, and finishes its BT payload
-    /// once. They are emitted from more than one place (the group state
-    /// transition itself *and* the engine-loop demotion path), so observer
-    /// notification is de-duplicated on `(gid, event)` for these variants.
+    /// `Complete`, `Error` and `BtComplete` are one-shot transitions: a
+    /// download completes once, fails once, and finishes its BT payload once.
+    /// They are emitted from more than one place (the group state transition
+    /// itself *and* the engine-loop demotion path), so observer notification is
+    /// de-duplicated on `(gid, event)` for these variants.
     ///
     /// `Start` and `Pause` may repeat across pause/unpause cycles and `Stop`
     /// is re-emitted by the RPC layer on explicit removal, so those are never
@@ -234,16 +234,14 @@ impl DownloadEvent {
     }
 
     /// Whether this notification marks the task as stopped for lifecycle
-    /// observers.
+    /// observers. `BtComplete` only marks payload completion; seeding may
+    /// continue until a later terminal event.
     ///
     /// `Stop` is terminal for the current task run even though aria2 may emit
     /// it again when a caller explicitly removes the task. It is therefore
     /// terminal for waiters but not a one-shot event for de-duplication.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Stop | Self::Complete | Self::Error | Self::BtComplete
-        )
+        matches!(self, Self::Stop | Self::Complete | Self::Error)
     }
 }
 
@@ -1155,6 +1153,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn terminal_stream_helper_waits_past_bt_payload_completion() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+        let requested_gid = crate::request::request_group::GroupId::new(12);
+        let gid = requested_gid.to_hex_string();
+
+        hooks.notify_listeners(DownloadEvent::BtComplete, &gid);
+        hooks.notify_listeners(DownloadEvent::Complete, &gid);
+
+        assert_eq!(
+            stream
+                .recv_terminal_for(requested_gid)
+                .await
+                .expect("seeding completion is terminal"),
+            DownloadEvent::Complete
+        );
+    }
+
     /// Regression test for the P0 defect: observers were only reached when a
     /// `--on-download-*` shell command happened to be configured, so RPC
     /// clients never saw `aria2.onDownloadComplete` in a default deployment.
@@ -1255,7 +1272,7 @@ mod tests {
         assert!(DownloadEvent::Stop.is_terminal());
         assert!(DownloadEvent::Complete.is_terminal());
         assert!(DownloadEvent::Error.is_terminal());
-        assert!(DownloadEvent::BtComplete.is_terminal());
+        assert!(!DownloadEvent::BtComplete.is_terminal());
         assert!(!DownloadEvent::Start.is_terminal());
         assert!(!DownloadEvent::Pause.is_terminal());
     }

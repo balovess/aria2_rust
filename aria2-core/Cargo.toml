@@ -11,7 +11,7 @@ homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
 keywords = ["download", "bittorrent", "concurrent-download", "rate-limiting", "resume"]
 categories = ["network-programming", "web-programming::http-client"]
-include = ["src/**/*", "../bindings/c/**/*", "../README.md", "../LICENSE"]
+include = ["src/**/*", "include/**/*"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]

@@ -129,6 +129,7 @@ impl std::fmt::Display for DownloadStats {
 ///
 /// Implement this trait to customize behavior after download completion.
 /// All methods are async, supporting time-consuming operations in async contexts.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PostDownloadHook: Send + Sync {
     /// Callback when download completes successfully

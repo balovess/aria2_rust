@@ -46,11 +46,10 @@ impl FileEntry {
             .remaining
             .iter()
             .position(|candidate| candidate == uri)
+            && let Some(dispatched) = state.remaining.remove(index)
         {
-            if let Some(dispatched) = state.remaining.remove(index) {
-                state.spent.push_back(dispatched);
-                return true;
-            }
+            state.spent.push_back(dispatched);
+            return true;
         }
 
         state.spent.iter().any(|candidate| candidate == uri)

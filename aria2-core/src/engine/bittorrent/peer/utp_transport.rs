@@ -260,11 +260,7 @@ async fn run_actor(
     for (id, mut connection) in connections.drain() {
         let _ = socket.close_connection(id);
         connection.state_tx.send_replace(ConnectionState::Closed);
-        while let Some(pending) = connection.pending_sends.pop_front() {
-            let _ = pending
-                .reply
-                .send(Err("uTP transport actor stopped".to_string()));
-        }
+        fail_pending_sends(&mut connection, "uTP transport actor stopped");
     }
 }
 
@@ -305,6 +301,14 @@ async fn handle_command(
                 let _ = reply.send(Err(format!("uTP connection {id} is no longer active")));
                 return;
             };
+            if is_terminal(
+                socket
+                    .connection_state(id)
+                    .unwrap_or(ConnectionState::Closed),
+            ) {
+                let _ = reply.send(Err("uTP connection is closing".to_string()));
+                return;
+            }
             if connection.rejected {
                 let _ = reply.send(Err("uTP connection receive queue was exceeded".to_string()));
                 return;
@@ -425,10 +429,7 @@ fn fail_pending_sends(connection: &mut ActorConnection, reason: &str) {
 
 fn flush_pending_sends(socket: &mut UtpSocket, connections: &mut HashMap<u16, ActorConnection>) {
     for (id, connection) in connections.iter_mut() {
-        loop {
-            let Some(pending) = connection.pending_sends.front_mut() else {
-                break;
-            };
+        while let Some(pending) = connection.pending_sends.front_mut() {
             let remaining = &pending.bytes[pending.offset..];
             match socket.send(*id, remaining) {
                 Ok(0) => break,
@@ -487,20 +488,19 @@ fn is_terminal(state: ConnectionState) -> bool {
 }
 
 fn publish_connection_state(socket: &UtpSocket, connections: &mut HashMap<u16, ActorConnection>) {
-    let active = socket.connection_ids();
     connections.retain(|id, connection| {
-        if !active.contains(id) {
-            connection.state_tx.send_replace(ConnectionState::Closed);
-            while let Some(pending) = connection.pending_sends.pop_front() {
-                let _ = pending.reply.send(Err("uTP connection closed".to_string()));
-            }
-            return false;
-        }
         let Ok(state) = socket.connection_state(*id) else {
             connection.state_tx.send_replace(ConnectionState::Closed);
+            fail_pending_sends(connection, "uTP connection closed");
             return false;
         };
-        connection.state_tx.send_replace(state);
+        connection.state_tx.send_if_modified(|current| {
+            if *current == state {
+                return false;
+            }
+            *current = state;
+            true
+        });
         true
     });
 }

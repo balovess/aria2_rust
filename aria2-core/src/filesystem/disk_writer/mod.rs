@@ -47,6 +47,7 @@ pub fn new_sequential_download_writer(
 
 // ── Sequential writer trait ──────────────────────────────────────────────
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
@@ -71,6 +72,7 @@ impl DiskWriter for Box<dyn DiskWriter> {
 
 // ── Positioned (seekable) writer trait ───────────────────────────────────
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 #[allow(clippy::len_without_is_empty)]
 pub trait SeekableDiskWriter: Send + Sync {

@@ -19,6 +19,9 @@ pub struct IncomingPeer {
     pub endpoint: SocketAddr,
 }
 
+// The incoming-peer mailbox is bounded by the configured peer limit; retaining
+// the TCP connection inline avoids an allocation for the common transport.
+#[allow(clippy::large_enum_variant)]
 pub enum IncomingPeerConnection {
     Tcp(aria2_protocol::bittorrent::peer::connection::PeerConnection),
     Utp(super::connection::UtpPeerConnection),
