@@ -14,7 +14,7 @@ mod stopped;
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::sync::Notify;
 use tracing::info;
 
@@ -25,6 +25,8 @@ pub use reserved::PositionMode;
 
 use super::global_net_stat::GlobalNetStat;
 use super::request_group::{ActivitySignal, GroupId, RequestGroup};
+
+static NEXT_EVENT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Result of resolving an RPC GID or high-order hexadecimal prefix.
 ///
@@ -75,6 +77,9 @@ pub struct RequestGroupMan {
     /// Next GID for auto-generated group IDs.
     next_gid: AtomicU64,
 
+    /// Process-unique identity used to scope events from this manager.
+    event_scope_id: u64,
+
     /// Global download speed limit (bytes/sec).
     global_download_limit: std::sync::RwLock<Option<u64>>,
 
@@ -107,6 +112,7 @@ impl RequestGroupMan {
             stopped: StoppedResults::new(),
             max_concurrent: AtomicU32::new(5), // Default matching aria2
             next_gid: AtomicU64::new(1),
+            event_scope_id: NEXT_EVENT_SCOPE_ID.fetch_add(1, Ordering::Relaxed),
             global_download_limit: std::sync::RwLock::new(None),
             global_upload_limit: std::sync::RwLock::new(None),
             global_net_stat: Arc::new(GlobalNetStat::default()),
@@ -114,6 +120,10 @@ impl RequestGroupMan {
             activity_signal: Arc::new(ActivitySignal::new()),
             force_shutdown_requested: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn event_scope_id(&self) -> u64 {
+        self.event_scope_id
     }
 
     fn lifecycle_guard(&self) -> std::sync::MutexGuard<'_, ()> {

@@ -55,6 +55,13 @@ pub const ARIA2_RUST_POSITION_SET: u32 = 0;
 pub const ARIA2_RUST_POSITION_CUR: u32 = 1;
 pub const ARIA2_RUST_POSITION_END: u32 = 2;
 
+pub const ARIA2_RUST_EVENT_DOWNLOAD_START: u32 = 1;
+pub const ARIA2_RUST_EVENT_DOWNLOAD_PAUSE: u32 = 2;
+pub const ARIA2_RUST_EVENT_DOWNLOAD_STOP: u32 = 3;
+pub const ARIA2_RUST_EVENT_DOWNLOAD_COMPLETE: u32 = 4;
+pub const ARIA2_RUST_EVENT_DOWNLOAD_ERROR: u32 = 5;
+pub const ARIA2_RUST_EVENT_BT_DOWNLOAD_COMPLETE: u32 = 6;
+
 /// Snapshot returned by `aria2_rust_get_download_info`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -88,6 +95,18 @@ pub struct Aria2RustGlobalStat {
     pub num_stopped: u64,
 }
 
+/// Callback invoked for lifecycle events belonging to one C API session.
+///
+/// The callback runs synchronously on the engine event thread. It must return
+/// promptly, must not unwind across the C ABI, and must not re-enter the same
+/// session's C API. The return value is ignored.
+pub type Aria2RustDownloadEventCallback = unsafe extern "C" fn(
+    session: *mut Aria2RustSession,
+    event: u32,
+    gid: u64,
+    user_data: *mut c_void,
+) -> i32;
+
 /// Opaque session owned by the embedding application.
 pub struct Aria2RustSession {
     runtime: Runtime,
@@ -98,6 +117,7 @@ pub struct Aria2RustSession {
     engine_task: Option<JoinHandle<Result<()>>>,
     keep_running: bool,
     last_error: String,
+    download_event_callback: Option<events::DownloadEventCallbackRegistration>,
 }
 
 static LIBRARY_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -219,6 +239,7 @@ fn write_c_string(value: &str, output: *mut c_char, capacity: usize) -> usize {
     required
 }
 
+mod events;
 mod gid;
 mod lifecycle;
 mod queries;
@@ -230,7 +251,7 @@ pub use gid::{
 };
 pub use lifecycle::{
     aria2_rust_library_deinit, aria2_rust_library_init, aria2_rust_session_final,
-    aria2_rust_session_new,
+    aria2_rust_session_new, aria2_rust_session_new_with_download_event_callback,
 };
 pub use queries::{
     aria2_rust_get_active_downloads, aria2_rust_get_download_info, aria2_rust_get_file_count,

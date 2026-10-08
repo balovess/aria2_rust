@@ -307,6 +307,7 @@ impl RequestGroupMan {
             Entry::Vacant(entry) => {
                 {
                     let mut group = group.recover_mut();
+                    group.set_event_scope_id(self.event_scope_id);
                     group.set_global_net_stat(Arc::clone(&self.global_net_stat));
                     group.attach_activity_signal(Arc::clone(&self.activity_signal));
                 }

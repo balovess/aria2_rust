@@ -27,27 +27,31 @@
 //!   getOption/changeOption/getVersion/getSessionInfo/saveSession/shutdown/forceShutdown/
 //!   system.multicall/system.listMethods/system.listNotifications.
 //!
+//! `RpcEngine` owns RPC parsing and dispatch, not download state. The
+//! `RpcEngine::new()` constructor deliberately uses an `UnsupportedBackend`,
+//! so stateful methods such as `aria2.addUri` return an unsupported-operation
+//! error. Applications that serve downloads must provide an
+//! [`RpcBackend`](backend::RpcBackend) with [`RpcEngine::with_backend`]. The
+//! example below uses the backend-independent method catalog.
+//!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```rust
 //! use aria2_rpc::engine::RpcEngine;
 //! use aria2_rpc::json_rpc::JsonRpcRequest;
+//! use serde_json::json;
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let engine = RpcEngine::new();
 //!
-//!     let req = JsonRpcRequest {
-//!         version: Some("2.0".into()),
-//!         method: "aria2.addUri".into(),
-//!         params: serde_json::json!([["http://example.com/file.zip"]]),
-//!         id: Some(serde_json::Value::String("req-1".into())),
-//!     };
+//!     let req = JsonRpcRequest::new("system.listMethods", json!([])).with_id("req-1");
 //!
 //!     let resp = engine.handle_request(&req).await;
-//!     if resp.is_success() {
-//!         println!("GID: {:?}", resp.result);
-//!     }
+//!     let methods = resp.result.expect("method catalog is backend-independent");
+//!     assert!(methods.as_array().is_some_and(|methods| {
+//!         methods.iter().any(|method| method == "aria2.addUri")
+//!     }));
 //! }
 //! ```
 //!

@@ -93,6 +93,7 @@ impl Aria2RustSession {
             engine_task: Some(engine_task),
             keep_running,
             last_error: String::new(),
+            download_event_callback: None,
         })
     }
 

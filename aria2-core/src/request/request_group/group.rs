@@ -55,6 +55,8 @@ use super::result_code::DownloadResultCode;
 pub struct RequestGroup {
     /// Group identifier — unique across the engine session.
     pub(super) gid: GroupId,
+    /// Identity of the request manager that owns lifecycle events for this group.
+    event_scope_id: u64,
     /// Initial URI list provided at construction time.
     ///
     /// These URIs are transferred to the first `FileEntry`'s `remaining_uris`
@@ -267,6 +269,7 @@ impl RequestGroup {
 
         RequestGroup {
             gid,
+            event_scope_id: 0,
             uris: uris.into_iter().map(String::into_boxed_str).collect(),
             output_name: std::sync::RwLock::new(None),
             resolved_output_path: std::sync::RwLock::new(None),
@@ -324,5 +327,13 @@ impl RequestGroup {
             #[cfg(feature = "metalink")]
             metalink_base_uri: std::sync::RwLock::new(None),
         }
+    }
+
+    pub(crate) fn event_scope_id(&self) -> u64 {
+        self.event_scope_id
+    }
+
+    pub(crate) fn set_event_scope_id(&mut self, scope_id: u64) {
+        self.event_scope_id = scope_id;
     }
 }

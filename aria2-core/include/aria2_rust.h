@@ -10,6 +10,11 @@ extern "C" {
 
 typedef struct Aria2RustSession Aria2RustSession;
 
+typedef int32_t (*Aria2RustDownloadEventCallback)(Aria2RustSession *session,
+                                                  uint32_t event,
+                                                  uint64_t gid,
+                                                  void *user_data);
+
 typedef struct Aria2RustKeyValue {
   const char *name;
   const char *value;
@@ -28,6 +33,15 @@ enum {
   ARIA2_RUST_POSITION_SET = 0,
   ARIA2_RUST_POSITION_CUR = 1,
   ARIA2_RUST_POSITION_END = 2
+};
+
+enum {
+  ARIA2_RUST_EVENT_DOWNLOAD_START = 1,
+  ARIA2_RUST_EVENT_DOWNLOAD_PAUSE = 2,
+  ARIA2_RUST_EVENT_DOWNLOAD_STOP = 3,
+  ARIA2_RUST_EVENT_DOWNLOAD_COMPLETE = 4,
+  ARIA2_RUST_EVENT_DOWNLOAD_ERROR = 5,
+  ARIA2_RUST_EVENT_BT_DOWNLOAD_COMPLETE = 6
 };
 
 #define ARIA2_RUST_INVALID_ARGUMENT (-1)
@@ -62,10 +76,19 @@ typedef struct Aria2RustGlobalStat {
 int32_t aria2_rust_library_init(void);
 int32_t aria2_rust_library_deinit(void);
 
-/* Unknown options are ignored. Invalid known values return NULL. */
+/* Unknown options are ignored. Invalid known values return NULL.
+ * user_data is reserved here; use the callback-enabled constructor to receive
+ * it with lifecycle events. */
 Aria2RustSession *aria2_rust_session_new(const Aria2RustKeyValue *options,
                                           size_t option_count,
                                           void *user_data);
+/* The callback runs synchronously on the engine event thread, must return
+ * promptly, must not unwind, and must not call the same session's C API.
+ * user_data is borrowed until session_final returns. Callback return values
+ * are ignored. Event values use the aria2 numbering above. */
+Aria2RustSession *aria2_rust_session_new_with_download_event_callback(
+    const Aria2RustKeyValue *options, size_t option_count,
+    Aria2RustDownloadEventCallback callback, void *user_data);
 int32_t aria2_rust_session_final(Aria2RustSession *session);
 
 /* mode 0 waits for all current downloads; mode 1 runs one event turn. */

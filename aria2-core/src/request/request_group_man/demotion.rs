@@ -336,12 +336,13 @@ impl super::RequestGroupMan {
                     // those notifications.
                     match command {
                         Some(cmd) if !cmd.is_empty() => {
-                            hooks.fire_event_with_params(
+                            hooks.fire_event_with_params_scoped(
                                 event,
                                 &ctx.gid_hex,
                                 ctx.num_files,
                                 &ctx.first_file_path,
                                 cmd,
+                                dg.group.recover().event_scope_id(),
                             );
                         }
                         // No per-group command: fall back to global hooks

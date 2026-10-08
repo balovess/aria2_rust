@@ -368,3 +368,207 @@ fn c_api_change_option_uses_reserved_group_semantics() {
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
     assert_eq!(aria2_rust_library_deinit(), 0);
 }
+
+#[derive(Default)]
+struct DownloadEventCapture {
+    events: Mutex<Vec<(usize, u32, u64, usize)>>,
+}
+
+unsafe extern "C" fn capture_download_event(
+    session: *mut Aria2RustSession,
+    event: u32,
+    gid: u64,
+    user_data: *mut c_void,
+) -> i32 {
+    if user_data.is_null() {
+        return -1;
+    }
+    let capture = unsafe { &*user_data.cast::<DownloadEventCapture>() };
+    capture
+        .events
+        .lock()
+        .unwrap()
+        .push((session as usize, event, gid, user_data as usize));
+    0
+}
+
+fn serve_http_downloads(
+    listener: std::net::TcpListener,
+    expected_paths: [&'static str; 2],
+) -> std::thread::JoinHandle<Vec<String>> {
+    use std::io::{Read, Write};
+    use std::time::Instant;
+
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut requests = Vec::new();
+        let mut completed_paths = [false; 2];
+        while !completed_paths.iter().all(|completed| *completed) && Instant::now() < deadline {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return requests;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("loopback HTTP accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "peer closed before sending HTTP headers");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let body = b"c-api-event-callback";
+            let request = String::from_utf8_lossy(&request);
+            let mut lines = request.lines();
+            let request_line = lines.next().unwrap_or_default().to_string();
+            let mut request_parts = request_line.split_whitespace();
+            let method = request_parts.next().unwrap_or_default().to_string();
+            let path = request_parts.next().unwrap_or_default().to_string();
+            requests.push(request_line);
+
+            let response_body = if method == "GET" {
+                for (index, expected_path) in expected_paths.iter().enumerate() {
+                    if path == *expected_path {
+                        completed_paths[index] = true;
+                    }
+                }
+                body.as_slice()
+            } else {
+                &[]
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                if method == "HEAD" {
+                    body.len()
+                } else {
+                    response_body.len()
+                }
+            )
+            .unwrap();
+            stream.write_all(response_body).unwrap();
+            stream.flush().unwrap();
+        }
+        requests
+    })
+}
+
+#[test]
+fn c_api_event_callback_is_session_scoped_for_real_http_downloads() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(aria2_rust_library_init(), 0);
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let (dir_entry, dir_name, dir_value) = kv("dir", output_dir.path().to_str().unwrap());
+    let (tries_entry, tries_name, tries_value) = kv("max-tries", "1");
+    let entries = [dir_entry, tries_entry];
+    let _keep_alive = [dir_name, dir_value, tries_name, tries_value];
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = serve_http_downloads(listener, ["/a.bin", "/b.bin"]);
+
+    let mut capture_a = Box::<DownloadEventCapture>::default();
+    let mut capture_b = Box::<DownloadEventCapture>::default();
+    let user_data_a = (&mut *capture_a as *mut DownloadEventCapture).cast::<c_void>();
+    let user_data_b = (&mut *capture_b as *mut DownloadEventCapture).cast::<c_void>();
+    let session_a = unsafe {
+        aria2_rust_session_new_with_download_event_callback(
+            entries.as_ptr(),
+            entries.len(),
+            Some(capture_download_event),
+            user_data_a,
+        )
+    };
+    let session_b = unsafe {
+        aria2_rust_session_new_with_download_event_callback(
+            entries.as_ptr(),
+            entries.len(),
+            Some(capture_download_event),
+            user_data_b,
+        )
+    };
+    assert!(!session_a.is_null());
+    assert!(!session_b.is_null());
+
+    let uri_a = CString::new(format!("http://{address}/a.bin")).unwrap();
+    let uri_b = CString::new(format!("http://{address}/b.bin")).unwrap();
+    let uris_a = [uri_a.as_ptr()];
+    let uris_b = [uri_b.as_ptr()];
+    let mut gid_a = 0;
+    let mut gid_b = 0;
+    assert_eq!(
+        unsafe { aria2_rust_add_uri(session_a, uris_a.as_ptr(), 1, ptr::null(), 0, &mut gid_a) },
+        0
+    );
+    assert_eq!(
+        unsafe { aria2_rust_add_uri(session_b, uris_b.as_ptr(), 1, ptr::null(), 0, &mut gid_b) },
+        0
+    );
+    assert_eq!(gid_a, gid_b, "test requires colliding per-session GIDs");
+
+    let run_a = unsafe { aria2_rust_run(session_a, 0) };
+    let run_b = unsafe { aria2_rust_run(session_b, 0) };
+    let result_a = unsafe {
+        (&*session_a)
+            .request_man
+            .find_stopped_result(&format!("{gid_a:016x}"))
+    };
+    let result_b = unsafe {
+        (&*session_b)
+            .request_man
+            .find_stopped_result(&format!("{gid_b:016x}"))
+    };
+    let message_a = result_a.as_ref().map(|result| result.message.clone());
+    let message_b = result_b.as_ref().map(|result| result.message.clone());
+    let final_a = unsafe { aria2_rust_session_final(session_a) };
+    let final_b = unsafe { aria2_rust_session_final(session_b) };
+    let server_requests = server.join();
+    let deinit = aria2_rust_library_deinit();
+
+    assert_eq!(run_a, 0);
+    assert_eq!(run_b, 0);
+    assert_eq!(final_a, 0);
+    assert_eq!(final_b, 0);
+    assert_eq!(deinit, 0);
+    let server_requests = server_requests.unwrap();
+    for path in ["/a.bin", "/b.bin"] {
+        assert!(
+            server_requests
+                .iter()
+                .any(|request| request.starts_with(&format!("GET {path} "))),
+            "loopback server did not receive GET for {path}: {server_requests:?}"
+        );
+    }
+
+    // aria2_original's public DownloadEvent values: Start=1, Complete=4.
+    for (session, gid, user_data, capture) in [
+        (session_a as usize, gid_a, user_data_a as usize, &capture_a),
+        (session_b as usize, gid_b, user_data_b as usize, &capture_b),
+    ] {
+        let events = capture.events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "callbacks must not cross session scope: {events:?}"
+        );
+        assert!(events.contains(&(session, 1, gid, user_data)));
+        assert!(
+            events.contains(&(session, 4, gid, user_data)),
+            "expected completion callback; got {events:?}; task messages: {message_a:?}, {message_b:?}; HTTP requests: {server_requests:?}"
+        );
+    }
+}
