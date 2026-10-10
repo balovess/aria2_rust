@@ -34,7 +34,7 @@ impl BtDownloadCommand {
         }
 
         if let Some(ref layout) = self.multi_file_layout {
-            layout.create_directories().map_err(|e| {
+            layout.create_directories_durable().await.map_err(|e| {
                 Aria2Error::Fatal(FatalError::Config(format!(
                     "create_directories failed: {}",
                     e

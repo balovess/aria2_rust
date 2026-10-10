@@ -112,7 +112,9 @@ impl ProgressCheckpoint {
             if trusted_length != control_file.completed_length() {
                 control_file.update_completed_length(trusted_length);
                 checkpoint.last_saved_length = trusted_length;
-                checkpoint.save().await;
+                if ensure_existing_payload_durable(output_path, trusted_length).await {
+                    checkpoint.save().await;
+                }
             }
         }
 
@@ -121,10 +123,13 @@ impl ProgressCheckpoint {
                 .await
             {
                 Ok(mut control_file) => {
-                    control_file.update_completed_length(existing_length.min(total_length));
-                    checkpoint.last_saved_length = control_file.completed_length();
+                    let completed_length = existing_length.min(total_length);
+                    control_file.update_completed_length(completed_length);
+                    checkpoint.last_saved_length = completed_length;
                     checkpoint.control_file = Some(control_file);
-                    checkpoint.save().await;
+                    if ensure_existing_payload_durable(output_path, completed_length).await {
+                        checkpoint.save().await;
+                    }
                 }
                 Err(error) => {
                     tracing::debug!(
@@ -238,6 +243,25 @@ impl ProgressCheckpoint {
             return;
         }
         self.last_saved_length = control_file.completed_length();
+    }
+}
+
+async fn ensure_existing_payload_durable(path: &Path, completed_length: u64) -> bool {
+    if completed_length == 0 {
+        return true;
+    }
+
+    match crate::filesystem::durability::sync_existing_payload(path).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(
+                path = %path.display(),
+                completed_length,
+                %error,
+                "Not persisting a checkpoint for an unsynced existing payload"
+            );
+            false
+        }
     }
 }
 

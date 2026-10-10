@@ -54,7 +54,7 @@ pub(super) async fn finish(
         .await?;
     }
 
-    writer.sync_data().await.map_err(|e| {
+    writer.sync_all().await.map_err(|e| {
         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
             "Durable output sync failed: {}",
             e

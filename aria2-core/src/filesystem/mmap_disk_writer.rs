@@ -466,6 +466,34 @@ impl SeekableDiskWriter for MmapDiskWriter {
         }
     }
 
+    async fn sync_all(&mut self) -> Result<()> {
+        self.open().await?;
+        match self.inner.as_mut() {
+            Some(Inner::Mmap { file, mmap }) => {
+                let file = Arc::clone(file);
+                let mmap = Arc::clone(mmap);
+                let path = self.path.clone();
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            mmap.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .flush()
+                                .map_err(|error| {
+                                    Aria2Error::Io(format!("mmap durable flush failed: {error}"))
+                                })?;
+                            file.sync_all().map_err(Aria2Error::from)?;
+                            crate::filesystem::durability::sync_parent_directories_sync(&path)
+                        },
+                        "mmap file and namespace sync",
+                    )
+                    .await
+            }
+            Some(Inner::Fallback(writer)) => writer.sync_all().await,
+            None => Ok(()),
+        }
+    }
+
     async fn len(&self) -> Result<u64> {
         match &self.inner {
             Some(Inner::Mmap { mmap, .. }) => {

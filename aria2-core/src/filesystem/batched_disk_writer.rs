@@ -231,6 +231,15 @@ impl SeekableDiskWriter for BatchedDiskWriter {
         writer.sync_data().await
     }
 
+    async fn sync_all(&mut self) -> Result<()> {
+        self.flush().await?;
+        self.ensure_open().await?;
+        let writer = self.file.as_mut().ok_or_else(|| {
+            Aria2Error::Io("file not open after ensure_open — invariant violated".into())
+        })?;
+        writer.sync_all().await
+    }
+
     async fn len(&self) -> Result<u64> {
         match self.file.as_ref() {
             Some(writer) => writer.len().await,

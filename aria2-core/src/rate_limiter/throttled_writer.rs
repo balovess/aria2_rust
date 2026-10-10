@@ -129,6 +129,10 @@ where
         self.inner.flush().await
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        self.inner.sync_data().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         self.inner.finalize().await
     }
@@ -218,6 +222,10 @@ where
 
     async fn sync_data(&mut self) -> Result<()> {
         self.inner.sync_data().await
+    }
+
+    async fn sync_all(&mut self) -> Result<()> {
+        self.inner.sync_all().await
     }
 
     async fn len(&self) -> Result<u64> {

@@ -63,7 +63,7 @@ impl SequentialDownloader {
             return Ok(false);
         }
 
-        writer.flush().await.map_err(|error| {
+        writer.sync_data().await.map_err(|error| {
             Aria2Error::FileIo(format!(
                 "Failed to flush requested sequential checkpoint: {error}"
             ))

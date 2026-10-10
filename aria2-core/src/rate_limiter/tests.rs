@@ -264,6 +264,10 @@ impl SeekableDiskWriter for TrackingSeekableWriter {
         Ok(())
     }
 
+    async fn sync_all(&mut self) -> crate::error::Result<()> {
+        Ok(())
+    }
+
     async fn len(&self) -> crate::error::Result<u64> {
         Ok(self.data.len() as u64)
     }

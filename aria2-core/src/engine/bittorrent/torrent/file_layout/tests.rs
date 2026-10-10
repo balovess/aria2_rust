@@ -217,6 +217,20 @@ fn test_create_directories() {
     // temp_dir is automatically cleaned up when dropped
 }
 
+#[tokio::test]
+async fn durable_create_directories_persists_multi_file_tree_entries() {
+    let info = make_multi_file_info_dict();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let base = temp_dir.path().join("torrent-root");
+    let layout = MultiFileLayout::from_info_dict(&info, &base).unwrap();
+
+    layout.create_directories_durable().await.unwrap();
+
+    assert!(base.join("dir1").is_dir());
+    assert!(base.join("dir2").is_dir());
+    assert!(base.join("dir3").is_dir());
+}
+
 #[test]
 fn test_resolve_file_offset_single_file() {
     let info = make_single_file_info_dict();

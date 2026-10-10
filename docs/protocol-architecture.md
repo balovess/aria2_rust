@@ -86,9 +86,23 @@ wait interruptibly on task lifecycle changes.
 can define validation and persistence. Its order is received, validated,
 written, durably persisted, then committed. `Committed` requires a successful
 stable-storage barrier; a successful write into the operating-system page cache
-alone is not persistence. File-backed `DiskWriter::flush` and
-`SeekableDiskWriter::sync_data` are the barriers used by the corresponding
-paths. Checkpoint files are advanced only after payload sync succeeds.
+alone is not persistence. Rust's `std::io::Write::flush` only drains writer
+buffers. File-backed `DiskWriter::flush` explicitly follows it with
+`File::sync_all` and a path namespace barrier; checkpoint paths use
+`DiskWriter::sync_data` to sync payload contents and the initial output path
+entry before advancing a sibling checkpoint. `SeekableDiskWriter::sync_all`
+remains the barrier for positioned writes. On Unix the namespace barrier
+synchronizes the containing directory chain after syncing the file. On Windows
+it opens and flushes the containing directory handle; unsupported directory
+barriers return an error. BitTorrent multi-file setup also syncs the parent
+entry for each directory it creates, from the deepest new directory upward;
+this avoids relying on write access to unrelated pre-existing ancestors.
+Checkpoint replacement uses `MoveFileExW` with
+`MOVEFILE_WRITE_THROUGH` as its rename barrier. Checkpoint files are advanced
+only after payload synchronization succeeds. When a new checkpoint is based
+on an existing resume prefix, the engine first syncs that existing payload
+and its path entry. `File::sync_data` may skip nonessential file metadata and
+some platforms implement it as `sync_all`.
 
 Validation is source-defined. HTTP status, Content-Range, offset, and expected
 body-length checks establish protocol correctness, but do not claim
@@ -116,7 +130,7 @@ retry admission.
 
 | Input | Core command path | Protocol implementation | Result path |
 |---|---|---|---|
-| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_data` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
+| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_all` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
 | FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | The adapter composes core DNS/address policy, proxy handling, FTP control flow, and lifecycle. `aria2-protocol::ftp::connection::control_io` shares injected control-stream reads/writes, `FtpActiveDataListener` shares active data acceptance, and `aria2-protocol::ftp::tls` supplies FTPS streams. Response and PASV/EPSV parsing policy stays with each source. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
 | BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
@@ -139,7 +153,7 @@ retry admission.
    selects its single-source scheduler or multi-mirror pipeline. Each path
    submits generic leases through `WorkScheduler`; `request_executor` runs
    `HttpSegmentDownloader` requests and sends offset-bearing response chunks
-   to the HTTP output adapter. A range lease is completed only after `sync_data`
+   to the HTTP output adapter. A range lease is completed only after `sync_all`
    succeeds; requested checkpoint saves use the same payload barrier.
 6. Otherwise, or after concurrent fallback, `SequentialDownloader` streams the
    response after HTTP status and body checks. These checks are protocol

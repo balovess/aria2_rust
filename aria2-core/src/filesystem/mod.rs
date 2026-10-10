@@ -4,6 +4,7 @@ pub mod disk_cache;
 pub(crate) mod disk_io_pool;
 pub mod disk_space;
 pub mod disk_writer;
+pub(crate) mod durability;
 pub mod file_allocation;
 pub mod file_allocation_iterator;
 pub mod file_allocation_man;

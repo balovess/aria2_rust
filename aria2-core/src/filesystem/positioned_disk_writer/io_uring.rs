@@ -181,10 +181,14 @@ impl SeekableDiskWriter for IoUringDiskWriter {
     }
 
     async fn sync_data(&mut self) -> Result<()> {
-        // The io_uring writer's existing flush is already a stable-storage
-        // barrier (sync_all), which is stronger than the payload-only sync
-        // required by checkpoint persistence.
+        // The io_uring writer's existing flush syncs the file itself. The
+        // checkpoint path uses `sync_all` below to include namespace entries.
         self.flush().await
+    }
+
+    async fn sync_all(&mut self) -> Result<()> {
+        self.flush().await?;
+        crate::filesystem::durability::sync_parent_directories(&self.path).await
     }
 
     async fn len(&self) -> Result<u64> {

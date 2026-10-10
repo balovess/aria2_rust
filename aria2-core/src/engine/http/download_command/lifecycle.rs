@@ -21,19 +21,20 @@ impl DownloadCommand {
     async fn prepare_fresh_download(&mut self) -> Result<()> {
         let control_path =
             crate::filesystem::control_file::ControlFile::control_path_for(&self.output_path);
-        match tokio::fs::remove_file(&control_path).await {
-            Ok(()) => tracing::debug!(
-                path = %control_path.display(),
-                "Removed control file before fresh download"
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Aria2Error::FileIo(format!(
+        let control_file_removed = crate::filesystem::durability::remove_file(&control_path)
+            .await
+            .map_err(|error| {
+                Aria2Error::FileIo(format!(
                     "Failed to reset control file {}: {}",
                     control_path.display(),
                     error
-                )));
-            }
+                ))
+            })?;
+        if control_file_removed {
+            tracing::debug!(
+                path = %control_path.display(),
+                "Removed control file before fresh download"
+            );
         }
 
         let file = tokio::fs::OpenOptions::new()
@@ -49,13 +50,22 @@ impl DownloadCommand {
                     error
                 ))
             })?;
-        file.sync_data().await.map_err(|error| {
+        file.sync_all().await.map_err(|error| {
             Aria2Error::FileIo(format!(
-                "Failed to flush truncated output file {}: {}",
+                "Failed to sync truncated output file {}: {}",
                 self.output_path.display(),
                 error
             ))
         })?;
+        crate::filesystem::durability::sync_parent_directories(&self.output_path)
+            .await
+            .map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to sync output directory for {}: {}",
+                    self.output_path.display(),
+                    error
+                ))
+            })?;
         drop(file);
 
         self.completed_bytes = 0;

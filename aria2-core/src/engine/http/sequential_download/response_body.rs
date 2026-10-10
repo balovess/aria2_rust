@@ -38,7 +38,7 @@ impl HttpResponseBodySink<'_> {
             // The control file must never claim a prefix that exists only in
             // the page cache. This is a periodic durability barrier, not a
             // per-network-chunk sync.
-            self.writer.flush().await.map_err(|error| {
+            self.writer.sync_data().await.map_err(|error| {
                 Aria2Error::FileIo(format!(
                     "Failed to durably sync sequential HTTP checkpoint payload: {error}"
                 ))
@@ -144,11 +144,34 @@ impl SequentialDownloader {
         let mut ctrl_file = if actual_total > 0 {
             match ControlFile::open_or_create(&ctrl_path, actual_total, 1).await {
                 Ok(mut cf) => {
-                    if start_offset > 0 {
-                        cf.update_completed_length(start_offset);
-                    }
-                    if let Err(e) = cf.save().await {
-                        tracing::warn!("Sequential: control file save failed: {}", e);
+                    let checkpoint_length = start_offset.min(cf.total_length());
+                    let payload_ready = if checkpoint_length > 0
+                        && checkpoint_length != cf.completed_length()
+                    {
+                        match crate::filesystem::durability::sync_existing_payload(
+                            &self.output_path,
+                        )
+                        .await
+                        {
+                            Ok(()) => true,
+                            Err(error) => {
+                                tracing::debug!(
+                                    path = %self.output_path.display(),
+                                    checkpoint_length,
+                                    %error,
+                                    "Not persisting an initial checkpoint for an unsynced resume prefix"
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    };
+                    if payload_ready {
+                        cf.update_completed_length(checkpoint_length);
+                        if let Err(error) = cf.save().await {
+                            tracing::warn!("Sequential: control file save failed: {}", error);
+                        }
                     }
                     Some(cf)
                 }

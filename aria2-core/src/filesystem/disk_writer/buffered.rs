@@ -239,6 +239,11 @@ impl SeekableDiskWriter for CachedDiskWriter {
         self.writer.sync_data().await
     }
 
+    async fn sync_all(&mut self) -> Result<()> {
+        self.flush_cache().await?;
+        self.writer.sync_all().await
+    }
+
     async fn len(&self) -> Result<u64> {
         if !self.opened {
             if let Some(size) = self.total_size {

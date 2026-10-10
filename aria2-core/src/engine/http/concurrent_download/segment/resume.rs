@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::error::Result;
 use crate::filesystem::control_file::ControlFile;
-use crate::filesystem::disk_writer::CachedDiskWriter;
+use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -113,9 +113,27 @@ pub(super) async fn prepare(
     }
 
     if let Some(control_file) = ctrl_file.as_mut() {
-        control_file.update_completed_length(completed_bytes);
-        if let Err(error) = control_file.save().await {
-            tracing::warn!("Failed to save initial control file: {}", error);
+        let payload_ready =
+            if completed_bytes > 0 && completed_bytes != control_file.completed_length() {
+                match writer.sync_all().await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::debug!(
+                            completed_bytes,
+                            %error,
+                            "Not persisting an initial checkpoint for an unsynced resume prefix"
+                        );
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+        if payload_ready {
+            control_file.update_completed_length(completed_bytes);
+            if let Err(error) = control_file.save().await {
+                tracing::warn!("Failed to save initial control file: {}", error);
+            }
         }
     }
     let ctrl_save_interval = total_length / num_pieces as u64;

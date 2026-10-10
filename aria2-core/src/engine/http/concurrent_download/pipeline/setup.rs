@@ -4,7 +4,7 @@ use crate::constants;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
-use crate::filesystem::disk_writer::CachedDiskWriter;
+use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::DownloadOptions;
@@ -239,9 +239,28 @@ pub(super) async fn prepare(
     dl.progress.set_completed_length(restored_bytes);
 
     if let Some(control_file) = ctrl_file.as_mut() {
-        control_file.update_completed_length(restored_bytes);
-        if let Err(error) = control_file.save().await {
-            tracing::warn!(%error, "Failed to save initial multi-mirror control file");
+        let payload_ready = if restored_bytes > 0
+            && restored_bytes != control_file.completed_length()
+        {
+            match writer.sync_all().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::debug!(
+                        restored_bytes,
+                        %error,
+                        "Not persisting an initial multi-mirror checkpoint for an unsynced resume prefix"
+                    );
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if payload_ready {
+            control_file.update_completed_length(restored_bytes);
+            if let Err(error) = control_file.save().await {
+                tracing::warn!(%error, "Failed to save initial multi-mirror control file");
+            }
         }
     }
     flush_requested_control_file(

@@ -173,7 +173,7 @@ pub(super) async fn flush_requested_control_file(
         return Ok(());
     }
 
-    writer.sync_data().await.map_err(|error| {
+    writer.sync_all().await.map_err(|error| {
         Aria2Error::FileIo(format!(
             "Failed to durably sync requested concurrent checkpoint payload: {error}"
         ))

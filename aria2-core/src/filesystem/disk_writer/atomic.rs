@@ -4,7 +4,7 @@
 //! - [`ByteArrayDiskWriter`] - in-memory byte buffer writer (no I/O)
 
 use super::DiskWriter;
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -14,6 +14,7 @@ pub struct DefaultDiskWriter {
     path: std::path::PathBuf,
     file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
     write_offset: Option<u64>,
+    namespace_sync: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
 impl DefaultDiskWriter {
@@ -22,6 +23,7 @@ impl DefaultDiskWriter {
             path: path.to_path_buf(),
             file: None,
             write_offset: None,
+            namespace_sync: None,
         }
     }
 
@@ -34,7 +36,49 @@ impl DefaultDiskWriter {
             path: path.to_path_buf(),
             file: None,
             write_offset: Some(offset),
+            namespace_sync: None,
         }
+    }
+
+    fn start_namespace_sync(&mut self) {
+        if self.namespace_sync.is_none() {
+            let path = self.path.clone();
+            self.namespace_sync = Some(tokio::spawn(async move {
+                crate::filesystem::durability::sync_parent_directories(&path).await
+            }));
+        }
+    }
+
+    async fn finish_namespace_sync(&mut self) -> Result<()> {
+        if let Some(sync) = self.namespace_sync.take() {
+            sync.await.map_err(|error| {
+                Aria2Error::Io(format!("directory sync task failed: {error}"))
+            })??;
+        }
+        Ok(())
+    }
+
+    async fn sync_file(&self, include_metadata: bool) -> Result<()> {
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        use std::io::Write;
+                        let mut file = file
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        file.flush().map_err(crate::error::Aria2Error::from)?;
+                        if include_metadata {
+                            file.sync_all().map_err(crate::error::Aria2Error::from)
+                        } else {
+                            file.sync_data().map_err(crate::error::Aria2Error::from)
+                        }
+                    },
+                    "sequential writer sync",
+                )
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -63,6 +107,7 @@ impl DiskWriter for DefaultDiskWriter {
                 )
                 .await?;
             self.file = Some(std::sync::Arc::new(std::sync::Mutex::new(file)));
+            self.start_namespace_sync();
         }
         if let Some(file) = self.file.as_ref().cloned() {
             let data = data.to_vec();
@@ -93,40 +138,21 @@ impl DiskWriter for DefaultDiskWriter {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        if let Some(file) = self.file.as_ref().cloned() {
-            crate::filesystem::disk_io_pool::shared()
-                .run(
-                    move || {
-                        use std::io::Write;
-                        let mut file = file
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        file.flush().map_err(crate::error::Aria2Error::from)?;
-                        file.sync_data().map_err(crate::error::Aria2Error::from)
-                    },
-                    "sequential writer flush",
-                )
-                .await?;
-        }
-        Ok(())
+        self.sync_file(true).await?;
+        self.finish_namespace_sync().await
+    }
+
+    async fn sync_data(&mut self) -> Result<()> {
+        self.sync_file(false).await?;
+        self.finish_namespace_sync().await
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {
-        if let Some(file) = self.file.take() {
-            crate::filesystem::disk_io_pool::shared()
-                .run(
-                    move || {
-                        use std::io::Write;
-                        let mut file = file
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        file.flush().map_err(crate::error::Aria2Error::from)?;
-                        file.sync_all().map_err(crate::error::Aria2Error::from)
-                    },
-                    "sequential writer finalize",
-                )
-                .await?;
+        if self.file.is_some() {
+            self.sync_file(true).await?;
         }
+        self.file.take();
+        self.finish_namespace_sync().await?;
         Ok(vec![])
     }
 }
@@ -171,6 +197,10 @@ impl DiskWriter for ByteArrayDiskWriter {
     }
 
     async fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn sync_data(&mut self) -> Result<()> {
         Ok(())
     }
 

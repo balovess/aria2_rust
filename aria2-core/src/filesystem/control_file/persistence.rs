@@ -293,11 +293,15 @@ impl ControlFile {
         file.write_all(&extension)
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
+        // The staged checkpoint's bytes and metadata must be durable before
+        // its name can become the checkpoint visible to resume.
         file.sync_all()
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
         drop(file);
-        tokio::fs::rename(&tmp_path, &self.path)
+        // Persist the rename itself as well: POSIX synchronizes the containing
+        // directory chain; Windows uses MOVEFILE_WRITE_THROUGH.
+        crate::filesystem::durability::replace_file(&tmp_path, &self.path)
             .await
             .map_err(|e| Aria2Error::Io(e.to_string()))?;
         Ok(())

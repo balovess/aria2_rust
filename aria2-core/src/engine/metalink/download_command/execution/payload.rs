@@ -279,7 +279,10 @@ async fn truncate_output(path: &Path) -> Result<()> {
         .open(path)
         .await
         .map_err(|error| Aria2Error::FileIo(error.to_string()))?;
-    file.sync_data()
+    file.sync_all()
+        .await
+        .map_err(|error| Aria2Error::FileIo(error.to_string()))?;
+    crate::filesystem::durability::sync_parent_directories(path)
         .await
         .map_err(|error| Aria2Error::FileIo(error.to_string()))
 }

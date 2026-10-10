@@ -141,7 +141,7 @@ impl BtDownloadCommand {
         {
             self.sync_dirty_multi_file_payload().await
         } else {
-            writer.sync_data().await.map_err(|error| {
+            writer.sync_all().await.map_err(|error| {
                 Aria2Error::FileIo(format!(
                     "Failed to durably sync BitTorrent checkpoint payload: {error}"
                 ))
@@ -181,7 +181,7 @@ impl BtDownloadCommand {
                     file_path.display()
                 ))
             })?;
-            let sync_result = file_writer.sync_data().await;
+            let sync_result = file_writer.sync_all().await;
             let close_result = file_writer
                 .close_without_sync("BT checkpoint file close")
                 .await;
@@ -327,6 +327,10 @@ mod tests {
         }
 
         async fn sync_data(&mut self) -> Result<()> {
+            self.inner.sync_data().await
+        }
+
+        async fn sync_all(&mut self) -> Result<()> {
             self.sync_calls.fetch_add(1, Ordering::SeqCst);
             self.sync_preceded_checkpoint
                 .store(!self.checkpoint_path.exists(), Ordering::SeqCst);
@@ -335,7 +339,7 @@ mod tests {
                     "injected payload sync failure".into(),
                 ));
             }
-            self.inner.sync_data().await
+            self.inner.sync_all().await
         }
 
         async fn len(&self) -> Result<u64> {

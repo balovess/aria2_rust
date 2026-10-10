@@ -52,10 +52,20 @@ pub fn new_sequential_download_writer(
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
 
-    /// Flush prior writes through the file-backed writer's stable-storage
-    /// barrier. In-memory writers may implement this as a no-op because they
-    /// do not provide crash-recoverable output.
+    /// Flush prior writes through the file and namespace durability barriers.
+    /// In-memory writers may implement this as a no-op because they do not
+    /// provide crash-recoverable output.
     async fn flush(&mut self) -> Result<()>;
+
+    /// Synchronize file contents before a checkpoint is persisted.
+    ///
+    /// The output's initial directory entry must also be durable before this
+    /// method returns. Implementations that cannot separate the two barriers
+    /// may use the stronger `flush` operation.
+    async fn sync_data(&mut self) -> Result<()> {
+        self.flush().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
@@ -67,6 +77,10 @@ impl DiskWriter for Box<dyn DiskWriter> {
 
     async fn flush(&mut self) -> Result<()> {
         self.as_mut().flush().await
+    }
+
+    async fn sync_data(&mut self) -> Result<()> {
+        self.as_mut().sync_data().await
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {
@@ -94,16 +108,24 @@ pub trait SeekableDiskWriter: Send + Sync {
     async fn truncate(&mut self, length: u64) -> Result<()>;
     async fn flush(&mut self) -> Result<()>;
 
-    /// Push written data to stable storage without releasing the writer.
+    /// Synchronize file contents without releasing the writer.
     ///
     /// `flush` only makes data visible through the operating-system page
-    /// cache. Call this before persisting metadata that claims the payload is
-    /// recoverable. Implementations that cannot provide this guarantee must
-    /// keep the default error rather than silently treating a page-cache
-    /// flush as durable.
+    /// cache. This method may leave file metadata and its directory entries
+    /// unsynchronized; use `sync_all` before persisting a checkpoint.
     async fn sync_data(&mut self) -> Result<()> {
         Err(Aria2Error::Io(
             "durable data synchronization is unsupported by this writer".into(),
+        ))
+    }
+
+    /// Synchronize file contents and metadata, and use the platform's
+    /// namespace barrier for the path before persisting a checkpoint that
+    /// claims this payload is complete. Implementations that cannot provide
+    /// this guarantee must return an error.
+    async fn sync_all(&mut self) -> Result<()> {
+        Err(Aria2Error::Io(
+            "durable file and namespace synchronization is unsupported by this writer".into(),
         ))
     }
 
@@ -141,6 +163,9 @@ impl SeekableDiskWriter for Box<dyn SeekableDiskWriter> {
     }
     async fn sync_data(&mut self) -> Result<()> {
         self.as_mut().sync_data().await
+    }
+    async fn sync_all(&mut self) -> Result<()> {
+        self.as_mut().sync_all().await
     }
     async fn len(&self) -> Result<u64> {
         self.as_ref().len().await

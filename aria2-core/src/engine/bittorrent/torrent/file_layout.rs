@@ -250,6 +250,22 @@ impl MultiFileLayout {
         Ok(())
     }
 
+    pub(crate) async fn create_directories_durable(&self) -> Result<(), String> {
+        for (i, file) in self.files.iter().enumerate() {
+            if let Some(parent) = file.absolute_path.parent() {
+                crate::filesystem::durability::create_directories(parent)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Failed to durably create directory {:?} for file[{}] {:?}: {}",
+                            parent, i, file.path, error
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn resolve_file_offset(
         &self,
         piece_idx: u32,

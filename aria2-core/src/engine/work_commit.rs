@@ -111,9 +111,9 @@ impl SequentialWorkCommitter<'_> {
         if let Some(checkpoint) = self.checkpoint.as_mut() {
             let save_requested = self.group.recover().take_save_control_file_request();
             if checkpoint.needs_update(*self.completed_bytes, save_requested) {
-                // DiskWriter::flush is the stable-storage barrier for file
-                // writers. Sync only when a resumable checkpoint will advance.
-                self.writer.flush().await?;
+                // Sync the payload bytes before advancing its sibling sidecar.
+                // The sidecar replacement persists their shared directory.
+                self.writer.sync_data().await?;
             }
             checkpoint
                 .update(*self.completed_bytes, save_requested)

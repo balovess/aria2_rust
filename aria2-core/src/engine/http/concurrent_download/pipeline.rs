@@ -375,7 +375,7 @@ pub async fn execute_with_coordinator(
                         );
                         let mut payload_synced = false;
                         if parent_complete {
-                            writer.sync_data().await.map_err(|error| {
+                            writer.sync_all().await.map_err(|error| {
                                 Aria2Error::FileIo(format!(
                                     "Failed to durably sync completed HTTP range: {error}"
                                 ))
@@ -390,7 +390,7 @@ pub async fn execute_with_coordinator(
                                 ctrl_bytes_since_save.saturating_add(bytes_downloaded);
                             if ctrl_bytes_since_save >= ctrl_save_interval {
                                 if !payload_synced {
-                                    writer.sync_data().await.map_err(|error| {
+                                    writer.sync_all().await.map_err(|error| {
                                         Aria2Error::FileIo(format!(
                                             "Failed to durably sync HTTP range checkpoint payload: {error}"
                                         ))
