@@ -156,20 +156,27 @@ impl ProgressCheckpoint {
             .map(|control_file| control_file.total_length())
     }
 
+    /// Whether an update would advance the saved length.
+    pub(crate) fn needs_update(&self, completed_length: u64, force: bool) -> bool {
+        let Some(control_file) = self.control_file.as_ref() else {
+            return false;
+        };
+        let completed_length = completed_length.min(control_file.total_length());
+        force || completed_length.saturating_sub(self.last_saved_length) >= CHECKPOINT_SAVE_INTERVAL
+    }
+
     /// Save progress when the batch threshold is reached, or immediately
     /// when `force` is used for a cancellation or terminal lifecycle edge.
+    /// Callers must durably sync the payload before advancing this checkpoint.
     pub(crate) async fn update(&mut self, completed_length: u64, force: bool) {
+        if !self.needs_update(completed_length, force) {
+            return;
+        }
         let Some(control_file) = self.control_file.as_mut() else {
             return;
         };
 
         let completed_length = completed_length.min(control_file.total_length());
-        if !force
-            && completed_length.saturating_sub(self.last_saved_length) < CHECKPOINT_SAVE_INTERVAL
-        {
-            return;
-        }
-
         control_file.update_completed_length(completed_length);
         self.save().await;
     }

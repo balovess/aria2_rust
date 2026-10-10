@@ -33,9 +33,13 @@ pub(super) async fn finalize_cancelled_download(
     completed_bytes: u64,
 ) {
     // Finalize before persisting progress so the control file never claims
-    // bytes that are still only buffered in the writer.
+    // bytes that are still only buffered in the writer or page cache.
     if let Err(error) = writer.finalize().await {
-        tracing::warn!("Sequential: finalize on cancellation failed: {}", error);
+        tracing::warn!(
+            "Sequential: output was not durably finalized on cancellation; retaining the previous checkpoint: {}",
+            error
+        );
+        return;
     }
     if let Some(control_file) = control_file {
         control_file.update_completed_length(completed_bytes);

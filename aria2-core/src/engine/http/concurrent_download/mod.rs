@@ -173,9 +173,9 @@ pub(super) async fn flush_requested_control_file(
         return Ok(());
     }
 
-    writer.flush().await.map_err(|error| {
+    writer.sync_data().await.map_err(|error| {
         Aria2Error::FileIo(format!(
-            "Failed to flush requested concurrent checkpoint: {error}"
+            "Failed to durably sync requested concurrent checkpoint payload: {error}"
         ))
     })?;
     if let Some(control_file) = control_file.as_mut() {

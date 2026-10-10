@@ -10,7 +10,7 @@ use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::info;
 
-use super::piece_storage::{in_flight_snapshot, persist_received_block};
+use super::piece_storage::{in_flight_snapshot, stage_received_block};
 use super::{PieceDownloadSession, PieceLoopAction};
 
 impl PieceDownloadSession<'_> {
@@ -160,7 +160,7 @@ impl PieceDownloadSession<'_> {
                     result = &mut piece_download => break Some(result),
                     block = block_receiver.recv() => {
                         if let Some(block) = block {
-                            persist_received_block(
+                            stage_received_block(
                                 writer,
                                 layout,
                                 &piece_lengths,
@@ -179,7 +179,7 @@ impl PieceDownloadSession<'_> {
                 }
             };
             while let Ok(block) = block_receiver.try_recv() {
-                persist_received_block(
+                stage_received_block(
                     writer,
                     layout,
                     &piece_lengths,
@@ -327,7 +327,7 @@ impl PieceDownloadSession<'_> {
                     result = &mut batch_download => break Some(result),
                     block = block_receiver.recv() => {
                         if let Some(block) = block {
-                            persist_received_block(
+                            stage_received_block(
                                 writer,
                                 layout,
                                 &piece_lengths,
@@ -346,7 +346,7 @@ impl PieceDownloadSession<'_> {
                 }
             };
             while let Ok(block) = block_receiver.try_recv() {
-                persist_received_block(
+                stage_received_block(
                     writer,
                     layout,
                     &piece_lengths,

@@ -7,7 +7,7 @@ use crate::filesystem::disk_writer::CachedDiskWriter;
 use crate::rate_limiter::RateLimiter;
 
 use super::super::ConcurrentDownloader;
-use super::super::range_commit::{HttpRangeCommitOptions, commit_http_range_chunk};
+use super::super::range_commit::{HttpRangeCommitOptions, write_http_range_chunk};
 
 pub(super) async fn drain_write_chunks(
     downloader: &ConcurrentDownloader,
@@ -19,7 +19,7 @@ pub(super) async fn drain_write_chunks(
     error_context: &str,
 ) -> Result<()> {
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-        commit_http_range_chunk(
+        write_http_range_chunk(
             downloader,
             writer,
             limiter,

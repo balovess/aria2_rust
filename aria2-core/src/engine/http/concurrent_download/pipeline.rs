@@ -13,10 +13,11 @@ use crate::engine::work_scheduler::{
     RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduleError, WorkScheduler,
 };
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::range_commit::{HttpRangeCommitOptions, commit_http_range_chunk};
+use super::range_commit::{HttpRangeCommitOptions, write_http_range_chunk};
 use super::{ConcurrentDownloadResult, ConcurrentDownloader, flush_requested_control_file};
 
 mod finalize;
@@ -253,7 +254,7 @@ pub async fn execute_with_coordinator(
         }
 
         while let Ok(chunk) = write_rx.try_recv() {
-            commit_http_range_chunk(
+            write_http_range_chunk(
                 dl,
                 &mut writer,
                 limiter.as_ref(),
@@ -372,6 +373,15 @@ pub async fn execute_with_coordinator(
                             bytes_downloaded,
                             elapsed,
                         );
+                        let mut payload_synced = false;
+                        if parent_complete {
+                            writer.sync_data().await.map_err(|error| {
+                                Aria2Error::FileIo(format!(
+                                    "Failed to durably sync completed HTTP range: {error}"
+                                ))
+                            })?;
+                            payload_synced = true;
+                        }
                         if let Some(control_file) = ctrl_file.as_mut() {
                             if parent_complete {
                                 control_file.mark_piece_done(seg_idx as usize);
@@ -379,6 +389,13 @@ pub async fn execute_with_coordinator(
                             ctrl_bytes_since_save =
                                 ctrl_bytes_since_save.saturating_add(bytes_downloaded);
                             if ctrl_bytes_since_save >= ctrl_save_interval {
+                                if !payload_synced {
+                                    writer.sync_data().await.map_err(|error| {
+                                        Aria2Error::FileIo(format!(
+                                            "Failed to durably sync HTTP range checkpoint payload: {error}"
+                                        ))
+                                    })?;
+                                }
                                 control_file.update_completed_length(coordinator.completed_bytes());
                                 if let Err(error) = control_file.save().await {
                                     tracing::warn!(%error, "Failed to save multi-mirror control file");
@@ -575,7 +592,7 @@ pub async fn execute_with_coordinator(
                 .await?;
             }
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
-                commit_http_range_chunk(
+                write_http_range_chunk(
                     dl,
                     &mut writer,
                     limiter.as_ref(),

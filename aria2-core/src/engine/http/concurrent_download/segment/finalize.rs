@@ -43,9 +43,9 @@ pub(super) async fn finish(
         "",
     )
     .await?;
-    writer.flush().await.map_err(|error| {
+    writer.sync_data().await.map_err(|error| {
         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-            "Flush failed: {error}"
+            "Durable output sync failed: {error}"
         )))
     })?;
 

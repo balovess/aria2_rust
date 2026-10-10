@@ -208,6 +208,7 @@ impl BtDownloadCommand {
         bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
         piece_bytes: u64,
         in_flight_pieces: &[crate::filesystem::control_file::ControlFileInFlightPiece],
+        payload_already_synced: bool,
     ) -> Result<()> {
         let save_requested = self.group.recover().is_save_control_file_requested();
         if self.checkpoint.is_none() {
@@ -233,13 +234,17 @@ impl BtDownloadCommand {
 
         // Persist payload bytes before the bitfield so a restored checkpoint
         // never advertises data that is still only in memory or page cache.
-        self.sync_checkpoint_payload(writer)
-            .await
-            .map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to sync BitTorrent checkpoint payload: {error}"
-                ))
-            })?;
+        // Piece commits sync before updating live completion state; other
+        // checkpoint callers pass `false` and establish the barrier here.
+        if !payload_already_synced {
+            self.sync_checkpoint_payload(writer)
+                .await
+                .map_err(|error| {
+                    Aria2Error::FileIo(format!(
+                        "Failed to sync BitTorrent checkpoint payload: {error}"
+                    ))
+                })?;
+        }
 
         let save_started = std::time::Instant::now();
         let checkpoint = self
@@ -422,6 +427,7 @@ mod tests {
                 &Arc::new(std::sync::RwLock::new(vec![0x80])),
                 u64::from(piece_length),
                 &[],
+                false,
             )
             .await
             .expect("payload sync and checkpoint should succeed");
@@ -452,6 +458,7 @@ mod tests {
                 &Arc::new(std::sync::RwLock::new(vec![0x80])),
                 u64::from(piece_length),
                 &[],
+                false,
             )
             .await;
 

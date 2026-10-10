@@ -1,125 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::bittorrent::peer::message_handler::types::{BLOCK_SIZE, ReceivedPieceBlock};
-use crate::engine::work_commit::{
-    PositionedDiskCommitter, PositionedOutput, WorkCommitOutcome, WorkCommitter, WorkValidation,
-    commit_work_result,
-};
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFileInFlightPiece;
 use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 use super::PieceDownloadSession;
 
-struct BtBlockCommitter<'a> {
-    writer: &'a mut Box<dyn SeekableDiskWriter>,
-    layout: Option<&'a crate::engine::bittorrent::torrent::file_layout::MultiFileLayout>,
-    piece_lengths: &'a HashMap<u32, u32>,
-    in_flight: &'a mut HashMap<u32, ControlFileInFlightPiece>,
-    dirty_multi_file_indices: &'a mut HashSet<usize>,
-    max_open_files: usize,
-    validated_block: Option<(u32, u32, u32, usize)>,
-}
-
-#[async_trait::async_trait]
-impl WorkCommitter for BtBlockCommitter<'_> {
-    type Output = ReceivedPieceBlock;
-
-    async fn validate(&mut self, block: &mut Self::Output) -> Result<WorkValidation> {
-        let Some(&piece_length) = self.piece_lengths.get(&block.piece_index) else {
-            return Ok(WorkValidation::Rejected);
-        };
-        let block_count = piece_length.div_ceil(BLOCK_SIZE);
-        let expected_offset = block.block_index.saturating_mul(BLOCK_SIZE);
-        let expected_length = (piece_length.saturating_sub(expected_offset)).min(BLOCK_SIZE);
-        if block.block_index >= block_count
-            || block.offset != expected_offset
-            || block.data.len() != expected_length as usize
-        {
-            return Err(Aria2Error::Network(format!(
-                "Invalid received block layout for piece {} block {}",
-                block.piece_index, block.block_index
-            )));
-        }
-        self.validated_block = Some((
-            block.piece_index,
-            piece_length,
-            block.block_index,
-            (block_count as usize).div_ceil(8),
-        ));
-        Ok(WorkValidation::Accepted)
-    }
-
-    async fn write(&mut self, block: Self::Output) -> Result<u64> {
-        let piece_length = self
-            .validated_block
-            .map(|(_, piece_length, _, _)| piece_length)
-            .ok_or_else(|| Aria2Error::Network("unvalidated BitTorrent block".into()))?;
-        let data_length = block.data.len() as u64;
-        if let Some(layout) = self.layout {
-            let touched_files =
-                crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
-                    layout,
-                    block.piece_index,
-                    block.offset,
-                    &block.data,
-                    self.max_open_files,
-                )
-                .await?;
-            self.dirty_multi_file_indices.extend(touched_files);
-        } else {
-            let global_offset =
-                u64::from(block.piece_index) * u64::from(piece_length) + u64::from(block.offset);
-            let mut committer = PositionedDiskCommitter::new(self.writer.as_mut());
-            match commit_work_result(
-                &mut committer,
-                PositionedOutput {
-                    offset: global_offset,
-                    data: block.data,
-                },
-            )
-            .await?
-            {
-                WorkCommitOutcome::Committed => {}
-                WorkCommitOutcome::Rejected => {
-                    return Err(Aria2Error::Network(
-                        "BitTorrent block output rejected validated data".into(),
-                    ));
-                }
-            }
-        }
-        Ok(data_length)
-    }
-
-    async fn checkpoint(&mut self, _committed_bytes: u64) -> Result<()> {
-        let Some((piece_index, piece_length, block_index, bitfield_len)) =
-            self.validated_block.take()
-        else {
-            return Err(Aria2Error::Network(
-                "BitTorrent block checkpoint has no validated block".into(),
-            ));
-        };
-        let record =
-            self.in_flight
-                .entry(piece_index)
-                .or_insert_with(|| ControlFileInFlightPiece {
-                    index: piece_index,
-                    length: piece_length,
-                    bitfield: vec![0; bitfield_len],
-                });
-        if record.length != piece_length || record.bitfield.len() != bitfield_len {
-            *record = ControlFileInFlightPiece {
-                index: piece_index,
-                length: piece_length,
-                bitfield: vec![0; bitfield_len],
-            };
-        }
-        record.bitfield[block_index as usize / 8] |= 1 << (7 - block_index % 8);
-        Ok(())
-    }
-}
-
-pub(super) async fn persist_received_block(
+pub(super) async fn stage_received_block(
     writer: &mut Box<dyn SeekableDiskWriter>,
     layout: Option<&crate::engine::bittorrent::torrent::file_layout::MultiFileLayout>,
     piece_lengths: &HashMap<u32, u32>,
@@ -128,18 +16,61 @@ pub(super) async fn persist_received_block(
     max_open_files: usize,
     block: ReceivedPieceBlock,
 ) -> Result<()> {
-    let mut committer = BtBlockCommitter {
-        writer,
-        layout,
-        piece_lengths,
-        in_flight,
-        dirty_multi_file_indices,
-        max_open_files,
-        validated_block: None,
+    let Some(&piece_length) = piece_lengths.get(&block.piece_index) else {
+        return Ok(());
     };
-    match commit_work_result(&mut committer, block).await? {
-        WorkCommitOutcome::Committed | WorkCommitOutcome::Rejected => Ok(()),
+    let block_count = piece_length.div_ceil(BLOCK_SIZE);
+    let expected_offset = block.block_index.saturating_mul(BLOCK_SIZE);
+    let expected_length = (piece_length.saturating_sub(expected_offset)).min(BLOCK_SIZE);
+    if block.block_index >= block_count
+        || block.offset != expected_offset
+        || block.data.len() != expected_length as usize
+    {
+        return Err(Aria2Error::Network(format!(
+            "Invalid received block layout for piece {} block {}",
+            block.piece_index, block.block_index
+        )));
     }
+
+    let piece_index = block.piece_index;
+    let block_index = block.block_index;
+    let offset = block.offset;
+    if let Some(layout) = layout {
+        let touched_files =
+            crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
+                layout,
+                piece_index,
+                offset,
+                &block.data,
+                max_open_files,
+            )
+            .await?;
+        dirty_multi_file_indices.extend(touched_files);
+    } else {
+        let global_offset = u64::from(piece_index) * u64::from(piece_length) + u64::from(offset);
+        writer.write_bytes_at(global_offset, block.data).await?;
+    }
+
+    // These blocks are staged until the complete piece passes its hash. The
+    // in-flight bitmap is only written to a checkpoint after its payload has
+    // crossed the stable-storage barrier in the checkpoint path.
+    let bitfield_len = (block_count as usize).div_ceil(8);
+    let record = in_flight
+        .entry(piece_index)
+        .or_insert_with(|| ControlFileInFlightPiece {
+            index: piece_index,
+            length: piece_length,
+            bitfield: vec![0; bitfield_len],
+        });
+    if record.length != piece_length || record.bitfield.len() != bitfield_len {
+        *record = ControlFileInFlightPiece {
+            index: piece_index,
+            length: piece_length,
+            bitfield: vec![0; bitfield_len],
+        };
+    }
+    record.bitfield[block_index as usize / 8] |= 1 << (7 - block_index % 8);
+    Ok(())
 }
 
 pub(super) fn in_flight_snapshot(

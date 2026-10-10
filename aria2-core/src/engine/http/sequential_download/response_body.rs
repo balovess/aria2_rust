@@ -1,9 +1,6 @@
 use futures::StreamExt;
 
 use crate::constants;
-use crate::engine::work_commit::{
-    WorkCommitOutcome, WorkCommitter, WorkValidation, commit_work_result,
-};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
@@ -14,7 +11,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::SequentialDownloader;
 use super::download_flow::finalize_cancelled_download;
 
-struct HttpResponseBodyCommitter<'a> {
+struct HttpResponseBodySink<'a> {
     downloader: &'a SequentialDownloader,
     writer: &'a mut Box<dyn DiskWriter>,
     control_file: &'a mut Option<ControlFile>,
@@ -23,30 +20,29 @@ struct HttpResponseBodyCommitter<'a> {
     save_interval: u64,
 }
 
-#[async_trait::async_trait]
-impl WorkCommitter for HttpResponseBodyCommitter<'_> {
-    type Output = bytes::Bytes;
-
-    async fn validate(&mut self, _output: &mut Self::Output) -> Result<WorkValidation> {
-        Ok(WorkValidation::Accepted)
-    }
-
-    async fn write(&mut self, output: Self::Output) -> Result<u64> {
-        self.writer.write(&output).await?;
-        let committed_bytes = output.len() as u64;
-        *self.completed_bytes = self.completed_bytes.saturating_add(committed_bytes);
-        *self.bytes_since_save = self.bytes_since_save.saturating_add(committed_bytes);
-        Ok(committed_bytes)
-    }
-
-    async fn checkpoint(&mut self, _committed_bytes: u64) -> Result<()> {
+impl HttpResponseBodySink<'_> {
+    async fn write_chunk(&mut self, output: &bytes::Bytes) -> Result<()> {
+        self.writer.write(output).await?;
+        let written_bytes = output.len() as u64;
+        *self.completed_bytes = self.completed_bytes.saturating_add(written_bytes);
+        *self.bytes_since_save = self.bytes_since_save.saturating_add(written_bytes);
         let save_requested = self
             .downloader
             .flush_requested_control_file(self.writer, self.control_file, *self.completed_bytes)
             .await?;
-        if let Some(control_file) = self.control_file.as_mut()
-            && (save_requested || *self.bytes_since_save >= self.save_interval)
+        if save_requested {
+            *self.bytes_since_save = 0;
+        } else if let Some(control_file) = self.control_file.as_mut()
+            && *self.bytes_since_save >= self.save_interval
         {
+            // The control file must never claim a prefix that exists only in
+            // the page cache. This is a periodic durability barrier, not a
+            // per-network-chunk sync.
+            self.writer.flush().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to durably sync sequential HTTP checkpoint payload: {error}"
+                ))
+            })?;
             control_file.update_completed_length(*self.completed_bytes);
             if let Err(error) = control_file.save().await {
                 tracing::warn!("Sequential: control file save failed: {}", error);
@@ -232,8 +228,8 @@ impl SequentialDownloader {
             while offset < data.len() {
                 let end = (offset + write_piece).min(data.len());
                 let piece = data.slice(offset..end);
-                let commit_result = {
-                    let mut committer = HttpResponseBodyCommitter {
+                {
+                    let mut sink = HttpResponseBodySink {
                         downloader: self,
                         writer: &mut writer,
                         control_file: &mut ctrl_file,
@@ -241,12 +237,7 @@ impl SequentialDownloader {
                         bytes_since_save: &mut ctrl_bytes_since_save,
                         save_interval: ctrl_save_interval,
                     };
-                    commit_work_result(&mut committer, piece).await?
-                };
-                if matches!(commit_result, WorkCommitOutcome::Rejected) {
-                    return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                        "HTTP output rejected a source chunk".into(),
-                    )));
+                    sink.write_chunk(&piece).await?;
                 }
                 offset = end;
 

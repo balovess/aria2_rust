@@ -39,7 +39,7 @@ pub(super) async fn finish(
         executor.shutdown().await;
     }
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-        super::super::range_commit::commit_http_range_chunk(
+        super::super::range_commit::write_http_range_chunk(
             dl,
             writer,
             limiter,
@@ -54,9 +54,9 @@ pub(super) async fn finish(
         .await?;
     }
 
-    writer.flush().await.map_err(|e| {
+    writer.sync_data().await.map_err(|e| {
         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-            "Flush failed: {}",
+            "Durable output sync failed: {}",
             e
         )))
     })?;

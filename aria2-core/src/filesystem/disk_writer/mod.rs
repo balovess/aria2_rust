@@ -51,6 +51,10 @@ pub fn new_sequential_download_writer(
 #[async_trait]
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
+
+    /// Flush prior writes through the file-backed writer's stable-storage
+    /// barrier. In-memory writers may implement this as a no-op because they
+    /// do not provide crash-recoverable output.
     async fn flush(&mut self) -> Result<()>;
     async fn finalize(&mut self) -> Result<Vec<u8>>;
 }

@@ -4,9 +4,6 @@
 use futures::StreamExt;
 
 use crate::constants;
-use crate::engine::work_commit::{
-    PositionedDiskCommitter, PositionedOutput, WorkCommitOutcome, commit_work_result,
-};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::http::response::is_redirect_status;
@@ -228,41 +225,18 @@ impl SequentialDownloader {
                     gl.acquire_download(data_len).await;
                 }
 
-                let write_result = {
-                    let mut committer = PositionedDiskCommitter::new(&mut writer);
-                    commit_work_result(
-                        &mut committer,
-                        PositionedOutput {
-                            offset: stream_offset,
-                            data,
-                        },
-                    )
-                    .await
-                };
-                match write_result {
-                    Ok(WorkCommitOutcome::Committed) => {}
-                    Ok(WorkCommitOutcome::Rejected) => {
-                        Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
-                        return GapDownloadResult {
-                            completed_gaps,
-                            error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
-                                "HTTP gap output rejected a range chunk".into(),
-                            ))),
-                        };
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Write failed during gap download ({}), cleaning up partial data",
-                            range_header
-                        );
-                        Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
-                        return GapDownloadResult {
-                            completed_gaps,
-                            error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
-                                format!("Write failed: {}", e),
-                            ))),
-                        };
-                    }
+                if let Err(error) = writer.write_bytes_at(stream_offset, data).await {
+                    tracing::warn!(
+                        "Write failed during gap download ({}), cleaning up partial data",
+                        range_header
+                    );
+                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    return GapDownloadResult {
+                        completed_gaps,
+                        error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
+                            format!("Write failed: {}", error),
+                        ))),
+                    };
                 }
 
                 completed_bytes += data_len;
@@ -446,26 +420,12 @@ impl SequentialDownloader {
             return;
         }
         let zero_data = vec![0u8; bytes_written as usize];
-        let result = {
-            let mut committer = PositionedDiskCommitter::new(writer);
-            commit_work_result(
-                &mut committer,
-                PositionedOutput {
-                    offset: gap_start,
-                    data: bytes::Bytes::from(zero_data),
-                },
-            )
-            .await
-        };
-        if !matches!(result, Ok(WorkCommitOutcome::Committed)) {
+        if let Err(error) = writer.write_at(gap_start, &zero_data).await {
             tracing::warn!(
                 "Failed to cleanup partial gap at {} ({} bytes): {}",
                 gap_start,
                 bytes_written,
-                result
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "output rejected cleanup bytes".into())
+                error
             );
         }
     }

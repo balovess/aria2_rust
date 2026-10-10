@@ -17,6 +17,7 @@ use crate::engine::work_scheduler::{
     RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduleError, WorkScheduler,
 };
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -32,7 +33,7 @@ mod output;
 mod plan;
 mod resume;
 
-use super::range_commit::{HttpRangeCommitOptions, commit_http_range_chunk};
+use super::range_commit::{HttpRangeCommitOptions, write_http_range_chunk};
 pub(super) use cancel::cancel_and_persist;
 
 fn work_scheduler_error(context: &str, error: WorkScheduleError) -> Aria2Error {
@@ -400,14 +401,14 @@ pub async fn execute(
                                 )),
                             ));
                         };
+                        let mut payload_synced = false;
                         if parent_complete {
-                            work_queue
-                                .complete(work_lease)
-                                .map_err(|error| work_scheduler_error("complete a range", error))?;
-                        } else {
-                            work_queue
-                                .reschedule_after_success(work_lease)
-                                .map_err(|error| work_scheduler_error("reschedule a partial range", error))?;
+                            writer.sync_data().await.map_err(|error| {
+                                Aria2Error::FileIo(format!(
+                                    "Failed to durably sync completed HTTP range: {error}"
+                                ))
+                            })?;
+                            payload_synced = true;
                         }
                         completed_bytes += total_written;
 
@@ -419,12 +420,28 @@ pub async fn execute(
                             }
                             ctrl_bytes_since_save += total_written;
                             if ctrl_bytes_since_save >= ctrl_save_interval {
+                                if !payload_synced {
+                                    writer.sync_data().await.map_err(|error| {
+                                        Aria2Error::FileIo(format!(
+                                            "Failed to durably sync HTTP range checkpoint payload: {error}"
+                                        ))
+                                    })?;
+                                }
                                 cf.update_completed_length(completed_bytes);
                                 if let Err(e) = cf.save().await {
                                     tracing::warn!("Control file save failed: {}", e);
                                 }
                                 ctrl_bytes_since_save = 0;
                             }
+                        }
+                        if parent_complete {
+                            work_queue
+                                .complete(work_lease)
+                                .map_err(|error| work_scheduler_error("complete a range", error))?;
+                        } else {
+                            work_queue
+                                .reschedule_after_success(work_lease)
+                                .map_err(|error| work_scheduler_error("reschedule a partial range", error))?;
                         }
                         // Use the atomic total for progress updates so that
                         // in-flight progress from concurrent segments is not
@@ -606,7 +623,7 @@ pub async fn execute(
             }
             // A write chunk arrived while segments are still running
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
-                commit_http_range_chunk(
+                write_http_range_chunk(
                     dl,
                     &mut writer,
                     limiter.as_ref(),

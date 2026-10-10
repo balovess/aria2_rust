@@ -1,14 +1,19 @@
-//! Shared validation, output, and checkpoint ordering for scheduled work.
+//! Shared validation, durable output, and checkpoint ordering for work items.
 
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
 
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::error::Result;
-use crate::filesystem::disk_writer::{DiskWriter, SeekableDiskWriter};
+use crate::filesystem::disk_writer::DiskWriter;
 use crate::request::request_group::RequestGroup;
 use crate::util::rwlock_ext::RwLockRecover;
 
+/// The protocol- or format-specific validator's decision for one received item.
+///
+/// `Accepted` means only that this adapter's defined checks passed. It does not
+/// imply a cryptographic integrity check; adapters without a content hash must
+/// describe their framing, range, or length checks separately.
 pub(crate) enum WorkValidation {
     Accepted,
     Rejected,
@@ -16,15 +21,19 @@ pub(crate) enum WorkValidation {
 
 #[derive(Debug)]
 pub(crate) enum WorkCommitOutcome {
+    /// Returned only after output data crossed the stable-storage barrier and
+    /// the checkpoint stage succeeded.
     Committed,
     Rejected,
 }
 
 /// Source-independent commit lifecycle for a completed work item.
 ///
-/// Adapters supply the item's validation rule and storage/checkpoint handles;
-/// the core guarantees validation precedes writes and checkpoints only follow
-/// successful writes.
+/// The lifecycle is `Received → Validated → Written → Persisted → Committed`.
+/// Adapters supply validation rules and storage handles; `persist` must cross
+/// the storage backend's stable-storage barrier, not merely flush bytes into
+/// the operating-system page cache. The core invokes the stages in order and
+/// never checkpoints or reports `Committed` before persistence succeeds.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait WorkCommitter: Send {
@@ -33,6 +42,9 @@ pub(crate) trait WorkCommitter: Send {
     async fn validate(&mut self, output: &mut Self::Output) -> Result<WorkValidation>;
 
     async fn write(&mut self, output: Self::Output) -> Result<u64>;
+
+    /// Make all bytes written for this item stable before publishing completion.
+    async fn persist(&mut self, committed_bytes: u64) -> Result<()>;
 
     async fn checkpoint(&mut self, committed_bytes: u64) -> Result<()>;
 }
@@ -47,6 +59,7 @@ pub(crate) async fn commit_work_result<C: WorkCommitter>(
     }
 
     let committed_bytes = committer.write(output).await?;
+    committer.persist(committed_bytes).await?;
     committer.checkpoint(committed_bytes).await?;
     Ok(WorkCommitOutcome::Committed)
 }
@@ -97,47 +110,15 @@ impl SequentialWorkCommitter<'_> {
         }
         if let Some(checkpoint) = self.checkpoint.as_mut() {
             let save_requested = self.group.recover().take_save_control_file_request();
+            if checkpoint.needs_update(*self.completed_bytes, save_requested) {
+                // DiskWriter::flush is the stable-storage barrier for file
+                // writers. Sync only when a resumable checkpoint will advance.
+                self.writer.flush().await?;
+            }
             checkpoint
                 .update(*self.completed_bytes, save_requested)
                 .await;
         }
-        Ok(())
-    }
-}
-
-pub(crate) struct PositionedOutput {
-    pub(crate) offset: u64,
-    pub(crate) data: bytes::Bytes,
-}
-
-/// Core-owned positioned write for work sources that produce offset ranges.
-pub(crate) struct PositionedDiskCommitter<'a> {
-    writer: &'a mut dyn SeekableDiskWriter,
-}
-
-impl<'a> PositionedDiskCommitter<'a> {
-    pub(crate) fn new(writer: &'a mut dyn SeekableDiskWriter) -> Self {
-        Self { writer }
-    }
-}
-
-#[async_trait]
-impl WorkCommitter for PositionedDiskCommitter<'_> {
-    type Output = PositionedOutput;
-
-    async fn validate(&mut self, _output: &mut Self::Output) -> Result<WorkValidation> {
-        Ok(WorkValidation::Accepted)
-    }
-
-    async fn write(&mut self, output: Self::Output) -> Result<u64> {
-        let committed_bytes = output.data.len() as u64;
-        self.writer
-            .write_bytes_at(output.offset, output.data)
-            .await?;
-        Ok(committed_bytes)
-    }
-
-    async fn checkpoint(&mut self, _committed_bytes: u64) -> Result<()> {
         Ok(())
     }
 }
@@ -152,6 +133,7 @@ mod tests {
     struct FakeCommitter {
         valid: bool,
         fail_write: bool,
+        fail_persist: bool,
         events: Vec<&'static str>,
     }
 
@@ -176,6 +158,14 @@ mod tests {
             Ok(4)
         }
 
+        async fn persist(&mut self, _committed_bytes: u64) -> Result<()> {
+            self.events.push("persist");
+            if self.fail_persist {
+                return Err(Aria2Error::FileIo("fake persistence failure".into()));
+            }
+            Ok(())
+        }
+
         async fn checkpoint(&mut self, _committed_bytes: u64) -> Result<()> {
             self.events.push("checkpoint");
             Ok(())
@@ -187,6 +177,7 @@ mod tests {
         let mut committer = FakeCommitter {
             valid: false,
             fail_write: false,
+            fail_persist: false,
             events: Vec::new(),
         };
 
@@ -203,6 +194,7 @@ mod tests {
         let mut committer = FakeCommitter {
             valid: true,
             fail_write: false,
+            fail_persist: false,
             events: Vec::new(),
         };
 
@@ -211,7 +203,10 @@ mod tests {
             .unwrap();
 
         assert!(matches!(outcome, WorkCommitOutcome::Committed));
-        assert_eq!(committer.events, ["validate", "write", "checkpoint"]);
+        assert_eq!(
+            committer.events,
+            ["validate", "write", "persist", "checkpoint"]
+        );
     }
 
     #[tokio::test]
@@ -219,6 +214,7 @@ mod tests {
         let mut committer = FakeCommitter {
             valid: true,
             fail_write: true,
+            fail_persist: false,
             events: Vec::new(),
         };
 
@@ -228,5 +224,22 @@ mod tests {
 
         assert!(matches!(error, Aria2Error::FileIo(_)));
         assert_eq!(committer.events, ["validate", "write"]);
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_never_advances_the_checkpoint_or_commits() {
+        let mut committer = FakeCommitter {
+            valid: true,
+            fail_write: false,
+            fail_persist: true,
+            events: Vec::new(),
+        };
+
+        let error = commit_work_result(&mut committer, b"data".to_vec())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Aria2Error::FileIo(_)));
+        assert_eq!(committer.events, ["validate", "write", "persist"]);
     }
 }

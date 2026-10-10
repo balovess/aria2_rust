@@ -78,6 +78,17 @@ impl WorkCommitter for PieceWorkCommitter<'_, '_> {
                 data_length
             };
 
+        Ok(committed_bytes)
+    }
+
+    async fn persist(&mut self, _committed_bytes: u64) -> Result<()> {
+        self.session
+            .command
+            .sync_checkpoint_payload(&mut self.session.writer)
+            .await
+    }
+
+    async fn checkpoint(&mut self, committed_bytes: u64) -> Result<()> {
         self.session
             .piece_manager
             .mark_piece_complete(self.piece_index);
@@ -97,11 +108,6 @@ impl WorkCommitter for PieceWorkCommitter<'_, '_> {
             .group
             .recover()
             .update_bt_bitfield_piece(self.piece_index, self.session.num_pieces);
-
-        Ok(committed_bytes)
-    }
-
-    async fn checkpoint(&mut self, committed_bytes: u64) -> Result<()> {
         self.session
             .command
             .persist_checkpoint_after_piece(
@@ -109,6 +115,7 @@ impl WorkCommitter for PieceWorkCommitter<'_, '_> {
                 &self.session.completed_bitfield,
                 committed_bytes,
                 &in_flight_snapshot(&self.session.in_flight_pieces),
+                true,
             )
             .await?;
         self.session.swarm.set_wanted_pieces(Arc::from(

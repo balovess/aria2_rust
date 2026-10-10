@@ -32,9 +32,10 @@ adapter. Each protocol adapter constructs its command and owns the protocol
 setup it needs. The command supplies protocol-specific work items and request
 rules to the shared work core. `WorkScheduler` owns generic queueing, bounded
 admission, attempt counts, retry deadlines, and cancellation; `work_runner`
-drives single-item attempts; `work_commit` enforces validation-before-write and
-write-before-checkpoint ordering. Adapters supply source requests, retry
-classification, validation rules, and output/checkpoint handles. This keeps
+drives single-item attempts; `work_commit` enforces
+validation-before-write-before-stable-persistence-before-checkpoint ordering
+for complete work items. Adapters supply source requests, retry classification,
+validation rules, and output/checkpoint handles. This keeps
 transport and format policy with its source while the common work lifecycle is
 independent of HTTP, FTP, SFTP, BitTorrent, or Metalink types.
 
@@ -60,7 +61,7 @@ CLI / RPC / library API
   → protocol command
   → shared work scheduler / single-item runner
   → protocol source request and response
-  → shared work commit path: validation → output write → checkpoint
+  → source validation → output write → stable-storage barrier → checkpoint
   → request/piece completion and task result
 ```
 
@@ -81,14 +82,30 @@ delayed work, cancellation, and active-lease validation live in that module.
 logical item while allowing its adapter to classify source-specific errors and
 wait interruptibly on task lifecycle changes.
 
-Completed data crosses `engine::work_commit::WorkCommitter`. The core invokes
-validation first, invokes the output writer only for accepted data, and
-advances a checkpoint only after the write succeeds. Its fake adapters cover
-success, validation rejection, write failure, attempt exhaustion, retry, and
-cancellation without editing scheduler code. FTP, SFTP, HTTP response bodies,
-ranges and gap writes, BitTorrent blocks and pieces, and WebSeeds use this shared
-lifecycle; their request construction, source selection, and protocol-specific
-validation remain in their adapters.
+`engine::work_commit::WorkCommitter` is for complete work items whose adapter
+can define validation and persistence. Its order is received, validated,
+written, durably persisted, then committed. `Committed` requires a successful
+stable-storage barrier; a successful write into the operating-system page cache
+alone is not persistence. File-backed `DiskWriter::flush` and
+`SeekableDiskWriter::sync_data` are the barriers used by the corresponding
+paths. Checkpoint files are advanced only after payload sync succeeds.
+
+Validation is source-defined. HTTP status, Content-Range, offset, and expected
+body-length checks establish protocol correctness, but do not claim
+cryptographic integrity unless an explicit digest is available and verified.
+BitTorrent complete pieces are committed only after their v1/v2 piece hash is
+verified and payload data is durably synced. Received BitTorrent blocks are
+staged and may be structurally checked, but are not called committed pieces.
+HTTP range chunks are likewise intermediate writes; a range lease completes
+only after its output has crossed the stable-storage barrier. Streaming
+protocols use `SequentialWorkCommitter` and sync before advancing a resumable
+checkpoint. These paths keep network and protocol decisions outside the
+generic scheduler.
+
+Scheduler transition tests use the synchronous `WorkScheduler<T>` directly,
+injecting `Instant` values for retry deadlines. They require no network,
+filesystem, Tokio runtime, or wall-clock sleeps. Fake commit adapters separately
+verify that persistence failure cannot advance a checkpoint or report a commit.
 
 HTTP range/mirror coordination and BitTorrent peer/piece selection retain
 their domain policies. They choose which work items to offer and what source
@@ -99,10 +116,10 @@ retry admission.
 
 | Input | Core command path | Protocol implementation | Result path |
 |---|---|---|---|
-| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; range and sequential body chunks pass through `WorkCommitter` before output/checkpoint updates. HTTP mirror/range policy remains in the HTTP adapter. |
-| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | The adapter composes core DNS/address policy, proxy handling, FTP control flow, and lifecycle. `aria2-protocol::ftp::connection::control_io` shares injected control-stream reads/writes, `FtpActiveDataListener` shares active data acceptance, and `aria2-protocol::ftp::tls` supplies FTPS streams. Response and PASV/EPSV parsing policy stays with each source. | `SingleWorkAdapter` supplies attempts; both proxy and FTP data chunks pass through `SequentialWorkCommitter`, which writes, updates progress, and advances checkpoints. Whole-file checksum policy uses the shared checksum service. |
-| SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoint updates. Whole-file checksum policy uses the shared checksum service. |
-| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. `WorkCommitter` validates and writes staged blocks and complete pieces before checkpointing; BT-specific peer feedback and piece accounting remain in the adapter. |
+| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_data` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
+| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | The adapter composes core DNS/address policy, proxy handling, FTP control flow, and lifecycle. `aria2-protocol::ftp::connection::control_io` shares injected control-stream reads/writes, `FtpActiveDataListener` shares active data acceptance, and `aria2-protocol::ftp::tls` supplies FTPS streams. Response and PASV/EPSV parsing policy stays with each source. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
+| SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
+| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
 | Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
 
 ### HTTP assembly and transfer path
@@ -122,12 +139,14 @@ retry admission.
    selects its single-source scheduler or multi-mirror pipeline. Each path
    submits generic leases through `WorkScheduler`; `request_executor` runs
    `HttpSegmentDownloader` requests and sends offset-bearing response chunks
-   to the core commit interface, which writes and honors requested checkpoints.
+   to the HTTP output adapter. A range lease is completed only after `sync_data`
+   succeeds; requested checkpoint saves use the same payload barrier.
 6. Otherwise, or after concurrent fallback, `SequentialDownloader` streams the
-   response through `WorkCommitter`, which writes each accepted chunk and
-   updates the existing progress/control-file cadence. Gap filling retains its
-   range-specific planning and fallback behavior while positioned writes use
-   the same core commit interface. `DownloadCommand` then
+   response after HTTP status and body checks. These checks are protocol
+   validation, not cryptographic integrity validation. The output sink writes
+   chunks and syncs before advancing control-file checkpoints; finalization
+   establishes stable storage before task completion. Gap filling retains its
+   range-specific planning and fallback behavior. `DownloadCommand` then
    finalizes the request group.
 
 ### FTP/FTPS assembly and transfer path
@@ -156,7 +175,7 @@ retry admission.
    endpoint selection.
 6. `receive_data_transfer` passes source chunks through the core
    `SequentialWorkCommitter`, which writes through `DiskWriter`, updates request
-   progress, and advances the existing checkpoint. The HTTP proxy GET route
+   progress, and syncs payload before advancing the existing checkpoint. The HTTP proxy GET route
    uses the same committer. The command retains rate-limit setup, transfer-length
    policy, checksum configuration, and FTP completion handling.
 
@@ -189,8 +208,9 @@ boundaries; the standalone client is not an adapter around the engine command.
    file-operation error type.
 5. The engine stats and opens the remote file, reconciles the local length and
    checkpoint, then reads chunks at explicit offsets. It passes each chunk
-   through the core `SequentialWorkCommitter` for local writing, progress, and
-   checkpoint updates before final checksum verification and task completion.
+   through the core `SequentialWorkCommitter` for local writing and progress;
+   the payload is synced before checkpoint updates and final checksum
+   verification/task completion.
 
 `aria2-protocol::sftp::transfer::SftpTransfer` remains a public standalone
 transfer interface. It adds local-file I/O, configurable buffering, resume,
@@ -247,9 +267,11 @@ facade.
 4. `BtDownloadCommand::execute` prepares the torrent layout and integrity
    state, then coordinates tracker/DHT discovery, peer sessions, piece
    selection, and WebSeeds through `download::execute`. The piece source uses
-   the core `WorkScheduler` for work leases; `WorkCommitter` validates incoming
-   block layout before staging it, then verifies complete pieces before writing
-   payload data and persisting checkpoints.
+   the core `WorkScheduler` for work leases. Received blocks are staged after
+   layout checks; their in-flight checkpoint bits are published only after
+   payload sync. Complete pieces pass their v1/v2 hash validator, are written
+   and synced, then become live-complete and eligible for checkpoint publication
+   through `WorkCommitter`.
    Peer messages and transport use `aria2-protocol::bittorrent`; peer selection
    and bad-peer feedback remain BitTorrent-specific policy.
 5. Peer interaction selects uTP, MSE, or a plain TCP fallback from task

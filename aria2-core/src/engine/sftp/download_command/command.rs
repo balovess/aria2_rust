@@ -112,8 +112,13 @@ impl SftpDownloadCommand {
     }
 
     pub(super) async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
-        let _ = writer.finalize().await;
-        self.flush_checkpoint().await;
+        match writer.finalize().await {
+            Ok(_) => self.flush_checkpoint().await,
+            Err(error) => tracing::warn!(
+                %error,
+                "SFTP output was not durably finalized; retaining the previous checkpoint"
+            ),
+        }
     }
 
     pub(super) async fn flush_checkpoint(&mut self) {

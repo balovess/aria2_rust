@@ -94,8 +94,13 @@ impl MetalinkDownloadCommand {
     }
 
     async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
-        let _ = writer.finalize().await;
-        self.flush_checkpoint().await;
+        match writer.finalize().await {
+            Ok(_) => self.flush_checkpoint().await,
+            Err(error) => warn!(
+                %error,
+                "Metalink output was not durably finalized; retaining the previous checkpoint"
+            ),
+        }
     }
 
     async fn flush_checkpoint(&mut self) {
