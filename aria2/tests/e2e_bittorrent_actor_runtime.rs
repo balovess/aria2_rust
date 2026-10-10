@@ -41,9 +41,11 @@ fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
         request.to_string().as_bytes(),
     );
     assert_eq!(
-        response.status, 200,
-        "RPC HTTP response: {:?}",
-        response.headers
+        response.status,
+        200,
+        "RPC HTTP response for {method}: {:?}; body: {}",
+        response.headers,
+        String::from_utf8_lossy(&response.body)
     );
     let response: Value = serde_json::from_slice(&response.body).expect("RPC JSON response");
     assert!(response.get("error").is_none(), "RPC error: {response}");
@@ -2030,18 +2032,22 @@ async fn cli_restores_bt_metadata_and_verified_pieces_across_process_restart() {
     second_args.push(format!("--input-file={}", session_path.display()));
     let queries_before_restart = tracker.captured_queries().await.len();
     let second = RunningAria2::start_rpc(&second_args);
-    assert!(
-        tracker
-            .wait_for_query_count(queries_before_restart + 1, Duration::from_secs(5))
-            .await,
-        "restored process must send its initial tracker announce"
-    );
-    let queries_after_restart = tracker.captured_queries().await;
-    let resumed_started_announce = queries_after_restart[queries_before_restart..]
-        .iter()
-        .find(|query| query.contains("event=started"))
-        .expect("restored process must send event=started")
-        .as_str();
+    let announce_deadline = Instant::now() + Duration::from_secs(5);
+    let resumed_started_announce = loop {
+        let queries = tracker.captured_queries().await;
+        let new_queries = queries.get(queries_before_restart..).unwrap_or_default();
+        if let Some(announce) = new_queries
+            .iter()
+            .find(|query| query.contains("event=started"))
+        {
+            break announce.clone();
+        }
+        assert!(
+            Instant::now() < announce_deadline,
+            "restored process must send event=started; observed announces: {new_queries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     let tracker_parameter = |query: &str, name: &str| {
         query
             .split_once('?')
@@ -2053,12 +2059,12 @@ async fn cli_restores_bt_metadata_and_verified_pieces_across_process_restart() {
             .map(|(_, value)| value.to_owned())
     };
     assert_eq!(
-        tracker_parameter(resumed_started_announce, "downloaded"),
+        tracker_parameter(&resumed_started_announce, "downloaded"),
         Some("0".to_owned()),
         "tracker downloaded is the current process transfer count"
     );
     assert_eq!(
-        tracker_parameter(resumed_started_announce, "left"),
+        tracker_parameter(&resumed_started_announce, "left"),
         Some("16".to_owned()),
         "initial announce must report the 16 bytes remaining after piece restore: {resumed_started_announce}"
     );

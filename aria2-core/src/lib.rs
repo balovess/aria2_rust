@@ -165,6 +165,10 @@
 //! }
 //! ```
 
+// `async_trait` marks its boxed futures as `must_use`; Clippy 1.99 also sees
+// the wrapped `Result` and flags the generated trait methods as double-must-use.
+#![allow(clippy::double_must_use)]
+
 pub mod auth;
 pub mod c_api;
 pub mod checksum;

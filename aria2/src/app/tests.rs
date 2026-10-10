@@ -782,23 +782,45 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
         .expect("download listener should expose an address")
         .port();
     let download_server = tokio::spawn(async move {
-        let (mut stream, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            download_listener.accept(),
-        )
-        .await
-        .expect("download request should arrive")
-        .expect("download listener should accept");
-        let mut request = [0u8; 2048];
-        let bytes_read = stream
-            .read(&mut request)
+        loop {
+            let (mut stream, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                download_listener.accept(),
+            )
             .await
-            .expect("download request should be readable");
-        assert!(bytes_read > 0, "download request should not be empty");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
-            .await
-            .expect("download response should be writable");
+            .expect("download request should arrive")
+            .expect("download listener should accept");
+            let mut request = Vec::with_capacity(1024);
+            let mut chunk = [0u8; 2048];
+            loop {
+                let bytes_read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("download request should be readable");
+                assert!(bytes_read > 0, "download request should not be empty");
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let is_head = request.starts_with(b"HEAD ");
+            if is_head {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("HEAD response should be writable");
+            } else {
+                assert!(request.starts_with(b"GET "), "expected a GET request");
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+                    )
+                    .await
+                    .expect("GET response should be writable");
+                break;
+            }
+        }
     });
 
     let temp_dir = TempDir::new().expect("temporary config directory");
@@ -807,7 +829,7 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
     tokio::fs::write(
         &config_path,
         format!(
-            "enable-rpc=true\ndisable-ipv6=true\nrpc-listen-port={rpc_port}\nstop=1\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=1\n",
+            "enable-rpc=true\nenable-public-trackers=false\ndisable-ipv6=true\nrpc-listen-port={rpc_port}\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=5\n",
             temp_dir.path().display()
         ),
     )
@@ -823,15 +845,21 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
     .expect("download CLI arguments should parse");
 
     let mut app = App::new();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), app.run(cli))
-        .await
-        .expect("download should not hang");
+    let run_result = tokio::time::timeout(std::time::Duration::from_secs(2), app.run(cli)).await;
+    let server_finished = download_server.is_finished();
+    assert!(
+        run_result.is_ok(),
+        "application did not finish; local server completed the request: {server_finished}"
+    );
+    let result = run_result.expect("run result was checked above");
     download_server
         .await
         .expect("download server task should finish");
     assert_eq!(
-        result, 0,
-        "a CLI download must ignore enable-rpc from the shared config"
+        result,
+        0,
+        "a CLI download must ignore enable-rpc from the shared config; stopped results: {:?}",
+        app.request_man.get_stopped_results(0, usize::MAX)
     );
 }
 
@@ -1023,7 +1051,7 @@ async fn test_global_interface_reaches_lpd_multicast_interface() {
 async fn test_dual_stack_global_interface_selects_ipv4_lpd_source() {
     let mut app = App::new();
     app.load_cli_args(
-        CliArgs::try_parse_from(["aria2", "--multiple-interface=::1,127.0.0.2"])
+        CliArgs::try_parse_from(["aria2", "--multiple-interface=::1,127.0.0.1"])
             .expect("dual-stack interface list should parse through the CLI seam"),
     )
     .await
@@ -1036,7 +1064,7 @@ async fn test_dual_stack_global_interface_selects_ipv4_lpd_source() {
         .expect("the engine must be initialized for dual-stack LPD binding");
     assert_eq!(
         engine.lpd_manager().interface(),
-        Some("127.0.0.2".parse().unwrap()),
+        Some("127.0.0.1".parse().unwrap()),
         "IPv4-only LPD must select the IPv4 source from a dual-stack policy"
     );
 }
@@ -1048,8 +1076,8 @@ async fn test_explicit_lpd_interface_overrides_global_interface() {
     app.load_cli_args(
         CliArgs::try_parse_from([
             "aria2",
-            "--interface=127.0.0.1",
-            "--bt-lpd-interface=127.0.0.2",
+            "--interface=127.0.0.2",
+            "--bt-lpd-interface=127.0.0.1",
         ])
         .expect("both interface options should parse through the CLI seam"),
     )
@@ -1063,7 +1091,7 @@ async fn test_explicit_lpd_interface_overrides_global_interface() {
         .expect("the engine must be initialized for LPD binding");
     assert_eq!(
         engine.lpd_manager().interface(),
-        Some("127.0.0.2".parse().unwrap()),
+        Some("127.0.0.1".parse().unwrap()),
         "explicit bt-lpd-interface must retain precedence over global interface"
     );
 }

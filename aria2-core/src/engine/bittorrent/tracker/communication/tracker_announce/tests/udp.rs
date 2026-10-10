@@ -119,7 +119,12 @@ async fn dual_stack_policy_uses_ipv6_source_for_ipv6_udp_tracker() {
     let result = announcer
         .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
         .await
-        .expect("IPv6 UDP tracker fixture should return an announce result");
+        .unwrap_or_else(|| {
+            panic!(
+                "IPv6 UDP tracker fixture announce failed: {:?}",
+                announcer.last_failure_kind
+            )
+        });
 
     assert_eq!(result.peers, vec![("192.0.2.11".to_string(), 6881)]);
     server.await.expect("IPv6 UDP tracker fixture should exit");

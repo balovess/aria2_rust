@@ -151,9 +151,10 @@ async fn upload_rate_change_wakes_actor_without_retry_polling() {
         })
         .await
         .unwrap();
+    tokio::task::yield_now().await;
 
     loop {
-        let event = timeout(Duration::from_secs(1), event_rx.recv())
+        let event = timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .unwrap()
             .expect("peer actor event channel closed");

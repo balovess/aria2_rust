@@ -148,9 +148,16 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let mut peer = TcpStream::connect(("127.0.0.1", listen_port))
-        .await
-        .expect("connect an incoming test peer");
+    let connect_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut peer = loop {
+        match TcpStream::connect(("127.0.0.1", listen_port)).await {
+            Ok(peer) => break peer,
+            Err(_) if tokio::time::Instant::now() < connect_deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("connect an incoming test peer: {error}"),
+        }
+    };
     let transport_endpoint = peer
         .local_addr()
         .expect("incoming peer has a temporary TCP source endpoint");
@@ -176,22 +183,13 @@ async fn incoming_peer_bep10_port_is_exposed_as_advertised_rpc_endpoint() {
     assert_eq!(&response[28..48], &info_hash);
 
     send_bep10_handshake(&mut peer, Some(6881)).await;
+    wait_for_rpc_peer_port(&client, &gid, 6881).await;
 
-    let details_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let details = loop {
-        let details = rpc(&client, 3, "aria2.getPeerDetails", json!([gid]));
-        let peer_details = details
-            .as_array()
-            .and_then(|peers| peers.iter().find(|peer| peer["source"] == "incoming"));
-        if peer_details.is_some() {
-            break peer_details.cloned().expect("checked incoming peer");
-        }
-        assert!(
-            tokio::time::Instant::now() < details_deadline,
-            "incoming peer did not appear in RPC: {details}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    let details = rpc(&client, 3, "aria2.getPeerDetails", json!([gid]))
+        .as_array()
+        .and_then(|peers| peers.iter().find(|peer| peer["source"] == "incoming"))
+        .cloned()
+        .expect("incoming peer details should be present after its BEP 10 port is published");
 
     assert_eq!(
         details["port"], 6881,

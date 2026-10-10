@@ -198,7 +198,7 @@ async fn mirror_resume_failure_reuses_resolved_output_path() {
 #[tokio::test]
 async fn cannot_resume_falls_back_to_fresh_download_without_renaming_path() {
     use crate::filesystem::control_file::ControlFile;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -213,26 +213,42 @@ async fn cannot_resume_falls_back_to_fresh_download_without_renaming_path() {
                 .accept()
                 .await
                 .expect("accept cannot-resume filename request");
-            let mut request = [0u8; 4096];
-            let bytes = stream
-                .read(&mut request)
-                .await
-                .expect("read cannot-resume filename request");
-            let request = String::from_utf8_lossy(&request[..bytes]);
+            let request = read_http_request(&mut stream).await;
             let request_lower = request.to_ascii_lowercase();
             match request_index {
                 0 => {
-                    assert!(request.starts_with("HEAD /download HTTP/1.1\r\n"));
-                    assert!(!request_lower.contains("range: bytes="));
+                    assert!(
+                        request.starts_with("HEAD /download HTTP/1.1\r\n"),
+                        "unexpected request {request_index}: {request:?}"
+                    );
+                    assert!(
+                        !request_lower.contains("range: bytes="),
+                        "unexpected Range header in request {request_index}: {request:?}"
+                    );
                 }
-                1 => assert!(request_lower.contains("range: bytes=2-")),
+                1 => assert!(
+                    request_lower.contains("range: bytes=2-"),
+                    "expected resume Range header in request {request_index}: {request:?}"
+                ),
                 2 => {
-                    assert!(request.starts_with("HEAD /download HTTP/1.1\r\n"));
-                    assert!(!request_lower.contains("range: bytes="));
+                    assert!(
+                        request.starts_with("HEAD /download HTTP/1.1\r\n"),
+                        "unexpected request {request_index}: {request:?}"
+                    );
+                    assert!(
+                        !request_lower.contains("range: bytes="),
+                        "unexpected Range header in request {request_index}: {request:?}"
+                    );
                 }
                 3 => {
-                    assert!(request.starts_with("GET /download HTTP/1.1\r\n"));
-                    assert!(!request_lower.contains("range: bytes="));
+                    assert!(
+                        request.starts_with("GET /download HTTP/1.1\r\n"),
+                        "unexpected request {request_index}: {request:?}"
+                    );
+                    assert!(
+                        !request_lower.contains("range: bytes="),
+                        "unexpected Range header in fresh request {request_index}: {request:?}"
+                    );
                 }
                 _ => unreachable!(),
             }

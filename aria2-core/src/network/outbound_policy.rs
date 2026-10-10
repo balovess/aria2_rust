@@ -161,6 +161,18 @@ impl OutboundNetworkPolicy {
     /// Resolve a UDP peer and retain the first address compatible with this
     /// policy's configured source families.
     pub async fn resolve_udp_host(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        if let Ok(address) = host.parse::<IpAddr>() {
+            let remote = SocketAddr::new(address, port);
+            if self.is_direct() || self.best_source(remote).is_some() {
+                return Ok(remote);
+            }
+            return Err(family_mismatch(remote));
+        }
+
         let addresses = tokio::net::lookup_host((host, port)).await?;
         for remote in addresses {
             if self.is_direct() || self.best_source(remote).is_some() {
@@ -204,20 +216,23 @@ impl OutboundNetworkPolicy {
         source.in_flight.fetch_add(1, Ordering::Relaxed);
         let result = connect_from(source.address, remote).await;
         source.in_flight.fetch_sub(1, Ordering::Relaxed);
-        if result.is_err() {
-            source
-                .failures
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_add(1))
-                })
-                .ok();
-        } else {
-            source
-                .failures
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_sub(1))
-                })
-                .ok();
+        let failed = result.is_err();
+        let mut failures = source.failures.load(Ordering::Relaxed);
+        loop {
+            let updated = if failed {
+                failures.saturating_add(1)
+            } else {
+                failures.saturating_sub(1)
+            };
+            match source.failures.compare_exchange_weak(
+                failures,
+                updated,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => failures = observed,
+            }
         }
         result
     }
@@ -436,6 +451,20 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
+    }
+
+    #[tokio::test]
+    async fn udp_host_resolution_accepts_bracketed_ipv6_literals_with_matching_source() {
+        let policy = OutboundNetworkPolicy::new(vec![
+            IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            policy.resolve_udp_host("[::1]", 6881).await.unwrap(),
+            SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 6881)
+        );
     }
 
     #[test]

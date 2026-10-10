@@ -34,8 +34,6 @@ pub trait DiskAdaptor: Send + Sync {
 /// returned to the caller. Non-POSIX callers simply omit the call.
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 pub(crate) fn advise_drop_cache(file: &impl std::os::fd::AsRawFd, offset: u64, length: u64) {
-    use std::os::fd::AsRawFd;
-
     let Ok(offset) = libc::off_t::try_from(offset) else {
         return;
     };

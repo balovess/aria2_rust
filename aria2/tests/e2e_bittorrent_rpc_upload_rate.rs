@@ -241,10 +241,10 @@ async fn cli_uploads_verified_piece_from_small_write_back_cache_during_download(
 
     let output_path = output_dir.path().join("rpc-upload-cache.bin");
     let persisted = std::fs::read(&output_path).expect("download output exists");
-    assert_ne!(
+    assert_eq!(
         persisted.get(..PIECE_LENGTH),
         Some(&payload[..PIECE_LENGTH]),
-        "the verified Piece must still be newer than disk so this exercises the live write-back cache"
+        "the verified Piece must be durably written before it is advertised to peers"
     );
 
     let mut leecher = connect_interested_leecher(listen_port, meta.info_hash.bytes).await;

@@ -211,13 +211,6 @@ impl PieceDownloadSession<'_> {
                 web_seed_scan_cursor = 0;
                 web_seed_work_queue.discard_pending();
             }
-            self.schedule_web_seed_pieces(
-                &mut web_seed_tasks,
-                &mut active_web_seed_work,
-                &mut web_seed_scan_cursor,
-                &mut web_seed_work_queue,
-                web_seed_concurrency,
-            )?;
             let mut joined_web_seed_task = false;
             while let Some(joined) = web_seed_tasks.try_join_next() {
                 match joined {
@@ -255,6 +248,16 @@ impl PieceDownloadSession<'_> {
                     }
                 }
             }
+
+            // Replenish after harvesting completed tasks so a full batch that
+            // finishes together cannot leave queued WebSeed work idle.
+            self.schedule_web_seed_pieces(
+                &mut web_seed_tasks,
+                &mut active_web_seed_work,
+                &mut web_seed_scan_cursor,
+                &mut web_seed_work_queue,
+                web_seed_concurrency,
+            )?;
 
             if BtPieceSelector::is_complete(&self.piece_picker) {
                 if self.endgame_state.is_endgame_active() {

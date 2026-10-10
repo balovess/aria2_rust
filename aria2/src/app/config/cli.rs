@@ -324,6 +324,12 @@ impl App {
         set_u64!("bt-keep-alive-interval", b.bt_keep_alive_interval);
         set_u64!("bt-timeout", b.bt_timeout);
         set_u64!("bt-request-timeout", b.bt_request_timeout);
+        set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
+        set_u64!(
+            "bt-optimistic-unchoke-interval",
+            b.bt_optimistic_unchoke_interval
+        );
+        set_u64!("bt-snubbed-timeout", b.bt_snubbed_timeout);
         set_u64!("peer-connection-timeout", b.peer_connection_timeout);
         set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);

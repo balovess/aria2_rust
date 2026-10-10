@@ -363,15 +363,21 @@ impl TokenBucket {
             return;
         }
         let refunded_milli = bytes.saturating_mul(1000);
-        let _ = self
-            .tokens_milli
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(
-                    current
-                        .saturating_add(refunded_milli)
-                        .min(self.capacity_milli),
-                )
-            });
+        let mut current = self.tokens_milli.load(Ordering::Relaxed);
+        loop {
+            let refunded = current
+                .saturating_add(refunded_milli)
+                .min(self.capacity_milli);
+            match self.tokens_milli.compare_exchange_weak(
+                current,
+                refunded,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Update the refill rate dynamically. Takes effect on the next refill cycle.

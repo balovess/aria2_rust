@@ -151,24 +151,26 @@ async fn active_download_actor_serves_upload_request_on_same_peer_connection() {
     assert_eq!(result.pex_peers.len(), 1);
     assert_eq!(result.pex_peers[0].ip, "127.0.0.1");
     assert_eq!(result.pex_peers[0].port, 6882);
-    let mut event_lease = swarm.lease_event_receiver().unwrap();
+    assert_eq!(remote.await.unwrap(), locally_verified_piece);
     tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if matches!(event_lease.recv().await, Some(crate::engine::bittorrent::peer::message_handler::PeerEvent::UploadBytes { actor_id: event_actor, .. }) if event_actor == actor_id) {
-                break;
-            }
+        while swarm.actor(actor_id).unwrap().stats.uploaded_bytes != 16 {
+            let mut events = swarm
+                .lease_event_receiver()
+                .expect("peer event receiver must be available after download completion");
+            events
+                .recv()
+                .await
+                .expect("peer actor must publish its completed upload");
         }
     })
     .await
-    .expect("uploaded-byte actor event was not published");
-    drop(event_lease);
+    .expect("upload byte event must update the peer actor snapshot");
     let stats = &swarm.actor(actor_id).unwrap().stats;
     assert_eq!(stats.uploaded_bytes, 16);
     assert!(stats.upload_speed > 0.0);
     assert!(!stats.am_choking);
     assert!(choking_algo.peers()[0].peer_interested);
     assert!(!choking_algo.peers()[0].am_choking);
-    assert_eq!(remote.await.unwrap(), locally_verified_piece);
     swarm.shutdown_all().await;
 }
 
