@@ -96,6 +96,18 @@ fn dynamic_subranges_keep_parent_incomplete_until_all_bytes_succeed() {
 }
 
 #[test]
+fn scheduler_can_claim_the_specific_pending_parent_segment() {
+    let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
+
+    assert_eq!(
+        mgr.next_pending_range_for_segment(0, 1, 40),
+        Some((1, 100, 40))
+    );
+    assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.segment_status(1), Some(SegmentStatus::Downloading));
+}
+
+#[test]
 fn test_completed_ranges_exclude_partial_or_failed_segments() {
     let mut mgr = ConcurrentSegmentManager::new(300, vec!["http://x.com/f".to_string()], Some(100));
     mgr.allocate_segments();

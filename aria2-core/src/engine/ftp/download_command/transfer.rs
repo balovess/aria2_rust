@@ -7,6 +7,7 @@ use tracing::{debug, info};
 
 use crate::checksum::checksum::Checksum;
 use crate::constants;
+use crate::engine::work_commit::SequentialWorkCommitter;
 use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -189,27 +190,28 @@ impl FtpDownloadCommand {
 
             self.group.recover().record_network_activity();
 
-            // Write to disk (with rate limiting if enabled)
-            if let Err(error) = writer.write(&buffer[..bytes_read]).await {
+            // Core work output commits the source chunk and advances progress
+            // only after the write succeeds.
+            let write_result = {
+                let mut committer = SequentialWorkCommitter::new(
+                    &mut writer,
+                    &mut self.completed_bytes,
+                    &self.group,
+                    &mut self.checkpoint,
+                );
+                committer.commit_chunk(&buffer[..bytes_read]).await
+            };
+            if let Err(error) = write_result {
                 drop(data_stream);
                 self.finalize_partial_writer(&mut writer).await;
                 ctrl.abort_transfer().await;
                 ctrl.quit().await.ok();
                 return Err(FtpAttemptError::from(error));
             }
-            self.completed_bytes += bytes_read as u64;
-            if let Some(checkpoint) = self.checkpoint.as_mut() {
-                let save_requested = self.group.recover().take_save_control_file_request();
-                checkpoint
-                    .update(self.completed_bytes, save_requested)
-                    .await;
-            }
 
-            // Update progress in request group
+            // Update download speed in the request group.
             {
                 let g = self.group.recover();
-                g.update_progress(self.completed_bytes);
-
                 // Update speed calculation every 500ms
                 let elapsed = last_speed_update.elapsed();
                 if elapsed.as_millis() >= constants::FTP_SPEED_UPDATE_INTERVAL_MS as u128 {

@@ -1,6 +1,9 @@
 use futures::StreamExt;
 
 use crate::constants;
+use crate::engine::work_commit::{
+    WorkCommitOutcome, WorkCommitter, WorkValidation, commit_work_result,
+};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
@@ -10,6 +13,49 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
 use super::download_flow::finalize_cancelled_download;
+
+struct HttpResponseBodyCommitter<'a> {
+    downloader: &'a SequentialDownloader,
+    writer: &'a mut Box<dyn DiskWriter>,
+    control_file: &'a mut Option<ControlFile>,
+    completed_bytes: &'a mut u64,
+    bytes_since_save: &'a mut u64,
+    save_interval: u64,
+}
+
+#[async_trait::async_trait]
+impl WorkCommitter for HttpResponseBodyCommitter<'_> {
+    type Output = bytes::Bytes;
+
+    async fn validate(&mut self, _output: &mut Self::Output) -> Result<WorkValidation> {
+        Ok(WorkValidation::Accepted)
+    }
+
+    async fn write(&mut self, output: Self::Output) -> Result<u64> {
+        self.writer.write(&output).await?;
+        let committed_bytes = output.len() as u64;
+        *self.completed_bytes = self.completed_bytes.saturating_add(committed_bytes);
+        *self.bytes_since_save = self.bytes_since_save.saturating_add(committed_bytes);
+        Ok(committed_bytes)
+    }
+
+    async fn checkpoint(&mut self, _committed_bytes: u64) -> Result<()> {
+        let save_requested = self
+            .downloader
+            .flush_requested_control_file(self.writer, self.control_file, *self.completed_bytes)
+            .await?;
+        if let Some(control_file) = self.control_file.as_mut()
+            && (save_requested || *self.bytes_since_save >= self.save_interval)
+        {
+            control_file.update_completed_length(*self.completed_bytes);
+            if let Err(error) = control_file.save().await {
+                tracing::warn!("Sequential: control file save failed: {}", error);
+            }
+            *self.bytes_since_save = 0;
+        }
+        Ok(())
+    }
+}
 
 impl SequentialDownloader {
     /// Download the response body to the output file.
@@ -185,25 +231,24 @@ impl SequentialDownloader {
             let mut offset = 0usize;
             while offset < data.len() {
                 let end = (offset + write_piece).min(data.len());
-                let piece = &data[offset..end];
-                writer.write(piece).await?;
-                completed_bytes += piece.len() as u64;
-                offset = end;
-
-                // ADR-0001: Periodically update control file with progress.
-                ctrl_bytes_since_save += piece.len() as u64;
-                let save_requested = self
-                    .flush_requested_control_file(&mut writer, &mut ctrl_file, completed_bytes)
-                    .await?;
-                if let Some(cf) = ctrl_file.as_mut()
-                    && (save_requested || ctrl_bytes_since_save >= ctrl_save_interval)
-                {
-                    cf.update_completed_length(completed_bytes);
-                    if let Err(e) = cf.save().await {
-                        tracing::warn!("Sequential: control file save failed: {}", e);
-                    }
-                    ctrl_bytes_since_save = 0;
+                let piece = data.slice(offset..end);
+                let commit_result = {
+                    let mut committer = HttpResponseBodyCommitter {
+                        downloader: self,
+                        writer: &mut writer,
+                        control_file: &mut ctrl_file,
+                        completed_bytes: &mut completed_bytes,
+                        bytes_since_save: &mut ctrl_bytes_since_save,
+                        save_interval: ctrl_save_interval,
+                    };
+                    commit_work_result(&mut committer, piece).await?
+                };
+                if matches!(commit_result, WorkCommitOutcome::Rejected) {
+                    return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                        "HTTP output rejected a source chunk".into(),
+                    )));
                 }
+                offset = end;
 
                 self.progress_updater
                     .update_progress(

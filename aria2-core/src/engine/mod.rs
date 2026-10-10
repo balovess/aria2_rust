@@ -24,9 +24,13 @@ pub mod mirror_coordinator;
 pub mod post_download_handler;
 mod process_wait;
 pub(crate) mod progress_checkpoint;
+pub(crate) mod protocol_adapter;
 pub mod resume_data;
 pub mod retry_policy;
 #[cfg(feature = "sftp")]
 pub mod sftp;
 pub mod task_spawner;
 pub mod timer;
+pub(crate) mod work_commit;
+pub(crate) mod work_runner;
+pub(crate) mod work_scheduler;

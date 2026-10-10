@@ -6,6 +6,8 @@
 pub mod peer;
 
 #[cfg(feature = "bittorrent")]
+pub(crate) mod command_adapter;
+#[cfg(feature = "bittorrent")]
 pub mod dht;
 #[cfg(feature = "bittorrent")]
 pub mod discovery;

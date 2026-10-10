@@ -33,7 +33,16 @@ pub(super) async fn finish(
     } else {
         executor.shutdown().await;
     }
-    drain_write_chunks(write_rx, writer, limiter, dl.global_limiter.as_ref(), "").await?;
+    drain_write_chunks(
+        dl,
+        write_rx,
+        writer,
+        limiter,
+        ctrl_file,
+        completed_bytes,
+        "",
+    )
+    .await?;
     writer.flush().await.map_err(|error| {
         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
             "Flush failed: {error}"

@@ -12,7 +12,6 @@ mod pex;
 mod piece_download;
 mod registry;
 mod state;
-mod web_seed;
 
 #[cfg(test)]
 mod runtime_tests;

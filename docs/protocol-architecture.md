@@ -12,23 +12,37 @@ translation live in `aria2`.
 flowchart BT
     P["Protocol libraries<br/>aria2-protocol"]
     C["Core shared services<br/>network / DNS / retry / rate limit / filesystem"]
-    E["Protocol engines<br/>engine::http / ftp / sftp / bittorrent / metalink"]
-    D["Task dispatch<br/>engine::task_spawner"]
+    W["Shared work core<br/>work_scheduler / work_runner / work_commit"]
+    E["Protocol source adapters<br/>engine::http / ftp / sftp / bittorrent / metalink"]
+    D["Protocol adapter registry<br/>engine::protocol_adapter"]
     T["Task lifecycle<br/>DownloadEngine / DownloadManager / RequestGroup"]
     A["Application and library entrypoints<br/>CLI / RPC / aria2-core public API"]
     P -->|protocol APIs consumed where applicable| E
-    C -->|shared facilities composed where needed| E
+    C -->|shared facilities| W
+    W -->|scheduled work and committed results| E
     E --> D
     D --> T
     T --> A
 ```
 
 The diagram reads from foundation to application. Runtime calls go the other
-way: CLI/RPC or a library caller adds a task; task lifecycle code reaches
-`task_spawner::create_command_for_uri`; that one function selects a protocol
-command. The selected command owns transfer execution and cleanup. Shared
-services are passed where a protocol uses them; they are not a mandatory chain
-through every protocol.
+way: CLI/RPC or a library caller adds a task; task lifecycle code starts a
+tracked task, which asks `ProtocolAdapterRegistry` to select a registered
+adapter. Each protocol adapter constructs its command and owns the protocol
+setup it needs. The command supplies protocol-specific work items and request
+rules to the shared work core. `WorkScheduler` owns generic queueing, bounded
+admission, attempt counts, retry deadlines, and cancellation; `work_runner`
+drives single-item attempts; `work_commit` enforces validation-before-write and
+write-before-checkpoint ordering. Adapters supply source requests, retry
+classification, validation rules, and output/checkpoint handles. This keeps
+transport and format policy with its source while the common work lifecycle is
+independent of HTTP, FTP, SFTP, BitTorrent, or Metalink types.
+
+The command registry and the work-item interface are separate seams. A new
+protocol registers a command adapter and implements the shared work interfaces;
+it does not add a branch to `task_spawner` or a protocol case to
+`WorkScheduler`. HTTP/3 can use the same interfaces when its transport is added;
+this change does not add an HTTP/3 network stack.
 
 `aria2-protocol::http::HttpClient` and the standalone FTP client are public
 protocol-library interfaces. The HTTP download engine uses its own reqwest
@@ -40,31 +54,60 @@ standalone HTTP client is not inserted as a redundant adapter in that route.
 ```text
 CLI / RPC / library API
   → DownloadManager / DownloadEngine / RequestGroupMan
-  → engine::task_spawner::create_command_for_uri
+  → engine::task_spawner::spawn_download_task
+  → engine::protocol_adapter::ProtocolAdapterRegistry
+  → engine::<protocol>::command_adapter
   → protocol command
-  → protocol-specific network and transfer path
-  → request/piece completion, persistence, and task result
+  → shared work scheduler / single-item runner
+  → protocol source request and response
+  → shared work commit path: validation → output write → checkpoint
+  → request/piece completion and task result
 ```
 
-The dispatcher also detects Metalink input before normal URI dispatch. Metalink
-expands metadata into payload request groups; each payload then follows the
-underlying supported URI route, such as HTTP, FTP, SFTP, or BitTorrent. For
-HTTP, dispatch hands construction to `engine::http::command_factory`, which
-resolves the target and proxy addresses before building the HTTP command.
+The Metalink adapter claims groups with Metalink source metadata before URI
+dispatch. It expands metadata into payload request groups; each payload then
+uses the adapter for its underlying route, such as HTTP, FTP, SFTP, or
+BitTorrent. The built-in registry orders metadata and scheme-specific adapters
+before the HTTP fallback. The HTTP adapter delegates construction to
+`engine::http::command_factory`, which resolves target and proxy addresses.
+
+## Shared work-item interface
+
+`engine::work_scheduler::WorkScheduler<T>` is transport-neutral. A caller
+queues typed payloads under opaque `WorkId`s, admits a bounded number of
+leases, and reports completion, failure, or unstarted requeue. Retry budgets,
+delayed work, cancellation, and active-lease validation live in that module.
+`engine::work_runner::SingleWorkAdapter` uses the same scheduler for a single
+logical item while allowing its adapter to classify source-specific errors and
+wait interruptibly on task lifecycle changes.
+
+Completed data crosses `engine::work_commit::WorkCommitter`. The core invokes
+validation first, invokes the output writer only for accepted data, and
+advances a checkpoint only after the write succeeds. Its fake adapters cover
+success, validation rejection, write failure, attempt exhaustion, retry, and
+cancellation without editing scheduler code. FTP, SFTP, HTTP response bodies,
+ranges and gap writes, BitTorrent blocks and pieces, and WebSeeds use this shared
+lifecycle; their request construction, source selection, and protocol-specific
+validation remain in their adapters.
+
+HTTP range/mirror coordination and BitTorrent peer/piece selection retain
+their domain policies. They choose which work items to offer and what source
+rules apply; the shared scheduler owns lease lifecycle, attempt budgets, and
+retry admission.
 
 ## Protocol routes
 
 | Input | Core command path | Protocol implementation | Result path |
 |---|---|---|---|
-| HTTP/HTTPS | `task_spawner` → `engine::http::command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, while transfers use `concurrent_download` → `request_executor` or `sequential_download`. | `aria2-core::http` owns request policy, cookie storage, response processing, TLS identity, and reusable client pools. `engine::http::client_config` composes download options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Shared request progress, retry/rate limiting, mirror/segment coordination, and `DiskWriter` |
-| FTP/FTPS | `task_spawner` → `engine::ftp::download_command::FtpDownloadCommand` → proxy GET or FTP control/data transfer. | The task command composes core DNS/address policy, proxy handling, FTP control flow, and task lifecycle. `aria2-protocol::ftp::connection::control_io` shares injected control-stream reads/writes, `FtpActiveDataListener` shares active data acceptance, and `aria2-protocol::ftp::tls` supplies FTPS streams. Core and standalone clients retain their own response and PASV/EPSV parsing policies. | Shared request progress, checkpointing, checksum verification, and `DiskWriter` |
-| SFTP | `task_spawner` → `engine::sftp::download_command::SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | Core owns URI/auth resolution, address policy, retry, task lifecycle, checkpoints, rate limiting, and disk writing. `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP session framing and request IDs, packet codec, and file operations. | The command streams positioned reads to `DiskWriter` (or the in-memory writer), updating request progress and checkpoints. |
-| BitTorrent | Existing torrent metadata: `task_spawner` → `engine::bittorrent::download::command` → `download::execute`. Magnet: `task_spawner` → `magnet::download_command` → metadata resolution → the same `download::command`. | `aria2-protocol::bittorrent` owns Bencode, torrent and magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. Core owns metadata-source ordering, peer/piece policy, tracker orchestration, task lifecycle, and the process-level DHT-family registry. | Verified pieces flow through the BitTorrent writer and checkpoint path; protocol runtime state stays in the BitTorrent engine |
-| Metalink | `aria2-protocol::metalink` parser → `engine::metalink::to_request_group` → `engine::metalink::download_command`. | The core command expands selected mirrors, hashes, and MetaURLs into payload work. | Each payload enters its supported URI command path, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol |
+| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; range and sequential body chunks pass through `WorkCommitter` before output/checkpoint updates. HTTP mirror/range policy remains in the HTTP adapter. |
+| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | The adapter composes core DNS/address policy, proxy handling, FTP control flow, and lifecycle. `aria2-protocol::ftp::connection::control_io` shares injected control-stream reads/writes, `FtpActiveDataListener` shares active data acceptance, and `aria2-protocol::ftp::tls` supplies FTPS streams. Response and PASV/EPSV parsing policy stays with each source. | `SingleWorkAdapter` supplies attempts; both proxy and FTP data chunks pass through `SequentialWorkCommitter`, which writes, updates progress, and advances checkpoints. Whole-file checksum policy uses the shared checksum service. |
+| SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoint updates. Whole-file checksum policy uses the shared checksum service. |
+| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. `WorkCommitter` validates and writes staged blocks and complete pieces before checkpointing; BT-specific peer feedback and piece accounting remain in the adapter. |
+| Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
 
 ### HTTP assembly and transfer path
 
-1. `task_spawner::create_command_for_uri` selects HTTP/HTTPS and delegates
+1. `ProtocolAdapterRegistry` selects the HTTP adapter, which delegates
    command construction to `engine::http::command_factory`.
 2. `command_factory` resolves the origin and proxy addresses when async DNS is
    enabled, then supplies those results and the outbound-address policy to
@@ -77,18 +120,21 @@ resolves the target and proxy addresses before building the HTTP command.
    returns the effective URL, entity length, and negotiated HTTP version.
 5. If concurrent ranges are allowed, `ConcurrentDownloader::execute_with_retry`
    selects its single-source scheduler or multi-mirror pipeline. Each path
-   submits work through `request_executor`; that executor runs
-   `HttpSegmentDownloader` requests and sends response chunks to the disk writer.
+   submits generic leases through `WorkScheduler`; `request_executor` runs
+   `HttpSegmentDownloader` requests and sends offset-bearing response chunks
+   to the core commit interface, which writes and honors requested checkpoints.
 6. Otherwise, or after concurrent fallback, `SequentialDownloader` streams the
-   response or fills only incomplete gaps. Both paths update progress and
-   control-file state before `DownloadCommand::finalize_attempt` completes the
-   task.
+   response through `WorkCommitter`, which writes each accepted chunk and
+   updates the existing progress/control-file cadence. Gap filling retains its
+   range-specific planning and fallback behavior while positioned writes use
+   the same core commit interface. `DownloadCommand` then
+   finalizes the request group.
 
 ### FTP/FTPS assembly and transfer path
 
-1. `task_spawner::create_command_for_uri` selects
-   `engine::ftp::download_command::FtpDownloadCommand`. Its constructor parses
-   the FTP URI and maps request options into task state.
+1. `ProtocolAdapterRegistry` selects `engine::ftp::command_adapter`, which
+   creates `FtpDownloadCommand`. Its constructor parses the FTP URI and maps
+   request options into task state.
 2. `FtpDownloadCommand::execute` owns the request lifecycle, retry policy,
    address refresh, cancellation, and checkpoint cleanup. Each attempt enters
    `execute_single_attempt`.
@@ -108,9 +154,11 @@ resolves the target and proxy addresses before building the HTTP command.
    configured. Active-mode listening/acceptance uses the shared
    `FtpActiveDataListener`; the core still controls bind address and advertised
    endpoint selection.
-6. `receive_data_transfer` streams through the shared `DiskWriter` path (or the
-   in-memory writer), updating request progress, rate limits, checkpoints, and
-   checksum state before completing the request group.
+6. `receive_data_transfer` passes source chunks through the core
+   `SequentialWorkCommitter`, which writes through `DiskWriter`, updates request
+   progress, and advances the existing checkpoint. The HTTP proxy GET route
+   uses the same committer. The command retains rate-limit setup, transfer-length
+   policy, checksum configuration, and FTP completion handling.
 
 `aria2-protocol::ftp::connection::FtpConnection` plus
 `aria2-protocol::ftp::download::FtpDownload` is a separate standalone client
@@ -121,9 +169,9 @@ boundaries; the standalone client is not an adapter around the engine command.
 
 ### SFTP assembly and transfer path
 
-1. `task_spawner::create_command_for_uri` selects
-   `engine::sftp::download_command::SftpDownloadCommand`, then injects the
-   process outbound-network policy and global rate limiter.
+1. `ProtocolAdapterRegistry` selects `engine::sftp::command_adapter`, which
+   creates `SftpDownloadCommand` and injects the process outbound-network
+   policy and global rate limiter.
 2. The command parses the SFTP URI, resolves credentials and output state, and
    builds SSH options including the configured host-key fingerprint policy.
 3. The engine asks `OutboundNetworkPolicy` to create the target TCP stream and
@@ -140,10 +188,9 @@ boundaries; the standalone client is not an adapter around the engine command.
    provides positioned reads/writes and explicit handle closure with the same
    file-operation error type.
 5. The engine stats and opens the remote file, reconciles the local length and
-   checkpoint, then reads chunks at explicit offsets. It writes each chunk
-   through `DiskWriter` (or the in-memory writer), applying rate limits and
-   updating progress/checksum state before closing the remote handle and
-   completing the request group.
+   checkpoint, then reads chunks at explicit offsets. It passes each chunk
+   through the core `SequentialWorkCommitter` for local writing, progress, and
+   checkpoint updates before final checksum verification and task completion.
 
 `aria2-protocol::sftp::transfer::SftpTransfer` remains a public standalone
 transfer interface. It adds local-file I/O, configurable buffering, resume,
@@ -176,10 +223,9 @@ facade.
 
 ### BitTorrent assembly and transfer path
 
-1. `task_spawner::create_command_for_uri` routes an existing torrent (a
-   `bt://` request or a group with torrent metadata) directly to
-   `BtDownloadCommand`. A `magnet:` URI enters `MagnetDownloadCommand` in the
-   same BitTorrent directory.
+1. `ProtocolAdapterRegistry` selects `engine::bittorrent::command_adapter` for
+   existing torrent metadata, a `bt://` request, or a `magnet:` URI. It routes
+   payloads to `BtDownloadCommand` and magnets to `MagnetDownloadCommand`.
 2. The magnet command uses the protocol library's `MagnetLink` parser, then
    resolves metadata in this order: a saved torrent when enabled, an `xs`
    exact source, tracker-discovered peers, then DHT-discovered peers and BEP 9
@@ -200,9 +246,12 @@ facade.
    this payload-resume snapshot is installed.
 4. `BtDownloadCommand::execute` prepares the torrent layout and integrity
    state, then coordinates tracker/DHT discovery, peer sessions, piece
-   selection, and WebSeeds through `download::execute`. Peer messages and
-   transport use `aria2-protocol::bittorrent`; core verifies completed pieces,
-   writes payload data, persists checkpoints, and finalizes the request group.
+   selection, and WebSeeds through `download::execute`. The piece source uses
+   the core `WorkScheduler` for work leases; `WorkCommitter` validates incoming
+   block layout before staging it, then verifies complete pieces before writing
+   payload data and persisting checkpoints.
+   Peer messages and transport use `aria2-protocol::bittorrent`; peer selection
+   and bad-peer feedback remain BitTorrent-specific policy.
 5. Peer interaction selects uTP, MSE, or a plain TCP fallback from task
    settings. Core establishes the policy-approved TCP stream and passes it to
    the protocol handshake. Plain and MSE handshakes both return the same
@@ -319,11 +368,12 @@ add another task-facing interface.
   scheduling, or process-wide state. Protocol-specific code stays in its
   protocol directory.
 - `aria2-core/src/engine` keeps cross-protocol work: task lifecycle, dispatch,
-  shared mirror/segment coordination, checkpoints, and engine services. The
-  HTTP-only cookie helper, concurrent downloader, range-probe path, and
-  sequential downloader live under `engine/http`; protocol-specific work does
-  not remain at engine root just because it is shared by HTTP transfer
-  strategies. HTTP target/proxy DNS resolution is owned by
+  work scheduling/running/commit, checkpoints, and engine services. HTTP
+  range/mirror planners remain HTTP domain policy even though their existing
+  public modules are rooted under `engine`. The HTTP-only cookie helper,
+  concurrent downloader, range-probe path, and sequential downloader live under
+  `engine/http`; protocol-specific work does not remain at engine root just
+  because it is shared by HTTP transfer strategies. HTTP target/proxy DNS resolution is owned by
   `engine/http/command_factory`, and reqwest client construction is owned by
   `engine/http/client_config`.
 - `aria2-core/src/{http,ftp,network}` owns shared core policy and helpers used
@@ -352,15 +402,16 @@ Do not add pass-through engine clients around these public interfaces.
   behavior.
 - **Keep** shared engine modules at `engine` level when they own cross-protocol
   lifecycle or a reusable coordination interface, including `task_spawner`,
-  `concurrent_segment_manager`, and `mirror_coordinator`.
+  `protocol_adapter`, `concurrent_segment_manager`, and `mirror_coordinator`.
 - **Narrow** the former flat collection of `bt_*`, `http_*`, FTP, SFTP, and
   Metalink engine modules into the protocol directories above. This is a source
   organization and module-path change; it does not alter download semantics,
   wire behavior, or task-facing crate-root exports. HTTP engine modules now
   have one canonical path under `engine/http` without legacy path re-exports.
-- **Keep** the scheme dispatch in `task_spawner`; protocol commands own the
-  execution after construction. Separate selectors or forwarding command
-  wrappers would repeat that seam without adding behavior.
+- **Narrow** `task_spawner` to tracked task creation and lifecycle cleanup.
+  `ProtocolAdapterRegistry` selects the first supporting adapter; each protocol
+  directory owns its command construction and dependency setup. HTTP is the
+  final fallback, after metadata and scheme-specific adapters.
 - **Narrow** HTTP construction to its protocol directory: the HTTP factory now
   owns target/proxy DNS resolution, and `client_config` owns reqwest setup.
   Generic task dispatch no longer assembles HTTP-specific addresses or client

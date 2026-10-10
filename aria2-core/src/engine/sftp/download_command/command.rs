@@ -3,6 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::DiskWriter;
 use crate::request::request_group::GroupId;
@@ -12,30 +13,7 @@ use super::types::SftpDownloadCommand;
 #[async_trait]
 impl Command for SftpDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
-        let mut attempts = 0u32;
-        loop {
-            let result = self.execute_once().await;
-            let error = match result {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-            let error = match error {
-                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-                | Aria2Error::Fatal(FatalError::FileNotFound { .. }) => {
-                    self.group.recover().file_not_found_error()
-                }
-                error => error,
-            };
-            let should_retry = self.should_retry_error(attempts, &error);
-            if !should_retry {
-                return Err(error);
-            }
-
-            attempts = attempts.saturating_add(1);
-            let wait = self.retry_policy.compute_wait(attempts).unwrap_or_default();
-            self.wait_for_retry(wait).await?;
-            self.completed_bytes = 0;
-        }
+        run_single_work_item(self).await
     }
 
     /// Return the current status of this command.
@@ -65,6 +43,39 @@ impl Command for SftpDownloadCommand {
 
     async fn shutdown(&mut self) {
         self.flush_checkpoint().await;
+    }
+}
+
+#[async_trait]
+impl SingleWorkAdapter for SftpDownloadCommand {
+    type Output = ();
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
+        match self.execute_once().await {
+            Err(Aria2Error::Recoverable(RecoverableError::ResourceNotFound))
+            | Err(Aria2Error::Fatal(FatalError::FileNotFound { .. })) => {
+                Err(self.group.recover().file_not_found_error())
+            }
+            result => result,
+        }
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<Duration> {
+        self.should_retry_error(attempt.saturating_sub(1), error)
+            .then(|| self.retry_policy.compute_wait(attempt).unwrap_or_default())
+    }
+
+    async fn wait_for_retry(&mut self, wait: Duration) -> Result<()> {
+        SftpDownloadCommand::wait_for_retry(self, wait).await
+    }
+
+    async fn prepare_retry(&mut self) -> Result<()> {
+        self.completed_bytes = 0;
+        Ok(())
     }
 }
 

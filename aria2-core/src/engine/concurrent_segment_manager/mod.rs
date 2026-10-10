@@ -251,6 +251,49 @@ impl ConcurrentSegmentManager {
         None
     }
 
+    /// Claim the next subrange of a specific pending parent segment.
+    ///
+    /// The HTTP work scheduler owns parent selection, so it supplies the
+    /// segment index to this HTTP range planner when the lease is admitted.
+    pub(crate) fn next_pending_range_for_segment(
+        &mut self,
+        mirror_idx: usize,
+        segment_index: u32,
+        max_length: u64,
+    ) -> Option<(u32, u64, u64)> {
+        if !self
+            .mirrors
+            .get(mirror_idx)
+            .is_some_and(|mirror| mirror.can_accept_more())
+        {
+            return None;
+        }
+
+        let index = segment_index as usize;
+        let segment = self.segments.get_mut(index)?;
+        if segment.status != SegmentStatus::Pending {
+            return None;
+        }
+
+        let completed = (*self.completed_lengths.get(index)?).min(segment.length);
+        let remaining = segment.length - completed;
+        if remaining == 0 {
+            segment.status = SegmentStatus::Done;
+            return None;
+        }
+
+        let offset = segment.offset.saturating_add(completed);
+        let length = remaining.min(max_length.max(1));
+        segment.status = SegmentStatus::Downloading;
+        segment.assigned_mirror = Some(mirror_idx);
+        self.next_segment_idx
+            .store((index + 1) as u32, Ordering::Relaxed);
+        if let Some(mirror) = self.mirrors.get_mut(mirror_idx) {
+            mirror.active_segments += 1;
+        }
+        Some((segment.index, offset, length))
+    }
+
     pub fn next_pending_segment(&mut self) -> Option<(u32, u64, u64)> {
         self.next_pending_segment_for_mirror(0)
     }

@@ -15,6 +15,7 @@ use tracing::warn;
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::retry_policy::RetryPolicy;
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::disk_writer::DiskWriter;
 use crate::request::request_group::GroupId;
@@ -200,37 +201,14 @@ impl MetalinkDownloadCommand {
         let options = self.group.recover().options_arc();
         let retry_policy =
             RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
-        let mut attempts = 0u32;
-
-        loop {
-            match self
-                .download_payload_url(output_path, url, expected_size)
-                .await
-            {
-                Ok(payload) => return Ok(payload),
-                Err(error) => {
-                    let error = self.record_not_found_error(error);
-                    if self.lifecycle_error().is_some()
-                        || self.should_stop_after_not_found(&error)
-                        || !self.should_retry_mirror_error(attempts, &error, &retry_policy)
-                    {
-                        return Err(error);
-                    }
-
-                    attempts = attempts.saturating_add(1);
-                    let wait = retry_policy.compute_wait(attempts).unwrap_or_default();
-                    warn!(
-                        url,
-                        attempt = attempts.saturating_add(1),
-                        max_attempts = retry_policy.max_tries(),
-                        ?wait,
-                        error = %error,
-                        "Metalink mirror failed, retrying"
-                    );
-                    self.wait_for_retry(wait).await?;
-                }
-            }
-        }
+        let mut work = MetalinkPayloadWork {
+            command: self,
+            output_path: output_path.to_path_buf(),
+            url: url.to_owned(),
+            expected_size,
+            retry_policy,
+        };
+        run_single_work_item(&mut work).await
     }
 
     async fn wait_for_lifecycle_change(&self) {
@@ -241,5 +219,56 @@ impl MetalinkDownloadCommand {
         if self.lifecycle_error().is_none() {
             notified.await;
         }
+    }
+}
+
+struct MetalinkPayloadWork<'a> {
+    command: &'a mut MetalinkDownloadCommand,
+    output_path: PathBuf,
+    url: String,
+    expected_size: Option<u64>,
+    retry_policy: RetryPolicy,
+}
+
+#[async_trait]
+impl SingleWorkAdapter for MetalinkPayloadWork<'_> {
+    type Output = PayloadDownload;
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
+        self.command
+            .download_payload_url(&self.output_path, &self.url, self.expected_size)
+            .await
+            .map_err(|error| self.command.record_not_found_error(error))
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<Duration> {
+        if self.command.lifecycle_error().is_some()
+            || self.command.should_stop_after_not_found(error)
+            || !self.command.should_retry_mirror_error(
+                attempt.saturating_sub(1),
+                error,
+                &self.retry_policy,
+            )
+        {
+            return None;
+        }
+        let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
+        warn!(
+            url = %self.url,
+            attempt = attempt.saturating_add(1),
+            max_attempts = self.retry_policy.max_tries(),
+            ?wait,
+            error = %error,
+            "Metalink mirror failed, retrying"
+        );
+        Some(wait)
+    }
+
+    async fn wait_for_retry(&mut self, wait: Duration) -> Result<()> {
+        self.command.wait_for_retry(wait).await
     }
 }

@@ -26,11 +26,11 @@ pub(super) async fn finish(
 ) -> Result<ConcurrentDownloadResult> {
     if should_fallback {
         super::super::segment::cancel_and_persist(
+            dl,
             executor,
             write_rx,
             writer,
             limiter,
-            dl.global_limiter.as_ref(),
             ctrl_file,
             coordinator.completed_bytes(),
         )
@@ -39,14 +39,19 @@ pub(super) async fn finish(
         executor.shutdown().await;
     }
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-        super::super::acquire_download_tokens(limiter, dl.global_limiter.as_ref(), data.len())
-            .await;
-        writer.write_bytes_at(offset, data).await.map_err(|e| {
-            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                "Write failed: {}",
-                e
-            )))
-        })?;
+        super::super::range_commit::commit_http_range_chunk(
+            dl,
+            writer,
+            limiter,
+            ctrl_file,
+            super::super::range_commit::HttpRangeCommitOptions {
+                completed_bytes: coordinator.completed_bytes(),
+                flush_checkpoint: false,
+                error_context: "",
+            },
+            WriteChunk { offset, data },
+        )
+        .await?;
     }
 
     writer.flush().await.map_err(|e| {

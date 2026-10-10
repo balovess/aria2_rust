@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use tracing::{error, info, warn};
 
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::DiskWriter;
 use crate::network::ConnectionContext;
@@ -68,92 +69,13 @@ impl Command for FtpDownloadCommand {
             })?;
         }
 
-        // Retry loop for transient errors. The policy counts total attempts,
-        // matching aria2's `--max-tries` contract.
-        let mut attempts = 0u32;
-        loop {
-            let attempt_index = attempts;
-            match self.execute_single_attempt(attempt_index).await {
-                Ok(_) => {
-                    info!(
-                        "FTP download completed successfully: {} ({} bytes)",
-                        self.output_path.display(),
-                        self.completed_bytes
-                    );
-                    return Ok(());
-                }
-                Err(attempt_error) => {
-                    self.flush_checkpoint().await;
-                    let FtpAttemptError {
-                        source: mut e,
-                        failed_control,
-                    } = attempt_error;
-                    if matches!(
-                        e,
-                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-                    ) {
-                        e = self.group.recover().file_not_found_error();
-                    }
-                    let reject_control = matches!(
-                        e,
-                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
-                            | Aria2Error::Recoverable(RecoverableError::Timeout)
-                    );
-                    if reject_control && let Some(context) = failed_control.as_ref() {
-                        if let Some(cache) = self.dns_cache.as_ref() {
-                            cache.lock().await.mark_bad_context(context);
-                        }
-                        self.resolved_addresses
-                            .retain(|address| *address != context.peer_addr);
-                        tracing::debug!(
-                            host = %context.endpoint.hostname(),
-                            peer = %context.peer_addr,
-                            "FTP control connection failed; peer was rejected"
-                        );
-                    }
-                    // Check if this is a retry-worthy error
-                    let should_retry = match &e {
-                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
-                            self.retry_policy
-                                .can_retry_after(attempts.saturating_add(1))
-                                && self.group.recover().can_retry_file_not_found()
-                        }
-                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                            ..
-                        })
-                        | Aria2Error::Recoverable(RecoverableError::Timeout) => self
-                            .retry_policy
-                            .can_retry_after(attempts.saturating_add(1)),
-                        _ => false,
-                    };
-
-                    if should_retry {
-                        attempts = attempts.saturating_add(1);
-                        let wait = self.retry_policy.compute_wait(attempts).unwrap_or_default();
-                        warn!(
-                            "FTP download failed (attempt {}/{}), retrying in {:?}: {}",
-                            attempts,
-                            self.retry_policy.max_tries(),
-                            wait,
-                            e
-                        );
-                        self.wait_for_retry(wait).await?;
-
-                        // Reset state for retry
-                        self.completed_bytes = 0;
-                        continue;
-                    }
-
-                    // Non-retryable error or max retries exceeded
-                    error!(
-                        "FTP download failed permanently after {} attempts: {}",
-                        attempts.saturating_add(1),
-                        e
-                    );
-                    return Err(e);
-                }
-            }
-        }
+        run_single_work_item(self).await?;
+        info!(
+            "FTP download completed successfully: {} ({} bytes)",
+            self.output_path.display(),
+            self.completed_bytes
+        );
+        Ok(())
     }
 
     async fn shutdown(&mut self) {
@@ -181,6 +103,92 @@ impl Command for FtpDownloadCommand {
 
     fn timeout(&self) -> Option<Duration> {
         self.group.recover().timeout()
+    }
+}
+
+#[async_trait]
+impl SingleWorkAdapter for FtpDownloadCommand {
+    type Output = ();
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, attempt: u32) -> Result<Self::Output> {
+        match self.execute_single_attempt(attempt.saturating_sub(1)).await {
+            Ok(()) => Ok(()),
+            Err(attempt_error) => {
+                self.flush_checkpoint().await;
+                let FtpAttemptError {
+                    source: mut error,
+                    failed_control,
+                } = attempt_error;
+                if matches!(
+                    &error,
+                    Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                ) {
+                    error = self.group.recover().file_not_found_error();
+                }
+                let reject_control = matches!(
+                    &error,
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+                        | Aria2Error::Recoverable(RecoverableError::Timeout)
+                );
+                if reject_control && let Some(context) = failed_control.as_ref() {
+                    if let Some(cache) = self.dns_cache.as_ref() {
+                        cache.lock().await.mark_bad_context(context);
+                    }
+                    self.resolved_addresses
+                        .retain(|address| *address != context.peer_addr);
+                    tracing::debug!(
+                        host = %context.endpoint.hostname(),
+                        peer = %context.peer_addr,
+                        "FTP control connection failed; peer was rejected"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<Duration> {
+        let should_retry = match error {
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+                self.retry_policy.can_retry_after(attempt)
+                    && self.group.recover().can_retry_file_not_found()
+            }
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+            | Aria2Error::Recoverable(RecoverableError::Timeout) => {
+                self.retry_policy.can_retry_after(attempt)
+            }
+            _ => false,
+        };
+        if should_retry {
+            let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
+            warn!(
+                "FTP download failed (attempt {}/{}), retrying in {:?}: {}",
+                attempt,
+                self.retry_policy.max_tries(),
+                wait,
+                error
+            );
+            Some(wait)
+        } else {
+            error!(
+                "FTP download failed permanently after {} attempts: {}",
+                attempt, error
+            );
+            None
+        }
+    }
+
+    async fn wait_for_retry(&mut self, wait: Duration) -> Result<()> {
+        FtpDownloadCommand::wait_for_retry(self, wait).await
+    }
+
+    async fn prepare_retry(&mut self) -> Result<()> {
+        self.completed_bytes = 0;
+        Ok(())
     }
 }
 

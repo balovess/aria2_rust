@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use super::{MetalinkDownloadCommand, PayloadDownload, classify_metalink_http_status};
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
+use crate::engine::work_commit::SequentialWorkCommitter;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -216,19 +217,20 @@ impl MetalinkDownloadCommand {
             if !bytes.is_empty() {
                 self.group.recover().record_network_activity();
             }
-            if let Err(error) = writer.write(&bytes).await {
+            let write_result = {
+                let mut committer = SequentialWorkCommitter::new(
+                    writer.as_mut(),
+                    &mut self.completed_bytes,
+                    &self.group,
+                    &mut self.checkpoint,
+                );
+                committer.commit_chunk_without_progress(&bytes).await
+            };
+            if let Err(error) = write_result {
                 self.finalize_partial_writer(&mut writer).await;
                 return Err(Aria2Error::FileIo(format!(
                     "Failed to write Metalink payload: {error}"
                 )));
-            }
-            self.completed_bytes = self.completed_bytes.saturating_add(bytes.len() as u64);
-
-            if let Some(checkpoint) = self.checkpoint.as_mut() {
-                let save_requested = self.group.recover().take_save_control_file_request();
-                checkpoint
-                    .update(self.completed_bytes, save_requested)
-                    .await;
             }
 
             let elapsed = last_speed_update.elapsed();

@@ -146,6 +146,31 @@ impl MirrorCoordinator {
         Some((mirror_idx, mirror_url, range))
     }
 
+    pub(crate) fn select_mirror_for_work_range_excluding(
+        &mut self,
+        segment_idx: u32,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, String, (u32, u64, u64))> {
+        let (mirror_idx, range) = self
+            .segment_manager
+            .select_mirror_for_segment_range_excluding(
+                segment_idx,
+                excluded_mirrors,
+                max_lengths,
+            )?;
+        let mirror_url = self.urls.get(mirror_idx).cloned()?;
+        Some((mirror_idx, mirror_url, range))
+    }
+
+    pub(crate) fn segment_is_complete(&self, segment_idx: u32) -> bool {
+        self.segment_manager
+            .segment_status(segment_idx as usize)
+            .is_some_and(|status| {
+                status == crate::engine::concurrent_segment_manager::SegmentStatus::Done
+            })
+    }
+
     /// Report a successful segment download.
     ///
     /// This updates server statistics with the measured speed and
@@ -408,14 +433,6 @@ impl MirrorCoordinator {
     /// Get the configuration.
     pub fn config(&self) -> &MirrorConfig {
         &self.config
-    }
-
-    /// Return the number of prior attempts for one segment.
-    ///
-    /// The concurrent pipeline uses this value to apply the shared retry
-    /// policy without exposing the segment manager itself.
-    pub(crate) fn segment_retry_count(&self, seg_idx: u32) -> u32 {
-        self.segment_manager.segment_retry_count(seg_idx)
     }
 
     /// Expose the manager to the coordinator's white-box tests only.

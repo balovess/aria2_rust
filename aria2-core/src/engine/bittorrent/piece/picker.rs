@@ -187,6 +187,16 @@ impl PiecePicker {
         self.allowed.test(index as usize)
     }
 
+    /// Whether an incomplete piece is currently selectable by the normal
+    /// peer-source picker. Used by the engine work queue to defer reserved or
+    /// currently unavailable pieces without changing picker priority order.
+    pub(crate) fn is_selectable(&self, index: u32) -> bool {
+        let index = index as usize;
+        index < self.num_pieces as usize
+            && self.is_available(index)
+            && (!self.has_availability_snapshot || self.frequencies[index] > 0)
+    }
+
     /// Number of pieces selected by the current filter.
     pub fn allowed_count(&self) -> usize {
         self.allowed_count

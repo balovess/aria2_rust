@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::http::cookie_helper::CookieHelper;
 use crate::engine::retry_policy::RetryPolicy;
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, Result};
 use crate::http::HttpRequestPolicy;
 use crate::network::ConnectionContext;
@@ -231,53 +232,16 @@ impl SequentialDownloader {
         completed_ranges: &[(u64, u64)],
         retry_policy: &RetryPolicy,
     ) -> Result<()> {
-        let mut accumulated_completed: Vec<(u64, u64)> = completed_ranges.to_vec();
-
-        let mut attempt = 0u32;
-        loop {
-            if attempt > 0
-                && let Some(wait) = retry_policy.compute_wait(attempt)
-            {
-                tracing::info!(
-                    "Sequential download with gaps retry #{} (waiting {:?}), {} ranges already completed...",
-                    attempt,
-                    wait,
-                    accumulated_completed.len()
-                );
-                self.wait_for_retry(wait).await?;
-            }
-
-            let result = self
-                .execute_with_gaps(uri, total_length, &accumulated_completed)
-                .await;
-
-            if !result.completed_gaps.is_empty() {
-                tracing::info!(
-                    "Attempt #{} completed {} gaps",
-                    attempt + 1,
-                    result.completed_gaps.len()
-                );
-                accumulated_completed.extend(result.completed_gaps);
-                accumulated_completed = Self::merge_ranges(&accumulated_completed);
-            }
-
-            if result.error.is_none() {
-                return Ok(());
-            }
-
-            tracing::warn!(
-                "Sequential download with gaps attempt #{} failed: {}",
-                attempt.saturating_add(1),
-                result.error.as_ref().unwrap()
-            );
-            let error = result.error.expect("error was checked above");
-
-            if !self.should_retry(attempt, &error, retry_policy) {
-                return Err(error);
-            }
-            debug_assert!(!retry_policy.is_exhausted(attempt.saturating_add(1)));
-            attempt = attempt.saturating_add(1);
-        }
+        let mut adapter = SequentialWorkAdapter {
+            downloader: self,
+            operation: SequentialWork::Gaps {
+                uri,
+                total_length,
+                completed: completed_ranges.to_vec(),
+            },
+            retry_policy,
+        };
+        run_single_work_item(&mut adapter).await
     }
 
     pub async fn execute_with_retry(
@@ -287,36 +251,121 @@ impl SequentialDownloader {
         total_length: u64,
         retry_policy: &RetryPolicy,
     ) -> Result<()> {
-        let mut attempt = 0u32;
-        loop {
-            if attempt > 0
-                && let Some(wait) = retry_policy.compute_wait(attempt)
-            {
-                tracing::info!(
-                    "Sequential download retry #{} (waiting {:?})...",
-                    attempt,
-                    wait
-                );
-                self.wait_for_retry(wait).await?;
-            }
+        let mut adapter = SequentialWorkAdapter {
+            downloader: self,
+            operation: SequentialWork::Full {
+                uri,
+                resume_state,
+                total_length,
+            },
+            retry_policy,
+        };
+        run_single_work_item(&mut adapter).await
+    }
+}
 
-            match self.execute(uri, resume_state, total_length).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::warn!(
-                        "Sequential download attempt #{} failed: {}",
-                        attempt.saturating_add(1),
-                        e
+enum SequentialWork<'a> {
+    Full {
+        uri: &'a str,
+        resume_state: &'a crate::filesystem::resume_helper::ResumeState,
+        total_length: u64,
+    },
+    Gaps {
+        uri: &'a str,
+        total_length: u64,
+        completed: Vec<(u64, u64)>,
+    },
+}
+
+struct SequentialWorkAdapter<'a> {
+    downloader: &'a mut SequentialDownloader,
+    operation: SequentialWork<'a>,
+    retry_policy: &'a RetryPolicy,
+}
+
+#[async_trait::async_trait]
+impl SingleWorkAdapter for SequentialWorkAdapter<'_> {
+    type Output = ();
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, attempt: u32) -> Result<Self::Output> {
+        match &mut self.operation {
+            SequentialWork::Full {
+                uri,
+                resume_state,
+                total_length,
+            } => {
+                self.downloader
+                    .execute(uri, resume_state, *total_length)
+                    .await
+            }
+            SequentialWork::Gaps {
+                uri,
+                total_length,
+                completed,
+            } => {
+                let result = self
+                    .downloader
+                    .execute_with_gaps(uri, *total_length, completed)
+                    .await;
+                if !result.completed_gaps.is_empty() {
+                    tracing::info!(
+                        "Attempt #{} completed {} gaps",
+                        attempt,
+                        result.completed_gaps.len()
                     );
-                    let should_retry = self.should_retry(attempt, &e, retry_policy);
-                    if !should_retry {
-                        return Err(e);
-                    }
-                    debug_assert!(!retry_policy.is_exhausted(attempt.saturating_add(1)));
-                    attempt = attempt.saturating_add(1);
+                    completed.extend(result.completed_gaps);
+                    let merged = SequentialDownloader::merge_ranges(completed);
+                    *completed = merged;
+                }
+                match result.error {
+                    Some(error) => Err(error),
+                    None => Ok(()),
                 }
             }
         }
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<std::time::Duration> {
+        match &self.operation {
+            SequentialWork::Full { .. } => {
+                tracing::warn!("Sequential download attempt #{} failed: {}", attempt, error)
+            }
+            SequentialWork::Gaps { .. } => tracing::warn!(
+                "Sequential download with gaps attempt #{} failed: {}",
+                attempt,
+                error
+            ),
+        }
+        let retryable =
+            self.downloader
+                .should_retry(attempt.saturating_sub(1), error, self.retry_policy);
+        if !retryable {
+            return None;
+        }
+
+        let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
+        match &self.operation {
+            SequentialWork::Full { .. } => tracing::info!(
+                "Sequential download retry #{} (waiting {:?})...",
+                attempt,
+                wait
+            ),
+            SequentialWork::Gaps { completed, .. } => tracing::info!(
+                "Sequential download with gaps retry #{} (waiting {:?}), {} ranges already completed...",
+                attempt,
+                wait,
+                completed.len()
+            ),
+        }
+        Some(wait)
+    }
+
+    async fn wait_for_retry(&mut self, wait: std::time::Duration) -> Result<()> {
+        self.downloader.wait_for_retry(wait).await
     }
 }
 

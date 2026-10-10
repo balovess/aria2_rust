@@ -11,29 +11,17 @@ use tracing::{debug, warn};
 
 use super::command::Command;
 use super::engine_command::TaskResult;
-use crate::dns::dns_cache::DnsCache;
+use super::protocol_adapter::{ProtocolAdapterRegistry, ProtocolCommandRequest, ProtocolServices};
 use crate::error::Aria2Error;
 use crate::network::ConnectionContext;
-use crate::network::OutboundNetworkPolicy;
-use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 use tokio_util::sync::CancellationToken;
 
 /// Shared services required while constructing a command.
 pub(crate) struct CommandDependencies {
-    pub(crate) dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
-    pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
-    pub(crate) global_limiter: Option<RateLimiter>,
-    #[cfg(feature = "bittorrent")]
-    pub(crate) public_tracker_catalog:
-        Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
-    #[cfg(feature = "bittorrent")]
-    pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>,
-    #[cfg(feature = "bittorrent")]
-    pub(crate) bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
-    #[cfg(feature = "bittorrent")]
-    pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    pub(crate) services: ProtocolServices,
+    pub(crate) protocol_adapters: Arc<ProtocolAdapterRegistry>,
 }
 
 /// Spawns a download command as a tokio task and wires up the completion
@@ -152,212 +140,71 @@ fn failed_task_result(
     }
 }
 
-fn ftp_origin(uri: &str) -> Option<(String, u16)> {
-    let parsed = url::Url::parse(uri).ok()?;
-    let scheme = parsed.scheme();
-    if !matches!(scheme, "ftp" | "ftps") {
-        return None;
-    }
-    Some((
-        parsed.host_str()?.to_string(),
-        parsed.port_or_known_default()?,
-    ))
-}
-
 /// Build the protocol command inside the tracked task.
 ///
-/// Metalink commands need their source metadata before URI dispatch, while
-/// the other protocols share the regular scheme factory. Keeping both paths
-/// here ensures command construction remains cancellable and never blocks the
-/// engine loop on DNS or client setup.
+/// The registry gives metadata adapters and URI adapters the same construction
+/// seam. Keeping construction inside the tracked task ensures DNS and client
+/// setup remain cancellable without blocking the engine loop.
 async fn create_command_for_group(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     first_uri: String,
     options: Arc<DownloadOptions>,
     dependencies: CommandDependencies,
 ) -> crate::error::Result<Box<dyn Command>> {
-    #[cfg(feature = "metalink")]
-    if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
-        let base_uri = group.recover().metalink_base_uri();
-        let mut command = crate::engine::metalink::download_command::MetalinkDownloadCommand::new_with_group_source(
-            Arc::clone(&group),
-            &metalink_data,
-            file_index,
-            &options,
-            base_uri.as_deref(),
-            &dependencies.outbound_network_policy,
-        )?;
-        if let Some(limiter) = dependencies.global_limiter.clone() {
-            command.set_global_limiter(limiter);
-        }
-        #[cfg(feature = "bittorrent")]
-        command.set_public_tracker_catalog(Arc::clone(&dependencies.public_tracker_catalog));
-        #[cfg(feature = "bittorrent")]
-        {
-            command.set_bt_registry(Arc::clone(&dependencies.bt_registry));
-            command.set_bt_listener(Arc::clone(&dependencies.bt_listener));
-            command.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
-        }
-        return Ok(Box::new(command));
-    }
-
     create_command_for_uri(&first_uri, group, &options, dependencies).await
 }
 
-/// Create the appropriate `Command` implementation for a URI.
-///
-/// Uses `new_with_group` constructors so the externally-managed `RequestGroup`
-/// is preserved rather than creating a new one internally. This is critical
-/// for the engine loop's `num_commands` tracking and promotion/demotion flow.
+/// Select a registered adapter and preserve the engine-owned `RequestGroup`.
 async fn create_command_for_uri(
     uri: &str,
     group: Arc<std::sync::RwLock<RequestGroup>>,
     options: &DownloadOptions,
     dependencies: CommandDependencies,
 ) -> crate::error::Result<Box<dyn Command>> {
-    let dns_cache = &dependencies.dns_cache;
-    let use_async_dns = options.async_dns;
-    let uri_lower = uri.to_lowercase();
-    #[cfg(feature = "bittorrent")]
-    let bt_metadata = group.recover().bt_metadata_data();
-
-    // SFTP downloads use the engine-owned group, matching other v2 protocols.
-    #[cfg(feature = "sftp")]
-    if uri_lower.starts_with("sftp://") {
-        let mut cmd = crate::engine::sftp::download_command::SftpDownloadCommand::new_with_group(
-            Arc::clone(&group),
-            uri,
-            options,
-            options.dir.as_deref(),
-            options.out.as_deref(),
-        )?;
-        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
-        if let Some(limiter) = dependencies.global_limiter.clone() {
-            cmd.set_global_limiter(limiter);
-        }
-        return Ok(Box::new(cmd));
-    }
-
-    // BitTorrent torrent payloads. Followed torrent groups retain tracker and
-    // web-seed URIs, so their first URI is not necessarily `bt://`.
-    #[cfg(feature = "bittorrent")]
-    if uri_lower.starts_with("bt://") || bt_metadata.is_some() {
-        let output_dir = options.dir.as_deref();
-        let torrent_bytes = bt_metadata
-            .or_else(|| {
-                group
-                    .recover()
-                    .metadata_info()
-                    .and_then(|info| info.metadata_path().map(std::path::PathBuf::from))
-                    .and_then(|path| std::fs::read(path).ok())
-            })
-            .ok_or_else(|| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(
-                    "Resolved BitTorrent payload has no metadata source".to_string(),
-                ))
-            })?;
-        let mut cmd = crate::engine::bittorrent::download::command::BtDownloadCommand::new_with_group_and_mappings_with_policy(
-            group,
-            &torrent_bytes,
-            options,
-            output_dir,
-            &[],
-            &dependencies.outbound_network_policy,
-        )?;
-        cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
-        cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
-        cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
-        if let Some(limiter) = dependencies.global_limiter.clone() {
-            cmd.set_global_limiter(limiter);
-        }
-        cmd.set_public_tracker_catalog(Arc::clone(&dependencies.public_tracker_catalog));
-        return Ok(Box::new(cmd));
-    }
-
-    // BitTorrent magnet links.
-    #[cfg(feature = "bittorrent")]
-    if uri_lower.starts_with("magnet:") {
-        let output_dir = options.dir.as_deref();
-        let mut cmd =
-            crate::engine::bittorrent::magnet::download_command::MagnetDownloadCommand::new_with_group(
-                group, output_dir,
-            )?;
-        cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
-        cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
-        cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
-        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
-        if let Some(limiter) = dependencies.global_limiter.clone() {
-            cmd.set_global_limiter(limiter);
-        }
-        cmd.set_public_tracker_catalog(Arc::clone(&dependencies.public_tracker_catalog));
-        return Ok(Box::new(cmd));
-    }
-
-    // FTP/FTPS downloads.
-    if uri_lower.starts_with("ftp://") || uri_lower.starts_with("ftps://") {
-        let output_dir = options.dir.as_deref();
-        let output_name = options.out.as_deref();
-        let mut cmd = crate::engine::ftp::download_command::FtpDownloadCommand::new_with_group(
-            group,
-            output_dir,
-            output_name,
-        )?;
-        if let Some(limiter) = dependencies.global_limiter.clone() {
-            cmd.set_global_limiter(limiter);
-        }
-        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
-        if use_async_dns {
-            cmd.set_dns_cache(Arc::clone(dns_cache));
-            if let Some((hostname, port)) = ftp_origin(uri)
-                && let Ok(addresses) = dns_cache
-                    .lock()
-                    .await
-                    .resolve_with_refresh(&hostname, port)
-                    .await
-            {
-                cmd.set_resolved_addresses(addresses);
-            }
-        }
-        return Ok(Box::new(cmd));
-    }
-
-    // Default: HTTP/HTTPS download command.
-    let command = crate::engine::http::command_factory::create_download_command(
-        group,
-        uri,
-        options,
-        Arc::clone(&dependencies.dns_cache),
-        Arc::clone(&dependencies.outbound_network_policy),
-        dependencies.global_limiter,
-    )
-    .await?;
-    Ok(Box::new(command))
+    dependencies
+        .protocol_adapters
+        .create(
+            ProtocolCommandRequest {
+                group,
+                first_uri: uri.to_string(),
+                options: Arc::new(options.clone()),
+            },
+            &dependencies.services,
+        )
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dns::dns_cache::DnsCache;
+    use crate::network::OutboundNetworkPolicy;
     use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
     fn dependencies(dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) -> CommandDependencies {
         CommandDependencies {
-            dns_cache,
-            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
-            global_limiter: None,
-            #[cfg(feature = "bittorrent")]
-            public_tracker_catalog: Arc::new(
-                aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
-            ),
-            #[cfg(feature = "bittorrent")]
-            bt_registry: Arc::new(std::sync::RwLock::new(
-                crate::engine::bittorrent::registry::BtRegistry::new(),
+            services: ProtocolServices {
+                dns_cache,
+                outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+                global_limiter: None,
+            },
+            protocol_adapters: Arc::new(ProtocolAdapterRegistry::builtins(
+                #[cfg(feature = "bittorrent")]
+                crate::engine::bittorrent::command_adapter::BtCommandServices {
+                    public_tracker_catalog: Arc::new(
+                        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
+                    ),
+                    bt_registry: Arc::new(std::sync::RwLock::new(
+                        crate::engine::bittorrent::registry::BtRegistry::new(),
+                    )),
+                    bt_listener: Arc::new(
+                        crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+                    ),
+                    lpd_manager: Arc::new(
+                        crate::engine::bittorrent::discovery::lpd::LpdManager::new(),
+                    ),
+                },
             )),
-            #[cfg(feature = "bittorrent")]
-            bt_listener: Arc::new(
-                crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
-            ),
-            #[cfg(feature = "bittorrent")]
-            lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
         }
     }
 

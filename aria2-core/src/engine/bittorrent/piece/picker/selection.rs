@@ -38,7 +38,7 @@ impl PiecePicker {
     /// A piece is *available* when it is neither completed nor already
     /// being downloaded by another request.
     #[inline]
-    fn is_available(&self, i: usize) -> bool {
+    pub(super) fn is_available(&self, i: usize) -> bool {
         self.allowed.test(i)
             && !self.completed.test(i)
             && !self.in_progress.test(i)

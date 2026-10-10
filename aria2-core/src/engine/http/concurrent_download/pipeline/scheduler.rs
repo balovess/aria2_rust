@@ -14,6 +14,7 @@ use crate::engine::http::segment_downloader::{
     SegmentProgress, SegmentProgressTracker, WriteChunk,
 };
 use crate::engine::retry_policy::RetryPolicy;
+use crate::engine::work_scheduler::WorkLease;
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -30,13 +31,21 @@ pub(super) struct RangeScheduler {
     pub(super) connection_guard: ActiveConnectionGuard,
     pub(super) write_tx: mpsc::Sender<WriteChunk>,
     pub(super) write_rx: mpsc::Receiver<WriteChunk>,
-    pub(super) active: HashMap<u32, (usize, u64, Instant, u64)>,
+    pub(super) active: HashMap<u32, ActiveRangeWork>,
     pub(super) progress_tracker: Arc<SegmentProgressTracker>,
     pub(super) segment_progress: HashMap<u32, Arc<SegmentProgress>>,
     pub(super) slow_range_recovery: SlowRangeRecovery,
     pub(super) segment_stall_timeout: Duration,
     pub(super) stall_check: tokio::time::Interval,
     pub(super) lifecycle_notify: Arc<tokio::sync::Notify>,
+}
+
+pub(super) struct ActiveRangeWork {
+    pub(super) lease: WorkLease<u32>,
+    pub(super) mirror_idx: usize,
+    pub(super) length: u64,
+    pub(super) started_at: Instant,
+    pub(super) task_id: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -89,7 +98,7 @@ pub(super) fn create(
     }
     let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
     let (write_tx, write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
-    let active: HashMap<u32, (usize, u64, Instant, u64)> = HashMap::new();
+    let active = HashMap::new();
     let progress_tracker =
         SegmentProgressTracker::new(coordinator.completed_bytes(), Arc::clone(&dl.progress));
     let segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();

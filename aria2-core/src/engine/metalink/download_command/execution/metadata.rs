@@ -1,6 +1,8 @@
 //! Metadata retrieval and Metalink hash verification.
 
 use std::path::Path;
+#[cfg(feature = "bittorrent")]
+use std::time::Duration;
 use tracing::warn;
 
 use super::MetalinkDownloadCommand;
@@ -10,6 +12,8 @@ use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
 #[cfg(feature = "bittorrent")]
 use crate::engine::retry_policy::RetryPolicy;
+#[cfg(feature = "bittorrent")]
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 #[cfg(feature = "bittorrent")]
 use crate::error::RecoverableError;
 use crate::error::{Aria2Error, Result};
@@ -57,38 +61,16 @@ impl MetalinkDownloadCommand {
     }
 
     #[cfg(feature = "bittorrent")]
-    pub(super) async fn download_metadata_url_with_retry(&self, url: &str) -> Result<Vec<u8>> {
+    pub(super) async fn download_metadata_url_with_retry(&mut self, url: &str) -> Result<Vec<u8>> {
         let options = self.group.recover().options_arc();
         let retry_policy =
             RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
-        let mut attempts = 0u32;
-
-        loop {
-            match self.download_metadata_url(url).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(error) => {
-                    let error = self.record_not_found_error(error);
-                    if self.lifecycle_error().is_some()
-                        || self.should_stop_after_not_found(&error)
-                        || !self.should_retry_mirror_error(attempts, &error, &retry_policy)
-                    {
-                        return Err(error);
-                    }
-
-                    attempts = attempts.saturating_add(1);
-                    let wait = retry_policy.compute_wait(attempts).unwrap_or_default();
-                    warn!(
-                        url,
-                        attempt = attempts.saturating_add(1),
-                        max_attempts = retry_policy.max_tries(),
-                        ?wait,
-                        error = %error,
-                        "Metalink torrent metaurl failed, retrying"
-                    );
-                    self.wait_for_retry(wait).await?;
-                }
-            }
-        }
+        let mut work = MetalinkMetadataUrlWork {
+            command: self,
+            url: url.to_owned(),
+            retry_policy,
+        };
+        run_single_work_item(&mut work).await
     }
 
     pub(super) async fn verify_file_hash(
@@ -238,6 +220,57 @@ impl MetalinkDownloadCommand {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+struct MetalinkMetadataUrlWork<'a> {
+    command: &'a mut MetalinkDownloadCommand,
+    url: String,
+    retry_policy: RetryPolicy,
+}
+
+#[cfg(feature = "bittorrent")]
+#[async_trait::async_trait]
+impl SingleWorkAdapter for MetalinkMetadataUrlWork<'_> {
+    type Output = Vec<u8>;
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
+        self.command
+            .download_metadata_url(&self.url)
+            .await
+            .map_err(|error| self.command.record_not_found_error(error))
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<Duration> {
+        if self.command.lifecycle_error().is_some()
+            || self.command.should_stop_after_not_found(error)
+            || !self.command.should_retry_mirror_error(
+                attempt.saturating_sub(1),
+                error,
+                &self.retry_policy,
+            )
+        {
+            return None;
+        }
+        let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
+        warn!(
+            url = %self.url,
+            attempt = attempt.saturating_add(1),
+            max_attempts = self.retry_policy.max_tries(),
+            ?wait,
+            error = %error,
+            "Metalink torrent metaurl failed, retrying"
+        );
+        Some(wait)
+    }
+
+    async fn wait_for_retry(&mut self, wait: Duration) -> Result<()> {
+        self.command.wait_for_retry(wait).await
     }
 }
 

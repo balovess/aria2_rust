@@ -2,7 +2,7 @@ use crate::engine::bittorrent::peer::message_handler::types::BLOCK_SIZE;
 
 use super::PieceDownloadSession;
 
-const MAX_BT_PIECES_IN_FLIGHT: usize = 8;
+pub(super) const MAX_BT_PIECES_IN_FLIGHT: usize = 8;
 const MAX_BT_PIECE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 impl PieceDownloadSession<'_> {

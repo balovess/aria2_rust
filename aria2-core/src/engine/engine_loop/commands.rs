@@ -19,6 +19,8 @@ pub(super) fn promote_reserved_groups(
     } else {
         ctx.group_man.fill_from_reserver()
     };
+    let protocol_adapters =
+        Arc::new(super::super::protocol_adapter::ProtocolAdapterRegistry::for_engine(ctx));
 
     for group in &promoted {
         let gid = group.recover().gid();
@@ -28,17 +30,12 @@ pub(super) fn promote_reserved_groups(
         match spawn_download_task(
             Arc::clone(group),
             CommandDependencies {
-                dns_cache: Arc::clone(&ctx.dns_cache),
-                outbound_network_policy: Arc::clone(&ctx.outbound_network_policy),
-                global_limiter: ctx.global_limiter.clone(),
-                #[cfg(feature = "bittorrent")]
-                public_tracker_catalog: Arc::clone(&ctx.public_tracker_catalog),
-                #[cfg(feature = "bittorrent")]
-                bt_registry: Arc::clone(&ctx.bt_registry),
-                #[cfg(feature = "bittorrent")]
-                bt_listener: Arc::clone(&ctx.bt_listener),
-                #[cfg(feature = "bittorrent")]
-                lpd_manager: Arc::clone(&ctx.lpd_manager),
+                services: super::super::protocol_adapter::ProtocolServices {
+                    dns_cache: Arc::clone(&ctx.dns_cache),
+                    outbound_network_policy: Arc::clone(&ctx.outbound_network_policy),
+                    global_limiter: ctx.global_limiter.clone(),
+                },
+                protocol_adapters: Arc::clone(&protocol_adapters),
             },
             generation,
             completion_tx.clone(),

@@ -7,6 +7,7 @@ use crate::engine::http::concurrent_download::{ConcurrentDownloadResult, Concurr
 use crate::engine::http::segment_downloader::HttpSegmentDownloader;
 use crate::engine::http::sequential_download::SequentialDownloader;
 use crate::engine::retry_policy::RetryPolicy;
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::file_allocation;
 use crate::filesystem::file_allocation_man;
@@ -169,30 +170,15 @@ impl DownloadCommand {
                     .with_auth_options(auth_options, options.netrc_path.clone());
             let probe_retry_policy =
                 RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
-            let mut probe_attempt = 0u32;
-            let probe: crate::engine::http::segment_downloader::RangeProbeResult = loop {
-                match prober
-                    .probe_range_metadata(&effective_uri, cookie_header.as_deref())
-                    .await
-                {
-                    Ok(probe) => break probe,
-                    Err(error) if probe_retry_policy.should_retry(probe_attempt, &error) => {
-                        let retry_wait = probe_retry_policy
-                            .compute_wait(probe_attempt.saturating_add(1))
-                            .unwrap_or_default();
-                        probe_attempt = probe_attempt.saturating_add(1);
-                        if !retry_wait.is_zero() {
-                            self.wait_for_retry(retry_wait).await?;
-                        }
-                        debug!(
-                            attempt = probe_attempt,
-                            wait_ms = retry_wait.as_millis() as u64,
-                            error = %error,
-                            "Retrying transient HTTP Range capability probe"
-                        );
-                    }
-                    Err(error) => return Err(error),
-                }
+            let probe = {
+                let mut work = HttpRangeProbeWork {
+                    command: self,
+                    prober: &prober,
+                    uri: &effective_uri,
+                    cookie_header: cookie_header.as_deref(),
+                    retry_policy: probe_retry_policy,
+                };
+                run_single_work_item(&mut work).await?
             };
             supports_range = probe.supports_range;
             if probe.total_length > 0 {
@@ -566,5 +552,52 @@ impl DownloadCommand {
         self.group
             .recover()
             .set_resolved_output_path(self.output_path.to_string_lossy());
+    }
+}
+
+struct HttpRangeProbeWork<'a> {
+    command: &'a mut DownloadCommand,
+    prober: &'a HttpSegmentDownloader,
+    uri: &'a str,
+    cookie_header: Option<&'a str>,
+    retry_policy: RetryPolicy,
+}
+
+#[async_trait::async_trait]
+impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
+    type Output = crate::engine::http::segment_downloader::RangeProbeResult;
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
+        self.prober
+            .probe_range_metadata(self.uri, self.cookie_header)
+            .await
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<std::time::Duration> {
+        if !self
+            .retry_policy
+            .should_retry(attempt.saturating_sub(1), error)
+        {
+            return None;
+        }
+        let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
+        debug!(
+            attempt,
+            wait_ms = wait.as_millis() as u64,
+            error = %error,
+            "Retrying transient HTTP Range capability probe"
+        );
+        Some(wait)
+    }
+
+    async fn wait_for_retry(&mut self, wait: std::time::Duration) -> Result<()> {
+        if wait.is_zero() {
+            return Ok(());
+        }
+        self.command.wait_for_retry(wait).await
     }
 }

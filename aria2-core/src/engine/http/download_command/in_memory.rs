@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::engine::retry_policy::RetryPolicy;
+use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 use futures::StreamExt;
@@ -13,28 +14,13 @@ impl DownloadCommand {
         let options = self.group.recover().options_arc();
         let retry_policy =
             RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
-        let mut attempt = 0u32;
-        loop {
-            match self.execute_in_memory_attempt(uri).await {
-                Ok(()) => return Ok(()),
-                Err(error)
-                    if should_retry_in_memory_error(
-                        &error,
-                        attempt,
-                        &retry_policy,
-                        options.retry_wait,
-                        self.group.recover().can_retry_file_not_found(),
-                    ) =>
-                {
-                    attempt = attempt.saturating_add(1);
-                    if options.retry_wait > 0 {
-                        self.wait_for_retry(Duration::from_secs(options.retry_wait))
-                            .await?;
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        let mut work = InMemoryDownloadWork {
+            command: self,
+            uri,
+            retry_policy,
+            retry_wait: Duration::from_secs(options.retry_wait),
+        };
+        run_single_work_item(&mut work).await
     }
 
     /// Download one metadata source into a memory buffer.
@@ -170,6 +156,44 @@ impl DownloadCommand {
         self.completed = true;
         self.group.recover_mut().complete()?;
         Ok(())
+    }
+}
+
+struct InMemoryDownloadWork<'a> {
+    command: &'a mut DownloadCommand,
+    uri: &'a str,
+    retry_policy: RetryPolicy,
+    retry_wait: Duration,
+}
+
+#[async_trait::async_trait]
+impl SingleWorkAdapter for InMemoryDownloadWork<'_> {
+    type Output = ();
+
+    fn max_attempts(&self) -> u32 {
+        self.retry_policy.max_tries()
+    }
+
+    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
+        self.command.execute_in_memory_attempt(self.uri).await
+    }
+
+    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<Duration> {
+        should_retry_in_memory_error(
+            error,
+            attempt.saturating_sub(1),
+            &self.retry_policy,
+            self.retry_wait.as_secs(),
+            self.command.group.recover().can_retry_file_not_found(),
+        )
+        .then_some(self.retry_wait)
+    }
+
+    async fn wait_for_retry(&mut self, wait: Duration) -> Result<()> {
+        if wait.is_zero() {
+            return Ok(());
+        }
+        self.command.wait_for_retry(wait).await
     }
 }
 

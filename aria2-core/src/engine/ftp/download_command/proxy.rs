@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::checksum::checksum::Checksum;
 use crate::constants;
+use crate::engine::work_commit::SequentialWorkCommitter;
 use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -205,19 +206,20 @@ impl FtpDownloadCommand {
             // Refresh the inactivity clock when bytes arrive from the proxy,
             // before any disk write or rate limiting can delay the loop.
             self.group.recover().record_network_activity();
-            if let Err(error) = writer.write(&buffer[..bytes_read]).await {
+            let write_result = {
+                let mut committer = SequentialWorkCommitter::new(
+                    &mut writer,
+                    &mut self.completed_bytes,
+                    &self.group,
+                    &mut self.checkpoint,
+                );
+                committer.commit_chunk(&buffer[..bytes_read]).await
+            };
+            if let Err(error) = write_result {
                 self.finalize_partial_writer(&mut writer).await;
                 return Err(FtpAttemptError::from(error));
             }
             body_bytes = body_bytes.saturating_add(bytes_read as u64);
-            self.completed_bytes = self.completed_bytes.saturating_add(bytes_read as u64);
-            if let Some(checkpoint) = self.checkpoint.as_mut() {
-                let save_requested = self.group.recover().take_save_control_file_request();
-                checkpoint
-                    .update(self.completed_bytes, save_requested)
-                    .await;
-            }
-            self.group.recover().update_progress(self.completed_bytes);
         }
 
         if let Some(expected_length) = body_length

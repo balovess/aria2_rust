@@ -4,6 +4,7 @@
 pub(crate) mod adaptive_concurrency;
 pub(crate) mod auth;
 pub(crate) mod client_config;
+pub(crate) mod command_adapter;
 pub(crate) mod command_factory;
 pub(crate) mod concurrent_download;
 pub mod cookie_helper;

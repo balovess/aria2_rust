@@ -315,7 +315,7 @@ mod http_status_tests {
             retry_wait: 0,
             ..DownloadOptions::default()
         };
-        let command = MetalinkDownloadCommand::new(
+        let mut command = MetalinkDownloadCommand::new(
             GroupId::new(404),
             br#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>http://127.0.0.1/unused</url></file></metalink>"#,
             &options,

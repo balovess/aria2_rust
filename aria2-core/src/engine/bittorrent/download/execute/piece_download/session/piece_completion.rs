@@ -3,6 +3,9 @@ use std::time::Instant;
 
 use crate::engine::bittorrent::download::execute::types::PeerKey;
 use crate::engine::bittorrent::peer::message_handler::types::PieceDownloadResult;
+use crate::engine::work_commit::{
+    WorkCommitOutcome, WorkCommitter, WorkValidation, commit_work_result,
+};
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadResultCode;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -10,7 +13,135 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::piece_storage::in_flight_snapshot;
 use super::{PieceDownloadSession, PieceLoopAction};
 
+struct PieceWorkCommitter<'a, 'command> {
+    session: &'a mut PieceDownloadSession<'command>,
+    piece_index: u32,
+    progress_index: usize,
+}
+
+#[async_trait::async_trait]
+impl WorkCommitter for PieceWorkCommitter<'_, '_> {
+    type Output = Vec<u8>;
+
+    async fn validate(&mut self, data: &mut Self::Output) -> Result<WorkValidation> {
+        let expected_hash = self
+            .session
+            .piece_manager
+            .expected_piece_verification(self.piece_index);
+        let (verified, verified_data) =
+            super::super::super::hash_verification::verify_piece_hash_async(
+                expected_hash,
+                std::mem::take(data),
+            )
+            .await?;
+        if !verified {
+            return Ok(WorkValidation::Rejected);
+        }
+        *data = verified_data;
+        Ok(WorkValidation::Accepted)
+    }
+
+    async fn write(&mut self, data: Self::Output) -> Result<u64> {
+        let data_length = data.len() as u64;
+        let piece_bytes = bytes::Bytes::from(data);
+        if self.session.command.multi_file_layout.is_some() {
+            let max_open_files = self
+                .session
+                .command
+                .group
+                .recover()
+                .options()
+                .bt_max_open_files;
+            self.session
+                .command
+                .write_multi_file_piece_and_track(self.piece_index, &piece_bytes, max_open_files)
+                .await?;
+        } else {
+            self.session
+                .writer
+                .write_bytes_at(
+                    self.piece_index as u64 * self.session.piece_length as u64,
+                    piece_bytes,
+                )
+                .await?;
+        }
+
+        let committed_bytes =
+            if self.session.meta.info.meta_version == Some(2) && self.session.has_v1_piece_hashes {
+                self.session
+                    .command
+                    .multi_file_layout
+                    .as_ref()
+                    .map(|layout| layout.content_bytes_in_piece(self.piece_index))
+                    .unwrap_or(data_length)
+            } else {
+                data_length
+            };
+
+        self.session
+            .piece_manager
+            .mark_piece_complete(self.piece_index);
+        self.session.piece_picker.mark_completed(self.piece_index);
+        super::super::super::checkpoint::mark_piece_completed(
+            &self.session.completed_bitfield,
+            self.piece_index,
+        );
+        self.session.command.completed_bytes = self
+            .session
+            .command
+            .completed_bytes
+            .saturating_add(committed_bytes);
+        self.session.in_flight_pieces.remove(&self.piece_index);
+        self.session
+            .command
+            .group
+            .recover()
+            .update_bt_bitfield_piece(self.piece_index, self.session.num_pieces);
+
+        Ok(committed_bytes)
+    }
+
+    async fn checkpoint(&mut self, committed_bytes: u64) -> Result<()> {
+        self.session
+            .command
+            .persist_checkpoint_after_piece(
+                &mut self.session.writer,
+                &self.session.completed_bitfield,
+                committed_bytes,
+                &in_flight_snapshot(&self.session.in_flight_pieces),
+            )
+            .await?;
+        self.session.swarm.set_wanted_pieces(Arc::from(
+            self.session.piece_picker.missing_pieces_bitfield(),
+        ));
+        self.session.swarm.broadcast_have(self.piece_index).await;
+        self.session.command.maybe_save_progress(
+            self.session.meta,
+            &self.session.completed_bitfield,
+            self.session.piece_length,
+            self.session.total_size,
+            self.session.num_pieces,
+            self.session.start_time,
+            &mut self.session.last_progress_save,
+            self.progress_index,
+        );
+        Ok(())
+    }
+}
+
 impl PieceDownloadSession<'_> {
+    async fn commit_piece_work(&mut self, piece_index: u32, data: Vec<u8>) -> Result<bool> {
+        let mut committer = PieceWorkCommitter {
+            session: self,
+            piece_index,
+            progress_index: piece_index as usize,
+        };
+        Ok(matches!(
+            commit_work_result(&mut committer, data).await?,
+            WorkCommitOutcome::Committed
+        ))
+    }
+
     pub(super) async fn complete_web_seed_piece(
         &mut self,
         piece_index: u32,
@@ -24,79 +155,53 @@ impl PieceDownloadSession<'_> {
                 return Ok(false);
             }
         };
-        let expected_hash = self.piece_manager.expected_piece_verification(piece_index);
-        let (verified, web_seed_data) =
-            super::super::super::hash_verification::verify_piece_hash_async(
-                expected_hash,
-                web_seed_data,
-            )
-            .await?;
-        if !verified {
+        if !self.commit_piece_work(piece_index, web_seed_data).await? {
             tracing::warn!(piece_index, "WebSeed piece failed hash verification");
             self.piece_picker.mark_reserved(piece_index, false);
             return Ok(false);
         }
-
-        let web_seed_data_length = web_seed_data.len() as u64;
-        let web_seed_bytes = bytes::Bytes::from(web_seed_data);
-        if self.command.multi_file_layout.is_some() {
-            let max_open_files = self.command.group.recover().options().bt_max_open_files;
-            self.command
-                .write_multi_file_piece_and_track(piece_index, &web_seed_bytes, max_open_files)
-                .await?;
-        } else {
-            self.writer
-                .write_bytes_at(
-                    piece_index as u64 * self.piece_length as u64,
-                    web_seed_bytes,
-                )
-                .await?;
-        }
-
-        let accounted_bytes = if self.meta.info.meta_version == Some(2) && self.has_v1_piece_hashes
-        {
-            self.command
-                .multi_file_layout
-                .as_ref()
-                .map(|layout| layout.content_bytes_in_piece(piece_index))
-                .unwrap_or(web_seed_data_length)
-        } else {
-            web_seed_data_length
-        };
-        self.piece_manager.mark_piece_complete(piece_index);
-        self.piece_picker.mark_completed(piece_index);
-        super::super::super::checkpoint::mark_piece_completed(
-            &self.completed_bitfield,
-            piece_index,
-        );
-        self.swarm
-            .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()));
-        self.command.completed_bytes = self.command.completed_bytes.saturating_add(accounted_bytes);
-        self.in_flight_pieces.remove(&piece_index);
-        self.command
-            .group
-            .recover()
-            .update_bt_bitfield_piece(piece_index, self.num_pieces);
-        self.command
-            .persist_checkpoint_after_piece(
-                &mut self.writer,
-                &self.completed_bitfield,
-                accounted_bytes,
-                &in_flight_snapshot(&self.in_flight_pieces),
-            )
-            .await?;
-        self.swarm.broadcast_have(piece_index).await;
-        self.command.maybe_save_progress(
-            self.meta,
-            &self.completed_bitfield,
-            self.piece_length,
-            self.total_size,
-            self.num_pieces,
-            self.start_time,
-            &mut self.last_progress_save,
-            piece_index as usize,
-        );
         Ok(true)
+    }
+
+    async fn try_web_seed_fallback(
+        &mut self,
+        piece_index: usize,
+        piece_data_length: u32,
+    ) -> Result<bool> {
+        let Some(web_seed_manager) = self.web_seed_manager.as_deref() else {
+            return Ok(false);
+        };
+
+        tracing::info!(
+            "[BT] Piece {} failed from peers, trying web seeds...",
+            piece_index
+        );
+        let connection_guard = crate::request::request_group::ActiveConnectionGuard::new(
+            Arc::clone(&self.command.group),
+        );
+        connection_guard.set(1);
+        let result = web_seed_manager
+            .request_piece_with_length_and_activity(
+                piece_index as u32,
+                piece_data_length as u64,
+                Some(self.command.progress.as_ref()),
+            )
+            .await
+            .map_err(|error| error.to_string());
+        drop(connection_guard);
+
+        if let Ok(data) = &result {
+            if !data.is_empty() {
+                self.command.progress.record_network_activity();
+            }
+            tracing::info!(
+                "[BT] Piece {} downloaded from web seed ({} bytes)",
+                piece_index,
+                data.len()
+            );
+        }
+        self.complete_web_seed_piece(piece_index as u32, result)
+            .await
     }
 
     pub(super) async fn process_piece_download_result(
@@ -110,7 +215,6 @@ impl PieceDownloadSession<'_> {
         match download_result {
             Ok(piece_result) => {
                 let piece_data = piece_result.data;
-                let piece_data_len = piece_data.len();
 
                 // Apply receive-time attribution before failed peers are removed.
                 for (peer_download, actor_id) in piece_result.peer_bytes.iter().zip(peer_actor_ids)
@@ -149,88 +253,12 @@ impl PieceDownloadSession<'_> {
                     "[BT] All blocks received for piece {}, verifying...",
                     next_piece_idx
                 );
-                let expected_hash = self
-                    .piece_manager
-                    .expected_piece_verification(next_piece_idx as u32);
-                let (piece_verified, piece_data) =
-                    super::super::super::hash_verification::verify_piece_hash_async(
-                        expected_hash,
-                        piece_data,
-                    )
-                    .await?;
-                if piece_verified {
+                if self
+                    .commit_piece_work(next_piece_idx as u32, piece_data)
+                    .await?
+                {
                     tracing::info!("[BT] Piece {} verified OK", next_piece_idx);
-                    self.piece_manager
-                        .mark_piece_complete(next_piece_idx as u32);
-                    self.piece_picker.mark_completed(next_piece_idx as u32);
-
-                    let piece_bytes = bytes::Bytes::from(piece_data);
-                    if self.command.multi_file_layout.is_some() {
-                        let max_open_files =
-                            self.command.group.recover().options().bt_max_open_files;
-                        self.command
-                            .write_multi_file_piece_and_track(
-                                next_piece_idx as u32,
-                                &piece_bytes,
-                                max_open_files,
-                            )
-                            .await?;
-                    } else {
-                        self.writer
-                            .write_bytes_at(
-                                next_piece_idx as u64 * self.piece_length as u64,
-                                piece_bytes,
-                            )
-                            .await?;
-                    }
-
-                    super::super::super::checkpoint::mark_piece_completed(
-                        &self.completed_bitfield,
-                        next_piece_idx as u32,
-                    );
-
-                    let accounted_piece_len =
-                        if self.meta.info.meta_version == Some(2) && self.has_v1_piece_hashes {
-                            self.command
-                                .multi_file_layout
-                                .as_ref()
-                                .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
-                                .unwrap_or(piece_data_len as u64)
-                        } else {
-                            piece_data_len as u64
-                        };
-                    self.command.completed_bytes += accounted_piece_len;
-                    self.in_flight_pieces.remove(&(next_piece_idx as u32));
-
-                    self.command
-                        .group
-                        .recover()
-                        .update_bt_bitfield_piece(next_piece_idx as u32, self.num_pieces);
-                    self.command
-                        .persist_checkpoint_after_piece(
-                            &mut self.writer,
-                            &self.completed_bitfield,
-                            accounted_piece_len,
-                            &in_flight_snapshot(&self.in_flight_pieces),
-                        )
-                        .await?;
-
-                    self.swarm
-                        .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()));
-                    self.swarm.broadcast_have(next_piece_idx as u32).await;
                     piece_ok = true;
-
-                    // P1 integration: periodically save download progress
-                    self.command.maybe_save_progress(
-                        self.meta,
-                        &self.completed_bitfield,
-                        self.piece_length,
-                        self.total_size,
-                        self.num_pieces,
-                        self.start_time,
-                        &mut self.last_progress_save,
-                        next_piece_idx,
-                    );
                 } else {
                     self.in_flight_pieces.remove(&(next_piece_idx as u32));
                     tracing::warn!(
@@ -285,30 +313,9 @@ impl PieceDownloadSession<'_> {
 
         if !piece_ok {
             // Try Web Seeds as fallback (BEP 19)
-            let accounted_piece_bytes =
-                if self.meta.info.meta_version == Some(2) && self.has_v1_piece_hashes {
-                    self.command
-                        .multi_file_layout
-                        .as_ref()
-                        .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
-                        .unwrap_or(actual_piece_len as u64)
-                } else {
-                    actual_piece_len as u64
-                };
-            piece_ok = super::super::super::web_seed::try_web_seed_fallback(
-                self.command,
-                self.web_seed_manager.as_deref(),
-                next_piece_idx,
-                actual_piece_len,
-                accounted_piece_bytes,
-                &mut self.piece_manager,
-                &mut self.piece_picker,
-                &self.completed_bitfield,
-                self.num_pieces,
-                &mut self.writer,
-                self.piece_length,
-            )
-            .await?;
+            piece_ok = self
+                .try_web_seed_fallback(next_piece_idx, actual_piece_len)
+                .await?;
 
             if !piece_ok {
                 let source_count =

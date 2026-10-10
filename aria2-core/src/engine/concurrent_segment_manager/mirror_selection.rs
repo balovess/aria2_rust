@@ -35,13 +35,26 @@ impl ConcurrentSegmentManager {
         excluded_mirrors: &[usize],
         max_lengths: &[u64],
     ) -> Option<(usize, (u32, u64, u64))> {
-        // Find a pending segment first
-        let pending_seg = self
+        let seg_index = self
             .segments
             .iter()
-            .find(|s| s.status == SegmentStatus::Pending)?;
+            .find(|segment| segment.status == SegmentStatus::Pending)?
+            .index;
+        self.select_mirror_for_segment_range_excluding(seg_index, excluded_mirrors, max_lengths)
+    }
 
-        let seg_index = pending_seg.index;
+    /// Select a mirror and claim the next subrange of a specific pending
+    /// durable parent. The engine work scheduler supplies the parent ID.
+    pub fn select_mirror_for_segment_range_excluding(
+        &mut self,
+        seg_index: u32,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, (u32, u64, u64))> {
+        let pending_seg = self.segments.get(seg_index as usize)?;
+        if pending_seg.index != seg_index || pending_seg.status != SegmentStatus::Pending {
+            return None;
+        }
         let completed = *self.completed_lengths.get(seg_index as usize)?;
         let remaining = pending_seg.length.saturating_sub(completed);
         if remaining == 0 {

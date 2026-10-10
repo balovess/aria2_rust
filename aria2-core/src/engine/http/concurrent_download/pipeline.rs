@@ -9,16 +9,45 @@ use std::time::Instant;
 use crate::constants;
 use crate::engine::http::request_executor::{HttpSegmentRequest, authority_key};
 use crate::engine::http::segment_downloader::WriteChunk;
+use crate::engine::work_scheduler::{
+    RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduleError, WorkScheduler,
+};
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::range_commit::{HttpRangeCommitOptions, commit_http_range_chunk};
 use super::{ConcurrentDownloadResult, ConcurrentDownloader, flush_requested_control_file};
 
 mod finalize;
 mod scheduler;
 mod setup;
+
+fn http_work_scheduler_error(context: &str, error: WorkScheduleError) -> Aria2Error {
+    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+        "HTTP work scheduler could not {context}: {error}"
+    )))
+}
+
+fn record_http_work_failure(
+    work_queue: &mut WorkScheduler<u32>,
+    lease: WorkLease<u32>,
+    retry: bool,
+) -> Result<bool> {
+    let retry_at = retry.then(Instant::now);
+    let outcome = work_queue
+        .fail(lease, retry_at)
+        .map_err(|error| http_work_scheduler_error("record a failed attempt", error))?;
+    match (retry, outcome) {
+        (true, RetryOutcome::Scheduled) => Ok(true),
+        (true, RetryOutcome::Exhausted(_)) | (false, RetryOutcome::Exhausted(_)) => Ok(false),
+        (false, RetryOutcome::Scheduled) => {
+            Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                "HTTP terminal work failure was unexpectedly retried".into(),
+            )))
+        }
+    }
+}
 
 /// Run the multi-mirror concurrent download pipeline.
 pub async fn execute_with_coordinator(
@@ -82,18 +111,34 @@ pub async fn execute_with_coordinator(
         fixed_piece_size,
         &coordinator,
     );
+    let mut work_queue = WorkScheduler::new();
+    for segment_index in 0..coordinator.num_segments() {
+        let segment_index = u32::try_from(segment_index).map_err(|_| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(
+                "HTTP segment index exceeds the work scheduler limit".into(),
+            ))
+        })?;
+        work_queue
+            .enqueue(WorkItem::new(
+                WorkId::new(u64::from(segment_index)),
+                segment_index,
+                retry_policy.max_tries(),
+            ))
+            .map_err(|error| http_work_scheduler_error("enqueue", error))?;
+    }
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
         let lifecycle_changed = lifecycle_notify.notified();
         tokio::pin!(lifecycle_changed);
         lifecycle_changed.as_mut().enable();
 
         if let Err(error) = dl.check_cancelled() {
+            work_queue.cancel();
             super::segment::cancel_and_persist(
+                dl,
                 executor,
                 &mut write_rx,
                 &mut writer,
                 limiter.as_ref(),
-                dl.global_limiter.as_ref(),
                 &mut ctrl_file,
                 coordinator.completed_bytes(),
             )
@@ -125,6 +170,13 @@ pub async fn execute_with_coordinator(
 
         let mut scheduling_attempts = 0usize;
         while scheduling_attempts < uris.len().max(1) * split {
+            if work_queue.in_flight_count() >= split {
+                break;
+            }
+            let Some(lease) = work_queue.admit_one(split, Instant::now()) else {
+                break;
+            };
+            let seg_idx = *lease.payload();
             let excluded_mirrors: Vec<usize> = uris
                 .iter()
                 .enumerate()
@@ -135,9 +187,22 @@ pub async fn execute_with_coordinator(
                         .then_some(mirror_idx)
                 })
                 .collect();
-            let Some((mirror_idx, mirror_url, (seg_idx, offset, length))) = coordinator
-                .select_mirror_for_range_excluding(&excluded_mirrors, &range_size_limits)
+            let Some((mirror_idx, mirror_url, (_, offset, length))) = coordinator
+                .select_mirror_for_work_range_excluding(
+                    seg_idx,
+                    &excluded_mirrors,
+                    &range_size_limits,
+                )
             else {
+                if coordinator.segment_is_complete(seg_idx) {
+                    work_queue
+                        .complete(lease)
+                        .map_err(|error| http_work_scheduler_error("complete", error))?;
+                    continue;
+                }
+                work_queue
+                    .requeue_unstarted(lease)
+                    .map_err(|error| http_work_scheduler_error("requeue", error))?;
                 break;
             };
             scheduling_attempts += 1;
@@ -160,11 +225,23 @@ pub async fn execute_with_coordinator(
             let Some(task_id) = submitted else {
                 segment_progress.remove(&seg_idx);
                 coordinator.requeue_segment(seg_idx);
+                work_queue
+                    .requeue_unstarted(lease)
+                    .map_err(|error| http_work_scheduler_error("requeue", error))?;
                 break;
             };
 
             connection_guard.set(executor.in_flight());
-            active.insert(seg_idx, (mirror_idx, length, Instant::now(), task_id));
+            active.insert(
+                seg_idx,
+                scheduler::ActiveRangeWork {
+                    lease,
+                    mirror_idx,
+                    length,
+                    started_at: Instant::now(),
+                    task_id,
+                },
+            );
             segment_progress.insert(seg_idx, progress);
             tracing::debug!(
                 seg_idx,
@@ -175,19 +252,20 @@ pub async fn execute_with_coordinator(
             );
         }
 
-        while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-            super::acquire_download_tokens(
+        while let Ok(chunk) = write_rx.try_recv() {
+            commit_http_range_chunk(
+                dl,
+                &mut writer,
                 limiter.as_ref(),
-                dl.global_limiter.as_ref(),
-                data.len(),
+                &mut ctrl_file,
+                HttpRangeCommitOptions {
+                    completed_bytes: coordinator.completed_bytes(),
+                    flush_checkpoint: false,
+                    error_context: "",
+                },
+                chunk,
             )
-            .await;
-            writer.write_bytes_at(offset, data).await.map_err(|e| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Write failed: {}",
-                    e
-                )))
-            })?;
+            .await?;
         }
         flush_requested_control_file(
             dl,
@@ -251,15 +329,21 @@ pub async fn execute_with_coordinator(
                 executor.reap_task(pool_result.task_id).await;
                 connection_guard.set(executor.in_flight());
                 let seg_idx = pool_result.segment_index;
-                let Some((_, _, _, active_task_id)) = active.get(&seg_idx).copied() else {
+                let Some(active_task_id) = active.get(&seg_idx).map(|work| work.task_id) else {
                     continue;
                 };
                 if active_task_id != pool_result.task_id {
                     continue;
                 }
-                let Some((mirror_idx, _, seg_start, _)) = active.remove(&seg_idx) else {
+                let Some(active_work) = active.remove(&seg_idx) else {
                     continue;
                 };
+                let scheduler::ActiveRangeWork {
+                    lease,
+                    mirror_idx,
+                    started_at: seg_start,
+                    ..
+                } = active_work;
                 let segment_progress_for_result = segment_progress.remove(&seg_idx);
                 let rejected_range_size_limit = pool_result.range_size_limit;
                 let explicit_range_size_rejection = pool_result.range_size_rejected;
@@ -301,6 +385,15 @@ pub async fn execute_with_coordinator(
                                 }
                                 ctrl_bytes_since_save = 0;
                             }
+                        }
+                        if parent_complete {
+                            work_queue
+                                .complete(lease)
+                                .map_err(|error| http_work_scheduler_error("complete work", error))?;
+                        } else {
+                            work_queue
+                                .reschedule_after_success(lease)
+                                .map_err(|error| http_work_scheduler_error("reschedule a partial range", error))?;
                         }
                     }
                     Err(e) => {
@@ -359,6 +452,9 @@ pub async fn execute_with_coordinator(
                                     ),
                                 )));
                             }
+                            work_queue
+                                .retry_without_consuming_attempt(lease)
+                                .map_err(|error| http_work_scheduler_error("retry a smaller range", error))?;
                             consecutive_416_count = 0;
                         } else {
                         let file_not_found_retry_allowed = !matches!(
@@ -369,12 +465,13 @@ pub async fn execute_with_coordinator(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
                         ) {
+                            record_http_work_failure(&mut work_queue, lease, false)?;
                             super::segment::cancel_and_persist(
+                                dl,
                                 executor,
                                 &mut write_rx,
                                 &mut writer,
                                 limiter.as_ref(),
-                                dl.global_limiter.as_ref(),
                                 &mut ctrl_file,
                                 coordinator.completed_bytes(),
                             )
@@ -403,6 +500,7 @@ pub async fn execute_with_coordinator(
                             consecutive_416_count = 0;
                         }
                         if should_fallback {
+                            record_http_work_failure(&mut work_queue, lease, false)?;
                             break;
                         }
                         let adaptive_capacity_retry = is_capacity_limited
@@ -411,7 +509,7 @@ pub async fn execute_with_coordinator(
                                 .is_some_and(|controller| {
                                     controller.preserve_retry_budget(is_http2)
                                 });
-                        let retry_count = coordinator.segment_retry_count(seg_idx);
+                        let retry_count = lease.attempt().saturating_sub(1);
                         let retry_allowed = adaptive_capacity_retry
                             || super::should_retry_segment(
                                 &retry_policy,
@@ -425,27 +523,35 @@ pub async fn execute_with_coordinator(
                                     .on_terminal_segment_failed(seg_idx, error_code)
                                     .is_some();
                             if !failed_over {
+                                record_http_work_failure(&mut work_queue, lease, false)?;
                                 super::segment::cancel_and_persist(
+                                    dl,
                                     executor,
                                     &mut write_rx,
                                     &mut writer,
                                     limiter.as_ref(),
-                                    dl.global_limiter.as_ref(),
                                     &mut ctrl_file,
                                     coordinator.completed_bytes(),
                                 )
                                 .await?;
                                 return Err(e);
                             }
+                            work_queue
+                                .retry_with_fresh_attempt_budget(lease)
+                                .map_err(|error| http_work_scheduler_error("retry on another mirror", error))?;
                         } else {
                             if adaptive_capacity_retry {
                                 coordinator.requeue_segment(seg_idx);
+                                work_queue
+                                    .retry_without_consuming_attempt(lease)
+                                    .map_err(|error| http_work_scheduler_error("retry after capacity adaptation", error))?;
                             } else {
                                 coordinator.on_segment_failed(
                                     mirror_idx,
                                     seg_idx,
                                     error_code,
                                 );
+                                let _ = record_http_work_failure(&mut work_queue, lease, true)?;
                             }
                         }
                         }
@@ -469,23 +575,17 @@ pub async fn execute_with_coordinator(
                 .await?;
             }
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
-                super::acquire_download_tokens(
-                    limiter.as_ref(),
-                    dl.global_limiter.as_ref(),
-                    data.len(),
-                )
-                .await;
-                writer.write_bytes_at(offset, data).await.map_err(|e| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "Write failed: {}",
-                        e
-                    )))
-                })?;
-                flush_requested_control_file(
+                commit_http_range_chunk(
                     dl,
                     &mut writer,
+                    limiter.as_ref(),
                     &mut ctrl_file,
-                    coordinator.completed_bytes(),
+                    HttpRangeCommitOptions {
+                        completed_bytes: coordinator.completed_bytes(),
+                        flush_checkpoint: true,
+                        error_context: "",
+                    },
+                    WriteChunk { offset, data },
                 )
                 .await?;
             }
@@ -498,12 +598,13 @@ pub async fn execute_with_coordinator(
                 )
                 .await?;
                 if let Err(error) = dl.check_cancelled() {
+                    work_queue.cancel();
                     super::segment::cancel_and_persist(
+                        dl,
                         executor,
                         &mut write_rx,
                         &mut writer,
                         limiter.as_ref(),
-                        dl.global_limiter.as_ref(),
                         &mut ctrl_file,
                         coordinator.completed_bytes(),
                     )
@@ -523,9 +624,11 @@ pub async fn execute_with_coordinator(
                     && executor.abort_segment(seg_idx).await
                 {
                     connection_guard.set(executor.in_flight());
-                    let Some((mirror_idx, _, _, _)) = active.remove(&seg_idx) else {
+                    let Some(active_work) = active.remove(&seg_idx) else {
                         continue;
                     };
+                    let lease = active_work.lease;
+                    let mirror_idx = active_work.mirror_idx;
                     let last_throughput_bps = if let Some(progress) = segment_progress.remove(&seg_idx) {
                         let throughput = progress.recent_throughput_bps();
                         progress.rollback();
@@ -534,6 +637,7 @@ pub async fn execute_with_coordinator(
                         0
                     };
                     coordinator.on_segment_failed(mirror_idx, seg_idx, 408);
+                    record_http_work_failure(&mut work_queue, lease, true)?;
                     tracing::warn!(
                         seg_idx,
                         stall_timeout_secs = segment_stall_timeout.as_secs(),
@@ -542,9 +646,9 @@ pub async fn execute_with_coordinator(
                     );
                 } else {
                     let slow_outlier = active.iter().find_map(
-                        |(seg_idx, (mirror_idx, length, started_at, _))| {
+                        |(seg_idx, active_work)| {
                             let progress = segment_progress.get(seg_idx)?;
-                            let mirror_url = uris.get(*mirror_idx)?;
+                            let mirror_url = uris.get(active_work.mirror_idx)?;
                             let key = authority_key(mirror_url)
                                 .unwrap_or_else(|| mirror_url.clone());
                             slow_range_recovery
@@ -553,21 +657,29 @@ pub async fn execute_with_coordinator(
                                     *seg_idx,
                                     progress.downloaded_bytes(),
                                     progress.recent_throughput_bps(),
-                                    *length,
-                                    started_at.elapsed(),
+                                    active_work.length,
+                                    active_work.started_at.elapsed(),
                                 )
-                                .map(|observation| (*seg_idx, *mirror_idx, observation))
+                                .map(|observation| {
+                                    (*seg_idx, active_work.mirror_idx, observation)
+                                })
                         },
                     );
                     if let Some((seg_idx, mirror_idx, observation)) = slow_outlier
                         && executor.abort_segment(seg_idx).await
                     {
                         connection_guard.set(executor.in_flight());
-                        active.remove(&seg_idx);
+                        let Some(active_work) = active.remove(&seg_idx) else {
+                            continue;
+                        };
+                        let lease = active_work.lease;
                         if let Some(progress) = segment_progress.remove(&seg_idx) {
                             progress.rollback();
                         }
                         if coordinator.requeue_segment(seg_idx) {
+                            work_queue
+                                .retry_without_consuming_attempt(lease)
+                                .map_err(|error| http_work_scheduler_error("retry a slow range", error))?;
                             slow_range_recovery.mark_recovered(seg_idx);
                             tracing::warn!(
                                 seg_idx,
@@ -582,6 +694,7 @@ pub async fn execute_with_coordinator(
                             );
                         } else {
                             coordinator.on_segment_failed(mirror_idx, seg_idx, 408);
+                            let _ = record_http_work_failure(&mut work_queue, lease, true)?;
                             tracing::warn!(
                                 seg_idx,
                                 mirror_idx,
@@ -596,6 +709,10 @@ pub async fn execute_with_coordinator(
         if should_fallback {
             break;
         }
+    }
+
+    if should_fallback {
+        work_queue.cancel();
     }
 
     finalize::finish(

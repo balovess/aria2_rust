@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::checksum::checksum::Checksum;
 use crate::constants;
+use crate::engine::work_commit::SequentialWorkCommitter;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -390,34 +391,33 @@ impl SftpDownloadCommand {
                     continue;
                 }
             };
-            let n = data.len();
             self.group.recover().record_network_activity();
 
-            // Write chunk to local disk via disk writer
-            if let Err(e) = writer.write(&data).await {
-                error!("[SFTP-CMD] Disk write error: {}", e);
+            // Core work output commits source chunks, progress, and
+            // checkpoints through the same ordered path used by other sources.
+            let write_result = {
+                let mut committer = SequentialWorkCommitter::new(
+                    &mut writer,
+                    &mut self.completed_bytes,
+                    &self.group,
+                    &mut self.checkpoint,
+                );
+                committer.commit_chunk(data.as_slice()).await
+            };
+            if let Err(error) = write_result {
+                error!("[SFTP-CMD] Disk write error: {}", error);
                 let _ = remote_file.close().await;
                 self.finalize_partial_writer(&mut writer).await;
                 let _ = conn.disconnect().await;
                 return Err(Aria2Error::Fatal(FatalError::Config(format!(
                     "Disk write failed: {}",
-                    e
+                    error
                 ))));
             }
 
-            self.completed_bytes += n as u64;
-            if let Some(checkpoint) = self.checkpoint.as_mut() {
-                let save_requested = self.group.recover().take_save_control_file_request();
-                checkpoint
-                    .update(self.completed_bytes, save_requested)
-                    .await;
-            }
-
-            // Update progress in RequestGroup
+            // Update download speed in RequestGroup.
             {
                 let g = self.group.recover();
-                g.update_progress(self.completed_bytes);
-
                 // Periodic speed calculation (every ~500ms)
                 let elapsed = last_speed_update.elapsed();
                 if elapsed.as_millis() >= constants::SFTP_SPEED_UPDATE_INTERVAL_MS as u128 {

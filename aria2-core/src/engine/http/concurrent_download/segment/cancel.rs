@@ -7,24 +7,27 @@ use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::RateLimiter;
 
+use super::super::ConcurrentDownloader;
 use super::io::drain_write_chunks;
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::engine::http::concurrent_download) async fn cancel_and_persist(
+    downloader: &ConcurrentDownloader,
     executor: HttpSegmentRequestExecutor,
     write_rx: &mut mpsc::Receiver<WriteChunk>,
     writer: &mut CachedDiskWriter,
     limiter: Option<&RateLimiter>,
-    global_limiter: Option<&RateLimiter>,
     ctrl_file: &mut Option<ControlFile>,
     completed_bytes: u64,
 ) -> Result<()> {
     executor.cancel().await;
     drain_write_chunks(
+        downloader,
         write_rx,
         writer,
         limiter,
-        global_limiter,
+        ctrl_file,
+        completed_bytes,
         " while cancelling",
     )
     .await?;
