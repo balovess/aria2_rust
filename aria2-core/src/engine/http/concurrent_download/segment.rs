@@ -350,7 +350,7 @@ pub async fn execute(
                         let display_total = progress_tracker.total();
 
                         dl.progress_updater
-                            .update_progress(
+                            .update_progress_without_speed(
                                 display_total,
                                 constants::PROGRESS_UPDATE_BYTES as u64,
                                 constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
@@ -552,6 +552,7 @@ pub async fn execute(
                 }
             }
             _ = stall_check.tick() => {
+                progress_tracker.refresh_speed();
                 let stalled_segment = active_segs.keys().find_map(|seg_idx| {
                     segment_progress
                         .get(seg_idx)

@@ -65,21 +65,19 @@ pub(super) async fn finish(
         return Ok(ConcurrentDownloadResult::Fallback { completed_ranges });
     }
 
+    let completed_bytes = coordinator.completed_bytes();
     let final_speed = {
         let g = dl.group.recover();
         let elapsed = g.elapsed_time();
         match elapsed {
-            Some(d) if d.as_secs_f64() > 0.0 => {
-                (dl.progress_updater.last_progress_update() as f64 / d.as_secs_f64()) as u64
-            }
+            Some(d) if d.as_secs_f64() > 0.0 => (completed_bytes as f64 / d.as_secs_f64()) as u64,
             _ => 0,
         }
     };
 
     {
-        let last = dl.progress_updater.last_progress_update();
-        dl.progress.set_total_length(last);
-        dl.progress.set_completed_length(last);
+        dl.progress.set_total_length(completed_bytes);
+        dl.progress.set_completed_length(completed_bytes);
         dl.progress.set_download_speed(final_speed);
         dl.progress.set_upload_speed(0);
         let mut g = dl.group.recover_mut();
@@ -89,7 +87,7 @@ pub(super) async fn finish(
     tracing::info!(
         "Multi-mirror concurrent download complete: {} ({} bytes, {} B/s)",
         dl.output_path.display(),
-        dl.progress_updater.last_progress_update(),
+        completed_bytes,
         final_speed
     );
     let progress_stats = progress_tracker.stats();

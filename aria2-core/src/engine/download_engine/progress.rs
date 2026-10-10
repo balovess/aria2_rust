@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::DownloadEngine;
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::{ProgressMessage, ProgressUpdate};
 use crate::request::request_group::RequestGroup;
 use crate::util::speed_smooth::SpeedSmoother;
 
@@ -13,12 +13,12 @@ impl DownloadEngine {
     ///
     /// This eliminates per-chunk write-lock contention on the download hot
     /// path: each `DownloadCommand` sends through a bounded `mpsc` queue and
-    /// this single aggregator task is the only writer of the progress fields.
+    /// this aggregator applies the resulting progress fields.
     ///
     /// The aggregator deduplicates consecutive updates with identical
-    /// `completed_bytes` values and only refreshes the speed fields when the
-    /// sender provides a non-zero `download_speed` sample (0 means "no fresh
-    /// sample this tick").
+    /// `completed_bytes` values and derives an EMA speed from byte deltas.
+    /// The command-owned channel also supports length-only updates for paths
+    /// that publish their speed through a separate sampler.
     ///
     /// The task exits cleanly when all senders are dropped (the receiver
     /// returns `None`).
@@ -38,40 +38,77 @@ impl DownloadEngine {
             let mut last_bytes: u64 = 0;
             let mut smoother = SpeedSmoother::with_default_window(); // EMA N=10
             while let Some(update) = receiver.recv().await {
-                // Skip no-op updates: identical completed_bytes means nothing changed
-                // since the last applied update (e.g. a stale in-flight send).
-                if update.completed_bytes == last_bytes {
-                    continue;
-                }
-                let delta = update.completed_bytes - last_bytes;
-                smoother.record_bytes(delta);
+                apply_progress_update(update, &progress, &mut smoother, &mut last_bytes, true);
+            }
+        })
+    }
 
-                // Lock-free progress update -- no RwLock acquisition needed.
-                progress.set_completed_length(update.completed_bytes);
-
-                // Speed: use EMA-smoothed speed when available; fall back to
-                // the sender's raw speed sample when the smoother hasn't
-                // produced a value yet (first sample window). Skip the speed
-                // write entirely when both are 0 so a previously cached speed
-                // (e.g. from a prior update) is preserved.
-                let smoothed = smoother.smoothed_speed() as u64;
-                if smoothed > 0 {
-                    progress.set_download_speed(smoothed);
-                    progress.set_upload_speed(update.upload_speed);
-                } else if update.download_speed > 0 {
-                    progress.set_download_speed(update.download_speed);
-                    progress.set_upload_speed(update.upload_speed);
-                }
-                last_bytes = update.completed_bytes;
+    pub(crate) fn spawn_progress_message_aggregator(
+        _group: Arc<std::sync::RwLock<RequestGroup>>,
+        progress: Arc<crate::request::request_group::AtomicProgress>,
+        mut receiver: mpsc::Receiver<ProgressMessage>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut last_bytes: u64 = 0;
+            let mut smoother = SpeedSmoother::with_default_window(); // EMA N=10
+            while let Some(message) = receiver.recv().await {
+                let (update, update_speed) = match message {
+                    ProgressMessage::Update(update) => (update, true),
+                    ProgressMessage::LengthOnly(update) => (update, false),
+                };
+                apply_progress_update(
+                    update,
+                    &progress,
+                    &mut smoother,
+                    &mut last_bytes,
+                    update_speed,
+                );
             }
         })
     }
 }
 
+fn apply_progress_update(
+    update: ProgressUpdate,
+    progress: &crate::request::request_group::AtomicProgress,
+    smoother: &mut SpeedSmoother,
+    last_bytes: &mut u64,
+    update_speed: bool,
+) {
+    if !update_speed {
+        smoother.reset();
+    }
+    if update.completed_bytes == *last_bytes {
+        return;
+    }
+
+    let delta = update.completed_bytes.saturating_sub(*last_bytes);
+    if update_speed {
+        smoother.record_bytes(delta);
+    }
+
+    // Lock-free progress update -- no RwLock acquisition needed.
+    progress.set_completed_length(update.completed_bytes);
+
+    if update_speed {
+        // Speed: use EMA-smoothed speed when available. Preserve the current
+        // value when no sample has completed yet.
+        let smoothed = smoother.smoothed_speed() as u64;
+        if smoothed > 0 {
+            progress.set_download_speed(smoothed);
+            progress.set_upload_speed(update.upload_speed);
+        } else if update.download_speed > 0 {
+            progress.set_download_speed(update.download_speed);
+            progress.set_upload_speed(update.upload_speed);
+        }
+    }
+    *last_bytes = update.completed_bytes;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::command::ProgressUpdate;
+    use crate::engine::command::{ProgressMessage, ProgressUpdate};
     use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
     #[cfg(test)]
     use crate::util::rwlock_ext::RwLockRecover;
@@ -131,6 +168,34 @@ mod tests {
             atomic_val, 5000,
             "aggregator should have applied the latest completed_bytes (5000)"
         );
+    }
+
+    #[tokio::test]
+    async fn length_only_updates_preserve_the_external_speed_sample() {
+        let group = make_group();
+        let progress = Arc::clone(&group.recover().progress);
+        progress.set_download_speed(12_345);
+        let (tx, rx) = mpsc::channel::<ProgressMessage>(4);
+        let handle = DownloadEngine::spawn_progress_message_aggregator(
+            Arc::clone(&group),
+            Arc::clone(&progress),
+            rx,
+        );
+
+        tx.send(ProgressMessage::LengthOnly(ProgressUpdate {
+            completed_bytes: 4096,
+            download_speed: 999_999,
+            upload_speed: 0,
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+        handle
+            .await
+            .expect("progress aggregator should exit cleanly");
+
+        assert_eq!(progress.completed_length(), 4096);
+        assert_eq!(progress.download_speed(), 12_345);
     }
 
     /// Verify the aggregator skips no-op updates with identical

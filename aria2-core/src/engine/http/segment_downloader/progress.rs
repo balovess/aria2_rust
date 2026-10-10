@@ -1,11 +1,14 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::constants::HTTP_SPEED_UPDATE_INTERVAL_MS;
 use crate::request::request_group::AtomicProgress;
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const CONCURRENT_SPEED_WINDOW: Duration = Duration::from_secs(10);
 const RECENT_GOODPUT_SAMPLE_INTERVAL_NANOS: u64 = 500_000_000;
 const RECENT_GOODPUT_SAMPLE_BYTES: u64 = 256 * 1024;
 const RECENT_GOODPUT_STALE_NANOS: u64 = 2_000_000_000;
@@ -38,21 +41,42 @@ pub(crate) struct SegmentProgressStats {
     pub rollbacks: u64,
 }
 
+#[derive(Clone, Copy)]
+struct SpeedSample {
+    at_nanos: u64,
+    bytes: u64,
+}
+
 struct ProgressSpeed {
     started_at: Instant,
     last_sample_nanos: AtomicU64,
     sample_bytes: AtomicU64,
+    // The transfer hot path aggregates bytes atomically; only the sampler
+    // takes this lock to keep the bounded live-speed history.
+    samples: Mutex<VecDeque<SpeedSample>>,
+    sampling: AtomicBool,
+}
+
+struct ProgressSpeedSamplingGuard<'a>(&'a AtomicBool);
+
+impl Drop for ProgressSpeedSamplingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl SegmentProgressTracker {
     pub(crate) fn new(initial_completed: u64, progress: Arc<AtomicProgress>) -> Arc<Self> {
+        let started_at = Instant::now();
         Arc::new(Self {
             total: AtomicU64::new(initial_completed),
             progress,
             speed: ProgressSpeed {
-                started_at: Instant::now(),
+                started_at,
                 last_sample_nanos: AtomicU64::new(0),
                 sample_bytes: AtomicU64::new(0),
+                samples: Mutex::new(VecDeque::new()),
+                sampling: AtomicBool::new(false),
             },
             segment_count: AtomicU64::new(0),
             update_count: AtomicU64::new(0),
@@ -82,6 +106,11 @@ impl SegmentProgressTracker {
             updates: self.update_count.load(Ordering::Relaxed),
             rollbacks: self.rollback_count.load(Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn refresh_speed(&self) {
+        let now_nanos = self.elapsed_nanos();
+        let _ = self.speed.refresh_at(&self.progress, now_nanos);
     }
 }
 
@@ -190,24 +219,106 @@ impl ProgressSpeed {
             .elapsed()
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
-        let last = self.last_sample_nanos.load(Ordering::Acquire);
-        let interval = HTTP_SPEED_UPDATE_INTERVAL_MS.saturating_mul(1_000_000);
-        if now.saturating_sub(last) < interval
+        let _ = self.sample_at(progress, now);
+    }
+
+    #[cfg(test)]
+    fn record_at(&self, delta: u64, progress: &AtomicProgress, now_nanos: u64) -> Option<u64> {
+        self.sample_bytes.fetch_add(delta, Ordering::Relaxed);
+        self.sample_at(progress, now_nanos)
+    }
+
+    fn sample_at(&self, progress: &AtomicProgress, now_nanos: u64) -> Option<u64> {
+        let last_sample_nanos = self.last_sample_nanos.load(Ordering::Acquire);
+        let interval_nanos = HTTP_SPEED_UPDATE_INTERVAL_MS.saturating_mul(1_000_000);
+        if now_nanos.saturating_sub(last_sample_nanos) < interval_nanos
             || self
-                .last_sample_nanos
-                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .sampling
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
         {
-            return;
+            return None;
+        }
+        let _sampling_guard = ProgressSpeedSamplingGuard(&self.sampling);
+
+        let last_sample_nanos = self.last_sample_nanos.load(Ordering::Acquire);
+        if now_nanos.saturating_sub(last_sample_nanos) < interval_nanos {
+            return None;
         }
 
-        let bytes = self.sample_bytes.swap(0, Ordering::AcqRel);
-        let elapsed = now.saturating_sub(last).max(1);
-        let speed = bytes.saturating_mul(NANOS_PER_SECOND) / elapsed;
-        if speed > 0 {
-            progress.set_download_speed(speed);
+        let sample_bytes = self.sample_bytes.swap(0, Ordering::AcqRel);
+        let window_nanos = CONCURRENT_SPEED_WINDOW.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let sample_elapsed_nanos = now_nanos.saturating_sub(last_sample_nanos);
+        // A transfer resuming after an idle period starts a fresh sample
+        // window instead of charging its first bytes for the entire pause.
+        let sample = if sample_elapsed_nanos >= window_nanos {
+            SpeedSample {
+                at_nanos: now_nanos.saturating_sub(interval_nanos),
+                bytes: sample_bytes,
+            }
+        } else {
+            SpeedSample {
+                at_nanos: last_sample_nanos,
+                bytes: sample_bytes,
+            }
+        };
+        let mut samples = self
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sample_bytes > 0 {
+            samples.push_back(sample);
         }
+        while samples
+            .front()
+            .is_some_and(|sample| now_nanos.saturating_sub(sample.at_nanos) > window_nanos)
+        {
+            samples.pop_front();
+        }
+        let speed_bps = speed_from_samples(&samples, now_nanos, window_nanos);
+        drop(samples);
+
+        progress.set_download_speed(speed_bps);
+        self.last_sample_nanos.store(now_nanos, Ordering::Release);
+        Some(speed_bps)
     }
+
+    fn refresh_at(&self, progress: &AtomicProgress, now_nanos: u64) -> Option<u64> {
+        self.sampling
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let _sampling_guard = ProgressSpeedSamplingGuard(&self.sampling);
+        let window_nanos = CONCURRENT_SPEED_WINDOW.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let mut samples = self
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while samples
+            .front()
+            .is_some_and(|sample| now_nanos.saturating_sub(sample.at_nanos) > window_nanos)
+        {
+            samples.pop_front();
+        }
+        let speed_bps = speed_from_samples(&samples, now_nanos, window_nanos);
+        drop(samples);
+        progress.set_download_speed(speed_bps);
+        Some(speed_bps)
+    }
+}
+
+fn speed_from_samples(samples: &VecDeque<SpeedSample>, now_nanos: u64, window_nanos: u64) -> u64 {
+    let Some(oldest_sample) = samples.front() else {
+        return 0;
+    };
+    let window_bytes = samples
+        .iter()
+        .fold(0_u64, |total, sample| total.saturating_add(sample.bytes));
+    let elapsed_nanos = now_nanos
+        .saturating_sub(oldest_sample.at_nanos)
+        .min(window_nanos)
+        .max(1);
+    ((u128::from(window_bytes) * u128::from(NANOS_PER_SECOND)) / u128::from(elapsed_nanos))
+        .min(u128::from(u64::MAX)) as u64
 }
 
 impl SegmentProgressTracker {
@@ -274,5 +385,139 @@ mod tests {
             fresh_goodput_bps(128 * 1024, RECENT_GOODPUT_STALE_NANOS - 1, 0),
             128 * 1024
         );
+    }
+
+    #[test]
+    fn concurrent_speed_smooths_large_sample_drops() {
+        let started_at = Instant::now();
+        let progress = AtomicProgress::new();
+        let speed = ProgressSpeed {
+            started_at,
+            last_sample_nanos: AtomicU64::new(0),
+            sample_bytes: AtomicU64::new(0),
+            samples: Mutex::new(VecDeque::new()),
+            sampling: AtomicBool::new(false),
+        };
+
+        let first = speed
+            .record_at(100 * 1024 * 1024, &progress, 500_000_000)
+            .expect("the first complete sample should be reported");
+        let second = speed
+            .record_at(5 * 1024 * 1024, &progress, 1_000_000_000)
+            .expect("the second complete sample should be reported");
+
+        assert_eq!(first, 200 * 1024 * 1024);
+        assert_eq!(second, 105 * 1024 * 1024);
+        assert!(second < first);
+        assert_eq!(progress.download_speed(), second);
+    }
+
+    #[test]
+    fn concurrent_speed_waits_for_a_full_first_interval() {
+        let speed = ProgressSpeed {
+            started_at: Instant::now(),
+            last_sample_nanos: AtomicU64::new(0),
+            sample_bytes: AtomicU64::new(0),
+            samples: Mutex::new(VecDeque::new()),
+            sampling: AtomicBool::new(false),
+        };
+        let progress = AtomicProgress::new();
+
+        assert_eq!(speed.record_at(1024, &progress, 499_999_999), None);
+        assert_eq!(progress.download_speed(), 0);
+
+        let sample = speed
+            .record_at(1024, &progress, 500_000_000)
+            .expect("the first sample should be emitted after 500ms");
+        assert_eq!(sample, 4096);
+        assert_eq!(progress.download_speed(), 4096);
+    }
+
+    #[test]
+    fn concurrent_speed_expires_bytes_outside_the_ten_second_window() {
+        let progress = AtomicProgress::new();
+        let speed = ProgressSpeed {
+            started_at: Instant::now(),
+            last_sample_nanos: AtomicU64::new(0),
+            sample_bytes: AtomicU64::new(0),
+            samples: Mutex::new(VecDeque::new()),
+            sampling: AtomicBool::new(false),
+        };
+
+        let baseline = speed
+            .record_at(5 * 1024 * 1024, &progress, 500_000_000)
+            .expect("the baseline sample should be reported");
+        let spike = speed
+            .record_at(100 * 1024 * 1024, &progress, 1_000_000_000)
+            .expect("the spike sample should be reported");
+
+        assert_eq!(baseline, 10 * 1024 * 1024);
+        assert_eq!(spike, 105 * 1024 * 1024);
+        assert_eq!(progress.download_speed(), spike);
+
+        let after_old_samples_expire = speed
+            .record_at(5 * 1024 * 1024, &progress, 11_000_000_000)
+            .expect("the next rolling sample should be reported");
+        assert_eq!(after_old_samples_expire, 10 * 1024 * 1024);
+        assert_eq!(progress.download_speed(), after_old_samples_expire);
+    }
+
+    #[test]
+    fn concurrent_speed_keeps_late_samples_then_expires_idle_speed() {
+        let progress = AtomicProgress::new();
+        let speed = ProgressSpeed {
+            started_at: Instant::now(),
+            last_sample_nanos: AtomicU64::new(0),
+            sample_bytes: AtomicU64::new(0),
+            samples: Mutex::new(VecDeque::new()),
+            sampling: AtomicBool::new(false),
+        };
+
+        let speed_bps = speed
+            .record_at(1024 * 1024, &progress, 30_000_000_000)
+            .expect("a late sample should still be emitted");
+
+        assert_eq!(speed_bps, 2 * 1024 * 1024);
+        assert_eq!(progress.download_speed(), speed_bps);
+
+        let expired_speed = speed
+            .refresh_at(&progress, 40_000_000_001)
+            .expect("the periodic refresh should expire old samples");
+        assert_eq!(expired_speed, 0);
+        assert_eq!(progress.download_speed(), 0);
+    }
+
+    #[test]
+    fn concurrent_speed_sampling_has_single_writer() {
+        const THREAD_COUNT: usize = 16;
+
+        let speed = Arc::new(ProgressSpeed {
+            started_at: Instant::now(),
+            last_sample_nanos: AtomicU64::new(0),
+            sample_bytes: AtomicU64::new(0),
+            samples: Mutex::new(VecDeque::new()),
+            sampling: AtomicBool::new(false),
+        });
+        let progress = Arc::new(AtomicProgress::new());
+        let barrier = Arc::new(std::sync::Barrier::new(THREAD_COUNT));
+        let threads: Vec<_> = (0..THREAD_COUNT)
+            .map(|_| {
+                let speed = Arc::clone(&speed);
+                let progress = Arc::clone(&progress);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    speed.record_at(1024, &progress, 500_000_000)
+                })
+            })
+            .collect();
+
+        let emitted_samples = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().expect("sampler thread should not panic"))
+            .count();
+
+        assert_eq!(emitted_samples, 1);
+        assert!(progress.download_speed() > 0);
     }
 }

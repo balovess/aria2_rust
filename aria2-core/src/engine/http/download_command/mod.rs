@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::ProgressMessage;
 use crate::http::HttpRequestPolicy;
 use crate::http::cookie::CookieStorage;
 use crate::http::socks_connector::NoProxyMatcher;
@@ -63,8 +63,8 @@ pub struct DownloadCommand {
     pub(super) perf_monitor: Option<Arc<PerformanceMonitor>>,
     pub(super) atomic_metrics: Arc<AtomicMetrics>,
     pub(super) request_policy: HttpRequestPolicy,
-    pub(super) progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
-    pub(super) progress_receiver: Option<mpsc::Receiver<ProgressUpdate>>,
+    pub(super) progress_sender: Option<mpsc::Sender<ProgressMessage>>,
+    pub(super) progress_receiver: Option<mpsc::Receiver<ProgressMessage>>,
     pub(super) progress_aggregator_handle: Option<tokio::task::JoinHandle<()>>,
 
     // ── Tail reclaim progress tracking ─────────────────────────────────

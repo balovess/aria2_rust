@@ -24,8 +24,8 @@ pub enum CommandStatus {
 /// Fields:
 /// - `completed_bytes`: total bytes downloaded so far for this command.
 /// - `download_speed`: current download speed in bytes/sec. `0` means the
-///   sender did not refresh the speed sample this tick (the aggregator keeps
-///   the previously cached value).
+///   sender did not provide a raw sample; the aggregator derives its normal
+///   smoothed rate from the completed-byte delta.
 /// - `upload_speed`: upload speed in bytes/sec (BT only; `0` for HTTP/FTP).
 #[derive(Debug, Clone)]
 pub struct ProgressUpdate {
@@ -35,6 +35,15 @@ pub struct ProgressUpdate {
     pub download_speed: u64,
     /// Upload speed in bytes/sec (for BT, 0 for HTTP).
     pub upload_speed: u64,
+}
+
+/// Internal progress-channel message that preserves the public
+/// [`ProgressUpdate`] shape while allowing a downloader with its own live
+/// speed sampler to publish length updates without replacing that estimate.
+#[derive(Debug, Clone)]
+pub(crate) enum ProgressMessage {
+    Update(ProgressUpdate),
+    LengthOnly(ProgressUpdate),
 }
 
 #[allow(clippy::double_must_use)]

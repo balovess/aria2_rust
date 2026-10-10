@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::constants;
-use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate};
+use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressMessage};
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::http::client_config::{ResolvedNetworkAddresses, build_download_clients};
 use crate::engine::http::cookie_helper::CookieHelper;
@@ -208,7 +208,8 @@ impl DownloadCommand {
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
-        let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
+        let (progress_tx, progress_rx) =
+            mpsc::channel::<ProgressMessage>(PROGRESS_CHANNEL_CAPACITY);
 
         Ok(Self {
             group,
@@ -342,7 +343,8 @@ impl DownloadCommand {
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
-        let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
+        let (progress_tx, progress_rx) =
+            mpsc::channel::<ProgressMessage>(PROGRESS_CHANNEL_CAPACITY);
 
         Ok(Self {
             group,
@@ -412,7 +414,7 @@ impl DownloadCommand {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn with_progress_sender(mut self, sender: mpsc::Sender<ProgressUpdate>) -> Self {
+    pub(crate) fn with_progress_sender(mut self, sender: mpsc::Sender<ProgressMessage>) -> Self {
         self.progress_sender = Some(sender);
         self.progress_receiver = None;
         self
@@ -423,11 +425,12 @@ impl DownloadCommand {
             return;
         }
         if let Some(rx) = self.progress_receiver.take() {
-            let handle = crate::engine::download_engine::DownloadEngine::spawn_progress_aggregator(
-                Arc::clone(&self.group),
-                Arc::clone(&self.progress),
-                rx,
-            );
+            let handle =
+                crate::engine::download_engine::DownloadEngine::spawn_progress_message_aggregator(
+                    Arc::clone(&self.group),
+                    Arc::clone(&self.progress),
+                    rx,
+                );
             self.progress_aggregator_handle = Some(handle);
         }
     }

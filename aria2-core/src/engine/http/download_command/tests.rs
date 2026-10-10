@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::command::{Command, ProgressUpdate};
+use crate::engine::command::{Command, ProgressMessage, ProgressUpdate};
 use crate::engine::http::download_command::DownloadCommand;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError};
@@ -25,7 +25,7 @@ impl DownloadCommand {
     fn send_progress_update(&self, update: ProgressUpdate) {
         if let Some(ref sender) = self.progress_sender {
             sender
-                .try_send(update)
+                .try_send(ProgressMessage::Update(update))
                 .expect("progress test channel should accept the update");
         } else {
             panic!("test called send_progress_update but no sender is set");

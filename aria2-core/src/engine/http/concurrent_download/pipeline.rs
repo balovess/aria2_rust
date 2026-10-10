@@ -454,7 +454,7 @@ pub async fn execute_with_coordinator(
 
                 let completed_bytes = coordinator.completed_bytes();
                 dl.progress_updater
-                    .update_progress(
+                    .update_progress_without_speed(
                         completed_bytes,
                         constants::PROGRESS_UPDATE_BYTES as u64,
                         constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
@@ -512,6 +512,7 @@ pub async fn execute_with_coordinator(
                 }
             }
             _ = stall_check.tick() => {
+                progress_tracker.refresh_speed();
                 let stalled_segment = active.iter().find_map(|(seg_idx, _)| {
                     segment_progress
                         .get(seg_idx)

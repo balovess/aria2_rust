@@ -658,29 +658,37 @@ mod tests {
             is_option_changeable("min-http-range-size", false),
             ChangeableKind::Immediate
         );
+        #[cfg(feature = "bittorrent")]
+        {
+            assert_eq!(
+                is_option_changeable("bt-max-upload-slots", true),
+                ChangeableKind::Pending
+            );
+            assert_eq!(
+                is_option_changeable("bt-max-upload-slots", false),
+                ChangeableKind::Immediate
+            );
+            assert_eq!(
+                is_option_changeable("bt-optimistic-unchoke-interval", true),
+                ChangeableKind::Pending
+            );
+            assert_eq!(
+                is_option_changeable("bt-optimistic-unchoke-interval", false),
+                ChangeableKind::Immediate
+            );
+            assert_eq!(
+                is_option_changeable("bt-snubbed-timeout", true),
+                ChangeableKind::Pending
+            );
+            assert_eq!(
+                is_option_changeable("bt-snubbed-timeout", false),
+                ChangeableKind::Immediate
+            );
+        }
+        #[cfg(not(feature = "bittorrent"))]
         assert_eq!(
             is_option_changeable("bt-max-upload-slots", true),
-            ChangeableKind::Pending
-        );
-        assert_eq!(
-            is_option_changeable("bt-max-upload-slots", false),
-            ChangeableKind::Immediate
-        );
-        assert_eq!(
-            is_option_changeable("bt-optimistic-unchoke-interval", true),
-            ChangeableKind::Pending
-        );
-        assert_eq!(
-            is_option_changeable("bt-optimistic-unchoke-interval", false),
-            ChangeableKind::Immediate
-        );
-        assert_eq!(
-            is_option_changeable("bt-snubbed-timeout", true),
-            ChangeableKind::Pending
-        );
-        assert_eq!(
-            is_option_changeable("bt-snubbed-timeout", false),
-            ChangeableKind::Immediate
+            ChangeableKind::NotChangeable
         );
         assert_eq!(
             is_option_changeable("dir", false),

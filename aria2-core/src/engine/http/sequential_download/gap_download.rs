@@ -4,8 +4,11 @@
 use futures::StreamExt;
 
 use crate::constants;
-use crate::error::{Aria2Error, RecoverableError};
+use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+use crate::http::response::is_redirect_status;
+use crate::http::response_processor::range::parse_content_range_value;
+use crate::http::skip_response::MAX_REDIRECT_COUNT;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -14,6 +17,7 @@ use super::{GapDownloadResult, SequentialDownloader};
 
 fn classify_gap_http_status(status_code: u16, range_header: &str) -> Aria2Error {
     match status_code {
+        200 => Aria2Error::Recoverable(RecoverableError::CannotResume),
         416 => Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
             range: range_header.to_string(),
         }),
@@ -52,14 +56,6 @@ impl SequentialDownloader {
                 error: None,
             };
         }
-
-        let url_parsed = reqwest::Url::parse(uri).ok();
-        let cookie_hdr = if let Some(ref url) = url_parsed {
-            let hdr = self.cookie_helper.build_cookie_header_from_url(url);
-            if hdr.is_empty() { None } else { Some(hdr) }
-        } else {
-            None
-        };
 
         let mut completed_bytes = completed_ranges.iter().map(|(_, len)| len).sum::<u64>();
         self.progress_updater.reset(completed_bytes);
@@ -100,26 +96,9 @@ impl SequentialDownloader {
             let range_header = format!("bytes={}-{}", gap_start, gap_end);
             tracing::debug!("Sequential Range request for gap: {}", range_header);
 
-            let request = self.request_policy.apply(
-                self.client.get(uri).header("Range", &range_header),
-                cookie_hdr.as_deref(),
-                &[],
-            );
-
-            let response = match tokio::select! {
-                result = request.send() => result,
-                cancellation = self.wait_for_cancellation() => {
-                    let error = cancellation.expect_err(
-                        "cancellation watcher must not complete successfully",
-                    );
-                    return GapDownloadResult {
-                        completed_gaps,
-                        error: Some(error),
-                    };
-                }
-            } {
-                Ok(r) => r,
-                Err(e) => {
+            let response = match self.send_gap_request(uri, &range_header).await {
+                Ok(response) => response,
+                Err(error) => {
                     tracing::warn!(
                         "Gap download failed ({}), cleaning up partial data",
                         range_header
@@ -127,22 +106,13 @@ impl SequentialDownloader {
                     Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
                     return GapDownloadResult {
                         completed_gaps,
-                        error: Some(Aria2Error::Recoverable(
-                            RecoverableError::TemporaryNetworkFailure {
-                                message: format!("HTTP request failed: {}", e),
-                            },
-                        )),
+                        error: Some(error),
                     };
                 }
             };
 
-            // Keep timeout and DNS candidate attribution consistent with the
-            // normal sequential response path.
-            self.publish_connection_context(uri, response.remote_addr());
-            self.cookie_helper.extract_and_store_cookies(uri, &response);
-
             let status = response.status();
-            if !status.is_success() && status.as_u16() != 206 {
+            if status.as_u16() != 206 {
                 tracing::warn!(
                     "Gap download failed with HTTP status {} ({}), cleaning up partial data",
                     status,
@@ -157,6 +127,24 @@ impl SequentialDownloader {
                 return GapDownloadResult {
                     completed_gaps,
                     error: Some(error),
+                };
+            }
+
+            let content_range = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range_value);
+            if content_range != Some((gap_start, gap_end, total_length)) {
+                tracing::warn!(
+                    "Gap download returned an unexpected Content-Range ({:?}) for {}",
+                    content_range,
+                    range_header
+                );
+                Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
+                return GapDownloadResult {
+                    completed_gaps,
+                    error: Some(Aria2Error::Recoverable(RecoverableError::CannotResume)),
                 };
             }
 
@@ -212,16 +200,32 @@ impl SequentialDownloader {
                     self.progress.record_network_activity();
                 }
 
+                let data_len = data.len() as u64;
+                if bytes_downloaded.saturating_add(data_len) > gap_length {
+                    tracing::warn!("Gap download exceeded expected size for {}", range_header);
+                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    return GapDownloadResult {
+                        completed_gaps,
+                        error: Some(Aria2Error::Recoverable(
+                            RecoverableError::HttpProtocolError {
+                                message: format!(
+                                    "HTTP Range response exceeded expected length for {range_header}"
+                                ),
+                            },
+                        )),
+                    };
+                }
+
                 if let Some(ref lim) = limiter {
-                    lim.acquire_download(data.len() as u64).await;
+                    lim.acquire_download(data_len).await;
                 }
                 if let Some(ref gl) = self.global_limiter
                     && gl.is_download_limited()
                 {
-                    gl.acquire_download(data.len() as u64).await;
+                    gl.acquire_download(data_len).await;
                 }
 
-                match writer.write_bytes_at(stream_offset, data.clone()).await {
+                match writer.write_bytes_at(stream_offset, data).await {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(
@@ -238,7 +242,6 @@ impl SequentialDownloader {
                     }
                 }
 
-                let data_len = data.len() as u64;
                 completed_bytes += data_len;
                 stream_offset += data_len;
                 bytes_downloaded += data_len;
@@ -270,6 +273,16 @@ impl SequentialDownloader {
                     bytes_downloaded
                 );
                 Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                return GapDownloadResult {
+                    completed_gaps,
+                    error: Some(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: format!(
+                                "HTTP Range response ended early: expected {gap_length} bytes, got {bytes_downloaded}"
+                            ),
+                        },
+                    )),
+                };
             }
         }
 
@@ -321,6 +334,85 @@ impl SequentialDownloader {
         }
     }
 
+    async fn send_gap_request(&self, uri: &str, range_header: &str) -> Result<reqwest::Response> {
+        let mut current_url = reqwest::Url::parse(uri).map_err(|error| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("invalid HTTP Range URL {uri}: {error}"),
+            })
+        })?;
+        let mut redirect_count = 0;
+
+        loop {
+            self.request_policy.wait_before_request().await;
+            let cookie_header = self
+                .cookie_helper
+                .build_cookie_header_from_url(&current_url);
+            let cookie_header = (!cookie_header.is_empty()).then_some(cookie_header);
+            let request = self.request_policy.apply(
+                self.client
+                    .get(current_url.as_str())
+                    .header(reqwest::header::RANGE, range_header),
+                cookie_header.as_deref(),
+                &[],
+            );
+            let response = tokio::select! {
+                result = request.send() => result.map_err(|error| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("HTTP Range request failed: {error}"),
+                    })
+                })?,
+                cancellation = self.wait_for_cancellation() => {
+                    return Err(cancellation.expect_err(
+                        "cancellation watcher must not complete successfully",
+                    ));
+                }
+            };
+
+            let status_code = response.status().as_u16();
+            self.publish_connection_context(current_url.as_str(), response.remote_addr());
+            self.cookie_helper
+                .extract_and_store_cookies(current_url.as_str(), &response);
+
+            if !is_redirect_status(status_code) {
+                return Ok(response);
+            }
+
+            if redirect_count >= MAX_REDIRECT_COUNT {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::HttpTooManyRedirects {
+                        count: redirect_count,
+                    },
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+                        message: format!("HTTP {status_code} redirect without Location header"),
+                    })
+                })?;
+            let target_url = current_url.join(location).map_err(|error| {
+                Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+                    message: format!("failed to resolve redirect URL '{location}': {error}"),
+                })
+            })?;
+            tracing::info!(
+                status_code,
+                redirect_count = redirect_count + 1,
+                from = %current_url,
+                to = %target_url,
+                "HTTP Range redirect while filling a gap"
+            );
+            self.group
+                .recover_mut()
+                .add_redirect_uri(target_url.as_str());
+            current_url = target_url;
+            redirect_count += 1;
+        }
+    }
+
     /// Zero-fill a partially-written gap region to maintain data integrity.
     async fn cleanup_partial_gap(
         writer: &mut CachedDiskWriter,
@@ -354,11 +446,66 @@ mod tests {
 
     use crate::engine::download_progress::ProgressUpdater;
     use crate::engine::http::cookie_helper::CookieHelper;
+    use crate::engine::retry_policy::RetryPolicy;
     use crate::http::HttpRequestPolicy;
     use crate::http::cookie::CookieStorage;
     use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
     use crate::util::perf_monitor::AtomicMetrics;
     use crate::util::rwlock_ext::RwLockRecover;
+
+    fn make_downloader(
+        uri: &str,
+        output_path: std::path::PathBuf,
+        group_id: u64,
+    ) -> (SequentialDownloader, Arc<std::sync::RwLock<RequestGroup>>) {
+        crate::http::client_pool::ensure_rustls_provider();
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(group_id),
+            vec![uri.to_string()],
+            DownloadOptions::default(),
+        )));
+        group.recover_mut().start().expect("start request group");
+        let progress = Arc::new(AtomicProgress::new());
+        let downloader = SequentialDownloader::new(
+            Arc::new(
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .expect("build test HTTP client"),
+            ),
+            output_path,
+            HttpRequestPolicy::default(),
+            CookieHelper::new(Arc::new(CookieStorage::new()), None),
+            ProgressUpdater::new(
+                None,
+                None,
+                Arc::clone(&progress),
+                Arc::new(AtomicMetrics::new()),
+                None,
+            ),
+            Arc::clone(&group),
+            progress,
+            None,
+        );
+        (downloader, group)
+    }
+
+    async fn read_request_headers(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut chunk).await.expect("read HTTP request");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("HTTP request headers should be UTF-8")
+    }
 
     #[test]
     fn classifies_416_as_range_failure() {
@@ -397,6 +544,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn classifies_full_response_to_range_request_as_cannot_resume() {
+        assert!(matches!(
+            classify_gap_http_status(200, "bytes=10-20"),
+            Aria2Error::Recoverable(RecoverableError::CannotResume)
+        ));
+    }
+
     #[tokio::test]
     async fn gap_download_records_the_selected_peer_address() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -417,36 +572,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("create temporary download directory");
         let uri = format!("http://{server_addr}/payload.bin");
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(9_901),
-            vec![uri.clone()],
-            DownloadOptions::default(),
-        )));
-        group.recover_mut().start().expect("start request group");
-        let progress = Arc::new(AtomicProgress::new());
-        crate::http::client_pool::ensure_rustls_provider();
-        let mut downloader = SequentialDownloader::new(
-            Arc::new(
-                reqwest::Client::builder()
-                    .no_proxy()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .expect("build test HTTP client"),
-            ),
-            dir.path().join("payload.bin"),
-            HttpRequestPolicy::default(),
-            CookieHelper::new(Arc::new(CookieStorage::new()), None),
-            ProgressUpdater::new(
-                None,
-                None,
-                Arc::clone(&progress),
-                Arc::new(AtomicMetrics::new()),
-                None,
-            ),
-            Arc::clone(&group),
-            progress,
-            None,
-        );
+        let (mut downloader, group) = make_downloader(&uri, dir.path().join("payload.bin"), 9_901);
 
         let result = downloader.execute_with_gaps(&uri, 3, &[]).await;
         server.await.expect("test HTTP server should finish");
@@ -467,5 +593,157 @@ mod tests {
         assert_eq!(contexts[0].endpoint.hostname(), "127.0.0.1");
         assert_eq!(contexts[0].endpoint.port(), server_addr.port());
         assert_eq!(contexts[0].peer_addr, server_addr);
+    }
+
+    #[tokio::test]
+    async fn gap_download_follows_redirect_and_preserves_the_missing_range() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP listener");
+        let server_addr = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                b"HTTP/1.1 302 Found\r\nLocation: /asset.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\ndef".as_slice(),
+            ] {
+                let accepted = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    listener.accept(),
+                )
+                .await;
+                let Ok(accepted) = accepted else {
+                    break;
+                };
+                let (mut stream, _) = accepted.expect("accept HTTP request");
+                requests.push(read_request_headers(&mut stream).await);
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("write HTTP response");
+            }
+            requests
+        });
+
+        let dir = tempfile::tempdir().expect("create temporary download directory");
+        let uri = format!("http://{server_addr}/original.bin");
+        let (mut downloader, _) = make_downloader(&uri, dir.path().join("payload.bin"), 9_902);
+        let result = downloader.execute_with_gaps(&uri, 6, &[(0, 3)]).await;
+        let requests = server.await.expect("test HTTP server should finish");
+
+        assert!(
+            result.error.is_none(),
+            "gap download failed: {:?}",
+            result.error
+        );
+        assert_eq!(result.completed_gaps, vec![(3, 3)]);
+        assert!(requests[0].starts_with("GET /original.bin HTTP/1.1\r\n"));
+        assert!(requests[1].starts_with("GET /asset.bin HTTP/1.1\r\n"));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("range: bytes=3-5\r\n")
+        );
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("range: bytes=3-5\r\n")
+        );
+        let payload = tokio::fs::read(dir.path().join("payload.bin"))
+            .await
+            .expect("read downloaded gap");
+        assert_eq!(&payload[3..], b"def");
+    }
+
+    #[tokio::test]
+    async fn gap_download_rejects_full_response_without_writing_it_at_the_gap_offset() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP listener");
+        let server_addr = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept range request");
+            let request = read_request_headers(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabcdef",
+                )
+                .await
+                .expect("write full response");
+            request
+        });
+
+        let dir = tempfile::tempdir().expect("create temporary download directory");
+        let uri = format!("http://{server_addr}/payload.bin");
+        let (mut downloader, _) = make_downloader(&uri, dir.path().join("payload.bin"), 9_903);
+        let result = downloader.execute_with_gaps(&uri, 6, &[(0, 3)]).await;
+        let request = server.await.expect("test HTTP server should finish");
+
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("range: bytes=3-5\r\n")
+        );
+        assert!(matches!(
+            result.error,
+            Some(Aria2Error::Recoverable(RecoverableError::CannotResume))
+        ));
+        assert!(result.completed_gaps.is_empty());
+        assert!(
+            !tokio::fs::try_exists(dir.path().join("payload.bin"))
+                .await
+                .expect("check whether output was created")
+        );
+    }
+
+    #[tokio::test]
+    async fn gap_download_retries_when_a_partial_response_ends_before_the_gap() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP listener");
+        let server_addr = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 3-5/6\r\nConnection: close\r\n\r\nde".as_slice(),
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\nConnection: close\r\n\r\ndef".as_slice(),
+            ] {
+                let accepted = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    listener.accept(),
+                )
+                .await;
+                let Ok(accepted) = accepted else {
+                    break;
+                };
+                let (mut stream, _) = accepted.expect("accept gap request");
+                requests.push(read_request_headers(&mut stream).await);
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("write gap response");
+            }
+            requests
+        });
+
+        let dir = tempfile::tempdir().expect("create temporary download directory");
+        let uri = format!("http://{server_addr}/payload.bin");
+        let (mut downloader, _) = make_downloader(&uri, dir.path().join("payload.bin"), 9_904);
+        let result = downloader
+            .execute_with_gaps_with_retry(&uri, 6, &[(0, 3)], &RetryPolicy::new(2, 0))
+            .await;
+        let requests = server.await.expect("test HTTP server should finish");
+
+        assert!(result.is_ok(), "gap retry failed: {result:?}");
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            request
+                .to_ascii_lowercase()
+                .contains("range: bytes=3-5\r\n")
+        }));
+        let payload = tokio::fs::read(dir.path().join("payload.bin"))
+            .await
+            .expect("read downloaded gap");
+        assert_eq!(&payload[3..], b"def");
     }
 }

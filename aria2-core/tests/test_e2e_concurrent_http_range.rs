@@ -79,6 +79,16 @@ fn make_concurrent_command(
     output_dir: Option<&str>,
     output_name: Option<&str>,
 ) -> DownloadCommand {
+    make_concurrent_command_with_group(gid, uri, options, output_dir, output_name).0
+}
+
+fn make_concurrent_command_with_group(
+    gid: GroupId,
+    uri: &str,
+    options: &DownloadOptions,
+    output_dir: Option<&str>,
+    output_name: Option<&str>,
+) -> (DownloadCommand, Arc<std::sync::RwLock<RequestGroup>>) {
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         gid,
         vec![uri.to_string()],
@@ -91,8 +101,10 @@ fn make_concurrent_command(
             "min-split-size".to_string(),
             serde_json::json!("1M"),
         )]));
-    DownloadCommand::new_with_group(group, uri, options, output_dir, output_name)
-        .expect("Failed to create DownloadCommand")
+    let command =
+        DownloadCommand::new_with_group(Arc::clone(&group), uri, options, output_dir, output_name)
+            .expect("Failed to create DownloadCommand");
+    (command, group)
 }
 
 /// Check if a request log entry has a Range header.
@@ -279,6 +291,17 @@ fn range_response_with_slow_first(
     req: &Request<Incoming>,
     body: &[u8],
     first_range_attempts: &AtomicUsize,
+    chunk_delay: std::time::Duration,
+) -> Response<Body> {
+    range_response_with_slow_nonzero_ranges(req, body, first_range_attempts, chunk_delay, false)
+}
+
+fn range_response_with_slow_nonzero_ranges(
+    req: &Request<Incoming>,
+    body: &[u8],
+    first_range_attempts: &AtomicUsize,
+    chunk_delay: std::time::Duration,
+    slow_nonzero_ranges: bool,
 ) -> Response<Body> {
     if req.method() == hyper::Method::HEAD {
         return Response::builder()
@@ -309,10 +332,13 @@ fn range_response_with_slow_first(
             .unwrap();
     }
 
-    let slow_first_attempt =
-        start == 0 && end > start && first_range_attempts.fetch_add(1, Ordering::AcqRel) == 0;
+    let slow_first_attempt = !slow_nonzero_ranges
+        && start == 0
+        && end > start
+        && first_range_attempts.fetch_add(1, Ordering::AcqRel) == 0;
+    let slow_response = slow_first_attempt || (slow_nonzero_ranges && start > 0);
     let range = Arc::new(body[start..=end].to_vec());
-    let response_body = if slow_first_attempt {
+    let response_body = if slow_response {
         let range_for_stream = Arc::clone(&range);
         StreamBody::new(futures::stream::unfold(0usize, move |offset| {
             let range = Arc::clone(&range_for_stream);
@@ -320,7 +346,7 @@ fn range_response_with_slow_first(
                 if offset >= range.len() {
                     return None;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(chunk_delay).await;
                 let next = (offset + 32 * 1024).min(range.len());
                 Some((
                     Ok::<_, Infallible>(Frame::data(Bytes::copy_from_slice(&range[offset..next]))),
@@ -437,6 +463,102 @@ async fn test_concurrent_download_assembles_file_correctly() {
     );
 
     // Cleanup
+    let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_download_smooths_live_speed_during_slow_range_progress() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+
+    let file_size = 8 * 1024 * 1024;
+    let data = Arc::new(generate_test_data(file_size, 91));
+    let first_range_attempts = Arc::new(AtomicUsize::new(0));
+    let handler_data = Arc::clone(&data);
+    let handler_attempts = Arc::clone(&first_range_attempts);
+    server.on("GET", "/speed-smoothing", move |request| {
+        range_response_with_slow_nonzero_ranges(
+            request,
+            &handler_data,
+            &handler_attempts,
+            std::time::Duration::from_millis(20),
+            true,
+        )
+    });
+
+    let url = make_url(&server.base_url(), "/speed-smoothing");
+    let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+    let out_name = format!("test_speed_smoothing_{}.bin", std::process::id());
+    let out_path = format!("{}/{}", tmp_dir, out_name);
+    let _ = std::fs::remove_file(&out_path);
+
+    let mut options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    options.http_version = HttpVersion::Http11;
+    let (mut command, group) = make_concurrent_command_with_group(
+        GroupId::new(76),
+        &url,
+        &options,
+        Some(&tmp_dir),
+        Some(&out_name),
+    );
+    let download = tokio::spawn(async move { command.execute().await });
+
+    let mut speed_samples = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !download.is_finished() {
+            let (status, completed_bytes, download_speed) = {
+                let group = group
+                    .read()
+                    .expect("request group lock should be available");
+                (
+                    group.status(),
+                    group.get_completed_length(),
+                    group.get_download_speed_cached(),
+                )
+            };
+            if status != DownloadStatus::Complete
+                && completed_bytes < file_size as u64
+                && download_speed > 0
+                && speed_samples.last() != Some(&download_speed)
+            {
+                speed_samples.push(download_speed);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("concurrent speed regression should finish promptly");
+    download
+        .await
+        .expect("download task should not panic")
+        .expect("concurrent download should succeed");
+
+    let requests = server.take_request_log();
+    let range_headers: Vec<_> = requests
+        .iter()
+        .filter_map(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+                .map(|(_, value)| value.clone())
+        })
+        .collect();
+    assert!(
+        speed_samples.len() >= 2,
+        "expected multiple live speed samples before completion, got {speed_samples:?}; requests={range_headers:?}"
+    );
+    let peak_speed = speed_samples.iter().copied().max().unwrap_or_default();
+    assert!(
+        peak_speed <= 20 * 1024 * 1024,
+        "the 8 MiB fixture reported an implausible live-speed spike: {speed_samples:?}"
+    );
+
+    let output = std::fs::read(&out_path).expect("completed output should be readable");
+    assert_eq!(output.as_slice(), data.as_slice());
+
     let _ = std::fs::remove_file(&out_path);
     server.shutdown().await;
 }
@@ -2026,7 +2148,12 @@ async fn test_slow_progressing_range_is_reclaimed_in_multi_mirror_pipeline() {
         let body = Arc::clone(&body);
         let first_range_attempts = Arc::clone(&first_range_attempts);
         server.on_get(path, move |req| {
-            range_response_with_slow_first(req, &body, &first_range_attempts)
+            range_response_with_slow_first(
+                req,
+                &body,
+                &first_range_attempts,
+                std::time::Duration::from_millis(250),
+            )
         });
     }
 
