@@ -7,8 +7,11 @@ use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+#[cfg(feature = "metalink")]
 use std::io::{Read, Write};
+#[cfg(feature = "metalink")]
 use std::net::TcpListener;
+#[cfg(feature = "metalink")]
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use support::RunningAria2;
