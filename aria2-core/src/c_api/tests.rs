@@ -546,6 +546,7 @@ fn serve_stalled_http_downloads(
                         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                             return get_count;
                         }
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                         Err(error) => panic!("loopback HTTP body read failed: {error}"),
                     }
                 }
