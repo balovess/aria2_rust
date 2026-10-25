@@ -93,6 +93,7 @@ impl SequentialWorkCommitter<'_> {
         self.commit_chunk_with_progress(output, true).await
     }
 
+    #[cfg(feature = "metalink")]
     pub(crate) async fn commit_chunk_without_progress(&mut self, output: &[u8]) -> Result<()> {
         self.commit_chunk_with_progress(output, false).await
     }
