@@ -1,5 +1,5 @@
 {
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "The ultra fast download utility - rewritten in Rust",
   "homepage": "https://github.com/balovess/aria2_rust",
   "license": "GPL-3.0-or-later",
@@ -14,8 +14,8 @@
   ],
   "architecture": {
     "64bit": {
-      "url": "https://github.com/balovess/aria2_rust/releases/download/v0.3.10/aria2-x86_64-windows-full.zip",
-      "hash": "edaec5db825af60a8718e2f2875ed1ce233f9a8f65e01a602709258b8bc7d4c0"
+      "url": "https://github.com/balovess/aria2_rust/releases/download/v0.3.11/aria2-x86_64-windows-full.zip",
+      "hash": "2f9036b4c8759a08924045bc1472e684e23efd120f388138abcdd3e5a0d9eb13"
     }
   },
   "bin": [
