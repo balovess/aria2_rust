@@ -2,6 +2,8 @@
 // redirect handling, auth challenge, and gap-based partial downloads.
 
 mod auth_retry;
+#[cfg(test)]
+mod checkpoint_tests;
 mod download_flow;
 mod gap_download;
 mod response_body;
@@ -54,6 +56,10 @@ pub struct SequentialDownloader {
     /// The first GET response, when filename metadata had to be read before
     /// collision resolution and resume inspection.
     pub(crate) prepared_response: Option<PreparedHttpResponse>,
+    /// Set once a response body started writing the output with a control
+    /// file, so a retry resumes from that checkpoint instead of from where
+    /// the first attempt started.
+    pub(crate) checkpoint_written: bool,
 }
 
 impl SequentialDownloader {
@@ -79,6 +85,7 @@ impl SequentialDownloader {
             global_limiter,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             prepared_response: None,
+            checkpoint_written: false,
         }
     }
 
@@ -255,7 +262,7 @@ impl SequentialDownloader {
             downloader: self,
             operation: SequentialWork::Full {
                 uri,
-                resume_state,
+                resume_state: resume_state.clone(),
                 total_length,
             },
             retry_policy,
@@ -267,7 +274,7 @@ impl SequentialDownloader {
 enum SequentialWork<'a> {
     Full {
         uri: &'a str,
-        resume_state: &'a crate::filesystem::resume_helper::ResumeState,
+        resume_state: crate::filesystem::resume_helper::ResumeState,
         total_length: u64,
     },
     Gaps {
@@ -298,6 +305,22 @@ impl SingleWorkAdapter for SequentialWorkAdapter<'_> {
                 resume_state,
                 total_length,
             } => {
+                if self.downloader.checkpoint_written {
+                    // The failed attempt saved the position it reached.
+                    let helper = crate::filesystem::resume_helper::ResumeHelper::new(
+                        &self.downloader.output_path,
+                        true,
+                    );
+                    match helper.detect(*total_length).await {
+                        Ok(state) if state.control_file.is_some() => *resume_state = state,
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            "Sequential retry #{} could not read its checkpoint: {}",
+                            attempt,
+                            error
+                        ),
+                    }
+                }
                 self.downloader
                     .execute(uri, resume_state, *total_length)
                     .await
