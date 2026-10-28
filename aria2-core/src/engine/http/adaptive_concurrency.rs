@@ -5,6 +5,11 @@
 //! admissions until the active round drains, then lowers the effective target
 //! by one and retries the rejected range. The configured connection/session
 //! limits remain hard ceilings and are never rewritten.
+//!
+//! A single-source download instead treats a 429/503 as a rate limit: the
+//! target drops at once to the ranges the server is still serving, new
+//! ranges pause for Retry-After (or an exponential backoff), and a run of
+//! successes raises the target again, up to the ceiling.
 
 use std::time::{Duration, Instant};
 
@@ -16,6 +21,10 @@ pub(crate) struct AdaptiveUpdate {
 #[derive(Debug)]
 struct ProtocolTarget {
     target: usize,
+    /// The configured limit; `target` never exceeds it.
+    ceiling: usize,
+    /// Successful ranges since the target last changed.
+    successes: usize,
     capacity_rejected: bool,
     accepting_new_work: bool,
     cooldown_until: Option<Instant>,
@@ -25,6 +34,8 @@ impl ProtocolTarget {
     fn new(target: usize) -> Self {
         Self {
             target: target.max(1),
+            ceiling: target.max(1),
+            successes: 0,
             capacity_rejected: false,
             accepting_new_work: true,
             cooldown_until: None,
@@ -42,6 +53,21 @@ pub(crate) struct HttpAdaptiveConcurrency {
     http2: ProtocolTarget,
     http2_streams_per_session: usize,
     retry_wait: Duration,
+    /// Backoff episodes since the last successful range.
+    backoff_steps: u32,
+}
+
+const CAPACITY_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const CAPACITY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Wait before the `step`th retry (from 1) after a 429/503 without
+/// Retry-After: 1 s doubling to 30 s, with +-50% jitter so parallel
+/// downloads do not retry in lockstep.
+pub(crate) fn capacity_backoff(step: u32) -> Duration {
+    let base = CAPACITY_BACKOFF_BASE
+        .saturating_mul(1 << step.saturating_sub(1).min(5))
+        .min(CAPACITY_BACKOFF_MAX);
+    base.mul_f64(rand::Rng::gen_range(&mut rand::thread_rng(), 0.5..1.5))
 }
 
 impl HttpAdaptiveConcurrency {
@@ -58,6 +84,7 @@ impl HttpAdaptiveConcurrency {
             http2: ProtocolTarget::new(http2_session_limit),
             http2_streams_per_session: http2_streams_per_session.max(1),
             retry_wait: Duration::from_secs(retry_wait_secs),
+            backoff_steps: 0,
         }
     }
 
@@ -96,6 +123,60 @@ impl HttpAdaptiveConcurrency {
         let protocol = self.protocol_target_mut(is_http2);
         protocol.capacity_rejected = true;
         protocol.accepting_new_work = false;
+    }
+
+    /// A 429/503 while `accepted` other ranges are being served: the server
+    /// takes at most that many, so drop to it at once (by at least one), and
+    /// pause new ranges for `retry_after`, or else an exponential backoff.
+    /// Ranges in flight keep going. Returns the wait.
+    pub(crate) fn record_capacity_rejection(
+        &mut self,
+        is_http2: bool,
+        accepted: usize,
+        retry_after: Option<Duration>,
+    ) -> Duration {
+        let now = Instant::now();
+        let protocol = self.protocol_target_mut(is_http2);
+        let in_cooldown = protocol.cooldown_until.is_some_and(|until| now < until);
+        // A new episode lowers by at least one; the rest of its burst only
+        // to what the server is serving.
+        let lowered = if in_cooldown {
+            protocol.target
+        } else {
+            protocol.target.saturating_sub(1)
+        };
+        protocol.target = lowered.min(accepted).max(1);
+        protocol.successes = 0;
+        // One backoff step per episode: the other ranges of the same burst
+        // are rejected inside the cooldown it started.
+        if !in_cooldown {
+            self.backoff_steps = self.backoff_steps.saturating_add(1);
+        }
+        let wait = retry_after.unwrap_or_else(|| capacity_backoff(self.backoff_steps));
+        let until = now.checked_add(wait).unwrap_or(now);
+        let protocol = self.protocol_target_mut(is_http2);
+        protocol.cooldown_until = Some(protocol.cooldown_until.map_or(until, |old| old.max(until)));
+        wait
+    }
+
+    /// A range succeeded: the backoff starts over, and after a run of
+    /// successes the target goes back up by one (a rate limit may have
+    /// passed), never above the configured ceiling.
+    pub(crate) fn record_success(&mut self, is_http2: bool) {
+        self.backoff_steps = 0;
+        let protocol = self.protocol_target_mut(is_http2);
+        protocol.successes = protocol.successes.saturating_add(1);
+        if protocol.target < protocol.ceiling
+            && protocol.successes >= protocol.target.saturating_mul(4)
+        {
+            protocol.target += 1;
+            protocol.successes = 0;
+        }
+    }
+
+    /// Backoff episodes since the last successful range.
+    pub(crate) fn backoff_steps(&self) -> u32 {
+        self.backoff_steps
     }
 
     /// Capacity rejections can be retried without consuming ordinary retry
@@ -213,6 +294,76 @@ mod tests {
         assert_eq!(controller.connection_target(true), 1);
         assert_eq!(controller.range_target(true), 4);
         assert!(!controller.preserve_retry_budget(true));
+    }
+
+    #[test]
+    fn capacity_rejection_drops_to_the_served_ranges_and_backs_off() {
+        let mut controller = controller();
+        let wait = controller.record_capacity_rejection(false, 3, None);
+        assert_eq!(controller.connection_target(false), 3);
+        assert!(wait >= Duration::from_millis(500) && wait <= Duration::from_millis(1500));
+        assert!(
+            !controller.can_start(0, false),
+            "new ranges wait out the backoff"
+        );
+        assert!(controller.cooldown_remaining().is_some());
+
+        // The rest of the burst lowers no further than needed and is not
+        // another backoff step.
+        controller.record_capacity_rejection(false, 3, None);
+        assert_eq!(controller.connection_target(false), 3);
+        assert_eq!(controller.backoff_steps(), 1);
+
+        assert_eq!(
+            controller.record_capacity_rejection(false, 0, Some(Duration::from_secs(7))),
+            Duration::from_secs(7),
+            "Retry-After is honoured"
+        );
+        assert_eq!(controller.connection_target(false), 1);
+        assert_eq!(controller.connection_target(true), 4);
+    }
+
+    #[test]
+    fn successes_reset_the_backoff_and_raise_the_target_to_the_ceiling() {
+        let mut controller = HttpAdaptiveConcurrency::new(16, 3, 4, 4, 0);
+        controller.record_capacity_rejection(false, 0, Some(Duration::ZERO));
+        assert_eq!(controller.connection_target(false), 1);
+        assert_eq!(controller.backoff_steps(), 1);
+
+        controller.record_success(false);
+        assert_eq!(controller.backoff_steps(), 0);
+        for _ in 0..3 {
+            controller.record_success(false);
+        }
+        assert_eq!(
+            controller.connection_target(false),
+            2,
+            "4 x target successes"
+        );
+        for _ in 0..8 {
+            controller.record_success(false);
+        }
+        assert_eq!(controller.connection_target(false), 3);
+        for _ in 0..24 {
+            controller.record_success(false);
+        }
+        assert_eq!(
+            controller.connection_target(false),
+            3,
+            "never above the ceiling"
+        );
+    }
+
+    #[test]
+    fn capacity_backoff_doubles_to_thirty_seconds_with_jitter() {
+        for (step, base) in [(1, 1), (2, 2), (3, 4), (5, 16), (6, 30), (20, 30)] {
+            let wait = capacity_backoff(step);
+            let base = Duration::from_secs(base);
+            assert!(
+                wait >= base.mul_f64(0.5) && wait <= base.mul_f64(1.5),
+                "step {step}: {wait:?}"
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,10 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
 
+/// How long a rate-limited (429/503) range probe keeps backing off before
+/// the download fails.
+const CAPACITY_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 impl DownloadCommand {
     pub(super) async fn execute_attempt(&mut self, uri: &str) -> Result<()> {
         debug!(
@@ -94,7 +98,11 @@ impl DownloadCommand {
             }
         }
 
-        let mut total_length = if let Some(resp) = response_for_metadata {
+        // An error response's Content-Length is its error page's, not the
+        // file's (a 429 page would otherwise size allocation and resume).
+        let mut total_length = if let Some(resp) =
+            response_for_metadata.filter(|response| response.status().is_success())
+        {
             resp.headers()
                 .get(reqwest::header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
@@ -572,9 +580,36 @@ impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
     }
 
     async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
-        self.prober
-            .probe_range_metadata(self.uri, self.cookie_header)
-            .await
+        // A rate-limited server (429/503, often without Retry-After) is
+        // waited out with a backoff that does not spend the probe's retries;
+        // with retry_wait 0 they would all be used up at once.
+        let started = std::time::Instant::now();
+        let mut capacity_waits = 0u32;
+        loop {
+            match self
+                .prober
+                .probe_range_metadata(self.uri, self.cookie_header)
+                .await
+            {
+                Err(error)
+                    if crate::engine::http::concurrent_download::is_capacity_limited_error(
+                        &error,
+                    ) && started.elapsed() < CAPACITY_PROBE_LIMIT =>
+                {
+                    capacity_waits = capacity_waits.saturating_add(1);
+                    let wait =
+                        crate::engine::http::adaptive_concurrency::capacity_backoff(capacity_waits);
+                    debug!(
+                        waits = capacity_waits,
+                        wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
+                        error = %error,
+                        "HTTP Range capability probe rate-limited; backing off"
+                    );
+                    self.command.wait_for_retry(wait).await?;
+                }
+                result => return result,
+            }
+        }
     }
 
     fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<std::time::Duration> {

@@ -2,11 +2,11 @@
 
 mod e2e_helpers;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::http::download_command::DownloadCommand;
@@ -14,7 +14,7 @@ use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup}
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use bytes::Bytes;
 use e2e_helpers::mock_http_server::{
-    Incoming, MockHttpServer, Request, Response, StatusCode, empty_body,
+    Incoming, MockHttpServer, Request, Response, StatusCode, empty_body, full_body,
 };
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
@@ -535,5 +535,264 @@ async fn cancellation_releases_http_requests() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(stats.active.load(Ordering::Acquire), 0);
+    server.shutdown().await;
+}
+
+/// When the limited server answers 429.
+#[derive(Clone, Copy)]
+enum RequestLimit {
+    /// The first `n` GETs, whatever they are.
+    First(usize),
+    /// A GET beyond `starts` begun within the last `window`, the way
+    /// rate-limited mirrors answer bursts of requests.
+    Rate { starts: usize, window: Duration },
+}
+
+/// Serves `data` (200 without Range, 206 with one) but answers 429, with a
+/// small HTML page and `retry_after` if given, as `limit` says. Records when
+/// each GET arrived and its status.
+fn register_rate_limited_server(
+    server: &MockHttpServer,
+    path: &str,
+    data: Arc<Vec<u8>>,
+    limit: RequestLimit,
+    retry_after: Option<&'static str>,
+) -> Arc<std::sync::Mutex<Vec<(Instant, u16)>>> {
+    let log = Arc::new(std::sync::Mutex::new(Vec::<(Instant, u16)>::new()));
+    let accepted_starts = Arc::new(std::sync::Mutex::new(VecDeque::<Instant>::new()));
+    let handler_log = Arc::clone(&log);
+    server.on_get(path, move |request| {
+        let now = Instant::now();
+        let mut log = handler_log.lock().unwrap();
+        let limited = match limit {
+            RequestLimit::First(count) => log.len() < count,
+            RequestLimit::Rate { starts, window } => {
+                let mut accepted = accepted_starts.lock().unwrap();
+                while accepted
+                    .front()
+                    .is_some_and(|started| now.duration_since(*started) >= window)
+                {
+                    accepted.pop_front();
+                }
+                let limited = accepted.len() >= starts;
+                if !limited {
+                    accepted.push_back(now);
+                }
+                limited
+            }
+        };
+        if limited {
+            log.push((now, 429));
+            let page = "<html><body>429 Too Many Requests</body></html>";
+            let mut response = Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("Content-Type", "text/html")
+                .header("Content-Length", page.len());
+            if let Some(retry_after) = retry_after {
+                response = response.header("Retry-After", retry_after);
+            }
+            return response.body(full_body(page)).unwrap();
+        }
+
+        let Some((start, end)) = parse_range(request, data.len()) else {
+            log.push((now, 200));
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", data.len())
+                .body(full_body(data.as_ref().clone()))
+                .unwrap();
+        };
+        log.push((now, 206));
+        let body = Bytes::copy_from_slice(&data[start..=end]);
+        let stream = futures::stream::once(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok::<_, Infallible>(Frame::data(body))
+        });
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Accept-Ranges", "bytes")
+            .header(
+                "Content-Range",
+                format!("bytes {start}-{end}/{}", data.len()),
+            )
+            .header("Content-Length", end - start + 1)
+            .body(StreamBody::new(stream).boxed())
+            .unwrap()
+    });
+    log
+}
+
+fn rejections(log: &std::sync::Mutex<Vec<(Instant, u16)>>) -> usize {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, status)| *status == 429)
+        .count()
+}
+
+#[tokio::test]
+async fn rate_limited_ranges_back_off_without_spending_retries() {
+    let server = MockHttpServer::start().await.unwrap();
+    let body = data();
+    // One new request per 200 ms and no Retry-After: even one connection is
+    // refused when it asks for its next range straight away.
+    let log = register_rate_limited_server(
+        &server,
+        "/rate-limited",
+        Arc::clone(&body),
+        RequestLimit::Rate {
+            starts: 1,
+            window: Duration::from_millis(200),
+        },
+        None,
+    );
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let mut options = options(8, 4);
+    options.max_retries = 2;
+    execute_download(
+        &format!("{}/rate-limited", server.base_url()),
+        output_dir.path(),
+        "rate-limited.bin",
+        options,
+        body.len() as u64,
+    )
+    .await
+    .expect("a rate limit must slow the download, not fail it");
+
+    assert!(
+        rejections(&log) > 2,
+        "the server must have refused more requests than the retry budget"
+    );
+    assert_eq!(
+        std::fs::read(output_dir.path().join("rate-limited.bin")).unwrap(),
+        *body
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn retry_after_pauses_new_ranges() {
+    let server = MockHttpServer::start().await.unwrap();
+    let body = data();
+    // Two requests a second; a third gets 429 asking for a second's rest.
+    let log = register_rate_limited_server(
+        &server,
+        "/retry-after",
+        Arc::clone(&body),
+        RequestLimit::Rate {
+            starts: 2,
+            window: Duration::from_secs(1),
+        },
+        Some("1"),
+    );
+
+    let output_dir = tempfile::tempdir().unwrap();
+    execute_download(
+        &format!("{}/retry-after", server.base_url()),
+        output_dir.path(),
+        "retry-after.bin",
+        options(8, 1),
+        body.len() as u64,
+    )
+    .await
+    .expect("a server asking for a pause must not fail the download");
+
+    let requests = log.lock().unwrap().clone();
+    assert!(requests.iter().any(|(_, status)| *status == 429));
+    for pair in requests.windows(2) {
+        let [(rejected_at, 429), (next_at, _)] = pair else {
+            continue;
+        };
+        let after = next_at.duration_since(*rejected_at);
+        assert!(
+            after >= Duration::from_millis(900),
+            "the next request came {after:?} after a 429 with Retry-After: 1"
+        );
+    }
+    assert_eq!(
+        std::fs::read(output_dir.path().join("retry-after.bin")).unwrap(),
+        *body
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rate_limited_range_probe_backs_off_without_spending_retries() {
+    let server = MockHttpServer::start().await.unwrap();
+    let body = data();
+    // The first two requests, the range probe and its retry, are refused.
+    let log = register_rate_limited_server(
+        &server,
+        "/probe-rate-limited",
+        Arc::clone(&body),
+        RequestLimit::First(2),
+        None,
+    );
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let mut options = options(8, 4);
+    options.max_retries = 1;
+    execute_download(
+        &format!("{}/probe-rate-limited", server.base_url()),
+        output_dir.path(),
+        "probe-rate-limited.bin",
+        options,
+        body.len() as u64,
+    )
+    .await
+    .expect("a rate-limited range probe must be waited out");
+
+    assert_eq!(rejections(&log), 2);
+    assert_eq!(
+        std::fs::read(output_dir.path().join("probe-rate-limited.bin")).unwrap(),
+        *body
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rate_limited_first_response_does_not_size_the_file() {
+    let server = MockHttpServer::start().await.unwrap();
+    let body = data();
+    // The first GET, which names and sizes an unknown download, gets a
+    // 429 page; its Content-Length is the page's, not the file's.
+    let log = register_rate_limited_server(
+        &server,
+        "/first-rate-limited.bin",
+        Arc::clone(&body),
+        RequestLimit::First(1),
+        None,
+    );
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let mut options = options(8, 4);
+    options.dir = Some(output_dir.path().to_string_lossy().into_owned());
+    let url = format!("{}/first-rate-limited.bin", server.base_url());
+    let mut command = DownloadCommand::new(
+        GroupId::new(rand::random::<u64>()),
+        &url,
+        &options,
+        options.dir.as_deref(),
+        None,
+    )
+    .unwrap();
+    set_test_min_split_size(&mut command);
+    let result = command.execute().await;
+
+    assert_eq!(rejections(&log), 1);
+    let output = output_dir.path().join("first-rate-limited.bin");
+    let written = std::fs::read(&output).unwrap_or_default();
+    assert!(
+        result.is_err() || written == *body,
+        "a download that succeeds must hold the whole file, not {} bytes",
+        written.len()
+    );
+    assert_ne!(
+        command.group().total_length(),
+        "<html><body>429 Too Many Requests</body></html>".len() as u64,
+        "the 429 page's length was taken as the file's"
+    );
     server.shutdown().await;
 }

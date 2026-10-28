@@ -37,6 +37,8 @@ pub struct WriteChunk {
 pub(crate) struct RangeDownloadFailure {
     pub(crate) error: Aria2Error,
     pub(crate) explicit_size_rejection: bool,
+    /// Retry-After of a 429/503 response.
+    pub(crate) retry_after: Option<std::time::Duration>,
 }
 
 impl From<Aria2Error> for RangeDownloadFailure {
@@ -44,8 +46,36 @@ impl From<Aria2Error> for RangeDownloadFailure {
         Self {
             error,
             explicit_size_rejection: false,
+            retry_after: None,
         }
     }
+}
+
+/// Longest Retry-After honoured; a longer one is capped to this.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Parse Retry-After as delay-seconds or an HTTP date, capped.
+pub(crate) fn parse_retry_after(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<std::time::Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let delay = match value.parse::<u64>() {
+        Ok(seconds) => std::time::Duration::from_secs(seconds),
+        Err(_) => {
+            let at = crate::http::cookie::parsing::parse_http_date(value)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            let now = i64::try_from(now).ok()?;
+            std::time::Duration::from_secs(u64::try_from(at.saturating_sub(now)).unwrap_or(0))
+        }
+    };
+    Some(delay.min(MAX_RETRY_AFTER))
 }
 
 pub struct HttpSegmentDownloader {

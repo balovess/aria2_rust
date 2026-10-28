@@ -37,6 +37,10 @@ mod resume;
 use super::range_commit::{HttpRangeCommitOptions, write_http_range_chunk};
 pub(super) use cancel::cancel_and_persist;
 
+/// How long 429/503 answers may go on with no range finishing before the
+/// download fails.
+const CAPACITY_GIVE_UP: Duration = Duration::from_secs(5 * 60);
+
 fn work_scheduler_error(context: &str, error: WorkScheduleError) -> Aria2Error {
     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
         "HTTP work scheduler could not {context}: {error}"
@@ -142,6 +146,9 @@ pub async fn execute(
     }
     let mut slow_range_recovery = SlowRangeRecovery::new();
     let mut completed_bytes = initial_completed;
+    // For giving up on a server that keeps answering 429/503.
+    let mut ranges_succeeded = 0usize;
+    let mut last_range_finished = std::time::Instant::now();
     let segment_stall_timeout =
         Duration::from_secs(constants::HTTP_DEFAULT_SEGMENT_STALL_TIMEOUT_SECS);
     let stall_check_interval = Duration::from_secs(1);
@@ -380,6 +387,7 @@ pub async fn execute(
                 let peer_addr = pool_result.peer_addr;
                 let rejected_range_size_limit = pool_result.range_size_limit;
                 let explicit_range_size_rejection = pool_result.range_size_rejected;
+                let retry_after = pool_result.retry_after;
                 if let Some(peer_addr) = peer_addr
                     && let Ok(url) = reqwest::Url::parse(uri)
                         && let Some(host) = url.host_str()
@@ -421,6 +429,9 @@ pub async fn execute(
 
                 match result {
                     Ok(total_written) => {
+                        ranges_succeeded += 1;
+                        last_range_finished = std::time::Instant::now();
+                        adaptive.record_success(executor.is_http2(&authority_key));
                         if let Some((_, _, started_at, _)) = active_segment {
                             slow_range_recovery.record_success(
                                 &authority_key,
@@ -581,9 +592,55 @@ pub async fn execute(
                             .await?;
                             return Err(e);
                         }
-                        let is_capacity_limited = super::is_capacity_limited_error(&e);
-                        if is_capacity_limited {
-                            adaptive.record_capacity_failure(is_http2);
+                        if super::is_capacity_limited_error(&e) {
+                            // 429/503: the server wants fewer connections or a
+                            // pause, not a failed download. The ranges it is
+                            // serving go on; drop to their count, back off, and
+                            // retry this range without using its retries.
+                            let accepted = segment_progress
+                                .values()
+                                .filter(|progress| progress.downloaded_bytes() > 0)
+                                .count();
+                            let wait =
+                                adaptive.record_capacity_rejection(is_http2, accepted, retry_after);
+                            tracing::warn!(
+                                seg_idx,
+                                target_connections = adaptive.connection_target(is_http2),
+                                wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
+                                "Server limited HTTP Range requests; backing off"
+                            );
+                            let gave_up = last_range_finished.elapsed() >= CAPACITY_GIVE_UP
+                                || (ranges_succeeded == 0
+                                    && options.max_retries != 0
+                                    && adaptive.backoff_steps() > options.max_retries);
+                            if gave_up {
+                                fail_work(&mut work_queue, work_lease, None)?;
+                                work_queue.cancel();
+                                cancel_and_persist(
+                                    dl,
+                                    executor,
+                                    &mut write_rx,
+                                    &mut writer,
+                                    limiter.as_ref(),
+                                    &mut ctrl_file,
+                                    completed_bytes,
+                                    Some(&mut in_flight_progress),
+                                )
+                                .await?;
+                                return Err(e);
+                            }
+                            if !manager.requeue_segment(seg_idx) {
+                                return Err(Aria2Error::Fatal(
+                                    crate::error::FatalError::Config(format!(
+                                        "HTTP segment scheduler could not requeue rate-limited parent {seg_idx}"
+                                    )),
+                                ));
+                            }
+                            work_queue
+                                .retry_without_consuming_attempt(work_lease)
+                                .map_err(|error| work_scheduler_error("retry a rate-limited range", error))?;
+                            consecutive_416_count = 0;
+                            continue;
                         }
                         let is_416 = matches!(
                             &e,
@@ -618,15 +675,12 @@ pub async fn execute(
                             consecutive_416_count = 0;
                         }
                         let retry_count = work_lease.attempt().saturating_sub(1);
-                        let adaptive_capacity_retry = is_capacity_limited
-                            && adaptive.preserve_retry_budget(is_http2);
-                        let retry_allowed = adaptive_capacity_retry
-                            || super::should_retry_segment(
-                                &retry_policy,
-                                retry_count,
-                                &e,
-                                file_not_found_retry_allowed,
-                            );
+                        let retry_allowed = super::should_retry_segment(
+                            &retry_policy,
+                            retry_count,
+                            &e,
+                            file_not_found_retry_allowed,
+                        );
                         if !retry_allowed {
                             fail_work(&mut work_queue, work_lease, None)?;
                             work_queue.cancel();
@@ -643,19 +697,12 @@ pub async fn execute(
                             .await?;
                             return Err(e);
                         }
-                        if adaptive_capacity_retry {
-                            manager.requeue_segment(seg_idx);
-                            work_queue
-                                .retry_without_consuming_attempt(work_lease)
-                                .map_err(|error| work_scheduler_error("retry after capacity adaptation", error))?;
-                        } else {
-                            manager.fail_segment(seg_idx);
-                            let _ = fail_work(
-                                &mut work_queue,
-                                work_lease,
-                                Some(std::time::Instant::now()),
-                            )?;
-                        }
+                        manager.fail_segment(seg_idx);
+                        let _ = fail_work(
+                            &mut work_queue,
+                            work_lease,
+                            Some(std::time::Instant::now()),
+                        )?;
                         }
                     }
                 }
