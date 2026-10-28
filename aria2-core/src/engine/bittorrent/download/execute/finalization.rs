@@ -17,6 +17,11 @@ impl BtDownloadCommand {
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
     ) -> Result<()> {
         self.return_all_checked_out_peers();
+        // A completed task accepts no more peers. Release its route now so a
+        // replacement task can register while this command finishes cleanup.
+        if self.bt_peer_route.take().is_some() {
+            tracing::debug!("[BT] Incoming peer route released on completion");
+        }
         let final_speed = elapsed_speed(self.completed_bytes, start_time);
         self.progress.set_completed_length(self.completed_bytes);
         self.progress.set_download_speed(final_speed);
@@ -51,6 +56,21 @@ impl BtDownloadCommand {
             }
         }
 
+        if let Some(ref manager) = self.progress_manager
+            && let Err(error) = manager.remove_progress(&meta.network_info_hash())
+        {
+            warn!(%error, "Failed to remove progress file after completion");
+        }
+
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.remove().await?;
+        }
+
+        // All output/checkpoint cleanup is complete. Release the reservation
+        // before the potentially slow DHT announce so a replacement task can
+        // safely reuse these paths while the old command remains alive.
+        self.output_path_reservation = None;
+
         if let Some(port) = dht_announce_port(self.listen_port) {
             for (engine_addr, result) in self
                 .dht_engines
@@ -68,16 +88,6 @@ impl BtDownloadCommand {
                     );
                 }
             }
-        }
-
-        if let Some(ref manager) = self.progress_manager
-            && let Err(error) = manager.remove_progress(&meta.network_info_hash())
-        {
-            warn!(%error, "Failed to remove progress file after completion");
-        }
-
-        if let Some(checkpoint) = self.checkpoint.take() {
-            checkpoint.remove().await?;
         }
 
         if let (Some(manager), Some(info_hash)) =
@@ -238,5 +248,69 @@ mod tests {
     fn dht_announce_uses_actual_peer_port() {
         assert_eq!(dht_announce_port(45123), Some(45123));
         assert_eq!(dht_announce_port(0), None);
+    }
+
+    #[tokio::test]
+    async fn completion_releases_route_and_output_reservation_before_drop() {
+        use crate::engine::bittorrent::download::command_tests::build_test_torrent;
+        use crate::engine::bittorrent::peer::listener::{BtPeerListenerManager, BtPeerRouteConfig};
+        use crate::engine::bittorrent::peer::storage::DefaultPeerStorage;
+        use crate::request::request_group::GroupId;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("temporary BT output directory");
+        let torrent = build_test_torrent();
+        let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+            .expect("test torrent should parse");
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(73_201),
+            &torrent,
+            &DownloadOptions::default(),
+            Some(dir.path().to_str().unwrap()),
+        )
+        .expect("test torrent should construct");
+        let manager = BtPeerListenerManager::new();
+        let route_config = |caretaker_id| BtPeerRouteConfig {
+            bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: meta.network_info_hash(),
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id,
+            max_peers: 1,
+            peer_storage: Arc::new(Mutex::new(DefaultPeerStorage::new())),
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        };
+        let (_, _incoming, route) = manager.register(route_config(1)).await.unwrap();
+        command.bt_peer_route = Some(route);
+        command
+            .reserve_output_paths()
+            .expect("outputs should reserve");
+        assert!(
+            manager.register(route_config(2)).await.is_err(),
+            "the running task holds the torrent's route"
+        );
+
+        command
+            .group
+            .recover_mut()
+            .start()
+            .expect("group should start");
+        command
+            .finalize_download(Instant::now(), &meta)
+            .await
+            .expect("finalization should succeed");
+
+        // The command is still alive (its task may announce for a while
+        // longer), but a new task for the same torrent can start.
+        assert!(
+            manager.register(route_config(3)).await.is_ok(),
+            "a completed task must release the torrent's route"
+        );
+        let _reservation = crate::engine::active_output_registry::global_registry()
+            .reserve_exact_paths(vec![command.output_path.clone()])
+            .expect("a completed task must release its output reservation");
+        drop(command);
     }
 }

@@ -28,14 +28,38 @@ impl BtCheckpoint {
         num_pieces: usize,
         info_hash: [u8; 20],
     ) -> Result<Self> {
+        Self::open_checked(
+            output_path,
+            |_| payload_exists,
+            total_length,
+            piece_length,
+            num_pieces,
+            info_hash,
+        )
+        .await
+    }
+
+    /// Like `open`, but the payload is checked against the checkpoint's own
+    /// bitfield (`payload_ok`): only the files that hold its verified pieces
+    /// need to exist. With `select-file` and no pre-allocation, other files
+    /// may never be written, and requiring every file discarded the progress
+    /// on each restart.
+    pub(crate) async fn open_checked(
+        output_path: &Path,
+        payload_ok: impl Fn(&[u8]) -> bool,
+        total_length: u64,
+        piece_length: u32,
+        num_pieces: usize,
+        info_hash: [u8; 20],
+    ) -> Result<Self> {
         let path = ControlFile::control_path_for(output_path);
         let expected_bitfield_len = num_pieces.div_ceil(8);
         let control_file = match ControlFile::load(&path).await {
             Ok(Some(mut control_file))
                 if control_file.is_torrent_checkpoint()
                     && control_file.total_length() == total_length
-                    && payload_exists
                     && control_file.bitfield().len() == expected_bitfield_len
+                    && payload_ok(control_file.bitfield())
                     && valid_trailing_bits(control_file.bitfield(), num_pieces)
                     && control_file.torrent_info_hash() == Some(info_hash)
                     && control_file
@@ -249,6 +273,38 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(control.torrent_piece_length(), Some(4));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_open_checked_tests_the_saved_bitfield() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        std::fs::write(&output, [0u8; 10]).unwrap();
+        let info_hash = [0x13; 20];
+        let mut checkpoint = BtCheckpoint::open(&output, true, 10, 4, 3, info_hash)
+            .await
+            .unwrap();
+        checkpoint.save(&[0b1010_0000], 6).await.unwrap();
+
+        // The check sees the saved bitfield; passing it keeps the progress
+        // even where `open` would be told the payload is incomplete.
+        let restored = BtCheckpoint::open_checked(
+            &output,
+            |bitfield| bitfield == [0b1010_0000],
+            10,
+            4,
+            3,
+            info_hash,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.completed_length(), 6);
+
+        // Failing it starts over.
+        let fresh = BtCheckpoint::open_checked(&output, |_| false, 10, 4, 3, info_hash)
+            .await
+            .unwrap();
+        assert_eq!(fresh.completed_length(), 0);
     }
 
     #[tokio::test]

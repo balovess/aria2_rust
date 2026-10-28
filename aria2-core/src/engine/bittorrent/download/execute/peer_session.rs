@@ -104,18 +104,35 @@ impl BtDownloadCommand {
                     Arc::clone(&max_peers_state),
                 )
             };
-            let route = if disable_ipv6 {
-                register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
-            } else {
-                match register(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
-                    Ok(route) => Ok(route),
-                    Err(ipv6_error) => {
-                        warn!(
-                            error = %ipv6_error,
-                            "IPv6 BitTorrent listener unavailable; falling back to IPv4"
-                        );
-                        register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+            let attempt = || async {
+                if disable_ipv6 {
+                    register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+                } else {
+                    match register(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
+                        Ok(route) => Ok(route),
+                        Err(ipv6_error) => {
+                            warn!(
+                                error = %ipv6_error,
+                                "IPv6 BitTorrent listener unavailable; falling back to IPv4"
+                            );
+                            register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+                        }
                     }
+                }
+            };
+            // A task restarted for the same torrent can start while the task
+            // it replaces is still releasing its route; wait for it briefly
+            // instead of failing with "info-hash route is already registered".
+            let mut waited = 0;
+            let route = loop {
+                match attempt().await {
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::AlreadyExists && waited < 40 =>
+                    {
+                        waited += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    result => break result,
                 }
             }
             .map_err(|error| {

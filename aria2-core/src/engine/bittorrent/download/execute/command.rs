@@ -40,14 +40,40 @@ impl Command for BtDownloadCommand {
             self.started_at = Some(Instant::now());
         }
 
-        if let Err(message) = self.register_bt_download() {
-            self.group.recover().set_last_error(
-                crate::request::request_group::DownloadResultCode::DuplicateInfoHash,
-                message.clone(),
-            );
-            return Err(Aria2Error::DownloadFailed(message));
+        // A task restarted for the same torrent (new options or a new file
+        // selection) can start while the task it replaces is still shutting
+        // down: tracker `stopped` announces keep the old registration and
+        // output reservation alive briefly. Wait for them instead of failing
+        // with a duplicate-download error.
+        let mut waited = 0;
+        loop {
+            match self.register_bt_download() {
+                Err(_) if waited < 40 => {}
+                Err(message) => {
+                    self.group.recover().set_last_error(
+                        crate::request::request_group::DownloadResultCode::DuplicateInfoHash,
+                        message.clone(),
+                    );
+                    return Err(Aria2Error::DownloadFailed(message));
+                }
+                Ok(()) => match self.reserve_output_paths() {
+                    Ok(()) => break,
+                    Err(crate::error::Aria2Error::DownloadFailed(_)) if waited < 40 => {
+                        self.unregister_bt_download();
+                    }
+                    Err(crate::error::Aria2Error::DownloadFailed(message)) => {
+                        self.group.recover().set_last_error(
+                            crate::request::request_group::DownloadResultCode::DuplicateDownload,
+                            message.clone(),
+                        );
+                        return Err(crate::error::Aria2Error::DownloadFailed(message));
+                    }
+                    Err(error) => return Err(error),
+                },
+            }
+            waited += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        self.reserve_output_paths()?;
 
         let (mut meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
         let network_info_hash = meta.network_info_hash();
