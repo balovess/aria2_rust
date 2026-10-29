@@ -11,6 +11,36 @@
   <img src="https://img.shields.io/badge/STATUS-IN%20DEVELOPMENT-red?style=for-the-badge" alt="In development — not production ready" />
 </p>
 
+<p align="center">
+  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/v/aria2-core?label=aria2-core" alt="aria2-core on crates.io" /></a>
+  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/dr/aria2-core?label=aria2-core%20downloads%20%2890%20days%29" alt="aria2-core downloads in the last 90 days" /></a>
+  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/d/aria2-core?label=aria2-core%20downloads%20%28total%29" alt="aria2-core total downloads" /></a>
+  <br />
+  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/v/aria2-protocol?label=aria2-protocol" alt="aria2-protocol on crates.io" /></a>
+  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/dr/aria2-protocol?label=aria2-protocol%20downloads%20%2890%20days%29" alt="aria2-protocol downloads in the last 90 days" /></a>
+  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/d/aria2-protocol?label=aria2-protocol%20downloads%20%28total%29" alt="aria2-protocol total downloads" /></a>
+  <br />
+  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/v/aria2-rpc?label=aria2-rpc" alt="aria2-rpc on crates.io" /></a>
+  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/dr/aria2-rpc?label=aria2-rpc%20downloads%20%2890%20days%29" alt="aria2-rpc downloads in the last 90 days" /></a>
+  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/d/aria2-rpc?label=aria2-rpc%20downloads%20%28total%29" alt="aria2-rpc total downloads" /></a>
+  <br />
+  <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/v/aria2-rust?label=Python%20SDK" alt="Python SDK on PyPI" /></a>
+  <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/dm/aria2-rust?label=PyPI%20downloads%20%28monthly%29" alt="Python SDK monthly downloads on PyPI" /></a>
+  <br />
+  <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/v/@aria2-rust/aria2-rust?label=Node.js%20SDK" alt="Node.js SDK on npm" /></a>
+  <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/dm/@aria2-rust/aria2-rust?label=npm%20downloads%20%28monthly%29" alt="Node.js SDK monthly downloads on npm" /></a>
+  <br />
+  <a href="https://github.com/balovess/aria2_rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/balovess/aria2_rust/ci.yml?branch=dev&label=CI%20%28manual%20workflow%29" alt="GitHub CI workflow status on dev" /></a>
+  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/v/release/balovess/aria2_rust?label=latest%20release" alt="Latest GitHub release" /></a>
+  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/downloads/balovess/aria2_rust/total?label=release%20downloads" alt="Downloads of assets in the latest GitHub release" /></a>
+  <a href="https://github.com/balovess/aria2_rust"><img src="https://img.shields.io/github/stars/balovess/aria2_rust?style=social" alt="GitHub stars" /></a>
+  <a href="https://github.com/balovess/aria2_rust/blob/dev/LICENSE"><img src="https://img.shields.io/github/license/balovess/aria2_rust" alt="Project license" /></a>
+  <br />
+  <a href="https://docs.rs/aria2-core"><img src="https://docs.rs/aria2-core/badge.svg" alt="aria2-core documentation on docs.rs" /></a>
+  <a href="https://docs.rs/aria2-protocol"><img src="https://docs.rs/aria2-protocol/badge.svg" alt="aria2-protocol documentation on docs.rs" /></a>
+  <a href="https://docs.rs/aria2-rpc"><img src="https://docs.rs/aria2-rpc/badge.svg" alt="aria2-rpc documentation on docs.rs" /></a>
+</p>
+
 ## Documentation
 
 Start with the [documentation index](docs/README-en.md). The main user paths are:

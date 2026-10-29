@@ -10,6 +10,36 @@ English: [`README.md`](README.md)
   <img src="https://img.shields.io/badge/状态-开发迭代中-red?style=for-the-badge" alt="开发迭代中，尚未达到生产级别" />
 </p>
 
+<p align="center">
+  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/v/aria2-core?label=aria2-core" alt="aria2-core crates.io 版本" /></a>
+  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/dr/aria2-core?label=aria2-core%20downloads%20%2890%20days%29" alt="aria2-core 近 90 天下载量" /></a>
+  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/d/aria2-core?label=aria2-core%20downloads%20%28total%29" alt="aria2-core 累计下载量" /></a>
+  <br />
+  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/v/aria2-protocol?label=aria2-protocol" alt="aria2-protocol crates.io 版本" /></a>
+  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/dr/aria2-protocol?label=aria2-protocol%20downloads%20%2890%20days%29" alt="aria2-protocol 近 90 天下载量" /></a>
+  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/d/aria2-protocol?label=aria2-protocol%20downloads%20%28total%29" alt="aria2-protocol 累计下载量" /></a>
+  <br />
+  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/v/aria2-rpc?label=aria2-rpc" alt="aria2-rpc crates.io 版本" /></a>
+  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/dr/aria2-rpc?label=aria2-rpc%20downloads%20%2890%20days%29" alt="aria2-rpc 近 90 天下载量" /></a>
+  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/d/aria2-rpc?label=aria2-rpc%20downloads%20%28total%29" alt="aria2-rpc 累计下载量" /></a>
+  <br />
+  <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/v/aria2-rust?label=Python%20SDK" alt="PyPI 上的 Python SDK 版本" /></a>
+  <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/dm/aria2-rust?label=PyPI%20downloads%20%28monthly%29" alt="Python SDK 在 PyPI 的月下载量" /></a>
+  <br />
+  <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/v/@aria2-rust/aria2-rust?label=Node.js%20SDK" alt="npm 上的 Node.js SDK 版本" /></a>
+  <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/dm/@aria2-rust/aria2-rust?label=npm%20downloads%20%28monthly%29" alt="Node.js SDK 在 npm 的月下载量" /></a>
+  <br />
+  <a href="https://github.com/balovess/aria2_rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/balovess/aria2_rust/ci.yml?branch=dev&label=CI%20%28manual%20workflow%29" alt="dev 分支上的手动 CI 工作流状态" /></a>
+  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/v/release/balovess/aria2_rust?label=latest%20release" alt="GitHub 最新 Release" /></a>
+  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/downloads/balovess/aria2_rust/total?label=release%20downloads" alt="GitHub 最新 Release 附件下载量" /></a>
+  <a href="https://github.com/balovess/aria2_rust"><img src="https://img.shields.io/github/stars/balovess/aria2_rust?style=social" alt="GitHub Stars 数" /></a>
+  <a href="https://github.com/balovess/aria2_rust/blob/dev/LICENSE"><img src="https://img.shields.io/github/license/balovess/aria2_rust" alt="项目许可证" /></a>
+  <br />
+  <a href="https://docs.rs/aria2-core"><img src="https://docs.rs/aria2-core/badge.svg" alt="aria2-core 的 docs.rs 文档状态" /></a>
+  <a href="https://docs.rs/aria2-protocol"><img src="https://docs.rs/aria2-protocol/badge.svg" alt="aria2-protocol 的 docs.rs 文档状态" /></a>
+  <a href="https://docs.rs/aria2-rpc"><img src="https://docs.rs/aria2-rpc/badge.svg" alt="aria2-rpc 的 docs.rs 文档状态" /></a>
+</p>
+
 ## 文档导览
 
 请先查看[文档索引](docs/README-cn.md)。常用入口：
