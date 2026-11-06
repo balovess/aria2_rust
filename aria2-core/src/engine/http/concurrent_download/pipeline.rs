@@ -356,6 +356,9 @@ pub async fn execute_with_coordinator(
                 let result_authority_key = pool_result.authority_key.clone();
                 match pool_result.result {
                     Ok(bytes_downloaded) => {
+                        if let Some(controller) = adaptive.get_mut(&result_authority_key) {
+                            controller.record_success(executor.is_http2(&result_authority_key));
+                        }
                         // The request result is sent only after its writer chunks
                         // have entered the channel. Commit them before the
                         // coordinator can mark this range complete.
