@@ -47,15 +47,6 @@ impl BtDownloadCommand {
             self.completed_bytes, self.total_uploaded
         );
 
-        if let Some(ref registry) = self.bt_registry {
-            let gid = self.group.recover().gid().value();
-            if let Ok(mut reg) = registry.write()
-                && reg.remove(gid)
-            {
-                info!(gid, "Removed BT download from BtRegistry on finalization");
-            }
-        }
-
         if let Some(ref manager) = self.progress_manager
             && let Err(error) = manager.remove_progress(&meta.network_info_hash())
         {
@@ -67,9 +58,18 @@ impl BtDownloadCommand {
         }
 
         // All output/checkpoint cleanup is complete. Release the reservation
-        // before the potentially slow DHT announce so a replacement task can
-        // safely reuse these paths while the old command remains alive.
+        // before unregistering this torrent, so a same-torrent replacement
+        // waits on the registry until its output paths are ready to reuse.
         self.output_path_reservation = None;
+
+        if let Some(ref registry) = self.bt_registry {
+            let gid = self.group.recover().gid().value();
+            if let Ok(mut reg) = registry.write()
+                && reg.remove(gid)
+            {
+                info!(gid, "Removed BT download from BtRegistry on finalization");
+            }
+        }
 
         if let Some(port) = dht_announce_port(self.listen_port) {
             for (engine_addr, result) in self

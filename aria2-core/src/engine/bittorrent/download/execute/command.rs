@@ -58,10 +58,8 @@ impl Command for BtDownloadCommand {
                 }
                 Ok(()) => match self.reserve_output_paths() {
                     Ok(()) => break,
-                    Err(crate::error::Aria2Error::DownloadFailed(_)) if waited < 40 => {
-                        self.unregister_bt_download();
-                    }
                     Err(crate::error::Aria2Error::DownloadFailed(message)) => {
+                        self.unregister_bt_download();
                         self.group.recover().set_last_error(
                             crate::request::request_group::DownloadResultCode::DuplicateDownload,
                             message.clone(),
