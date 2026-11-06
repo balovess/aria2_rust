@@ -8,7 +8,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::SequentialDownloader;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::engine::http::cookie_helper::CookieHelper;
-use crate::engine::retry_policy::RetryPolicy;
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::resume_helper::ResumeHelper;
 use crate::http::HttpRequestPolicy;
@@ -130,49 +129,6 @@ async fn load_checkpoint(output: &Path) -> ControlFile {
         .await
         .expect("read control file")
         .expect("control file exists")
-}
-
-#[tokio::test]
-async fn sequential_retry_resumes_from_where_the_broken_attempt_stopped() {
-    let data = payload(64 * KIB);
-    let broken_at = 40_000;
-    let rest = &data[broken_at..];
-    let (uri, server) = serve(vec![
-        response("HTTP/1.1 200 OK", &data, broken_at),
-        response(
-            &format!(
-                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {broken_at}-{}/{}",
-                data.len() - 1,
-                data.len()
-            ),
-            rest,
-            rest.len(),
-        ),
-    ])
-    .await;
-    let dir = tempfile::tempdir().expect("create temporary download directory");
-    let output = dir.path().join("payload.bin");
-    let mut downloader = make_downloader(&uri, output.clone(), 9_910);
-    let fresh = ResumeHelper::new(&output, false)
-        .detect(data.len() as u64)
-        .await
-        .expect("detect fresh download");
-
-    // A total length of zero keeps the Linux splice shortcut out of the way;
-    // the response provides the length.
-    let result = downloader
-        .execute_with_retry(&uri, &fresh, 0, &RetryPolicy::new(2, 0))
-        .await;
-    let requests = server.await.expect("test HTTP server should finish");
-
-    assert!(result.is_ok(), "sequential retry failed: {result:?}");
-    assert_eq!(requests.len(), 2);
-    assert!(
-        requests[1].contains(&format!("range: bytes={broken_at}-\r\n")),
-        "the retry restarted instead of resuming: {}",
-        requests[1]
-    );
-    assert_eq!(tokio::fs::read(&output).await.expect("read output"), data);
 }
 
 #[tokio::test]

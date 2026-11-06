@@ -435,7 +435,7 @@ impl DownloadCommand {
                 total_length,
                 requested_split,
                 min_split_size,
-            ) as u16;
+            );
 
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();

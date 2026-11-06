@@ -103,7 +103,7 @@ impl PieceDownloadSession<'_> {
                 .options()
                 .split
                 .unwrap_or(crate::constants::DEFAULT_SPLIT)
-                .clamp(1, MAX_WEB_SEED_PIECES_IN_FLIGHT as u16) as usize;
+                .clamp(1, MAX_WEB_SEED_PIECES_IN_FLIGHT as u64) as usize;
         let mut piece_work_queue = WorkScheduler::new();
         self.announce_available_pieces().await;
         self.apply_upload_choke_round();

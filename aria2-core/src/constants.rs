@@ -108,6 +108,8 @@ pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
 pub const DEFAULT_HTTP2_SESSIONS_PER_SERVER: usize = 4;
 /// Default simultaneous HTTP/2 Range streams allowed on each physical session.
 pub const DEFAULT_HTTP2_STREAMS_PER_SESSION: usize = 4;
+/// Default durable HTTP parent piece length.
+pub const DEFAULT_PIECE_LENGTH: u64 = 1024 * 1024;
 /// Allowed range and default for the adaptive HTTP Range size floor. This is
 /// independent from the durable fixed piece length.
 pub const HTTP_RANGE_SIZE_FLOOR_MIN_BYTES: u64 = 1024;
@@ -115,8 +117,8 @@ pub const DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES: u64 = 64 * 1024;
 pub const HTTP_RANGE_SIZE_FLOOR_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// Maximum simultaneous HTTP Range request budget for one download and the
 /// number of durable parent ranges before adaptive dynamic slicing.
-pub const DEFAULT_SPLIT: u16 = 16;
-pub const DEFAULT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
+pub const DEFAULT_SPLIT: u64 = 16;
+pub const DEFAULT_MIN_SPLIT_SIZE: u64 = 20 * 1024 * 1024;
 pub const MIN_SEGMENT_SIZE: usize = 1024 * 256;
 pub const MAX_SEGMENT_SIZE: usize = 1024 * 1024 * 16;
 pub const DEFAULT_SEGMENT_SIZE: usize = 1_048_576;

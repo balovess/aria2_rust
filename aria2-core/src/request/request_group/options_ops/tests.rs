@@ -2,6 +2,13 @@ use super::rpc_update::apply_rpc_option;
 use crate::request::request_group::DownloadOptions;
 
 #[test]
+fn runtime_split_update_keeps_values_above_u16() {
+    let mut options = DownloadOptions::default();
+    assert!(apply_rpc_option(&mut options, "split", &serde_json::json!("1000000")).unwrap());
+    assert_eq!(options.split, Some(1_000_000));
+}
+
+#[test]
 fn string_options_reach_their_typed_fields() {
     let cases = [
         ("bt-peer-blocklist", serde_json::json!("blocklist.txt")),

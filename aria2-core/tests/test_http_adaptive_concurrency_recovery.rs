@@ -218,7 +218,7 @@ fn register_jitter_range_server(
     });
 }
 
-fn options(split: u16, max_connection_per_server: u16) -> DownloadOptions {
+fn options(split: u64, max_connection_per_server: u16) -> DownloadOptions {
     DownloadOptions {
         split: Some(split),
         max_connection_per_server: Some(max_connection_per_server),

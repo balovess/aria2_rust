@@ -34,15 +34,15 @@ use self::in_flight::InFlightProgress;
 /// only admits additional ranges as another minimum-sized range remains.
 pub(crate) fn effective_segment_count(
     total_length: u64,
-    requested_split: u16,
+    requested_split: u64,
     min_split_size: u64,
 ) -> usize {
-    let requested = u64::from(requested_split.max(1));
+    let requested = requested_split.max(1);
     let max_by_minimum = total_length
         .checked_div(min_split_size.max(1))
         .unwrap_or(0)
         .max(1);
-    requested.min(max_by_minimum) as usize
+    usize::try_from(requested.min(max_by_minimum)).unwrap_or(usize::MAX)
 }
 
 /// Map a completed HTTP attempt to the status code recorded by mirror stats.

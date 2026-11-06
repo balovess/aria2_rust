@@ -97,10 +97,10 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "piece-length".into(),
             opt_type: OptionType::Size,
-            default_value: OptionValue::Int((1024 * 1024) as i64),
+            default_value: OptionValue::Int(crate::constants::DEFAULT_PIECE_LENGTH as i64),
             min: Some(1024 * 1024),
             max: Some(1024 * 1024 * 1024),
-            description: "BT piece length".into(),
+            description: "Durable HTTP Range piece length".into(),
             category: OptionCategory::Advanced,
             ..Default::default()
         });

@@ -53,7 +53,7 @@ impl DownloadOptions {
         };
 
         Self {
-            split: positive_u16("split"),
+            split: positive_u64("split"),
             force_sequential: options
                 .get("force-sequential")
                 .map(|v| v == "true")

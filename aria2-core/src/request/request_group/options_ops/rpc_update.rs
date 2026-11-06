@@ -85,7 +85,7 @@ pub(super) fn apply_rpc_option(
 ) -> Result<bool, String> {
     match key {
         "split" => {
-            let value = rpc_option_u16(value, key)?;
+            let value = rpc_option_u64(value, key)?;
             if value == 0 {
                 return Err(format!("Option '{}' must be greater than zero", key));
             }

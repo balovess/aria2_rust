@@ -449,7 +449,7 @@ mod tests {
         );
         assert_eq!(
             mgr.get_global_i64("min-split-size").await,
-            Some(1024 * 1024)
+            Some((20 * 1024 * 1024) as i64)
         );
         assert_eq!(
             mgr.get_global_i64("min-http-range-size").await,
@@ -492,6 +492,15 @@ mod tests {
         assert!(result.is_ok());
         let val = mgr.get_global_i64("split").await;
         assert_eq!(val, Some(8));
+    }
+
+    #[tokio::test]
+    async fn split_has_no_registry_wide_practical_cap() {
+        let mut mgr = ConfigManager::new();
+        mgr.set_global_option("split", OptionValue::Str("1000000".into()))
+            .await
+            .expect("split should accept values beyond the old 128 limit");
+        assert_eq!(mgr.get_global_i64("split").await, Some(1_000_000));
     }
 
     #[tokio::test]
