@@ -2,12 +2,11 @@
 
 English: [`README.md`](README.md)
 
-> **重要提示：** aria2-rust 当前仍处于开发迭代和持续完善阶段，距离生产级别
-> 还有很大差距。功能可能不完整、不稳定，甚至无法使用；我们不保证功能可用性，
-> 请勿将其用于生产环境或重要数据场景。
+> **项目状态：** aria2-rust 当前已具备可用能力，并将持续迭代完善。后续工作重点是
+> 完善库的使用体验与文档、修复问题、改善整体体验并优化性能。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/状态-开发迭代中-red?style=for-the-badge" alt="开发迭代中，尚未达到生产级别" />
+  <img src="https://img.shields.io/badge/状态-可用，持续完善-brightgreen?style=for-the-badge" alt="当前可用，持续完善中" />
 </p>
 
 <p align="center">
