@@ -60,6 +60,8 @@ pub struct HttpSegmentRequestResult {
     /// requests that were already in flight before a downshift.
     pub range_size_limit: u64,
     pub range_size_rejected: bool,
+    /// Retry-After of a 429/503 response.
+    pub retry_after: Option<std::time::Duration>,
     pub peer_addr: Option<std::net::SocketAddr>,
     // The lease intentionally remains attached to the result. A completed
     // request still counts as in-flight until the scheduler consumes it.

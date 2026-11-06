@@ -5,6 +5,7 @@ use futures::StreamExt;
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::http::response::is_redirect_status;
 use crate::http::response_processor::range::parse_content_range_value;
@@ -67,6 +68,17 @@ impl SequentialDownloader {
             disk_cache,
             false,
         );
+        // The split attempt this falls back from left its checkpoint. Record
+        // filled gaps in it, so a retry or the next run keeps them.
+        let ctrl_path = ControlFile::control_path_for(&self.output_path);
+        let mut checkpoint = GapCheckpoint {
+            control_file: ControlFile::load(&ctrl_path)
+                .await
+                .ok()
+                .flatten()
+                .filter(|cf| cf.total_length() == total_length && !cf.is_torrent_checkpoint()),
+            on_disk: Self::merge_ranges(completed_ranges),
+        };
 
         let rate_limit = { self.group.recover().options().max_download_limit };
         let limiter = rate_limit
@@ -103,7 +115,6 @@ impl SequentialDownloader {
                         "Gap download failed ({}), cleaning up partial data",
                         range_header
                     );
-                    Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
                     return GapDownloadResult {
                         completed_gaps,
                         error: Some(error),
@@ -118,7 +129,6 @@ impl SequentialDownloader {
                     status,
                     range_header
                 );
-                Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
                 let error = if status.as_u16() == 404 {
                     self.classify_file_not_found()
                 } else {
@@ -141,7 +151,6 @@ impl SequentialDownloader {
                     content_range,
                     range_header
                 );
-                Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
                 return GapDownloadResult {
                     completed_gaps,
                     error: Some(Aria2Error::Recoverable(RecoverableError::CannotResume)),
@@ -158,7 +167,13 @@ impl SequentialDownloader {
                     let error = cancellation.expect_err(
                         "cancellation watcher must not complete successfully",
                     );
-                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    Self::cleanup_partial_gap(
+                        &mut writer,
+                        &mut checkpoint,
+                        gap_start,
+                        bytes_downloaded,
+                    )
+                    .await;
                     return GapDownloadResult {
                         completed_gaps,
                         error: Some(error),
@@ -170,7 +185,13 @@ impl SequentialDownloader {
                 // `aria2.forceRemove` sets the RequestGroup status to
                 // `Removed`, which `is_removed()` observes without blocking.
                 if let Err(e) = self.check_cancelled() {
-                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    Self::cleanup_partial_gap(
+                        &mut writer,
+                        &mut checkpoint,
+                        gap_start,
+                        bytes_downloaded,
+                    )
+                    .await;
                     return GapDownloadResult {
                         completed_gaps,
                         error: Some(e),
@@ -184,7 +205,13 @@ impl SequentialDownloader {
                             "Gap download failed during streaming ({}), cleaning up partial data",
                             range_header
                         );
-                        Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                        Self::cleanup_partial_gap(
+                            &mut writer,
+                            &mut checkpoint,
+                            gap_start,
+                            bytes_downloaded,
+                        )
+                        .await;
                         return GapDownloadResult {
                             completed_gaps,
                             error: Some(Aria2Error::Recoverable(
@@ -203,7 +230,13 @@ impl SequentialDownloader {
                 let data_len = data.len() as u64;
                 if bytes_downloaded.saturating_add(data_len) > gap_length {
                     tracing::warn!("Gap download exceeded expected size for {}", range_header);
-                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    Self::cleanup_partial_gap(
+                        &mut writer,
+                        &mut checkpoint,
+                        gap_start,
+                        bytes_downloaded,
+                    )
+                    .await;
                     return GapDownloadResult {
                         completed_gaps,
                         error: Some(Aria2Error::Recoverable(
@@ -230,7 +263,13 @@ impl SequentialDownloader {
                         "Write failed during gap download ({}), cleaning up partial data",
                         range_header
                     );
-                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    Self::cleanup_partial_gap(
+                        &mut writer,
+                        &mut checkpoint,
+                        gap_start,
+                        bytes_downloaded,
+                    )
+                    .await;
                     return GapDownloadResult {
                         completed_gaps,
                         error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
@@ -257,6 +296,17 @@ impl SequentialDownloader {
             }
 
             if bytes_downloaded == gap_length {
+                // A later gap can still fail this attempt, and the retry
+                // skips this one: its bytes must not stay in the write cache.
+                if let Err(error) = checkpoint.persist(&mut writer, gap_start, gap_length).await {
+                    tracing::warn!("Flush failed during gap download: {}", error);
+                    return GapDownloadResult {
+                        completed_gaps,
+                        error: Some(Aria2Error::Fatal(crate::error::FatalError::Config(
+                            format!("Flush failed: {}", error),
+                        ))),
+                    };
+                }
                 completed_gaps.push((gap_start, gap_length));
                 tracing::debug!(
                     "Gap download complete: {} ({} bytes)",
@@ -269,7 +319,13 @@ impl SequentialDownloader {
                     gap_length,
                     bytes_downloaded
                 );
-                Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                Self::cleanup_partial_gap(
+                    &mut writer,
+                    &mut checkpoint,
+                    gap_start,
+                    bytes_downloaded,
+                )
+                .await;
                 return GapDownloadResult {
                     completed_gaps,
                     error: Some(Aria2Error::Recoverable(
@@ -324,6 +380,10 @@ impl SequentialDownloader {
             completed_bytes,
             completed_gaps.len()
         );
+        drop(checkpoint);
+        if let Err(error) = crate::filesystem::durability::remove_file(&ctrl_path).await {
+            tracing::debug!("Failed to delete control file on completion: {}", error);
+        }
         self.cookie_helper.save_cookies_if_configured();
         GapDownloadResult {
             completed_gaps,
@@ -410,13 +470,26 @@ impl SequentialDownloader {
         }
     }
 
-    /// Zero-fill a partially-written gap region to maintain data integrity.
+    /// Keep a partially-written gap in the checkpoint, or without one
+    /// zero-fill it to maintain data integrity.
     async fn cleanup_partial_gap(
         writer: &mut CachedDiskWriter,
+        checkpoint: &mut GapCheckpoint,
         gap_start: u64,
         bytes_written: u64,
     ) {
         if bytes_written == 0 {
+            return;
+        }
+        if checkpoint.control_file.is_some() {
+            if let Err(error) = checkpoint.persist(writer, gap_start, bytes_written).await {
+                tracing::warn!(
+                    "Failed to checkpoint partial gap at {} ({} bytes): {}",
+                    gap_start,
+                    bytes_written,
+                    error
+                );
+            }
             return;
         }
         let zero_data = vec![0u8; bytes_written as usize];
@@ -428,6 +501,44 @@ impl SequentialDownloader {
                 error
             );
         }
+    }
+}
+
+/// The ranges of a gap download that are on disk, and the checkpoint that
+/// records them.
+struct GapCheckpoint {
+    control_file: Option<ControlFile>,
+    /// Merged `(offset, length)` ranges known to be written.
+    on_disk: Vec<(u64, u64)>,
+}
+
+impl GapCheckpoint {
+    /// Make `[start, start + length)` durable and record it. The checkpoint
+    /// gets the whole written run that ends there, so a piece whose in-flight
+    /// prefix ends mid-block is still finished by the gap after it.
+    async fn persist(
+        &mut self,
+        writer: &mut CachedDiskWriter,
+        start: u64,
+        length: u64,
+    ) -> Result<()> {
+        let Some(control_file) = self.control_file.as_mut() else {
+            return writer.flush().await;
+        };
+        // The checkpoint must never claim bytes still in the write cache.
+        writer.sync_data().await?;
+        let run_start = self
+            .on_disk
+            .iter()
+            .find(|&&(offset, len)| offset <= start && start <= offset + len)
+            .map_or(start, |&(offset, _)| offset);
+        control_file.record_completed_range(run_start, start + length - run_start);
+        if let Err(error) = control_file.save().await {
+            tracing::warn!("Control file save after gap failed: {}", error);
+        }
+        self.on_disk.push((start, length));
+        self.on_disk = SequentialDownloader::merge_ranges(&self.on_disk);
+        Ok(())
     }
 }
 
@@ -739,5 +850,65 @@ mod tests {
             .await
             .expect("read downloaded gap");
         assert_eq!(&payload[3..], b"def");
+    }
+
+    /// Serve one scripted response per connection, returning the requests.
+    fn serve_scripted(
+        listener: tokio::net::TcpListener,
+        responses: Vec<&'static [u8]>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let accepted =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept())
+                        .await;
+                let Ok(accepted) = accepted else {
+                    break;
+                };
+                let (mut stream, _) = accepted.expect("accept gap request");
+                requests.push(read_request_headers(&mut stream).await);
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("write gap response");
+            }
+            requests
+        })
+    }
+
+    #[tokio::test]
+    async fn gap_finished_before_a_failed_gap_is_on_disk_after_the_retry() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP listener");
+        let server_addr = listener.local_addr().expect("read listener address");
+        let server = serve_scripted(
+            listener,
+            vec![
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 4-7/16\r\nConnection: close\r\n\r\nEFGH",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 12-15/16\r\nConnection: close\r\n\r\nMN",
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 12-15/16\r\nConnection: close\r\n\r\nMNOP",
+            ],
+        );
+
+        let dir = tempfile::tempdir().expect("create temporary download directory");
+        let output = dir.path().join("payload.bin");
+        tokio::fs::write(&output, b"ABCD\0\0\0\0IJKL\0\0\0\0")
+            .await
+            .expect("write the ranges the split download finished");
+        let uri = format!("http://{server_addr}/payload.bin");
+        let (mut downloader, _) = make_downloader(&uri, output.clone(), 9_905);
+        let result = downloader
+            .execute_with_gaps_with_retry(&uri, 16, &[(0, 4), (8, 4)], &RetryPolicy::new(2, 0))
+            .await;
+        let requests = server.await.expect("test HTTP server should finish");
+
+        assert!(result.is_ok(), "gap retry failed: {result:?}");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            tokio::fs::read(&output).await.expect("read output"),
+            b"ABCDEFGHIJKLMNOP"
+        );
     }
 }

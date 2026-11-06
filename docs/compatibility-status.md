@@ -3,6 +3,27 @@
 This file records compatibility evidence for externally observable download
 behavior. An unlisted behavior has not been audited here.
 
+## HTTP split and piece geometry
+
+- **Supported scope:** `split` is the task-wide HTTP segment budget and has no
+  fixed registry maximum. The effective budget is bounded by the payload,
+  `min-split-size`, and runtime resource limits.
+- **Default alignment:** `min-split-size` defaults to `20M`, matching original
+  aria2. `piece-length` defaults to `1M` and defines durable HTTP parent-piece
+  boundaries for new downloads. A compatible control-file layout wins on
+  resume.
+- **Known difference:** `max-connection-per-server` remains a per-download,
+  per-authority ceiling with the aria2-compatible range `1..=16`, but this
+  implementation currently defaults to `16`; original aria2 defaults to `1`.
+  `split` also has no registry ceiling but currently defaults to `16`, while
+  original aria2 defaults to `5`.
+  With `-x=1`, an HTTP/1.1 source permits one active Range request even when
+  `split` is larger. HTTP/2 applies the cap to client session pools, not
+  directly to individual multiplexed Range streams.
+- **Verification:** focused tests cover values above the old `split=128`
+  ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
+  reuse of the control-file piece layout ahead of a new configuration.
+
 ## HTTP(S) multi-mirror range resume
 
 - **Upstream format:** aria2 documents `.aria2` in-flight piece records as an

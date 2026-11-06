@@ -197,9 +197,8 @@ impl crate::config::OptionRegistry {
             name: "split".into(),
             opt_type: OptionType::Integer,
             short_name: Some('s'),
-            default_value: OptionValue::Int(16),
+            default_value: OptionValue::Int(crate::constants::DEFAULT_SPLIT as i64),
             min: Some(1),
-            max: Some(128),
             description: "Concurrent segment requests per download".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

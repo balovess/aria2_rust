@@ -42,7 +42,7 @@ pub(super) async fn finalize_cancelled_download(
         return;
     }
     if let Some(control_file) = control_file {
-        control_file.update_completed_length(completed_bytes);
+        control_file.record_completed_prefix(completed_bytes);
         if let Err(error) = control_file.save().await {
             tracing::warn!(
                 "Sequential: control file save on pause/remove failed: {}",
@@ -69,7 +69,7 @@ impl SequentialDownloader {
             ))
         })?;
         if let Some(control_file) = control_file {
-            control_file.update_completed_length(completed_bytes);
+            control_file.record_completed_prefix(completed_bytes);
             control_file.save().await.map_err(|error| {
                 Aria2Error::FileIo(format!(
                     "Failed to save requested sequential checkpoint: {error}"

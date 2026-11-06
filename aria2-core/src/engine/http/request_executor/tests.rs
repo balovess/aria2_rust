@@ -194,6 +194,7 @@ async fn selecting_next_result_does_not_drop_a_received_completion() {
                 result: Ok(1),
                 range_size_limit: 1,
                 range_size_rejected: false,
+                retry_after: None,
                 peer_addr: None,
                 _lease: lease,
             })

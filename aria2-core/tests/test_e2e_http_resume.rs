@@ -93,21 +93,6 @@ async fn wait_for_completed_length_at_least(
     .expect("download did not reach the expected completed length");
 }
 
-async fn wait_for_checkpoint_length_at_least(path: &std::path::Path, expected: u64) {
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            if let Ok(Some(checkpoint)) = ControlFile::load(path).await
-                && checkpoint.completed_length() >= expected
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("control file did not persist the expected completed length");
-}
-
 fn payload_range_start(entry: &RequestLog) -> Option<u64> {
     entry
         .headers
@@ -127,20 +112,38 @@ async fn wait_for_engine(handle: tokio::task::JoinHandle<aria2_core::error::Resu
     result.expect("download engine returned an error");
 }
 
+async fn wait_for_in_flight_checkpoint(path: &std::path::Path) -> ControlFile {
+    // Paused status is published before the cancelled command finishes saving.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(checkpoint)) = ControlFile::load(path).await
+                && !checkpoint.in_flight_pieces().is_empty()
+            {
+                return checkpoint;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pause did not persist reusable in-flight blocks")
+}
+
 #[tokio::test]
-async fn named_http_download_advances_checkpoint_across_repeated_pauses() {
+async fn single_source_pause_persists_in_flight_blocks_and_resumes_from_them() {
+    const BLOCK_SIZE: usize = 16 * 1024;
+    const PIECE_SIZE: usize = 1024 * 1024;
     let server = MockHttpServer::start()
         .await
         .expect("start mock HTTP server");
-    let file_size = 32 * 1024 * 1024;
+    let file_size = 16 * PIECE_SIZE;
     let data = generate_test_data(file_size);
-    server.register_slow_range_response("/named-resume", &data, 128 * 1024, 150);
+    server.register_slow_range_response("/single-inflight", &data, BLOCK_SIZE, 50);
 
     let directory = tempfile::tempdir().expect("create output directory");
-    let output_name = "named-resume.bin";
+    let output_name = "single-inflight.bin";
     let output_path = directory.path().join(output_name);
     let control_path = ControlFile::control_path_for(&output_path);
-    let url = format!("{}/named-resume", server.base_url());
+    let url = format!("{}/single-inflight", server.base_url());
     let options = DownloadOptions {
         allow_overwrite: true,
         continue_download: true,
@@ -148,10 +151,10 @@ async fn named_http_download_advances_checkpoint_across_repeated_pauses() {
         max_connection_per_server: Some(4),
         out: Some(output_name.to_string()),
         split: Some(4),
-        use_head: false,
+        use_head: true,
         ..DownloadOptions::default()
     };
-    let gid = GroupId::new(414);
+    let gid = GroupId::new(415);
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         gid,
         vec![url],
@@ -177,75 +180,61 @@ async fn named_http_download_advances_checkpoint_across_repeated_pauses() {
     let engine_task = tokio::spawn(engine.run());
 
     wait_for_group_status(&group, DownloadStatus::Active, "initial activation").await;
-    wait_for_completed_length_at_least(&group, 2 * 1024 * 1024).await;
+    // Less than one piece per connection: nothing is complete yet.
+    wait_for_completed_length_at_least(&group, 512 * 1024).await;
     command_tx
         .send(EngineCommand::Pause { gid })
-        .expect("initial pause command");
-    wait_for_paused_group_requeue(&group, &group_man, "initial pause").await;
-    wait_for_checkpoint_length_at_least(&control_path, 2 * 1024 * 1024).await;
+        .expect("pause command");
+    wait_for_paused_group_requeue(&group, &group_man, "pause").await;
+    let checkpoint = wait_for_in_flight_checkpoint(&control_path).await;
+    assert_eq!(checkpoint.piece_length(), Some(PIECE_SIZE as u32));
 
-    let initial_checkpoint = ControlFile::load(&control_path)
+    let output = tokio::fs::read(&output_path)
         .await
-        .expect("load initial checkpoint")
-        .expect("initial pause should create a checkpoint");
-    assert_eq!(initial_checkpoint.piece_length(), Some(file_size as u32));
-    let mut previous_checkpoint = initial_checkpoint.completed_length();
-    assert!(previous_checkpoint >= 2 * 1024 * 1024);
-    server.take_request_log();
-
-    let fixed_piece_size = 1024 * 1024;
-    let in_flight_allowance = 4 * fixed_piece_size;
-    for resume_index in 0..3 {
-        command_tx
-            .send(EngineCommand::Unpause { gid })
-            .expect("resume command");
-        let resume_phase = format!("resume {resume_index} activation");
-        wait_for_group_status(&group, DownloadStatus::Active, &resume_phase).await;
-        wait_for_checkpoint_length_at_least(&control_path, previous_checkpoint + fixed_piece_size)
-            .await;
-        command_tx
-            .send(EngineCommand::Pause { gid })
-            .expect("pause command");
-        let pause_phase = format!("resume {resume_index} pause");
-        wait_for_paused_group_requeue(&group, &group_man, &pause_phase).await;
-
-        let checkpoint = ControlFile::load(&control_path)
-            .await
-            .expect("load resumed checkpoint")
-            .expect("paused resume should preserve its checkpoint");
+        .expect("read paused output after the writer sync barrier");
+    let mut expected_resume_offsets = Vec::new();
+    let mut persisted_in_flight_bytes = 0;
+    for piece in checkpoint.in_flight_pieces() {
+        let piece_offset = piece.index as usize * PIECE_SIZE;
+        let blocks = (0..(piece.length as usize).div_ceil(BLOCK_SIZE))
+            .take_while(|block| piece.bitfield[block / 8] & (1 << (7 - block % 8)) != 0)
+            .count();
+        let reusable = (blocks * BLOCK_SIZE).min(piece.length as usize);
         assert!(
-            checkpoint.completed_length() >= previous_checkpoint + fixed_piece_size,
-            "resume {resume_index} did not advance: previous={previous_checkpoint}, current={}",
-            checkpoint.completed_length()
+            reusable > 0,
+            "persisted in-flight entry has no reusable block"
         );
-        assert_eq!(checkpoint.piece_length(), Some(fixed_piece_size as u32));
-        assert!(
-            checkpoint.completed_pieces() > 0,
-            "resume {resume_index} did not persist restored segments in the bitfield"
+        assert_eq!(
+            &output[piece_offset..piece_offset + reusable],
+            &data[piece_offset..piece_offset + reusable],
+            "checkpoint claims bytes of piece {} that were not written",
+            piece.index
         );
-
-        let requests = server.take_request_log();
-        let earliest_start = requests
-            .iter()
-            .filter_map(payload_range_start)
-            .min()
-            .expect("resumed HTTP requests should carry Range headers");
-        let minimum_allowed_start = previous_checkpoint.saturating_sub(in_flight_allowance);
-        assert!(
-            earliest_start >= minimum_allowed_start,
-            "resume {resume_index} restarted too far back: earliest Range={earliest_start}, pause checkpoint={previous_checkpoint}, allowance={in_flight_allowance}, requests={requests:?}, bitfield={:?}, completed_pieces={}, piece_length={:?}",
-            checkpoint.bitfield(),
-            checkpoint.completed_pieces(),
-            checkpoint.piece_length()
-        );
-        previous_checkpoint = checkpoint.completed_length();
+        persisted_in_flight_bytes += reusable;
+        expected_resume_offsets.push((piece.index, (piece_offset + reusable) as u64));
     }
+    assert!(
+        persisted_in_flight_bytes >= 512 * 1024,
+        "checkpoint kept only {persisted_in_flight_bytes} in-flight bytes after at least 512 KiB of progress"
+    );
+    server.take_request_log();
 
     command_tx
         .send(EngineCommand::Unpause { gid })
-        .expect("final resume command");
+        .expect("resume command");
     wait_for_engine(engine_task).await;
 
+    let resumed_starts = server
+        .take_request_log()
+        .iter()
+        .filter_map(payload_range_start)
+        .collect::<Vec<_>>();
+    for (piece_index, expected_offset) in expected_resume_offsets {
+        assert!(
+            resumed_starts.contains(&expected_offset),
+            "piece {piece_index} did not resume from its first unsaved byte {expected_offset}: {resumed_starts:?}"
+        );
+    }
     assert_eq!(tokio::fs::read(&output_path).await.unwrap(), data);
     assert!(!control_path.exists());
     server.shutdown().await;

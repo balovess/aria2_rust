@@ -29,7 +29,7 @@ fn make_url(base: &str, path: &str) -> String {
 }
 
 fn make_options(
-    split: Option<u16>,
+    split: Option<u64>,
     max_conn: Option<u16>,
     dir: &str,
     out: &str,

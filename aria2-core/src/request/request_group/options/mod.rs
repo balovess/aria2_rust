@@ -13,7 +13,7 @@ pub const DEFAULT_DISK_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
-    pub split: Option<u16>,
+    pub split: Option<u64>,
     /// Force the HTTP downloader to use one sequential request even when the
     /// server supports ranges and `split` is greater than one.
     pub force_sequential: bool,

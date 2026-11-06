@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "aria2"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "aria2-core",
  "aria2-protocol",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-core"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "adler32",
  "aes-gcm 0.10.3",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-protocol"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-rpc"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "async-trait",
  "axum",

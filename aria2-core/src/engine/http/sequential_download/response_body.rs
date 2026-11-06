@@ -43,7 +43,7 @@ impl HttpResponseBodySink<'_> {
                     "Failed to durably sync sequential HTTP checkpoint payload: {error}"
                 ))
             })?;
-            control_file.update_completed_length(*self.completed_bytes);
+            control_file.record_completed_prefix(*self.completed_bytes);
             if let Err(error) = control_file.save().await {
                 tracing::warn!("Sequential: control file save failed: {}", error);
             }
@@ -95,7 +95,9 @@ impl SequentialDownloader {
 
         let rate_limit = { self.group.recover().options().max_download_limit };
 
-        let raw_writer = if start_offset > 0 {
+        // A resume keeps the file even from offset 0: a split checkpoint can
+        // hold finished pieces after an unfinished first one.
+        let raw_writer = if start_offset > 0 || resume_state.should_resume {
             DefaultDiskWriter::new_with_offset(&self.output_path, start_offset)
         } else {
             DefaultDiskWriter::new(&self.output_path)
@@ -141,6 +143,17 @@ impl SequentialDownloader {
         // completed_length is the authoritative source for resume detection,
         // immune to the preallocation pitfall.
         let ctrl_path = ControlFile::control_path_for(&self.output_path);
+        // A fresh download truncates the file, so the pieces an old
+        // checkpoint lists are no longer on disk.
+        if !resume_state.should_resume
+            && let Err(error) = crate::filesystem::durability::remove_file(&ctrl_path).await
+        {
+            tracing::warn!(
+                "Sequential: stale control file removal failed {}: {}",
+                ctrl_path.display(),
+                error
+            );
+        }
         let mut ctrl_file = if actual_total > 0 {
             match ControlFile::open_or_create(&ctrl_path, actual_total, 1).await {
                 Ok(mut cf) => {
@@ -168,11 +181,12 @@ impl SequentialDownloader {
                         true
                     };
                     if payload_ready {
-                        cf.update_completed_length(checkpoint_length);
+                        cf.record_completed_prefix(checkpoint_length);
                         if let Err(error) = cf.save().await {
                             tracing::warn!("Sequential: control file save failed: {}", error);
                         }
                     }
+                    self.checkpoint_written = true;
                     Some(cf)
                 }
                 Err(e) => {
@@ -238,11 +252,19 @@ impl SequentialDownloader {
                 return Err(e);
             }
 
-            let data: bytes::Bytes = chunk.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: e.to_string(),
-                })
-            })?;
+            let data: bytes::Bytes = match chunk {
+                Ok(data) => data,
+                Err(error) => {
+                    // Like a pause, a broken stream keeps everything written
+                    // so far rather than the last periodic checkpoint.
+                    finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: error.to_string(),
+                        },
+                    ));
+                }
+            };
             if !data.is_empty() {
                 self.progress.record_network_activity();
             }

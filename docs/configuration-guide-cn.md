@@ -181,6 +181,17 @@ aria2c --conf-path=aria2.conf --reset-config
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP 连接、流水线、压缩、认证和响应行为 |
 | `ftp-pasv`, `ftp-reuse-connection`, `ftp-type`, `ssh-host-key-md` | FTP 被动模式、连接复用、传输类型、SSH 主机密钥摘要 |
 
+HTTP 下载中，`split` 是任务级分段预算，不再有固定的配置上限；实际生效值
+受文件大小、`min-split-size`（默认 `20M`）和运行时资源约束。`piece-length`
+（默认 `1M`）决定新下载用于构造 HTTP Range 请求的持久父分片边界；恢复下载
+时优先沿用兼容的 control file 布局。本实现当前默认 `split=16`，原始 aria2
+默认 `5`。
+
+`max-connection-per-server`（`-x`）限制单个下载对同一服务器的并发访问，取值范围
+仍为 `1..=16`。本实现当前默认 `16`，原始 aria2 默认 `1`。对 HTTP/1.1，
+即使 `split` 更大，`-x=1` 也只会允许一个活动 Range 请求。HTTP/2 中该上限作用于
+独立客户端会话池，会话内部仍可复用多个并发流。
+
 ### BitTorrent（启用 bittorrent feature 时）
 
 `seed-time`, `seed-ratio`, `bt-max-peers`, `bt-request-peer-speed-limit`, `bt-max-open-files`, `bt-seed-unverified`, `bt-save-metadata`, `bt-force-encryption`, `bt-min-crypto-level`, `bt-detach-seed-only`, `bt-enable-lpd`, `lpd-listen-port`, `bt-enable-web-seed`, `enable-dht`, `dht-listen-port`, `dht-entry-point`, `dht-file-path`, `enable-peer-exchange`, `follow-torrent`, `listen-port`, `bt-prioritize-piece`, `bt-enable-hook-after-hash-check`, `bt-exclude-tracker`, `bt-external-ip`, `bt-hash-check-seed`, `bt-load-saved-metadata`, `bt-lpd-interface`, `bt-metadata-only`, `bt-remove-unselected-file`, `bt-require-crypto`, `bt-stop-timeout`, `bt-tracker`, `bt-tracker-source`, `bt-tracker-update-interval`, `enable-public-trackers`, `bt-tracker-connect-timeout`, `bt-tracker-interval`, `bt-tracker-timeout`, `bt-tracker-stopped-timeout`, `dht-message-timeout`, `enable-dht6`, `dht-listen-addr6`, `peer-id-prefix`, `peer-agent`, `select-file`, `index-out`, `bt-peer-blocklist`, `enable-utp`, `utp-listen-port`, `bt-keep-alive-interval`, `bt-timeout`, `bt-request-timeout`, `peer-connection-timeout`, `dht-entry-point-host`, `dht-entry-point-port`, `dht-entry-point6`, `dht-entry-point-host6`, `dht-entry-point-port6`, `dht-file-path6`, `dht-listen-addr`。

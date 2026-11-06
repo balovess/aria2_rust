@@ -181,6 +181,21 @@ Options currently marked as unsupported compatibility entries are: `interface`, 
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP connection, pipelining, compression, authentication, and response behavior |
 | `ftp-pasv`, `ftp-reuse-connection`, `ftp-type`, `ssh-host-key-md` | FTP passive mode, connection reuse, transfer type, and SSH host-key digest |
 
+For HTTP downloads, `split` is the task-wide segment budget and has no fixed
+registry maximum. Its effective value is bounded by the payload,
+`min-split-size` (default `20M`), and runtime resources. `piece-length`
+(default `1M`) defines the durable parent-piece boundaries used to build HTTP
+Range requests for a new download; a compatible control-file layout is
+preserved on resume. This implementation currently defaults `split` to `16`;
+original aria2 defaults to `5`.
+
+`max-connection-per-server` (`-x`) limits concurrent access to one server for
+one download. It remains restricted to `1..=16`. This implementation currently
+defaults to `16`; original aria2 defaults to `1`. For HTTP/1.1, `-x=1` permits
+only one active Range request even if `split` is larger. HTTP/2 applies this
+limit to independent client session pools while allowing multiplexed streams
+within a session.
+
 ### BitTorrent (when the bittorrent feature is enabled)
 
 `seed-time`, `seed-ratio`, `bt-max-peers`, `bt-request-peer-speed-limit`, `bt-max-open-files`, `bt-seed-unverified`, `bt-save-metadata`, `bt-force-encryption`, `bt-min-crypto-level`, `bt-detach-seed-only`, `bt-enable-lpd`, `lpd-listen-port`, `bt-enable-web-seed`, `enable-dht`, `dht-listen-port`, `dht-entry-point`, `dht-file-path`, `enable-peer-exchange`, `follow-torrent`, `listen-port`, `bt-prioritize-piece`, `bt-enable-hook-after-hash-check`, `bt-exclude-tracker`, `bt-external-ip`, `bt-hash-check-seed`, `bt-load-saved-metadata`, `bt-lpd-interface`, `bt-metadata-only`, `bt-remove-unselected-file`, `bt-require-crypto`, `bt-stop-timeout`, `bt-tracker`, `bt-tracker-source`, `bt-tracker-update-interval`, `enable-public-trackers`, `bt-tracker-connect-timeout`, `bt-tracker-interval`, `bt-tracker-timeout`, `bt-tracker-stopped-timeout`, `dht-message-timeout`, `enable-dht6`, `dht-listen-addr6`, `peer-id-prefix`, `peer-agent`, `select-file`, `index-out`, `bt-peer-blocklist`, `enable-utp`, `utp-listen-port`, `bt-keep-alive-interval`, `bt-timeout`, `bt-request-timeout`, `peer-connection-timeout`, `dht-entry-point-host`, `dht-entry-point-port`, `dht-entry-point6`, `dht-entry-point-host6`, `dht-entry-point-port6`, `dht-file-path6`, and `dht-listen-addr`.

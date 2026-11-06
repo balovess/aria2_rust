@@ -3,7 +3,7 @@ use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::engine::http::segment_downloader::HttpSegmentDownloader;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
-fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> DownloadCommand {
+fn create_http_command(uri: &str, split: Option<u64>, max_conn: Option<u16>) -> DownloadCommand {
     let options = DownloadOptions {
         split,
         max_connection_per_server: max_conn,

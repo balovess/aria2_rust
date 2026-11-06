@@ -115,6 +115,9 @@ impl HttpSegmentDownloader {
                     length,
                     expected_entity_length,
                 ),
+                retry_after: matches!(status.as_u16(), 429 | 503)
+                    .then(|| super::parse_retry_after(response.headers()))
+                    .flatten(),
             });
         }
         if status.as_u16() == 206 {

@@ -128,6 +128,18 @@ impl InFlightProgress {
         }
     }
 
+    /// Written prefixes of the pieces `is_complete` rejects, as
+    /// `(offset, length)`, so a fallback does not fetch (and on failure
+    /// zero-fill) bytes that the checkpoint already claims.
+    pub(super) fn partial_ranges(&self, is_complete: impl Fn(usize) -> bool) -> Vec<(u64, u64)> {
+        self.completed_prefixes
+            .iter()
+            .enumerate()
+            .filter(|&(index, &prefix)| prefix > 0 && !is_complete(index))
+            .map(|(index, &prefix)| ((index as u64).saturating_mul(self.piece_length), prefix))
+            .collect()
+    }
+
     /// Build canonical checkpoint records. Only complete blocks in each
     /// contiguous prefix are advertised as reusable.
     pub(super) fn snapshot(&self, completed_bitfield: &[u8]) -> Vec<ControlFileInFlightPiece> {

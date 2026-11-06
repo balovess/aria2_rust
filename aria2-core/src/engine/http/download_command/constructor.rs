@@ -479,7 +479,7 @@ impl DownloadCommand {
         &self,
         total_length: u64,
         supports_range: bool,
-        split: u16,
+        split: usize,
     ) -> bool {
         if self.group.recover().options().force_sequential {
             return false;

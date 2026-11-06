@@ -6,13 +6,27 @@ use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use std::collections::BTreeMap;
 
 #[tokio::test]
-async fn web_seed_hostname_uses_a_compatible_policy_source() {
+async fn web_seed_hostname_policy_selects_a_compatible_local_source() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    let listener = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+    let policy = crate::network::OutboundNetworkPolicy::new(vec![
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+        "::1".parse().expect("parse IPv6 source"),
+    ])
+    .expect("web-seed policy should accept both families");
+    let stats = std::sync::Arc::new(WebSeedStats::new());
+    let tls = crate::http::client_identity::ClientTlsConfig::default();
+    let local_address = policy
+        .source_for_host("localhost", 0)
         .await
-        .expect("web-seed fixture should bind");
+        .expect("web-seed policy should select a source for localhost")
+        .expect("constrained policy should select a local source");
+    let listener = match local_address {
+        std::net::IpAddr::V4(_) => TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await,
+        std::net::IpAddr::V6(_) => TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).await,
+    }
+    .expect("web-seed fixture should bind on the selected address family");
     let address = listener.local_addr().expect("web-seed fixture address");
     let server = tokio::spawn(async move {
         let (mut stream, peer) = listener.accept().await.expect("web-seed should accept");
@@ -30,23 +44,13 @@ async fn web_seed_hostname_uses_a_compatible_policy_source() {
             .expect("write web-seed response");
         peer
     });
-
-    let policy = crate::network::OutboundNetworkPolicy::new(vec![
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
-        "::1".parse().expect("parse IPv6 source"),
-    ])
-    .expect("web-seed policy should accept both families");
-    let stats = std::sync::Arc::new(WebSeedStats::new());
-    let tls = crate::http::client_identity::ClientTlsConfig::default();
-    let local_address = policy
-        .source_for_host("localhost", address.port())
-        .await
-        .expect("web-seed policy should select the IPv4 source for localhost");
     let timeout = std::time::Duration::from_secs(60);
-    let http_client = super::client::build_client(&tls, local_address, timeout)
+    let http_client = super::client::build_client(&tls, Some(local_address), timeout)
         .expect("web-seed HTTP client should build");
+    // The policy already resolved localhost; use the fixture's IP literal
+    // to avoid a second lookup selecting a different address family.
     let client = WebSeedClient::with_shared_http_client(
-        &format!("http://localhost:{}/file.bin", address.port()),
+        &format!("http://{address}/file.bin"),
         stats,
         http_client,
         timeout,
@@ -55,7 +59,7 @@ async fn web_seed_hostname_uses_a_compatible_policy_source() {
     assert_eq!(client.download_piece(0, 2, 0, 2).await.unwrap(), b"ok");
     assert_eq!(
         server.await.expect("web-seed fixture should finish").ip(),
-        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        local_address
     );
 }
 

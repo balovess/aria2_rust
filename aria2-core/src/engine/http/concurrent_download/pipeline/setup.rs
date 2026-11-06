@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::constants;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::{ResumeState, is_sequential_checkpoint};
@@ -11,7 +11,7 @@ use crate::request::request_group::DownloadOptions;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::ConcurrentDownloader;
-use super::super::fixed_piece_size::calculate_fixed_piece_size;
+use super::super::fixed_piece_size::resolve_http_piece_length;
 use super::super::in_flight::InFlightProgress;
 use super::super::{effective_segment_count, flush_requested_control_file};
 use crate::engine::mirror_coordinator::MirrorCoordinator;
@@ -44,21 +44,8 @@ pub(super) async fn prepare(
     let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
     let min_split_size = dl.group.recover().effective_min_split_size();
     let split = effective_segment_count(total_length, requested_split, min_split_size);
-    let fixed_piece_size = resume_state
-        .control_file
-        .as_ref()
-        .filter(|control_file| {
-            control_file.total_length() == total_length && !control_file.is_torrent_checkpoint()
-        })
-        .and_then(ControlFile::piece_length)
-        .map(u64::from)
-        .filter(|&piece_size| piece_size > 0 && piece_size < total_length)
-        .unwrap_or_else(|| calculate_fixed_piece_size(total_length));
-    let piece_length = u32::try_from(fixed_piece_size).map_err(|_| {
-        Aria2Error::InvalidArgument(format!(
-            "HTTP fixed piece length is not representable: {fixed_piece_size}"
-        ))
-    })?;
+    let piece_length = resolve_http_piece_length(total_length, resume_state, options.piece_length)?;
+    let fixed_piece_size = u64::from(piece_length);
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)

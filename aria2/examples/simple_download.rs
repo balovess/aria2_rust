@@ -49,7 +49,7 @@ async fn add_download(config: &ConfigManager, uri: &str) -> Vec<u64> {
         .create_task_config(std::collections::HashMap::new())
         .await;
 
-    let split = opts.get("split").and_then(|v| v.as_i64()).unwrap_or(1) as u16;
+    let split = opts.get("split").and_then(|v| v.as_i64()).unwrap_or(1) as u64;
     let dir = opts
         .get("dir")
         .and_then(|v| v.as_str())

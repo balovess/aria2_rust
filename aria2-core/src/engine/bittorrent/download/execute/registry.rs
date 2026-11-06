@@ -37,13 +37,31 @@ impl BtDownloadCommand {
                     "File {} is being downloaded by other command.",
                     self.output_path.display()
                 );
-                self.group.recover().set_last_error(
-                    crate::request::request_group::DownloadResultCode::DuplicateDownload,
-                    message.clone(),
-                );
                 Err(crate::error::Aria2Error::DownloadFailed(message))
             }
         }
+    }
+
+    /// Undoes `register_bt_download`, as dropping the command does, so that
+    /// registration can be retried.
+    pub(super) fn unregister_bt_download(&mut self) {
+        let Some(registry) = self.bt_registry.as_ref() else {
+            return;
+        };
+        let gid = self.group.recover().gid().value();
+        let mut registry = registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owns_registration = self.tracker_runtime.as_ref().is_some_and(|runtime| {
+            registry
+                .get(gid)
+                .and_then(|object| object.tracker_runtime.as_ref())
+                .is_some_and(|registered| Arc::ptr_eq(registered, runtime))
+        });
+        if owns_registration {
+            registry.remove(gid);
+        }
+        self.tracker_runtime = None;
     }
 
     pub(super) fn register_bt_download(&mut self) -> std::result::Result<(), String> {
@@ -124,7 +142,50 @@ mod tests {
     use super::*;
     use crate::engine::bittorrent::download::command_tests::build_test_torrent;
     use crate::engine::command::Command;
-    use crate::request::request_group::{DownloadOptions, GroupId};
+    use crate::request::request_group::{DownloadOptions, DownloadResultCode, GroupId};
+
+    #[test]
+    fn transient_output_reservation_conflict_does_not_record_an_error() {
+        let dir = tempfile::tempdir().expect("temporary BT output directory");
+        let torrent = build_test_torrent();
+        let options = DownloadOptions::default();
+        let mut blocker = BtDownloadCommand::new(
+            GroupId::new(776),
+            &torrent,
+            &options,
+            Some(dir.path().to_str().expect("temporary path is UTF-8")),
+        )
+        .expect("blocking command should construct");
+        blocker
+            .reserve_output_paths()
+            .expect("the first command should reserve its outputs");
+
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(777),
+            &torrent,
+            &options,
+            Some(dir.path().to_str().expect("temporary path is UTF-8")),
+        )
+        .expect("retrying command should construct");
+        command
+            .group()
+            .set_last_error(DownloadResultCode::TimeOut, "previous error");
+        assert!(command.reserve_output_paths().is_err());
+        assert_eq!(
+            command.group().get_last_error_code(),
+            DownloadResultCode::TimeOut
+        );
+
+        drop(blocker);
+        command
+            .reserve_output_paths()
+            .expect("reservation should succeed after the blocker releases it");
+        assert_eq!(
+            command.group().get_last_error_code(),
+            DownloadResultCode::TimeOut,
+            "a successful retry must not overwrite the prior error state"
+        );
+    }
 
     #[test]
     fn registration_exposes_a_live_tracker_runtime_snapshot() {

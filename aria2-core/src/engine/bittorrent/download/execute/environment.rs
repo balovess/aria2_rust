@@ -97,6 +97,28 @@ impl BtDownloadCommand {
         }
     }
 
+    /// Returns a check for a checkpoint bitfield: whether every file that
+    /// holds a verified piece still exists, so the checkpoint can be trusted.
+    /// With `select-file` and no pre-allocation, files outside the selection
+    /// (and selected files not reached yet) are never created, so requiring
+    /// every file discarded valid progress on each restart. The closure owns
+    /// its data because it is held across the checkpoint load.
+    pub(super) fn bt_checkpoint_files_exist(
+        &self,
+    ) -> impl Fn(&[u8]) -> bool + Send + Sync + 'static {
+        let layout = self.multi_file_layout.clone();
+        let output_path = self.output_path.clone();
+        move |bitfield: &[u8]| match layout.as_ref() {
+            Some(layout) => (0..layout.num_files()).all(|index| {
+                layout.file_completed_bytes(index, bitfield) == 0
+                    || layout
+                        .file_absolute_path(index)
+                        .is_some_and(|path| path.is_file())
+            }),
+            None => output_path.is_file(),
+        }
+    }
+
     pub(super) async fn create_zero_length_payload(&self) -> Result<()> {
         let paths = match self.multi_file_layout.as_ref() {
             Some(layout) => (0..layout.num_files())
@@ -129,5 +151,66 @@ impl BtDownloadCommand {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::bittorrent::download::command::BtDownloadCommand;
+    use crate::engine::bittorrent::download::command_tests::build_test_torrent;
+    use crate::engine::bittorrent::torrent::file_layout::MultiFileLayout;
+    use crate::request::request_group::{DownloadOptions, GroupId};
+    use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
+
+    #[test]
+    fn checkpoint_files_check_requires_only_files_with_verified_pieces() {
+        let dir = tempfile::tempdir().expect("temporary BT output directory");
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(73_101),
+            &build_test_torrent(),
+            &DownloadOptions::default(),
+            None,
+        )
+        .expect("test torrent should construct");
+        // Three files, one piece each.
+        let file = |name: &str| FileEntry {
+            length: 8,
+            path: vec![name.into()],
+        };
+        let info = InfoDict {
+            name: "selected".into(),
+            piece_length: 8,
+            pieces: vec![[0; 20]; 3],
+            length: None,
+            files: Some(vec![
+                file("first.bin"),
+                file("second.bin"),
+                file("third.bin"),
+            ]),
+            private: None,
+            meta_version: None,
+            v2_files: None,
+            pieces_root: None,
+        };
+        let layout = MultiFileLayout::from_info_dict(&info, &dir.path().join("selected"))
+            .expect("multi-file layout should build");
+        layout
+            .create_directories()
+            .expect("payload directories should be created");
+        let first = layout.file_absolute_path(0).unwrap().to_path_buf();
+        let second = layout.file_absolute_path(1).unwrap().to_path_buf();
+        command.multi_file_layout = Some(layout);
+        let files_exist = command.bt_checkpoint_files_exist();
+
+        // Nothing verified: nothing needs to exist.
+        assert!(files_exist(&[0b0000_0000]));
+        // The first piece verified, its file missing: the checkpoint can't be trusted.
+        assert!(!files_exist(&[0b1000_0000]));
+        std::fs::write(&first, [0u8; 8]).unwrap();
+        // Its file exists; the other files (not selected, never written) don't matter.
+        assert!(files_exist(&[0b1000_0000]));
+        assert!(!files_exist(&[0b1100_0000]));
+        std::fs::write(&second, [0u8; 8]).unwrap();
+        assert!(files_exist(&[0b1100_0000]));
     }
 }

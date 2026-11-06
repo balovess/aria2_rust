@@ -28,6 +28,36 @@ pub(crate) fn is_sequential_checkpoint(cf: &ControlFile, total_length: u64) -> b
             .is_some_and(|piece_length| u64::from(piece_length) >= total_length)
 }
 
+/// Length of the contiguous run of written 16 KiB blocks at the start of an
+/// in-flight piece of a split checkpoint.
+fn in_flight_prefix(cf: &ControlFile, index: u64) -> u64 {
+    const BLOCK_SIZE: u64 = 16 * 1024;
+    let Some(piece_length) = cf.piece_length().map(u64::from) else {
+        return 0;
+    };
+    let Some(expected_length) = index
+        .checked_mul(piece_length)
+        .and_then(|offset| cf.total_length().checked_sub(offset))
+        .map(|remaining| remaining.min(piece_length))
+    else {
+        return 0;
+    };
+    if expected_length == 0 {
+        return 0;
+    }
+
+    cf.in_flight_pieces()
+        .iter()
+        .find(|piece| u64::from(piece.index) == index && u64::from(piece.length) == expected_length)
+        .map(|piece| {
+            let blocks = (0..piece.bitfield.len() * 8)
+                .take_while(|block| piece.bitfield[block / 8] & (1 << (7 - block % 8)) != 0)
+                .count() as u64;
+            blocks.saturating_mul(BLOCK_SIZE).min(expected_length)
+        })
+        .unwrap_or(0)
+}
+
 impl ResumeHelper {
     pub fn new(output_path: &Path, continue_opt: bool) -> Self {
         let control_path = ControlFile::control_path_for(output_path);
@@ -104,19 +134,23 @@ impl ResumeHelper {
             // have total_length bytes on disk regardless of actual progress.
             (Some(cf), _) => {
                 // For split checkpoints, completed_length is the sum of all
-                // finished pieces and may include gaps. A sequential request
-                // can resume only from the unbroken completed prefix.
+                // finished (and partly finished) pieces and may include gaps.
+                // A sequential request can resume only from the unbroken
+                // completed prefix, plus the written start of the next piece.
                 let offset = match cf.piece_length().map(u64::from) {
                     Some(piece_length)
                         if !is_sequential_checkpoint(cf, cf.total_length())
-                            && cf.completed_pieces() > 0 =>
+                            && (cf.completed_pieces() > 0 || !cf.in_flight_pieces().is_empty()) =>
                     {
                         let leading_pieces =
                             (0..).take_while(|&index| cf.is_piece_done(index)).count() as u64;
-                        leading_pieces
-                            .saturating_mul(piece_length)
-                            .min(cf.total_length())
-                            .min(cf.completed_length())
+                        let run_end = leading_pieces.saturating_mul(piece_length);
+                        let run = run_end.min(cf.total_length()).min(cf.completed_length());
+                        if run == run_end {
+                            run + in_flight_prefix(cf, leading_pieces)
+                        } else {
+                            run
+                        }
                     }
                     _ => cf.completed_length(),
                 };
@@ -268,6 +302,97 @@ mod tests {
             ResumeHelper::build_range_header(&state).as_deref(),
             Some("bytes=100-")
         );
+    }
+
+    #[tokio::test]
+    async fn split_checkpoint_with_in_flight_pieces_is_not_read_as_a_prefix() {
+        use crate::filesystem::control_file::ControlFileInFlightPiece;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("split-in-flight.bin");
+        let control_path = ControlFile::control_path_for(&out_path);
+        let total_length = 256 * 1024;
+        let piece_length = 64 * 1024;
+
+        tokio::fs::write(&out_path, vec![0xCD; total_length as usize])
+            .await
+            .unwrap();
+        let mut control = ControlFile::open_or_create_with_piece_length(
+            &control_path,
+            total_length,
+            piece_length,
+        )
+        .await
+        .unwrap();
+        // Pieces 0 and 2 are partly written; completed_length is their sum,
+        // which is not a contiguous prefix of the file.
+        control.set_in_flight_pieces(vec![
+            ControlFileInFlightPiece {
+                index: 0,
+                length: piece_length,
+                bitfield: vec![0b1100_0000],
+            },
+            ControlFileInFlightPiece {
+                index: 2,
+                length: piece_length,
+                bitfield: vec![0b1110_0000],
+            },
+        ]);
+        control.update_completed_length(80 * 1024);
+        control.save().await.unwrap();
+
+        let state = ResumeHelper::new(&out_path, true).detect(0).await.unwrap();
+        assert!(state.should_resume);
+        assert_eq!(state.start_offset, 32 * 1024);
+
+        // After finished pieces, the next piece's written blocks extend it.
+        control.mark_piece_done(0);
+        control.mark_piece_done(1);
+        control.set_in_flight_pieces(vec![ControlFileInFlightPiece {
+            index: 2,
+            length: piece_length,
+            bitfield: vec![0b1110_0000],
+        }]);
+        control.update_completed_length(176 * 1024);
+        control.save().await.unwrap();
+        let state = ResumeHelper::new(&out_path, true).detect(0).await.unwrap();
+        assert_eq!(state.start_offset, 176 * 1024);
+    }
+
+    #[tokio::test]
+    async fn split_checkpoint_ignores_in_flight_piece_longer_than_file_tail() {
+        use crate::filesystem::control_file::ControlFileInFlightPiece;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("short-tail.bin");
+        let control_path = ControlFile::control_path_for(&out_path);
+        let total_length = 100 * 1024;
+        let piece_length = 64 * 1024;
+
+        tokio::fs::write(&out_path, vec![0xCD; total_length as usize])
+            .await
+            .unwrap();
+        let mut control = ControlFile::open_or_create_with_piece_length(
+            &control_path,
+            total_length,
+            piece_length,
+        )
+        .await
+        .unwrap();
+        control.mark_piece_done(0);
+        control.set_in_flight_pieces(vec![ControlFileInFlightPiece {
+            index: 1,
+            length: piece_length,
+            bitfield: vec![0b1110_0000],
+        }]);
+        control.update_completed_length(80 * 1024);
+        control.save().await.unwrap();
+
+        let state = ResumeHelper::new(&out_path, true).detect(0).await.unwrap();
+
+        assert!(state.should_resume);
+        assert_eq!(state.start_offset, piece_length as u64);
+        assert!(state.start_offset <= total_length);
     }
 
     #[tokio::test]

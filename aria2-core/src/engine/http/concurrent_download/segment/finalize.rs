@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tokio::sync::mpsc;
 
-use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
+use crate::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};
 use crate::engine::http::request_executor::HttpSegmentRequestExecutor;
 use crate::engine::http::segment_downloader::{SegmentProgressTracker, WriteChunk};
 use crate::error::{Aria2Error, Result};
@@ -11,6 +11,7 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::RateLimiter;
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::super::in_flight::InFlightProgress;
 use super::super::{ConcurrentDownloadResult, ConcurrentDownloader};
 use super::io::{DrainWriteChunksOptions, drain_write_chunks};
 
@@ -27,6 +28,7 @@ pub(super) async fn finish(
     ctrl_path: &Path,
     completed_bytes: u64,
     progress_tracker: &SegmentProgressTracker,
+    in_flight_progress: &mut InFlightProgress,
 ) -> Result<ConcurrentDownloadResult> {
     if should_fallback {
         executor.cancel().await;
@@ -41,7 +43,7 @@ pub(super) async fn finish(
         ctrl_file,
         DrainWriteChunksOptions {
             completed_bytes,
-            in_flight: None,
+            in_flight: Some(in_flight_progress),
             error_context: "",
         },
     )
@@ -53,8 +55,14 @@ pub(super) async fn finish(
     })?;
 
     if should_fallback {
-        let completed_ranges = manager.completed_ranges();
+        let mut completed_ranges = manager.completed_ranges();
+        completed_ranges
+            .extend(in_flight_progress.partial_ranges(|index| {
+                manager.segment_status(index) == Some(SegmentStatus::Done)
+            }));
+        completed_ranges.sort_unstable();
         if let Some(control_file) = ctrl_file.as_mut() {
+            control_file.set_in_flight_pieces(in_flight_progress.snapshot(control_file.bitfield()));
             control_file.update_completed_length(completed_bytes);
             if let Err(error) = control_file.save().await {
                 tracing::warn!("Control file save on fallback failed: {}", error);

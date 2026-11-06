@@ -3,14 +3,13 @@ use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http::request_executor::authority_key;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::error::{Aria2Error, Result};
-use crate::filesystem::control_file::ControlFile;
+use crate::error::Result;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::ConcurrentDownloader;
 use super::super::effective_segment_count;
-use super::super::fixed_piece_size::calculate_fixed_piece_size;
+use super::super::fixed_piece_size::resolve_http_piece_length;
 
 pub(super) struct SegmentPlan {
     pub(super) split: usize,
@@ -33,24 +32,8 @@ pub(super) fn create(
     let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
     let min_split_size = dl.group.recover().effective_min_split_size();
     let split = effective_segment_count(total_length, requested_split, min_split_size);
-    let piece_size = resume_state
-        .control_file
-        .as_ref()
-        .filter(|control_file| {
-            control_file.total_length() == total_length && !control_file.is_torrent_checkpoint()
-        })
-        .and_then(ControlFile::piece_length)
-        .map(u64::from)
-        // A sequential checkpoint has one piece spanning the whole file.
-        // Reusing it would turn the remaining download into a single range,
-        // so later pauses could not persist any new completed pieces.
-        .filter(|&piece_size| piece_size > 0 && piece_size < total_length)
-        .unwrap_or_else(|| calculate_fixed_piece_size(total_length));
-    let piece_length = u32::try_from(piece_size).map_err(|_| {
-        Aria2Error::InvalidArgument(format!(
-            "HTTP fixed piece length is not representable: {piece_size}"
-        ))
-    })?;
+    let piece_length = resolve_http_piece_length(total_length, resume_state, options.piece_length)?;
+    let piece_size = u64::from(piece_length);
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)

@@ -131,7 +131,7 @@ async fn rust_engine_loop_high_concurrency_baseline() {
     let mut groups = Vec::with_capacity(download_count);
     for index in 0..download_count {
         let options = DownloadOptions {
-            split: Some(SPLIT_COUNT),
+            split: Some(u64::from(SPLIT_COUNT)),
             max_connection_per_server: Some(SPLIT_COUNT),
             use_head: true,
             dir: Some(temp_dir.path().to_string_lossy().into_owned()),

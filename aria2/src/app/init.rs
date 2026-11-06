@@ -17,7 +17,7 @@ pub struct InitRequest {
 #[derive(Debug, Clone)]
 struct InitPerformance {
     disk_cache: String,
-    split: u16,
+    split: u64,
     max_connection_per_server: u16,
     max_concurrent_downloads: u16,
 }
@@ -173,15 +173,11 @@ fn prompt_performance() -> Result<InitPerformance, String> {
         let _ = bytes;
         Ok(value.to_string())
     })?;
-    let split = prompt_u16(
-        "Maximum connections per download task",
-        defaults.split,
-        1,
-        64,
-    )?;
-    // Keep the server cap aligned with the task limit in the simple wizard.
-    // Advanced users can still tune the two options independently afterward.
-    let max_connection_per_server = split;
+    let split = prompt_u64_min("Split segment budget", defaults.split, 1)?;
+    // The wizard uses aria2's documented per-server ceiling while still
+    // allowing the task-wide split budget to be larger.
+    let max_connection_per_server =
+        split.min(aria2_core::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u64) as u16;
     let max_concurrent_downloads = prompt_u16(
         "Simultaneous downloads",
         defaults.max_concurrent_downloads,
@@ -204,6 +200,18 @@ fn prompt_u16(label: &str, default: u16, min: u16, max: u16) -> Result<u16, Stri
             .map_err(|_| format!("enter an integer from {min} to {max}"))?;
         if !(min..=max).contains(&parsed) {
             return Err(format!("enter an integer from {min} to {max}"));
+        }
+        Ok(parsed)
+    })
+}
+
+fn prompt_u64_min(label: &str, default: u64, min: u64) -> Result<u64, String> {
+    prompt_value(label, default, |value| {
+        let parsed = value
+            .parse::<u64>()
+            .map_err(|_| format!("enter an integer greater than or equal to {min}"))?;
+        if parsed < min {
+            return Err(format!("enter an integer greater than or equal to {min}"));
         }
         Ok(parsed)
     })

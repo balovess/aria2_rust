@@ -52,7 +52,7 @@ fn make_url(base: &str, path: &str) -> String {
 
 /// Create a minimal DownloadOptions with split and max_connection_per_server.
 fn make_options(
-    split: Option<u16>,
+    split: Option<u64>,
     max_conn: Option<u16>,
     dir: &str,
     out: &str,
@@ -673,6 +673,77 @@ async fn test_concurrent_download_multiple_range_requests() {
 
     // Cleanup
     let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn configured_piece_length_defines_http_range_boundaries() {
+    const PIECE_LENGTH: u64 = 4 * 1024 * 1024;
+    const FILE_SIZE: usize = 6 * 1024 * 1024;
+
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let data = generate_test_data(FILE_SIZE, 44);
+    server.register_range_response("/piece-boundary", &data);
+
+    let url = make_url(&server.base_url(), "/piece-boundary");
+    let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+    let out_name = format!("test_piece_boundary_{}.bin", std::process::id());
+    let out_path = format!("{tmp_dir}/{out_name}");
+    let control_path = ControlFile::control_path_for(std::path::Path::new(&out_path));
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&control_path);
+
+    let mut options = make_options(Some(2), Some(2), &tmp_dir, &out_name);
+    options.http_version = HttpVersion::Http11;
+    options.piece_length = Some(PIECE_LENGTH);
+    let mut cmd = make_concurrent_command(
+        GroupId::new(84),
+        &url,
+        &options,
+        Some(&tmp_dir),
+        Some(&out_name),
+    );
+    cmd.execute()
+        .await
+        .expect("Concurrent download should succeed");
+
+    assert_eq!(
+        std::fs::read(&out_path).expect("Output file should be readable"),
+        data
+    );
+    let ranges: Vec<(u64, u64)> = server
+        .take_request_log()
+        .into_iter()
+        .filter(|entry| entry.method == "GET")
+        .filter_map(|entry| {
+            entry
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+                .and_then(|(_, value)| value.strip_prefix("bytes="))
+                .and_then(|value| value.split_once('-'))
+                .and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)))
+        })
+        .collect();
+    assert!(
+        ranges.contains(&(0, PIECE_LENGTH - 1)),
+        "first HTTP piece must honor piece-length: {ranges:?}"
+    );
+    assert!(
+        ranges.contains(&(PIECE_LENGTH, FILE_SIZE as u64 - 1)),
+        "tail HTTP piece must begin at the configured boundary: {ranges:?}"
+    );
+    assert!(
+        ranges
+            .iter()
+            .all(|&(start, end)| end.saturating_sub(start) < PIECE_LENGTH),
+        "no ordinary Range request may exceed piece-length: {ranges:?}"
+    );
+
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&control_path);
     server.shutdown().await;
 }
 

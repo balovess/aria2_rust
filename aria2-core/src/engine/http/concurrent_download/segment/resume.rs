@@ -7,6 +7,7 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::{ResumeState, is_sequential_checkpoint};
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::super::in_flight::InFlightProgress;
 use super::super::{ConcurrentDownloader, flush_requested_control_file};
 
 pub(super) struct PreparedResume {
@@ -23,6 +24,7 @@ pub(super) async fn prepare(
     total_length: u64,
     piece_length: u32,
     writer: &mut CachedDiskWriter,
+    in_flight_progress: &mut InFlightProgress,
 ) -> Result<PreparedResume> {
     // Persist completed pieces so pause-resume can distinguish a preallocated
     // file from a completed download.
@@ -93,10 +95,24 @@ pub(super) async fn prepare(
         })
         .unwrap_or(0);
     let completed_bytes = if let Some(control_file) = ctrl_file.as_ref() {
-        if compatible_control_file.is_some() && control_file.completed_pieces() > 0 {
-            manager.restore_completed_from_bitfield(control_file.bitfield())
+        // With in-flight records, completed_length is an aggregate of this
+        // layout's pieces and partial pieces, not a contiguous prefix.
+        if compatible_control_file.is_some()
+            && (control_file.completed_pieces() > 0 || !control_file.in_flight_pieces().is_empty())
+        {
+            manager.restore_completed_from_bitfield(control_file.bitfield());
+            for (index, prefix) in
+                in_flight_progress.restore(control_file.in_flight_pieces(), control_file.bitfield())
+            {
+                manager.restore_completed_segment_prefix(index, prefix);
+            }
+            manager.completed_bytes()
         } else if compatible_control_file.is_some() || can_restore_prefix {
-            manager.restore_completed_prefix(persisted_prefix)
+            let restored = manager.restore_completed_prefix(persisted_prefix);
+            // Keep the partial piece at the end of the prefix for the next
+            // checkpoint; whole pieces are marked done below.
+            in_flight_progress.record_range(0, restored);
+            restored
         } else {
             0
         }
@@ -113,6 +129,8 @@ pub(super) async fn prepare(
                 control_file.mark_piece_done(index);
             }
         }
+        let in_flight_pieces = in_flight_progress.snapshot(control_file.bitfield());
+        control_file.set_in_flight_pieces(in_flight_pieces);
     }
     dl.progress_updater.reset(completed_bytes);
     dl.progress.set_completed_length(completed_bytes);
@@ -150,7 +168,14 @@ pub(super) async fn prepare(
         }
     }
     let ctrl_save_interval = total_length / num_pieces as u64;
-    flush_requested_control_file(dl, writer, &mut ctrl_file, completed_bytes, None).await?;
+    flush_requested_control_file(
+        dl,
+        writer,
+        &mut ctrl_file,
+        completed_bytes,
+        Some(in_flight_progress),
+    )
+    .await?;
 
     Ok(PreparedResume {
         ctrl_path,

@@ -23,6 +23,15 @@ fn option_map_keeps_memory_follow_mode() {
 }
 
 #[test]
+fn split_option_keeps_large_positive_values() {
+    let values = HashMap::from([("split".to_string(), "1000000".to_string())]);
+    assert_eq!(
+        DownloadOptions::from_option_strings(&values).split,
+        Some(1_000_000)
+    );
+}
+
+#[test]
 fn memory_follow_mode_is_limited_to_metadata_sources() {
     let options = DownloadOptions {
         follow_torrent: Some(FollowMode::Memory),

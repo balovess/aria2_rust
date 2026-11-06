@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 mod native;
 mod persistence;
 
+/// Block size of an in-flight piece's bitfield, as in aria2.
+const IN_FLIGHT_BLOCK_LENGTH: u64 = 16 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlFileInFlightPiece {
     pub index: u32,
@@ -268,6 +271,133 @@ impl ControlFile {
 
     pub fn update_completed_length(&mut self, length: u64) {
         self.completed_length = length.min(self.total_length);
+    }
+
+    /// Offset and length of piece `index`.
+    fn piece_span(&self, index: usize) -> Option<(u64, u64)> {
+        let piece_length = u64::from(self.effective_piece_length().ok()?);
+        let offset = (index as u64).checked_mul(piece_length)?;
+        (index < self.num_pieces && offset < self.total_length)
+            .then(|| (offset, piece_length.min(self.total_length - offset)))
+    }
+
+    /// Bytes of an unfinished piece written from its start, per its in-flight
+    /// block bitfield (aria2's 16 KiB blocks).
+    fn in_flight_prefix(&self, index: usize) -> u64 {
+        let Some(piece) = self
+            .in_flight_pieces
+            .iter()
+            .find(|piece| piece.index as usize == index)
+        else {
+            return 0;
+        };
+        let blocks = (0..piece.bitfield.len() * 8)
+            .take_while(|&block| piece.bitfield[block / 8] & (1 << (7 - block % 8)) != 0)
+            .count() as u64;
+        blocks
+            .saturating_mul(IN_FLIGHT_BLOCK_LENGTH)
+            .min(u64::from(piece.length))
+    }
+
+    /// Record `written` bytes from the start of piece `index` as in flight.
+    /// Only whole blocks count, and a recorded prefix is never lowered.
+    fn set_in_flight_prefix(&mut self, index: usize, written: u64) {
+        let Some((_, length)) = self.piece_span(index) else {
+            return;
+        };
+        let block_count = length.div_ceil(IN_FLIGHT_BLOCK_LENGTH);
+        let blocks = if written >= length {
+            block_count
+        } else {
+            written / IN_FLIGHT_BLOCK_LENGTH
+        };
+        if self.is_piece_done(index)
+            || blocks == 0
+            || blocks.saturating_mul(IN_FLIGHT_BLOCK_LENGTH).min(length)
+                <= self.in_flight_prefix(index)
+        {
+            return;
+        }
+        let (Ok(piece_index), Ok(piece_length)) = (u32::try_from(index), u32::try_from(length))
+        else {
+            return;
+        };
+        let mut bitfield = vec![0u8; block_count.div_ceil(8) as usize];
+        for block in 0..blocks as usize {
+            bitfield[block / 8] |= 1 << (7 - block % 8);
+        }
+        let record = ControlFileInFlightPiece {
+            index: piece_index,
+            length: piece_length,
+            bitfield,
+        };
+        match self
+            .in_flight_pieces
+            .iter_mut()
+            .find(|piece| piece.index as usize == index)
+        {
+            Some(existing) => *existing = record,
+            None => self.in_flight_pieces.push(record),
+        }
+    }
+
+    /// Record that `[start, start + length)` of an HTTP/FTP download is on
+    /// disk. Pieces it covers are marked done; a piece it fills from its
+    /// start, or from where that piece's in-flight prefix ends, gets a longer
+    /// in-flight prefix. A one-piece (sequential) checkpoint keeps a prefix in
+    /// `completed_length` instead.
+    pub fn record_completed_range(&mut self, start: u64, length: u64) {
+        let end = start.saturating_add(length).min(self.total_length);
+        if start >= end {
+            return;
+        }
+        if self.num_pieces <= 1 {
+            if start <= self.completed_length {
+                self.completed_length = self.completed_length.max(end);
+            }
+            return;
+        }
+        let Ok(piece_length) = self.effective_piece_length().map(u64::from) else {
+            return;
+        };
+        for index in (start / piece_length) as usize..end.div_ceil(piece_length) as usize {
+            let Some((offset, span)) = self.piece_span(index) else {
+                break;
+            };
+            if self.is_piece_done(index)
+                || (offset < start && self.in_flight_prefix(index) < start - offset)
+            {
+                continue;
+            }
+            if end >= offset + span {
+                self.mark_piece_done(index);
+            } else {
+                self.set_in_flight_prefix(index, end - offset);
+            }
+        }
+        self.recount_completed();
+    }
+
+    /// Record that the first `length` bytes are on disk, as a sequential
+    /// download writes them. A split checkpoint gets pieces marked, because a
+    /// concurrent resume reads only its bitfield and in-flight pieces.
+    pub fn record_completed_prefix(&mut self, length: u64) {
+        if self.num_pieces <= 1 {
+            self.update_completed_length(length);
+        } else {
+            self.record_completed_range(0, length);
+        }
+    }
+
+    /// Set `completed_length` to the finished pieces plus in-flight prefixes.
+    fn recount_completed(&mut self) {
+        let in_flight: u64 = self
+            .in_flight_pieces
+            .iter()
+            .filter(|piece| !self.is_piece_done(piece.index as usize))
+            .map(|piece| self.in_flight_prefix(piece.index as usize))
+            .sum();
+        self.completed_length = (self.calculate_completed() + in_flight).min(self.total_length);
     }
 
     fn effective_piece_length(&self) -> Result<u32> {
