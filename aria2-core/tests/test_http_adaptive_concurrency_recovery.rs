@@ -37,6 +37,19 @@ impl Drop for ActiveRequestGuard {
     }
 }
 
+#[derive(Clone, Default)]
+struct JitterStats {
+    active: Arc<AtomicUsize>,
+    accepted_peak: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
+    successes: Arc<AtomicUsize>,
+    capacity_rejections: Arc<AtomicUsize>,
+    proxy_errors: Arc<AtomicUsize>,
+    capacity_rejections_after_final_recovery: Arc<AtomicUsize>,
+}
+
+const FINAL_RECOVERY_SUCCESSES: usize = 14;
+
 fn update_peak(peak: &AtomicUsize, current: usize) {
     let mut observed = peak.load(Ordering::Acquire);
     while current > observed {
@@ -121,12 +134,96 @@ fn register_recovering_range_server(
     });
 }
 
+fn register_jitter_range_server(
+    server: &MockHttpServer,
+    path: &str,
+    data: Arc<Vec<u8>>,
+    stats: JitterStats,
+) {
+    let path = path.to_string();
+    server.on_get(&path, move |request| {
+        let Some((start, end)) = parse_range(request, data.len()) else {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("Content-Range", format!("bytes=*/{}", data.len()))
+                .body(empty_body())
+                .unwrap();
+        };
+
+        let request_index = stats.requests.fetch_add(1, Ordering::AcqRel);
+        let successes = stats.successes.load(Ordering::Acquire);
+        let capacity = if successes < 6 {
+            1
+        } else if successes < 10 {
+            4
+        } else if successes < FINAL_RECOVERY_SUCCESSES {
+            2
+        } else {
+            4
+        };
+        let current = stats.active.fetch_add(1, Ordering::AcqRel) + 1;
+        if current > capacity {
+            stats.active.fetch_sub(1, Ordering::AcqRel);
+            stats.capacity_rejections.fetch_add(1, Ordering::Relaxed);
+            if successes >= FINAL_RECOVERY_SUCCESSES {
+                stats
+                    .capacity_rejections_after_final_recovery
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            let status = if request_index.is_multiple_of(2) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            return Response::builder()
+                .status(status)
+                .header("Content-Length", 0)
+                .body(empty_body())
+                .unwrap();
+        }
+        if successes > 0 && matches!(request_index, 8 | 20) {
+            stats.active.fetch_sub(1, Ordering::AcqRel);
+            stats.proxy_errors.fetch_add(1, Ordering::Relaxed);
+            return Response::builder()
+                .status(StatusCode::GATEWAY_TIMEOUT)
+                .header("Content-Length", 0)
+                .body(empty_body())
+                .unwrap();
+        }
+        update_peak(&stats.accepted_peak, current);
+
+        let guard = ActiveRequestGuard {
+            active: Arc::clone(&stats.active),
+        };
+        let body = Bytes::copy_from_slice(&data[start..=end]);
+        let successes = Arc::clone(&stats.successes);
+        let stream = futures::stream::once(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            successes.fetch_add(1, Ordering::AcqRel);
+            let frame = Frame::data(body);
+            drop(guard);
+            Ok::<_, Infallible>(frame)
+        });
+
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Accept-Ranges", "bytes")
+            .header(
+                "Content-Range",
+                format!("bytes={start}-{end}/{}", data.len()),
+            )
+            .header("Content-Length", end - start + 1)
+            .body(StreamBody::new(stream).boxed())
+            .unwrap()
+    });
+}
+
 fn options(split: u16, max_connection_per_server: u16) -> DownloadOptions {
     DownloadOptions {
         split: Some(split),
         max_connection_per_server: Some(max_connection_per_server),
         file_allocation: Some("none".into()),
-        max_retries: 5,
+        max_retries: 12,
         retry_wait: 0,
         ..DownloadOptions::default()
     }
@@ -136,10 +233,14 @@ fn data() -> Arc<Vec<u8>> {
     Arc::new((0..(8 * 1024 * 1024)).map(|index| index as u8).collect())
 }
 
-fn set_test_min_split_size(command: &mut DownloadCommand) {
+fn large_data() -> Arc<Vec<u8>> {
+    Arc::new((0..(32 * 1024 * 1024)).map(|index| index as u8).collect())
+}
+
+fn set_test_min_split_size(command: &mut DownloadCommand, size: &str) {
     command.group_mut().set_option_snapshot(HashMap::from([(
         "min-split-size".to_string(),
-        serde_json::json!("1M"),
+        serde_json::json!(size),
     )]));
 }
 
@@ -149,6 +250,7 @@ async fn execute_multi_mirror_download(
     output_name: &str,
     mut options: DownloadOptions,
     total_length: u64,
+    min_split_size: &str,
 ) -> Result<(), aria2_core::error::Aria2Error> {
     options.dir = Some(output_dir.to_string_lossy().into_owned());
     options.out = Some(output_name.to_string());
@@ -166,7 +268,7 @@ async fn execute_multi_mirror_download(
         options.dir.as_deref(),
         options.out.as_deref(),
     )?;
-    set_test_min_split_size(&mut command);
+    set_test_min_split_size(&mut command, min_split_size);
     command.execute().await
 }
 
@@ -188,6 +290,7 @@ async fn multi_mirror_target_recovers_after_temporary_capacity_limit() {
         "adaptive-recovery.bin",
         options(8, 4),
         body.len() as u64,
+        "1M",
     )
     .await
     .unwrap();
@@ -207,4 +310,72 @@ async fn multi_mirror_target_recovers_after_temporary_capacity_limit() {
         *body
     );
     server.shutdown().await;
+}
+
+async fn run_adaptive_soak(iteration: usize) {
+    let server = MockHttpServer::start().await.unwrap();
+    let body = large_data();
+    let stats = JitterStats::default();
+    let path_a = format!("/soak-{iteration}-a");
+    let path_b = format!("/soak-{iteration}-b");
+    register_jitter_range_server(&server, &path_a, Arc::clone(&body), stats.clone());
+    register_jitter_range_server(&server, &path_b, Arc::clone(&body), stats.clone());
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let output_name = format!("adaptive-soak-{iteration}.bin");
+    execute_multi_mirror_download(
+        &[
+            format!("{}{path_a}", server.base_url()),
+            format!("{}{path_b}", server.base_url()),
+        ],
+        output_dir.path(),
+        &output_name,
+        options(16, 4),
+        body.len() as u64,
+        "2M",
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        stats.capacity_rejections.load(Ordering::Acquire) > 0,
+        "the soak must exercise capacity downshifts"
+    );
+    assert!(
+        stats.proxy_errors.load(Ordering::Acquire) > 0,
+        "the soak must exercise non-capacity request failures"
+    );
+    assert!(
+        stats.accepted_peak.load(Ordering::Acquire) > 1,
+        "the soak must recover from capacity downshifts"
+    );
+    assert_eq!(
+        stats
+            .capacity_rejections_after_final_recovery
+            .load(Ordering::Acquire),
+        0,
+        "a fully recovered server must not receive self-inflicted capacity rejections"
+    );
+    assert_eq!(
+        std::fs::read(output_dir.path().join(output_name)).unwrap(),
+        *body
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn adaptive_soak_survives_capacity_changes_and_proxy_jitter() {
+    run_adaptive_soak(0).await;
+}
+
+#[tokio::test]
+#[ignore = "extended soak; run explicitly with --ignored"]
+async fn adaptive_extended_soak_repeats_capacity_and_proxy_jitter() {
+    tokio::time::timeout(Duration::from_secs(55), async {
+        for iteration in 0..8 {
+            run_adaptive_soak(iteration).await;
+        }
+    })
+    .await
+    .expect("extended adaptive soak exceeded 55 seconds");
 }
