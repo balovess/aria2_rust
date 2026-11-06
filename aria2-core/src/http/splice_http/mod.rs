@@ -23,4 +23,4 @@ mod helpers;
 #[cfg(test)]
 mod tests;
 
-pub use download::try_splice_download;
+pub use download::{try_splice_download, try_splice_download_with_policy};

@@ -1,37 +1,106 @@
-use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::node::DhtNode;
-use super::routing_table::RoutingTable;
+use tokio::io::AsyncWriteExt;
 
-static FILE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-
-fn persistence_file_key(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|dir| dir.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    }
+/// Cross-process lock around a snapshot file write.
+///
+/// The lock file is intentionally retained on disk; the OS lock is tied to
+/// the open handle and is released automatically after a crash or normal
+/// drop, so stale marker cleanup is never required.
+struct ProcessFileLock {
+    _file: std::fs::File,
 }
 
-fn persistence_file_lock(path: &Path) -> Arc<Mutex<()>> {
-    let locks = FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
-    locks
-        .entry(persistence_file_key(path))
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+fn persistence_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn ensure_parent_directory_sync(path: &Path) -> Result<(), String> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create DHT directory {}: {}",
+            parent.display(),
+            error
+        )
+    })
+}
+
+fn acquire_process_file_lock(path: &Path) -> Result<ProcessFileLock, String> {
+    ensure_parent_directory_sync(path)?;
+    let lock_path = persistence_lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| {
+            format!(
+                "Failed to open DHT lock file {}: {}",
+                lock_path.display(),
+                e
+            )
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(format!(
+                "Failed to lock DHT file {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            return Err(format!(
+                "Failed to lock DHT file {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    Ok(ProcessFileLock { _file: file })
 }
 
 const DHT_MAGIC: &[u8] = &[0xA1, 0xA2];
 const DHT_FORMAT_ID: u8 = 0x02;
-const DHT_VERSION_3: u8 = 0x03;
 const DHT_VERSION_2: u8 = 0x02;
-const NODE_ENTRY_SIZE: usize = 48;
+const DHT_VERSION_3: u8 = 0x03;
+const NODE_ENTRY_SIZE: usize = 56;
 
 #[derive(Debug, Clone)]
 pub struct PersistedNode {
@@ -89,11 +158,159 @@ fn compact_to_socket_addr(data: &[u8]) -> Option<std::net::SocketAddr> {
     }
 }
 
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| format!("Failed to sync DHT directory {}: {}", parent.display(), e))?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+async fn sync_parent_directory_async(path: &Path) -> Result<(), String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_parent_directory(&path))
+        .await
+        .map_err(|e| format!("Failed to sync DHT directory: {}", e))??;
+    Ok(())
+}
+
+async fn write_serialized_to_file_async(path: &Path, data: &[u8]) -> Result<(), String> {
+    let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    if let Err(error) = file.write_all(data).await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to write temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to sync temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    drop(file);
+
+    let replacement_path = tmp_path.clone();
+    let target_path = path.to_path_buf();
+    let replacement =
+        tokio::task::spawn_blocking(move || replace_file(&replacement_path, &target_path))
+            .await
+            .map_err(|e| format!("Failed to replace DHT file: {}", e))?;
+    if let Err(error) = replacement {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to replace {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            error
+        ));
+    }
+
+    sync_parent_directory_async(path).await
+}
+
+fn write_serialized_to_file_sync(path: &Path, data: &[u8]) -> Result<(), String> {
+    let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
+    let mut file = std::fs::File::create(&tmp_path)
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    if let Err(error) = file.write_all(data) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to write temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to sync temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    drop(file);
+
+    if let Err(error) = replace_file(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to replace {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            error
+        ));
+    }
+
+    sync_parent_directory(path)
+}
+
+fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+
+        let source: Vec<u16> = temp_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let target: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(temp_path, path)
+    }
+}
+
 pub struct DhtPersistence;
 
 impl DhtPersistence {
-    pub fn serialize(self_id: &[u8; 20], nodes: &[DhtNode]) -> Result<Vec<u8>, String> {
-        let mut buf = Vec::with_capacity(256 + nodes.len() * NODE_ENTRY_SIZE);
+    /// Return whether a snapshot is recent enough to seed a routing table.
+    pub fn is_fresh(saved_at_secs: u64, max_age: std::time::Duration) -> bool {
+        current_epoch_secs().saturating_sub(saved_at_secs) <= max_age.as_secs()
+    }
+    pub fn serialize(self_id: &[u8; 20], nodes: &[DhtNode]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(56 + nodes.len() * NODE_ENTRY_SIZE);
 
         let mut header = [0u8; 8];
         header[0] = DHT_MAGIC[0];
@@ -133,7 +350,7 @@ impl DhtPersistence {
             buf.extend_from_slice(&reserved4);
         }
 
-        Ok(buf)
+        buf
     }
 
     pub fn deserialize(data: &[u8]) -> Result<DhtPersistedData, String> {
@@ -141,31 +358,30 @@ impl DhtPersistence {
             return Err("dht.dat data too short".into());
         }
 
-        let header_v3: [u8; 8] = [
-            DHT_MAGIC[0],
-            DHT_MAGIC[1],
-            DHT_FORMAT_ID,
-            0,
-            0,
-            0,
-            0,
-            DHT_VERSION_3,
-        ];
-        let header_v2: [u8; 8] = [
-            DHT_MAGIC[0],
-            DHT_MAGIC[1],
-            DHT_FORMAT_ID,
-            0,
-            0,
-            0,
-            0,
-            DHT_VERSION_2,
-        ];
-
-        let version = if data[..8] == header_v3[..] {
-            3
-        } else if data[..8] == header_v2[..] {
-            2
+        let header = |version| {
+            [
+                DHT_MAGIC[0],
+                DHT_MAGIC[1],
+                DHT_FORMAT_ID,
+                0,
+                0,
+                0,
+                0,
+                version,
+            ]
+        };
+        let saved_at_secs = if data[..8] == header(DHT_VERSION_3) {
+            u64::from_be_bytes(
+                data[8..16]
+                    .try_into()
+                    .map_err(|_| "dht.dat timestamp truncated")?,
+            )
+        } else if data[..8] == header(DHT_VERSION_2) {
+            u32::from_be_bytes(
+                data[8..12]
+                    .try_into()
+                    .map_err(|_| "dht.dat timestamp truncated")?,
+            ) as u64
         } else {
             return Err(format!(
                 "dht.dat invalid magic/version: {:02x?}",
@@ -173,37 +389,10 @@ impl DhtPersistence {
             ));
         };
 
-        let mut offset = 8;
-
-        let saved_at_secs = if version >= 3 {
-            if offset + 8 > data.len() {
-                return Err("dht.dat timestamp truncated".into());
-            }
-            let ts = u64::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-            offset += 8;
-            ts
-        } else {
-            if offset + 8 > data.len() {
-                return Err("dht.dat timestamp truncated (v2)".into());
-            }
-            let ts32 = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as u64;
-            offset += 8;
-            ts32
-        };
+        // Both supported versions place the local-node record after a
+        // 8-byte timestamp slot: v2 stores a 32-bit timestamp plus 4 reserved
+        // bytes, while v3 stores a 64-bit timestamp.
+        let mut offset = 16;
 
         if offset + 32 > data.len() {
             return Err("dht.dat localnode truncated".into());
@@ -226,8 +415,9 @@ impl DhtPersistence {
         ]) as usize;
         offset += 8;
 
-        let expected_end = offset + num_nodes * NODE_ENTRY_SIZE;
-        if expected_end > data.len() {
+        let available = data.len() - offset;
+        if num_nodes > available / NODE_ENTRY_SIZE {
+            let expected_end = offset.saturating_add(num_nodes.saturating_mul(NODE_ENTRY_SIZE));
             return Err(format!(
                 "dht.dat node data truncated: need {} bytes, got {}",
                 expected_end,
@@ -237,47 +427,28 @@ impl DhtPersistence {
 
         let mut nodes = Vec::with_capacity(num_nodes);
         for _ in 0..num_nodes {
+            let entry_end = offset + NODE_ENTRY_SIZE;
             let clen = data[offset] as usize;
-            offset += 1;
-            offset += 7;
 
             if clen != 6 && clen != 18 {
-                offset += NODE_ENTRY_SIZE - 8;
-                continue;
+                return Err(format!(
+                    "dht.dat invalid compact peer info length: {}",
+                    clen
+                ));
             }
 
-            if offset + clen > data.len() {
-                break;
-            }
-            let compact = &data[offset..offset + clen];
+            let compact_start = offset + 8;
+            let compact = &data[compact_start..compact_start + clen];
+            let addr = compact_to_socket_addr(compact)
+                .ok_or_else(|| "dht.dat compact peer info is malformed".to_string())?;
 
-            if compact.iter().all(|&b| b == 0) {
-                offset += NODE_ENTRY_SIZE - 8;
-                continue;
-            }
-
-            let addr = match compact_to_socket_addr(compact) {
-                Some(a) => a,
-                None => {
-                    offset += NODE_ENTRY_SIZE - 8;
-                    continue;
-                }
-            };
-            offset += clen;
-
-            let pad_remaining = 24 - clen;
-            offset += pad_remaining;
-
-            if offset + 20 > data.len() {
-                break;
-            }
-            let id: [u8; 20] = data[offset..offset + 20]
+            let id_start = offset + 8 + 24;
+            let id: [u8; 20] = data[id_start..id_start + 20]
                 .try_into()
                 .map_err(|_| "dht.dat node ID length error")?;
-            offset += 20;
-            offset += 4;
 
             nodes.push(PersistedNode { id, addr });
+            offset = entry_end;
         }
 
         Ok(DhtPersistedData {
@@ -287,33 +458,28 @@ impl DhtPersistence {
         })
     }
 
-    pub fn collect_good_nodes(rt: &RoutingTable) -> Vec<DhtNode> {
-        rt.collect_good_nodes()
-    }
-
     pub async fn save_to_file(
         path: &Path,
         self_id: &[u8; 20],
         nodes: &[DhtNode],
     ) -> Result<usize, String> {
-        let data = Self::serialize(self_id, nodes)?;
+        let data = Self::serialize(self_id, nodes);
 
-        let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
-        tokio::fs::write(&tmp_path, &data)
-            .await
-            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-
-        #[cfg(windows)]
-        let _ = tokio::fs::remove_file(path).await;
-        if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(format!(
-                "Failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            ));
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                format!("Failed to create DHT directory {}: {}", parent.display(), e)
+            })?;
         }
+
+        let lock_path = path.to_path_buf();
+        let _process_lock =
+            tokio::task::spawn_blocking(move || acquire_process_file_lock(&lock_path))
+                .await
+                .map_err(|e| format!("Failed to acquire DHT file lock: {}", e))??;
+        write_serialized_to_file_async(path, &data).await?;
 
         Ok(nodes.len())
     }
@@ -323,54 +489,11 @@ impl DhtPersistence {
         self_id: &[u8; 20],
         nodes: &[DhtNode],
     ) -> Result<usize, String> {
-        let data = Self::serialize(self_id, nodes)?;
-
-        let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
-        std::fs::write(&tmp_path, &data)
-            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-
-        #[cfg(windows)]
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp_path, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!(
-                "Failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            )
-        })?;
+        let data = Self::serialize(self_id, nodes);
+        let _process_lock = acquire_process_file_lock(path)?;
+        write_serialized_to_file_sync(path, &data)?;
 
         Ok(nodes.len())
-    }
-
-    /// Merge this engine's good nodes with the existing snapshot before saving.
-    ///
-    /// Multiple BitTorrent tasks can own independent DHT engines while sharing
-    /// one configured `dht-file-path`. The per-engine save lock cannot protect
-    /// that shared file, so this method serializes saves process-wide and
-    /// preserves nodes discovered by other engines.
-    pub fn merge_and_save_to_file_sync(
-        path: &Path,
-        self_id: &[u8; 20],
-        nodes: &[DhtNode],
-    ) -> Result<usize, String> {
-        let file_lock = persistence_file_lock(path);
-        let _guard = file_lock.lock().unwrap_or_else(|error| error.into_inner());
-
-        let mut merged = HashMap::<[u8; 20], DhtNode>::with_capacity(nodes.len());
-        if let Ok(existing) = Self::load_from_file_sync(path) {
-            for node in existing.nodes {
-                merged.insert(node.id, DhtNode::new(node.id, node.addr));
-            }
-        }
-        for node in nodes {
-            merged.insert(node.id, node.clone());
-        }
-
-        let mut merged: Vec<_> = merged.into_values().collect();
-        merged.sort_by_key(|node| node.id);
-        Self::save_to_file_sync(path, self_id, &merged)
     }
 
     pub async fn load_from_file(path: &Path) -> Result<DhtPersistedData, String> {
@@ -388,271 +511,4 @@ impl DhtPersistence {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_serialize_header_magic_and_version() {
-        let id = [0x42u8; 20];
-        let data = DhtPersistence::serialize(&id, &[]).unwrap();
-        assert_eq!(data[0], 0xA1);
-        assert_eq!(data[1], 0xA2);
-        assert_eq!(data[2], 0x02);
-        assert_eq!(data[7], 0x03);
-    }
-
-    #[test]
-    fn test_serialize_local_node_id() {
-        let id = [0xABu8; 20];
-        let data = DhtPersistence::serialize(&id, &[]).unwrap();
-        let stored_id: [u8; 20] = data[24..44].try_into().unwrap();
-        assert_eq!(stored_id, id);
-    }
-
-    #[test]
-    fn test_serialize_nodes_ipv4() {
-        let id = [0u8; 20];
-        let addr: std::net::SocketAddr = "192.168.1.100:6881".parse().unwrap();
-        let node = DhtNode::new(id, addr);
-        let data = DhtPersistence::serialize(&id, &[node]).unwrap();
-
-        assert_eq!(data[56], 6, "IPv4 compact length should be 6");
-        let ip_start = 64;
-        assert_eq!(data[ip_start], 192);
-        assert_eq!(data[ip_start + 1], 168);
-        assert_eq!(data[ip_start + 2], 1);
-        assert_eq!(data[ip_start + 3], 100);
-        let port = u16::from_be_bytes([data[ip_start + 4], data[ip_start + 5]]);
-        assert_eq!(port, 6881);
-    }
-
-    #[test]
-    fn test_serialize_nodes_ipv6() {
-        let id = [0u8; 20];
-        let addr: std::net::SocketAddr = "[::1]:6882".parse().unwrap();
-        let node = DhtNode::new(id, addr);
-        let data = DhtPersistence::serialize(&id, &[node]).unwrap();
-
-        assert_eq!(data[56], 18, "IPv6 compact length should be 18");
-    }
-
-    #[test]
-    fn test_serialize_empty_routing_table() {
-        let id = [0xFFu8; 20];
-        let data = DhtPersistence::serialize(&id, &[]).unwrap();
-
-        let num_nodes = u32::from_be_bytes([data[44], data[45], data[46], data[47]]);
-        assert_eq!(num_nodes, 0);
-        assert_eq!(
-            data.len(),
-            56,
-            "empty table should be exactly 56 bytes (header+ts+localnode+count)"
-        );
-    }
-
-    #[test]
-    fn test_deserialize_v3_format() {
-        let id = [0x11u8; 20];
-        let addr: std::net::SocketAddr = "10.0.0.5:6881".parse().unwrap();
-        let node = DhtNode::new(id, addr);
-        let serialized = DhtPersistence::serialize(&id, &[node]).unwrap();
-
-        let result = DhtPersistence::deserialize(&serialized).unwrap();
-        assert_eq!(result.self_id, id);
-        assert_eq!(result.nodes.len(), 1);
-        assert_eq!(result.nodes[0].id, id);
-        assert_eq!(result.nodes[0].addr, addr);
-    }
-
-    #[test]
-    fn test_repeated_file_save_replaces_existing_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dht.dat");
-        let first = DhtNode::new([0x01; 20], "127.0.0.1:6881".parse().unwrap());
-        let second = DhtNode::new([0x02; 20], "127.0.0.1:6882".parse().unwrap());
-        DhtPersistence::save_to_file_sync(&path, &[0xAA; 20], &[first]).unwrap();
-        DhtPersistence::save_to_file_sync(&path, &[0xBB; 20], std::slice::from_ref(&second))
-            .unwrap();
-
-        let restored = DhtPersistence::load_from_file_sync(&path).unwrap();
-        assert_eq!(restored.self_id, [0xBB; 20]);
-        assert_eq!(restored.nodes.len(), 1);
-        assert_eq!(restored.nodes[0].id, second.id);
-        assert_eq!(restored.nodes[0].addr, second.addr);
-    }
-
-    #[test]
-    fn test_concurrent_merged_saves_preserve_nodes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = Arc::new(dir.path().join("dht.dat"));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-
-        std::thread::scope(|scope| {
-            for (id, port) in [(0x01, 6881), (0x02, 6882)] {
-                let path = Arc::clone(&path);
-                let barrier = Arc::clone(&barrier);
-                scope.spawn(move || {
-                    let node = DhtNode::new([id; 20], ([127, 0, 0, 1], port).into());
-                    barrier.wait();
-                    DhtPersistence::merge_and_save_to_file_sync(&path, &[0xAA; 20], &[node])
-                        .unwrap();
-                });
-            }
-        });
-
-        let restored = DhtPersistence::load_from_file_sync(&path).unwrap();
-        assert_eq!(restored.nodes.len(), 2);
-        assert!(restored.nodes.iter().any(|node| node.id == [0x01; 20]));
-        assert!(restored.nodes.iter().any(|node| node.id == [0x02; 20]));
-    }
-
-    #[test]
-    fn test_deserialize_v2_compat() {
-        let mut data = vec![0u8; 56];
-        data[0] = 0xA1;
-        data[1] = 0xA2;
-        data[2] = 0x02;
-        data[7] = 0x02;
-        data[8..12].copy_from_slice(&(1000u32).to_be_bytes());
-
-        let id = [0xCCu8; 20];
-        data[24..44].copy_from_slice(&id);
-
-        let result = DhtPersistence::deserialize(&data).unwrap();
-        assert_eq!(result.self_id, id);
-        assert_eq!(result.saved_at_secs, 1000);
-        assert!(result.nodes.is_empty());
-    }
-
-    #[test]
-    fn test_roundtrip_serialize_deserialize() {
-        let self_id = [0xDEu8; 20];
-        let addrs: Vec<std::net::SocketAddr> = vec![
-            "1.2.3.4:6881".parse().unwrap(),
-            "[2001:db8::1]:6882".parse().unwrap(),
-            "10.0.0.1:6883".parse().unwrap(),
-        ];
-        let nodes: Vec<DhtNode> = addrs
-            .iter()
-            .enumerate()
-            .map(|(i, a)| DhtNode::new([i as u8; 20], *a))
-            .collect();
-
-        let serialized = DhtPersistence::serialize(&self_id, &nodes).unwrap();
-        let deserialized = DhtPersistence::deserialize(&serialized).unwrap();
-
-        assert_eq!(deserialized.self_id, self_id);
-        assert_eq!(deserialized.nodes.len(), 3);
-        for (i, node) in deserialized.nodes.iter().enumerate().take(3) {
-            assert_eq!(node.addr, addrs[i]);
-        }
-    }
-
-    #[test]
-    fn test_reject_bad_header() {
-        let bad_data = vec![0x00u8; 16];
-        let result = DhtPersistence::deserialize(&bad_data);
-        assert!(result.is_err(), "bad magic should fail");
-    }
-
-    #[test]
-    fn test_collect_good_nodes_only() {
-        let mut rt = RoutingTable::new([0x80u8; 20]);
-
-        let good_addr = "127.0.0.1:6881".parse().unwrap();
-        let good_node = DhtNode::new([1u8; 20], good_addr);
-
-        let bad_addr = "127.0.0.1:6882".parse().unwrap();
-        let mut bad_node = DhtNode::new([2u8; 20], bad_addr);
-        for _ in 0..3 {
-            bad_node.record_failure();
-        }
-
-        rt.insert(good_node);
-        rt.insert(bad_node);
-
-        let collected = DhtPersistence::collect_good_nodes(&rt);
-        assert_eq!(collected.len(), 1);
-        assert_eq!(collected[0].addr, good_addr);
-    }
-
-    #[test]
-    fn test_save_load_file_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dht.dat");
-
-        let self_id = [0x99u8; 20];
-        let addr = "172.16.0.1:9999".parse().unwrap();
-        let node = DhtNode::new([0xAAu8; 20], addr);
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            DhtPersistence::save_to_file(&path, &self_id, &[node])
-                .await
-                .unwrap();
-
-            let loaded = DhtPersistence::load_from_file(&path).await.unwrap();
-            assert_eq!(loaded.self_id, self_id);
-            assert_eq!(loaded.nodes.len(), 1);
-            assert_eq!(loaded.nodes[0].id, [0xAAu8; 20]);
-            assert_eq!(loaded.nodes[0].addr, addr);
-        });
-    }
-
-    #[test]
-    fn test_multiple_nodes_roundtrip() {
-        let self_id = [0x12u8; 20];
-        let mut nodes = Vec::new();
-        for i in 0u8..20 {
-            let octets = [192, 0, 1, i + 1];
-            let addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]),
-                6881 + i as u16,
-            ));
-            nodes.push(DhtNode::new([i; 20], addr));
-        }
-
-        let serialized = DhtPersistence::serialize(&self_id, &nodes).unwrap();
-        let deserialized = DhtPersistence::deserialize(&serialized).unwrap();
-        assert_eq!(deserialized.nodes.len(), 20);
-    }
-
-    #[test]
-    fn test_truncated_data_error() {
-        let short_data = vec![0xA1, 0xA2];
-        let result = DhtPersistence::deserialize(&short_data);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_socket_addr_to_compact_ipv4() {
-        let addr: std::net::SocketAddr = "8.8.8.8:53".parse().unwrap();
-        let compact = socket_addr_to_compact(&addr);
-        assert_eq!(compact.len(), 6);
-        assert_eq!(compact[0], 8);
-        assert_eq!(compact[1], 8);
-        assert_eq!(compact[2], 8);
-        assert_eq!(compact[3], 8);
-        let port = u16::from_be_bytes([compact[4], compact[5]]);
-        assert_eq!(port, 53);
-    }
-
-    #[test]
-    fn test_compact_to_socket_addr_ipv4() {
-        let compact: Vec<u8> = vec![127, 0, 0, 1, 0x1A, 0x0B];
-        let addr = compact_to_socket_addr(&compact).unwrap();
-        assert_eq!(
-            addr,
-            "127.0.0.1:6667".parse::<std::net::SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn test_load_nonexistent_file_error() {
-        let path = PathBuf::from("/nonexistent/path/dht.dat");
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(async { DhtPersistence::load_from_file(&path).await });
-        assert!(result.is_err());
-    }
-}
+mod tests;

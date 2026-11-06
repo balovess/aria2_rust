@@ -41,7 +41,7 @@ aria2-x86_64-linux-full.tar.gz
 ## CI 与发布触发规则
 
 - Dev CI 只支持手动触发（GitHub Actions 的 `workflow_dispatch`），不会因提交或创建 Pull Request 自动运行。
-- Release 只在分支 Pull Request 合并到 `master` 后自动运行；直接推送到 `master` 不会触发二进制发布。
+- Release 工作流在每次推送到 `master` 时运行，也可从 `master` 手动触发。只有版本号生成的 tag 尚不存在时才创建新二进制 Release；已有 Release 可通过手动触发重试包管理器更新。
 - Release 页面会自动生成四档产物选择表，并附带每个平台的校验文件。
 
 ## 从源码构建

@@ -66,12 +66,6 @@ impl MseDhKeyExchange {
         self.keypair.public_fixed()
     }
 
-    /// Get the variable-length raw public key bytes (for internal use).
-    #[allow(dead_code)]
-    pub fn raw_public_key(&self) -> &[u8] {
-        &self.keypair.public
-    }
-
     /// Compute the shared secret using the other party's public key.
     ///
     /// `other_public` must be exactly `KEY_LENGTH` (96) bytes in big-endian.
@@ -98,16 +92,16 @@ impl Default for MseDhKeyExchange {
 
 /// DH key pair with 768-bit MSE prime.
 #[derive(Debug, Clone)]
-pub struct DhKeyPair {
+struct DhKeyPair {
     /// Private key as big-endian bytes (variable length).
-    pub private: Vec<u8>,
+    private: Vec<u8>,
     /// Public key as big-endian bytes (variable length).
-    pub public: Vec<u8>,
+    public: Vec<u8>,
 }
 
 impl DhKeyPair {
     /// Get the 768-bit MSE prime as a BigUint.
-    pub fn get_prime() -> BigUint {
+    fn get_prime() -> BigUint {
         BigUint::from_str_radix(DH_P_768_HEX, 16).expect("DH prime constant is valid hex")
     }
 
@@ -115,7 +109,7 @@ impl DhKeyPair {
     ///
     /// Private key is 160 random bits (matching C++ `privateKeyBits = 160`),
     /// and public key = g^private mod p.
-    pub fn generate() -> Self {
+    fn generate() -> Self {
         let p = Self::get_prime();
         let g: BigUint = DH_G.into();
 
@@ -144,7 +138,7 @@ impl DhKeyPair {
     /// Returns the big-endian bytes of the shared secret.
     /// The result may be shorter than KEY_LENGTH if the secret has
     /// leading zero bytes when represented as a fixed-size integer.
-    pub fn compute_shared_secret(&self, other_public: &[u8]) -> Vec<u8> {
+    fn compute_shared_secret(&self, other_public: &[u8]) -> Vec<u8> {
         let p = Self::get_prime();
         let other_pub = BigUint::from_bytes_be(other_public);
         let self_priv = BigUint::from_bytes_be(&self.private);
@@ -160,7 +154,7 @@ impl DhKeyPair {
 
     /// Return the public key as a fixed-size 96-byte array.
     /// Left-padded with zeros, matching C++ `getPublicKey()`.
-    pub fn public_fixed(&self) -> [u8; KEY_LENGTH] {
+    fn public_fixed(&self) -> [u8; KEY_LENGTH] {
         fixed_size_bytes::<KEY_LENGTH>(&self.public)
     }
 }
@@ -174,7 +168,7 @@ impl Default for DhKeyPair {
 /// Left-pad or truncate a big-endian byte slice to exactly N bytes,
 /// matching C++ bignum `binary(out, outLength)` which zero-fills
 /// the output buffer and writes the big-endian value at the end.
-pub fn fixed_size_bytes<const N: usize>(bytes: &[u8]) -> [u8; N] {
+fn fixed_size_bytes<const N: usize>(bytes: &[u8]) -> [u8; N] {
     let mut result = [0u8; N];
     let offset = bytes.len().saturating_sub(N);
     let len = bytes.len().saturating_sub(offset);

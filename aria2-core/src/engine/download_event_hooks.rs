@@ -58,12 +58,14 @@
 //! must not block (the recommended pattern is an `mpsc` send consumed by a
 //! dedicated task).
 
-use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, OnceLock, atomic::AtomicU64};
+
+use tokio::sync::broadcast;
 
 use tracing::{debug, info, warn};
 
-use crate::request::request_group::RequestGroup;
+use crate::request::request_group::{GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 // ============================================================================
@@ -91,10 +93,115 @@ pub enum DownloadEvent {
     /// Fired when a download is stopped (not complete, not error).
     /// C++: `PREF_ON_DOWNLOAD_STOP`
     Stop,
-    /// Fired when a BitTorrent download finishes completely
-    /// (all files downloaded and seeding complete).
+    /// Fired when a BitTorrent payload download completes. Seeding may
+    /// continue after this event.
     /// C++: `PREF_ON_BT_DOWNLOAD_COMPLETE`
     BtComplete,
+}
+
+/// Describes the transition from a completed metadata task to download groups
+/// that can consume its resolved metadata.
+///
+/// This is deliberately separate from [`DownloadEvent`]. The latter mirrors
+/// aria2's lifecycle hooks and the standard RPC notifications, while metadata
+/// resolution is a Rust-library observation that has no corresponding
+/// standard aria2 status or notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataResolvedEvent {
+    /// GID of the task that produced the metadata.
+    pub metadata_gid: GroupId,
+    /// GIDs ready to consume the resolved metadata. For an in-place magnet
+    /// download this contains the same GID as `metadata_gid`; for a
+    /// metadata-only request it is empty. For a post-download metadata task,
+    /// these are the values exposed as `followedBy` for `metadata_gid`.
+    pub download_gids: Vec<GroupId>,
+}
+
+/// Event stream item for Rust-library consumers.
+///
+/// The lifecycle variant keeps the canonical hex GID used by aria2's RPC
+/// surface. Metadata resolution is represented separately because it is a
+/// transient library event rather than a standard aria2 download status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadNotification {
+    Lifecycle { event: DownloadEvent, gid: String },
+    MetadataResolved(MetadataResolvedEvent),
+}
+
+/// A loss-aware stream of lifecycle and metadata notifications.
+///
+/// This is backed by a bounded broadcast channel. A slow consumer must handle
+/// [`broadcast::error::RecvError::Lagged`] by taking a fresh snapshot from its
+/// [`DownloadHandle`](super::download_manager::DownloadHandle), rather than
+/// assuming every intermediate progress event was retained.
+pub struct DownloadEventStream {
+    receiver: broadcast::Receiver<DownloadNotification>,
+}
+
+impl DownloadEventStream {
+    pub async fn recv(&mut self) -> Result<DownloadNotification, broadcast::error::RecvError> {
+        self.receiver.recv().await
+    }
+
+    /// Wait for a terminal lifecycle event for `gid`.
+    ///
+    /// This consumes unrelated notifications from this receiver while
+    /// waiting. `Stop` is included because aria2 uses it for a download that
+    /// was stopped without completing or failing. The helper is deliberately
+    /// event-driven; callers that need the final snapshot can use the matching
+    /// [`DownloadHandle`](super::download_manager::DownloadHandle) after it
+    /// returns.
+    pub async fn recv_terminal_for(
+        &mut self,
+        gid: GroupId,
+    ) -> Result<DownloadEvent, broadcast::error::RecvError> {
+        let gid = gid.to_hex_string();
+        loop {
+            match self.recv().await? {
+                DownloadNotification::Lifecycle {
+                    event,
+                    gid: event_gid,
+                } if event_gid == gid && event.is_terminal() => {
+                    return Ok(event);
+                }
+                DownloadNotification::Lifecycle { .. }
+                | DownloadNotification::MetadataResolved(_) => {}
+            }
+        }
+    }
+
+    /// Wait for metadata resolution involving `gid`.
+    ///
+    /// A metadata task may resolve into the same GID (for a magnet download)
+    /// or into one or more child download GIDs (for a metadata-backed graph).
+    /// This helper filters both forms while preserving the broadcast channel's
+    /// lag error so callers can resubscribe and refresh their snapshots.
+    pub async fn recv_metadata_for(
+        &mut self,
+        gid: GroupId,
+    ) -> Result<MetadataResolvedEvent, broadcast::error::RecvError> {
+        loop {
+            match self.recv().await? {
+                DownloadNotification::MetadataResolved(event)
+                    if event.metadata_gid == gid || event.download_gids.contains(&gid) =>
+                {
+                    return Ok(event);
+                }
+                DownloadNotification::Lifecycle { .. }
+                | DownloadNotification::MetadataResolved(_) => {}
+            }
+        }
+    }
+}
+
+impl MetadataResolvedEvent {
+    /// Create a metadata-resolution event from a parent GID and its children.
+    pub fn new(metadata_gid: GroupId, download_gids: Vec<GroupId>) -> Self {
+        Self {
+            metadata_gid,
+            download_gids,
+        }
+    }
 }
 
 impl DownloadEvent {
@@ -113,17 +220,28 @@ impl DownloadEvent {
     /// Whether this event can legitimately fire at most **once** for a given
     /// download.
     ///
-    /// `Complete`, `Error` and `BtComplete` are terminal one-shot transitions:
-    /// a download completes once, fails once, and finishes its BT payload
-    /// once. They are emitted from more than one place (the group state
-    /// transition itself *and* the engine-loop demotion path), so observer
-    /// notification is de-duplicated on `(gid, event)` for these variants.
+    /// `Complete`, `Error` and `BtComplete` are one-shot transitions: a
+    /// download completes once, fails once, and finishes its BT payload once.
+    /// They are emitted from more than one place (the group state transition
+    /// itself *and* the engine-loop demotion path), so observer notification is
+    /// de-duplicated on `(gid, event)` for these variants.
     ///
     /// `Start` and `Pause` may repeat across pause/unpause cycles and `Stop`
     /// is re-emitted by the RPC layer on explicit removal, so those are never
     /// de-duplicated.
     pub fn is_once_per_download(&self) -> bool {
         matches!(self, Self::Complete | Self::Error | Self::BtComplete)
+    }
+
+    /// Whether this notification marks the task as stopped for lifecycle
+    /// observers. `BtComplete` only marks payload completion; seeding may
+    /// continue until a later terminal event.
+    ///
+    /// `Stop` is terminal for the current task run even though aria2 may emit
+    /// it again when a caller explicitly removes the task. It is therefore
+    /// terminal for waiters but not a one-shot event for de-duplication.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Stop | Self::Complete | Self::Error)
     }
 }
 
@@ -151,6 +269,23 @@ pub trait DownloadEventListener: Send + Sync {
     /// Called for every fired download event.
     fn on_download_event(&self, event: DownloadEvent, gid: &str);
 
+    /// Called for lifecycle events emitted by a request manager.
+    ///
+    /// The default keeps existing process-wide observers compatible. A
+    /// manager-scoped observer can override this method to distinguish equal
+    /// GIDs owned by different managers.
+    fn on_download_event_scoped(&self, event: DownloadEvent, gid: &str, _scope_id: u64) {
+        self.on_download_event(event, gid);
+    }
+
+    /// Called after a metadata task has produced and queued its download
+    /// groups.
+    ///
+    /// This callback is intentionally not mapped to a standard aria2 RPC
+    /// notification. Implementors that only need lifecycle events can keep
+    /// the default no-op implementation.
+    fn on_metadata_resolved(&self, _event: &MetadataResolvedEvent) {}
+
     /// Whether the observer still has a live destination.
     ///
     /// Process-wide buses can outlive a server instance. Implementations that
@@ -160,6 +295,9 @@ pub trait DownloadEventListener: Send + Sync {
         true
     }
 }
+
+/// Stable identifier for one registered lifecycle listener.
+pub type DownloadEventListenerId = u64;
 
 // ============================================================================
 // DownloadEventHooks — manages hook registration and execution
@@ -174,11 +312,18 @@ pub trait DownloadEventListener: Send + Sync {
 /// both generations, so recently-seen events are never forgotten prematurely.
 const DEDUP_GENERATION_CAPACITY: usize = 4096;
 
+/// Number of metadata-resolution events retained for late library observers.
+///
+/// Metadata resolution is a one-shot transition, so a bounded replay history
+/// is enough to bridge the small gap between task submission and a caller
+/// starting its await. The event stream remains loss-aware for older entries.
+const METADATA_HISTORY_CAPACITY: usize = 1024;
+
 /// Two-generation bounded de-duplication ledger for one-shot events.
 #[derive(Default)]
 struct OneShotLedger {
-    current: HashSet<(String, DownloadEvent)>,
-    previous: HashSet<(String, DownloadEvent)>,
+    current: HashSet<(Option<u64>, String, DownloadEvent)>,
+    previous: HashSet<(Option<u64>, String, DownloadEvent)>,
 }
 
 impl OneShotLedger {
@@ -186,7 +331,7 @@ impl OneShotLedger {
     ///
     /// Returns `true` when the caller should proceed with the notification,
     /// `false` when the event was already delivered.
-    fn claim(&mut self, key: (String, DownloadEvent)) -> bool {
+    fn claim(&mut self, key: (Option<u64>, String, DownloadEvent)) -> bool {
         if self.current.contains(&key) || self.previous.contains(&key) {
             return false;
         }
@@ -219,10 +364,16 @@ pub struct DownloadEventHooks {
     global_hooks: Arc<std::sync::RwLock<GlobalHookMap>>,
     /// Registered observers (sink 2). Notified for **every** fired event,
     /// regardless of whether a shell hook command is configured.
-    listeners: std::sync::RwLock<Vec<Arc<dyn DownloadEventListener>>>,
+    listeners: std::sync::RwLock<Vec<(DownloadEventListenerId, Arc<dyn DownloadEventListener>)>>,
+    next_listener_id: AtomicU64,
     /// De-duplication ledger for one-shot events
     /// ([`DownloadEvent::is_once_per_download`]).
     one_shot: std::sync::RwLock<OneShotLedger>,
+    /// Bounded event stream for library consumers that do not need to
+    /// implement the synchronous listener trait.
+    notifications: broadcast::Sender<DownloadNotification>,
+    /// Recent structured metadata transitions for late high-level waiters.
+    metadata_history: std::sync::RwLock<VecDeque<MetadataResolvedEvent>>,
 }
 
 /// Type alias for the global hook map.
@@ -234,10 +385,14 @@ static SHARED_HOOKS: OnceLock<Arc<DownloadEventHooks>> = OnceLock::new();
 impl DownloadEventHooks {
     /// Create a new hook manager with no global hooks and no listeners.
     pub fn new() -> Self {
+        let (notifications, _) = broadcast::channel(256);
         Self {
             global_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
             listeners: std::sync::RwLock::new(Vec::new()),
+            next_listener_id: AtomicU64::new(1),
             one_shot: std::sync::RwLock::new(OneShotLedger::default()),
+            notifications,
+            metadata_history: std::sync::RwLock::new(VecDeque::new()),
         }
     }
 
@@ -257,22 +412,72 @@ impl DownloadEventHooks {
 
     /// Register an observer that is notified of every fired download event.
     ///
-    /// Mirrors C++ `Notifier::addDownloadEventListener()`. Registration is
-    /// additive and there is no removal API, matching C++ where listeners
-    /// live for the lifetime of the process.
+    /// Registration is additive. Call [`Self::add_listener_with_id`] when the
+    /// caller owns a bounded-lifetime adapter and needs explicit cleanup.
     pub fn add_listener(&self, listener: Arc<dyn DownloadEventListener>) {
+        let _ = self.add_listener_with_id(listener);
+    }
+
+    /// Register an observer and return its removal identifier.
+    ///
+    /// The identifier is local to this hook bus and remains valid until the
+    /// listener is removed or the bus is dropped. Registration still prunes
+    /// listeners whose [`DownloadEventListener::is_alive`] method is false.
+    pub fn add_listener_with_id(
+        &self,
+        listener: Arc<dyn DownloadEventListener>,
+    ) -> DownloadEventListenerId {
+        let id = self
+            .next_listener_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut listeners = self.listeners.recover_mut();
-        listeners.retain(|listener| listener.is_alive());
-        listeners.push(listener);
+        listeners.retain(|(_, listener)| listener.is_alive());
+        listeners.push((id, listener));
         debug!(
+            listener_id = id,
             count = listeners.len(),
             "Registered download event listener"
         );
+        id
+    }
+
+    /// Remove a listener previously returned by [`Self::add_listener_with_id`].
+    ///
+    /// Returns `true` only when the requested identifier was registered. Any
+    /// other listeners that are already dead are pruned as part of the same
+    /// operation.
+    pub fn remove_listener(&self, id: DownloadEventListenerId) -> bool {
+        let mut listeners = self.listeners.recover_mut();
+        let removed = listeners.iter().any(|(listener_id, _)| *listener_id == id);
+        listeners.retain(|(listener_id, listener)| *listener_id != id && listener.is_alive());
+        removed
     }
 
     /// Number of currently registered observers (primarily for tests).
     pub fn listener_count(&self) -> usize {
         self.listeners.recover().len()
+    }
+
+    /// Subscribe to lifecycle and metadata notifications without installing a
+    /// callback object. Events are delivered in publication order for this
+    /// receiver, subject to the bounded channel's lag semantics.
+    pub fn subscribe(&self) -> DownloadEventStream {
+        DownloadEventStream {
+            receiver: self.notifications.subscribe(),
+        }
+    }
+
+    /// Return the most recent metadata transition involving `gid`.
+    ///
+    /// This is used by high-level handles to close the race between creating
+    /// an event receiver and checking whether metadata was already resolved.
+    pub(crate) fn metadata_event_for(&self, gid: GroupId) -> Option<MetadataResolvedEvent> {
+        self.metadata_history
+            .recover()
+            .iter()
+            .rev()
+            .find(|event| event.metadata_gid == gid || event.download_gids.contains(&gid))
+            .cloned()
     }
 
     /// Notify every registered observer of `event` for `gid`.
@@ -289,21 +494,36 @@ impl DownloadEventHooks {
     /// the `RequestGroup` state change and again at engine-loop demotion is
     /// only delivered once.
     pub fn notify_listeners(&self, event: DownloadEvent, gid: &str) {
+        self.notify_listeners_in_scope(event, gid, None);
+    }
+
+    /// Notify observers with the owning request manager's identity.
+    pub(crate) fn notify_listeners_scoped(&self, event: DownloadEvent, gid: &str, scope_id: u64) {
+        self.notify_listeners_in_scope(event, gid, Some(scope_id));
+    }
+
+    fn notify_listeners_in_scope(&self, event: DownloadEvent, gid: &str, scope_id: Option<u64>) {
         // Snapshot under a short read lock so a listener callback can never
         // deadlock against `add_listener`.
         let listeners: Vec<Arc<dyn DownloadEventListener>> = {
             let mut guard = self.listeners.recover_mut();
-            guard.retain(|listener| listener.is_alive());
-            if guard.is_empty() {
+            guard.retain(|(_, listener)| listener.is_alive());
+            if guard.is_empty() && self.notifications.receiver_count() == 0 {
                 // Nothing to do — and importantly, do not pollute the
                 // de-duplication ledger when no one is listening.
                 return;
             }
-            guard.clone()
+            guard
+                .iter()
+                .map(|(_, listener)| Arc::clone(listener))
+                .collect()
         };
 
         if event.is_once_per_download()
-            && !self.one_shot.recover_mut().claim((gid.to_string(), event))
+            && !self
+                .one_shot
+                .recover_mut()
+                .claim((scope_id, gid.to_string(), event))
         {
             debug!(
                 event = event.name(),
@@ -312,6 +532,11 @@ impl DownloadEventHooks {
             return;
         }
 
+        let _ = self.notifications.send(DownloadNotification::Lifecycle {
+            event,
+            gid: gid.to_string(),
+        });
+
         debug!(
             event = event.name(),
             gid,
@@ -319,7 +544,53 @@ impl DownloadEventHooks {
             "Notifying download event listeners"
         );
         for listener in listeners {
-            listener.on_download_event(event, gid);
+            if let Some(scope_id) = scope_id {
+                listener.on_download_event_scoped(event, gid, scope_id);
+            } else {
+                listener.on_download_event(event, gid);
+            }
+        }
+    }
+
+    /// Notify observers that a metadata task produced its download groups.
+    ///
+    /// The caller must invoke this after the child groups have been inserted
+    /// into the request manager. The event is synchronous and follows the
+    /// same non-blocking, non-panicking listener contract as lifecycle events.
+    pub fn notify_metadata_resolved(&self, event: MetadataResolvedEvent) {
+        {
+            let mut history = self.metadata_history.recover_mut();
+            history.retain(|previous| previous.metadata_gid != event.metadata_gid);
+            history.push_back(event.clone());
+            while history.len() > METADATA_HISTORY_CAPACITY {
+                history.pop_front();
+            }
+        }
+
+        let listeners: Vec<Arc<dyn DownloadEventListener>> = {
+            let mut guard = self.listeners.recover_mut();
+            guard.retain(|(_, listener)| listener.is_alive());
+            if guard.is_empty() && self.notifications.receiver_count() == 0 {
+                return;
+            }
+            guard
+                .iter()
+                .map(|(_, listener)| Arc::clone(listener))
+                .collect()
+        };
+
+        let _ = self
+            .notifications
+            .send(DownloadNotification::MetadataResolved(event.clone()));
+
+        debug!(
+            metadata_gid = event.metadata_gid.value(),
+            download_gids = event.download_gids.len(),
+            listeners = listeners.len(),
+            "Notifying metadata-resolved listeners"
+        );
+        for listener in listeners {
+            listener.on_metadata_resolved(&event);
         }
     }
 
@@ -389,7 +660,7 @@ impl DownloadEventHooks {
         // onBtDownloadComplete) are delivered through this path, and gating
         // them on an unrelated `--on-download-*` CLI option would leave every
         // default deployment without completion notifications.
-        self.notify_listeners(event, &gid_hex);
+        self.notify_listeners_scoped(event, &gid_hex, group.event_scope_id());
     }
 
     /// Fire a download event hook using direct parameters instead of a group.
@@ -407,12 +678,50 @@ impl DownloadEventHooks {
         first_file_path: &str,
         command: &str,
     ) {
+        self.fire_event_with_params_in_scope(
+            event,
+            gid_hex,
+            num_files,
+            first_file_path,
+            command,
+            None,
+        );
+    }
+
+    pub(crate) fn fire_event_with_params_scoped(
+        &self,
+        event: DownloadEvent,
+        gid_hex: &str,
+        num_files: usize,
+        first_file_path: &str,
+        command: &str,
+        scope_id: u64,
+    ) {
+        self.fire_event_with_params_in_scope(
+            event,
+            gid_hex,
+            num_files,
+            first_file_path,
+            command,
+            Some(scope_id),
+        );
+    }
+
+    fn fire_event_with_params_in_scope(
+        &self,
+        event: DownloadEvent,
+        gid_hex: &str,
+        num_files: usize,
+        first_file_path: &str,
+        command: &str,
+        scope_id: Option<u64>,
+    ) {
         // Sink 1 — only when a shell command was actually configured.
         if !command.is_empty() {
             self.spawn_hook(command, gid_hex, num_files, first_file_path, event);
         }
         // Sink 2 — always. See `fire_event` for why this must not be gated.
-        self.notify_listeners(event, gid_hex);
+        self.notify_listeners_in_scope(event, gid_hex, scope_id);
     }
 
     /// Extract `(numFiles, firstFilePath)` hook arguments from a group.
@@ -732,17 +1041,26 @@ mod tests {
     #[derive(Default)]
     struct RecordingListener {
         seen: std::sync::Mutex<Vec<(DownloadEvent, String)>>,
+        metadata_seen: std::sync::Mutex<Vec<MetadataResolvedEvent>>,
     }
 
     impl RecordingListener {
         fn events(&self) -> Vec<(DownloadEvent, String)> {
             self.seen.lock().unwrap().clone()
         }
+
+        fn metadata_events(&self) -> Vec<MetadataResolvedEvent> {
+            self.metadata_seen.lock().unwrap().clone()
+        }
     }
 
     impl DownloadEventListener for RecordingListener {
         fn on_download_event(&self, event: DownloadEvent, gid: &str) {
             self.seen.lock().unwrap().push((event, gid.to_string()));
+        }
+
+        fn on_metadata_resolved(&self, event: &MetadataResolvedEvent) {
+            self.metadata_seen.lock().unwrap().push(event.clone());
         }
     }
 
@@ -753,6 +1071,16 @@ mod tests {
         hooks.add_listener(Arc::new(RecordingListener::default()));
         hooks.add_listener(Arc::new(RecordingListener::default()));
         assert_eq!(hooks.listener_count(), 2);
+    }
+
+    #[test]
+    fn test_listener_can_be_removed_explicitly() {
+        let hooks = DownloadEventHooks::new();
+        let id = hooks.add_listener_with_id(Arc::new(RecordingListener::default()));
+        assert_eq!(hooks.listener_count(), 1);
+        assert!(hooks.remove_listener(id));
+        assert_eq!(hooks.listener_count(), 0);
+        assert!(!hooks.remove_listener(id));
     }
 
     struct ToggleListener {
@@ -796,6 +1124,115 @@ mod tests {
         let expected = vec![(DownloadEvent::Complete, "00000000000000ff".to_string())];
         assert_eq!(a.events(), expected);
         assert_eq!(b.events(), expected);
+    }
+
+    #[test]
+    fn test_notify_metadata_resolved_delivers_structured_event() {
+        let hooks = DownloadEventHooks::new();
+        let listener = Arc::new(RecordingListener::default());
+        hooks.add_listener(listener.clone());
+
+        hooks.notify_metadata_resolved(MetadataResolvedEvent::new(
+            crate::request::request_group::GroupId::new(10),
+            vec![crate::request::request_group::GroupId::new(11)],
+        ));
+
+        assert_eq!(
+            listener.metadata_events(),
+            vec![MetadataResolvedEvent::new(
+                crate::request::request_group::GroupId::new(10),
+                vec![crate::request::request_group::GroupId::new(11)],
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_receives_lifecycle_and_metadata_events() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+
+        hooks.notify_listeners(DownloadEvent::Start, "0000000000000001");
+        assert_eq!(
+            stream.recv().await.expect("lifecycle event"),
+            DownloadNotification::Lifecycle {
+                event: DownloadEvent::Start,
+                gid: "0000000000000001".to_string(),
+            }
+        );
+
+        let metadata = MetadataResolvedEvent::new(
+            crate::request::request_group::GroupId::new(10),
+            vec![crate::request::request_group::GroupId::new(11)],
+        );
+        hooks.notify_metadata_resolved(metadata.clone());
+        assert_eq!(
+            stream.recv().await.expect("metadata event"),
+            DownloadNotification::MetadataResolved(metadata)
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_stream_helper_filters_by_metadata_or_download_gid() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+        let requested_gid = crate::request::request_group::GroupId::new(11);
+        let unrelated = MetadataResolvedEvent::new(
+            crate::request::request_group::GroupId::new(20),
+            vec![crate::request::request_group::GroupId::new(21)],
+        );
+        let matching = MetadataResolvedEvent::new(
+            crate::request::request_group::GroupId::new(10),
+            vec![requested_gid],
+        );
+
+        hooks.notify_metadata_resolved(unrelated);
+        hooks.notify_metadata_resolved(matching.clone());
+
+        assert_eq!(
+            stream
+                .recv_metadata_for(requested_gid)
+                .await
+                .expect("matching metadata event"),
+            matching
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_helper_filters_by_gid_and_event_kind() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+        let requested_gid = crate::request::request_group::GroupId::new(11);
+
+        hooks.notify_listeners(DownloadEvent::Start, "000000000000000b");
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000a");
+        hooks.notify_listeners(DownloadEvent::Stop, "000000000000000b");
+
+        assert_eq!(
+            stream
+                .recv_terminal_for(requested_gid)
+                .await
+                .expect("matching terminal event"),
+            DownloadEvent::Stop
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_helper_waits_past_bt_payload_completion() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+        let requested_gid = crate::request::request_group::GroupId::new(12);
+        let gid = requested_gid.to_hex_string();
+
+        hooks.notify_listeners(DownloadEvent::BtComplete, &gid);
+        hooks.notify_listeners(DownloadEvent::Complete, &gid);
+
+        assert_eq!(
+            stream
+                .recv_terminal_for(requested_gid)
+                .await
+                .expect("seeding completion is terminal"),
+            DownloadEvent::Complete
+        );
     }
 
     /// Regression test for the P0 defect: observers were only reached when a
@@ -894,16 +1331,27 @@ mod tests {
     }
 
     #[test]
+    fn test_terminal_event_classification() {
+        assert!(DownloadEvent::Stop.is_terminal());
+        assert!(DownloadEvent::Complete.is_terminal());
+        assert!(DownloadEvent::Error.is_terminal());
+        assert!(!DownloadEvent::BtComplete.is_terminal());
+        assert!(!DownloadEvent::Start.is_terminal());
+        assert!(!DownloadEvent::Pause.is_terminal());
+    }
+
+    #[test]
     fn test_one_shot_ledger_rotates_and_stays_bounded() {
         let mut ledger = OneShotLedger::default();
         for i in 0..(DEDUP_GENERATION_CAPACITY + 10) {
-            assert!(ledger.claim((format!("{:016x}", i), DownloadEvent::Complete)));
+            assert!(ledger.claim((None, format!("{:016x}", i), DownloadEvent::Complete)));
         }
         // Rotation happened, so neither generation exceeds the cap.
         assert!(ledger.current.len() <= DEDUP_GENERATION_CAPACITY);
         assert!(ledger.previous.len() <= DEDUP_GENERATION_CAPACITY);
         // The most recent entries are still remembered.
         assert!(!ledger.claim((
+            None,
             format!("{:016x}", DEDUP_GENERATION_CAPACITY + 9),
             DownloadEvent::Complete
         )));

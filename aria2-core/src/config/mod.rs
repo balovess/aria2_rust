@@ -452,6 +452,10 @@ mod tests {
             Some(1024 * 1024)
         );
         assert_eq!(
+            mgr.get_global_i64("min-http-range-size").await,
+            Some(crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES as i64)
+        );
+        assert_eq!(
             mgr.get_global_bool("enable-http-pipelining").await,
             Some(true)
         );
@@ -459,9 +463,9 @@ mod tests {
         {
             assert_eq!(
                 mgr.get_global_bool("bt-load-saved-metadata").await,
-                Some(true)
+                Some(false)
             );
-            assert_eq!(mgr.get_global_bool("bt-save-metadata").await, Some(true));
+            assert_eq!(mgr.get_global_bool("bt-save-metadata").await, Some(false));
         }
     }
 

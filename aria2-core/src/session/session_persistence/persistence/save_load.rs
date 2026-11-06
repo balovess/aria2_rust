@@ -120,14 +120,6 @@ impl SessionPersistence {
             debug!(path = %cookie_path.display(), "Cookies persisted to session");
         }
 
-        // Keep the legacy JSON adapter available for existing callers.
-        if let Some(ref jar) = self.cookie_jar {
-            let legacy_path = self.session_dir.join("cookies.json");
-            if let Err(e) = Self::save_cookie_jar_to_file(jar, &legacy_path).await {
-                warn!("Failed to persist legacy cookies: {}", e);
-            }
-        }
-
         info!(
             saved,
             dir = %self.session_dir.display(),
@@ -284,21 +276,6 @@ impl SessionPersistence {
             }
         }
 
-        // Read the legacy JSON adapter when present so existing session/API
-        // callers continue to observe the persisted jar alongside canonical storage.
-        let legacy_path = self.session_dir.join("cookies.json");
-        if legacy_path.exists() {
-            match Self::load_cookie_jar_from_file(&legacy_path).await {
-                Ok(jar) => {
-                    self.cookie_jar = Some(jar);
-                    info!("Loaded legacy cookies from session");
-                }
-                Err(e) => {
-                    warn!("Failed to load legacy cookies from session: {}", e);
-                }
-            }
-        }
-
         info!(
             loaded,
             dir = %self.session_dir.display(),
@@ -343,7 +320,9 @@ impl SessionPersistence {
             )
         })?;
 
-        let memory_download = options.uses_memory_download()
+        let memory_download = uris
+            .first()
+            .is_some_and(|uri| options.uses_memory_download_for_uri(uri))
             || resume_data
                 .options
                 .get("aria2-rust-memory-download")

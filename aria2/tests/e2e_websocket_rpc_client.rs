@@ -18,6 +18,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const GRACEFUL_SHUTDOWN_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -233,11 +234,16 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
             .is_some_and(|result| result.starts_with("OK.")),
         "shutdown must return aria2's successful result: {shutdown}"
     );
-    assert!(aria2.wait_for_exit(PROCESS_EXIT_TIMEOUT).success());
+    drop(socket);
     stop_download_server.store(true, Ordering::Release);
     download_server
         .join()
         .expect("test HTTP server thread must exit cleanly");
+    assert!(
+        aria2
+            .wait_for_exit(GRACEFUL_SHUTDOWN_EXIT_TIMEOUT)
+            .success()
+    );
 }
 
 /// `aria2_original` limits WebSocket JSON parsing with

@@ -33,6 +33,14 @@ class DownloadStatus(str, Enum):
     REMOVED = "removed"
 
 
+class PositionMode(str, Enum):
+    """Queue-position operation accepted by ``aria2.changePosition``."""
+
+    SET_FROM_START = "POS_SET"
+    MOVE_FROM_START = "POS_CUR"
+    SET_FROM_END = "POS_END"
+
+
 _EVENT_METHOD_MAP: Dict[str, EventType] = {
     "aria2.onDownloadStart": EventType.DOWNLOAD_START,
     "aria2.onDownloadPause": EventType.DOWNLOAD_PAUSE,
@@ -82,6 +90,106 @@ class FileInfo:
 
 
 @dataclass
+class ServerInfo:
+    uri: Optional[str] = None
+    current_uri: Optional[str] = None
+    download_speed: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ServerInfo:
+        converted = _convert_keys(data)
+        return cls(
+            uri=converted.get("uri"),
+            current_uri=converted.get("current_uri"),
+            download_speed=converted.get("download_speed"),
+        )
+
+
+@dataclass
+class ServerInfoIndex:
+    index: Optional[str] = None
+    servers: List[ServerInfo] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ServerInfoIndex:
+        converted = _convert_keys(data)
+        servers_data = converted.get("servers") or []
+        return cls(
+            index=converted.get("index"),
+            servers=[
+                ServerInfo.from_dict(server) if isinstance(server, dict) else server
+                for server in servers_data
+            ],
+        )
+
+
+@dataclass
+class TrackerInfo:
+    uri: Optional[str] = None
+    tier: Optional[int] = None
+    current: Optional[bool] = None
+    last_attempt: Optional[bool] = None
+    announce_ready: Optional[bool] = None
+    all_failed: Optional[bool] = None
+    in_flight: Optional[int] = None
+    interval: Optional[str] = None
+    min_interval: Optional[int] = None
+    seeders: Optional[int] = None
+    leechers: Optional[int] = None
+    tracker_id: Optional[str] = None
+    last_failure_kind: Optional[str] = None
+    seconds_since_last_success: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> TrackerInfo:
+        converted = _convert_keys(data)
+        return cls(
+            uri=converted.get("uri"),
+            tier=converted.get("tier"),
+            current=converted.get("current"),
+            last_attempt=converted.get("last_attempt"),
+            announce_ready=converted.get("announce_ready"),
+            all_failed=converted.get("all_failed"),
+            in_flight=converted.get("in_flight"),
+            interval=converted.get("interval"),
+            min_interval=converted.get("min_interval"),
+            seeders=converted.get("seeders"),
+            leechers=converted.get("leechers"),
+            tracker_id=converted.get("tracker_id"),
+            last_failure_kind=converted.get("last_failure_kind"),
+            seconds_since_last_success=converted.get("seconds_since_last_success"),
+        )
+
+
+@dataclass
+class PeerInfo:
+    peer_id: Optional[str] = None
+    ip: Optional[str] = None
+    port: Optional[str] = None
+    bitfield: Optional[str] = None
+    am_choking: Optional[str] = None
+    peer_choking: Optional[str] = None
+    download_speed: Optional[str] = None
+    upload_speed: Optional[str] = None
+    seeder: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PeerInfo:
+        converted = _convert_keys(data)
+        return cls(
+            peer_id=converted.get("peer_id"),
+            ip=converted.get("ip"),
+            port=converted.get("port"),
+            bitfield=converted.get("bitfield"),
+            am_choking=converted.get("am_choking"),
+            peer_choking=converted.get("peer_choking"),
+            download_speed=converted.get("download_speed"),
+            upload_speed=converted.get("upload_speed"),
+            seeder=converted.get("seeder"),
+        )
+
+
+@dataclass
 class StatusInfo:
     gid: Optional[str] = None
     total_length: Optional[str] = None
@@ -89,16 +197,44 @@ class StatusInfo:
     upload_length: Optional[str] = None
     download_speed: Optional[str] = None
     upload_speed: Optional[str] = None
+    connections: Optional[str] = None
     error_code: Optional[str] = None
+    error_message: Optional[str] = None
     status: Optional[str] = None
     dir: Optional[str] = None
-    files: List[FileInfo] = field(default_factory=list)
+    # ``tellStatus`` may omit this field when the caller did not request it.
+    # Keep omission distinct from an explicitly returned empty list.
+    files: Optional[List[FileInfo]] = None
+    bittorrent: Optional[Dict[str, Any]] = None
+    following: Optional[str] = None
+    seeder: Optional[str] = None
+    bitfield: Optional[str] = None
+    piece_length: Optional[str] = None
+    num_pieces: Optional[str] = None
+    completed_pieces: Optional[str] = None
+    missing_pieces: Optional[str] = None
+    # ``followedBy`` is also optional in aria2's status response.
+    followed_by: Optional[List[str]] = None
+    belongs_to: Optional[str] = None
+    info_hash: Optional[str] = None
+    num_seeders: Optional[str] = None
+    verified_length: Optional[str] = None
+    verify_integrity_pending: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StatusInfo:
         converted = _convert_keys(data)
-        files_data = converted.get("files") or []
-        files = [FileInfo.from_dict(f) if isinstance(f, dict) else f for f in files_data]
+        files = None
+        if "files" in converted and converted["files"] is not None:
+            files_data = converted["files"]
+            if isinstance(files_data, list):
+                files = [
+                    FileInfo.from_dict(f) if isinstance(f, dict) else f
+                    for f in files_data
+                ]
+        followed_by = converted.get("followed_by")
+        if not isinstance(followed_by, list):
+            followed_by = None
         return cls(
             gid=converted.get("gid"),
             total_length=converted.get("total_length"),
@@ -106,10 +242,26 @@ class StatusInfo:
             upload_length=converted.get("upload_length"),
             download_speed=converted.get("download_speed"),
             upload_speed=converted.get("upload_speed"),
+            connections=converted.get("connections"),
             error_code=converted.get("error_code"),
+            error_message=converted.get("error_message"),
             status=converted.get("status"),
             dir=converted.get("dir"),
             files=files,
+            bittorrent=converted.get("bittorrent"),
+            following=converted.get("following"),
+            seeder=converted.get("seeder"),
+            bitfield=converted.get("bitfield"),
+            piece_length=converted.get("piece_length"),
+            num_pieces=converted.get("num_pieces"),
+            completed_pieces=converted.get("completed_pieces"),
+            missing_pieces=converted.get("missing_pieces"),
+            followed_by=followed_by,
+            belongs_to=converted.get("belongs_to"),
+            info_hash=converted.get("info_hash"),
+            num_seeders=converted.get("num_seeders"),
+            verified_length=converted.get("verified_length"),
+            verify_integrity_pending=converted.get("verify_integrity_pending"),
         )
 
 
@@ -161,25 +313,62 @@ class SessionInfo:
 
 
 @dataclass
+class DhtStatus:
+    state: Optional[str] = None
+    total_nodes: Optional[str] = None
+    good_nodes: Optional[str] = None
+    pending_transactions: Optional[str] = None
+    peer_info_hashes: Optional[str] = None
+    stored_peers: Optional[str] = None
+    peer_storage_evictions: Optional[str] = None
+    max_peer_info_hashes: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DhtStatus:
+        converted = _convert_keys(data)
+        return cls(
+            state=converted.get("state"),
+            total_nodes=converted.get("total_nodes"),
+            good_nodes=converted.get("good_nodes"),
+            pending_transactions=converted.get("pending_transactions"),
+            peer_info_hashes=converted.get("peer_info_hashes"),
+            stored_peers=converted.get("stored_peers"),
+            peer_storage_evictions=converted.get("peer_storage_evictions"),
+            max_peer_info_hashes=converted.get("max_peer_info_hashes"),
+        )
+
+
+@dataclass
 class DownloadEvent:
     event_type: EventType
     gid: Optional[str] = None
-    error_code: Optional[str] = None
+    error_code: Optional[int] = None
     files: Optional[List[FileInfo]] = None
 
     @classmethod
-    def from_rpc_notification(cls, method: str, params: Dict[str, Any]) -> DownloadEvent:
+    def from_rpc_notification(
+        cls, method: str, params: Dict[str, Any]
+    ) -> Optional[DownloadEvent]:
         event_type = _EVENT_METHOD_MAP.get(method)
         if event_type is None:
-            event_type = EventType.DOWNLOAD_START
+            return None
         converted = _convert_keys(params)
+        gid = converted.get("gid")
+        if not isinstance(gid, str) or not gid:
+            return None
         files_data = converted.get("files")
         files = None
         if files_data and isinstance(files_data, list):
             files = [FileInfo.from_dict(f) if isinstance(f, dict) else f for f in files_data]
+        raw_error_code = converted.get("error_code")
+        error_code = None
+        if isinstance(raw_error_code, int) and not isinstance(raw_error_code, bool):
+            error_code = raw_error_code
+        elif isinstance(raw_error_code, str) and raw_error_code.lstrip("-").isdigit():
+            error_code = int(raw_error_code)
         return cls(
             event_type=event_type,
-            gid=converted.get("gid"),
-            error_code=converted.get("error_code"),
+            gid=gid,
+            error_code=error_code,
             files=files,
         )

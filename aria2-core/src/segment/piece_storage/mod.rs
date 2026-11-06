@@ -20,7 +20,6 @@
 //! - [`DefaultPieceStorage`] — Default implementation suitable for HTTP/FTP and BT
 
 mod bitfield_man;
-mod bt_piece_provider;
 mod default_storage;
 mod trait_def;
 mod types;

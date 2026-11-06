@@ -11,6 +11,7 @@ use super::helpers::{
     is_uri_supplied_for_requested_file_entry, is_valid_uri,
 };
 use crate::download::request::Request;
+use crate::selector::uri_selector::InorderUriSelector;
 
 // ── Construction ─────────────────────────────────────────────────────
 
@@ -210,7 +211,8 @@ fn test_uris_concatenated() {
     let mut entry = FileEntry::default();
     entry.add_uri("http://remaining.com/file");
     entry
-        .spent_uris
+        .write_uri_state()
+        .spent
         .push_back("http://spent.com/file".to_string());
     let all = entry.uris();
     assert_eq!(all.len(), 2);
@@ -239,10 +241,36 @@ fn test_remove_uri_not_found() {
 fn test_remove_uri_from_spent() {
     let mut entry = FileEntry::default();
     entry
-        .spent_uris
+        .write_uri_state()
+        .spent
         .push_back("http://spent.com/file".to_string());
     assert!(entry.remove_uri("http://spent.com/file"));
     assert!(entry.spent_uris().is_empty());
+}
+
+#[test]
+fn change_uri_does_not_reuse_a_removed_uri_from_the_request_pool() {
+    let mut entry = FileEntry::default();
+    let removed = "http://old.example/file".to_string();
+    let replacement = "http://new.example/file".to_string();
+    entry.write_uri_state().spent.push_back(removed.clone());
+    entry.request_pool.push(Arc::new(
+        Request::new(&removed).expect("valid pooled request"),
+    ));
+
+    assert_eq!(
+        entry.change_uris_shared(
+            std::slice::from_ref(&removed),
+            std::slice::from_ref(&replacement),
+            None,
+        ),
+        (1, 1)
+    );
+
+    let request = entry
+        .get_request(&InorderUriSelector::new(), false, &[], "", "GET")
+        .expect("replacement URI yields a request");
+    assert_eq!(request.uri(), replacement);
 }
 
 #[test]
@@ -435,8 +463,10 @@ fn test_eq_same_offset() {
 fn test_reuse_uri_basic() {
     let mut entry = FileEntry::default();
     // Simulate: spent URIs without errors should be reusable.
-    entry.spent_uris.push_back("http://a.com/file".to_string());
-    entry.spent_uris.push_back("http://b.com/file".to_string());
+    entry.write_uri_state().spent.extend([
+        "http://a.com/file".to_string(),
+        "http://b.com/file".to_string(),
+    ]);
     // One URI had an error.
     entry.add_uri_result("http://a.com/file".to_string(), 2);
 
@@ -449,8 +479,10 @@ fn test_reuse_uri_basic() {
 #[test]
 fn test_reuse_uri_with_ignore() {
     let mut entry = FileEntry::default();
-    entry.spent_uris.push_back("http://a.com/file".to_string());
-    entry.spent_uris.push_back("http://b.com/file".to_string());
+    entry.write_uri_state().spent.extend([
+        "http://a.com/file".to_string(),
+        "http://b.com/file".to_string(),
+    ]);
 
     entry.reuse_uri(&["a.com".to_string()]);
     // a.com should be ignored.

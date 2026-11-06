@@ -34,9 +34,10 @@ impl ProgressCheckpoint {
     ) -> u64 {
         let has_compatible_checkpoint = matches!(
             ControlFile::load(&ControlFile::control_path_for(output_path)).await,
-            Ok(Some(control_file))
-                if control_file.total_length() == total_length
-                    && control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8)
+                Ok(Some(control_file))
+                    if control_file.total_length() == total_length
+                    && (control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8)
+                        || control_file.uses_native_layout())
         );
         if continue_download || has_compatible_checkpoint {
             existing_length
@@ -72,7 +73,8 @@ impl ProgressCheckpoint {
             match ControlFile::load(&path).await {
                 Ok(Some(control_file))
                     if control_file.total_length() == total_length
-                        && control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8) =>
+                        && (control_file.bitfield().len() == CHECKPOINT_PIECES.div_ceil(8)
+                            || control_file.uses_native_layout()) =>
                 {
                     Some(control_file)
                 }
@@ -110,7 +112,9 @@ impl ProgressCheckpoint {
             if trusted_length != control_file.completed_length() {
                 control_file.update_completed_length(trusted_length);
                 checkpoint.last_saved_length = trusted_length;
-                checkpoint.save().await;
+                if ensure_existing_payload_durable(output_path, trusted_length).await {
+                    checkpoint.save().await;
+                }
             }
         }
 
@@ -119,10 +123,13 @@ impl ProgressCheckpoint {
                 .await
             {
                 Ok(mut control_file) => {
-                    control_file.update_completed_length(existing_length.min(total_length));
-                    checkpoint.last_saved_length = control_file.completed_length();
+                    let completed_length = existing_length.min(total_length);
+                    control_file.update_completed_length(completed_length);
+                    checkpoint.last_saved_length = completed_length;
                     checkpoint.control_file = Some(control_file);
-                    checkpoint.save().await;
+                    if ensure_existing_payload_durable(output_path, completed_length).await {
+                        checkpoint.save().await;
+                    }
                 }
                 Err(error) => {
                     tracing::debug!(
@@ -154,20 +161,27 @@ impl ProgressCheckpoint {
             .map(|control_file| control_file.total_length())
     }
 
+    /// Whether an update would advance the saved length.
+    pub(crate) fn needs_update(&self, completed_length: u64, force: bool) -> bool {
+        let Some(control_file) = self.control_file.as_ref() else {
+            return false;
+        };
+        let completed_length = completed_length.min(control_file.total_length());
+        force || completed_length.saturating_sub(self.last_saved_length) >= CHECKPOINT_SAVE_INTERVAL
+    }
+
     /// Save progress when the batch threshold is reached, or immediately
     /// when `force` is used for a cancellation or terminal lifecycle edge.
+    /// Callers must durably sync the payload before advancing this checkpoint.
     pub(crate) async fn update(&mut self, completed_length: u64, force: bool) {
+        if !self.needs_update(completed_length, force) {
+            return;
+        }
         let Some(control_file) = self.control_file.as_mut() else {
             return;
         };
 
         let completed_length = completed_length.min(control_file.total_length());
-        if !force
-            && completed_length.saturating_sub(self.last_saved_length) < CHECKPOINT_SAVE_INTERVAL
-        {
-            return;
-        }
-
         control_file.update_completed_length(completed_length);
         self.save().await;
     }
@@ -229,6 +243,25 @@ impl ProgressCheckpoint {
             return;
         }
         self.last_saved_length = control_file.completed_length();
+    }
+}
+
+async fn ensure_existing_payload_durable(path: &Path, completed_length: u64) -> bool {
+    if completed_length == 0 {
+        return true;
+    }
+
+    match crate::filesystem::durability::sync_existing_payload(path).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(
+                path = %path.display(),
+                completed_length,
+                %error,
+                "Not persisting a checkpoint for an unsynced existing payload"
+            );
+            false
+        }
     }
 }
 

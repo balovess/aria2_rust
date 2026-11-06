@@ -178,10 +178,8 @@ impl DownloadEvent {
 }
 
 struct Subscriber {
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
     filter: Option<Vec<EventType>>,
+    sender: broadcast::Sender<(EventType, DownloadEvent)>,
 }
 
 /// Receiver registration whose lifetime is tied to the broadcast receiver.
@@ -192,6 +190,12 @@ pub struct ScopedSubscription {
 }
 
 impl ScopedSubscription {
+    /// Receive the next event accepted by this subscription's filter.
+    ///
+    /// Filtering happens before events enter this subscription's broadcast
+    /// buffer, so unrelated events do not consume its lag budget. Broadcast
+    /// lag is reported as `RecvError::Lagged` so callers can decide whether to
+    /// resynchronize.
     pub async fn recv(
         &mut self,
     ) -> Result<(EventType, DownloadEvent), broadcast::error::RecvError> {
@@ -208,25 +212,32 @@ impl Drop for ScopedSubscription {
 }
 
 pub struct EventPublisher {
-    tx: broadcast::Sender<(EventType, DownloadEvent)>,
+    capacity: usize,
     subscribers: Arc<RwLock<HashMap<String, Subscriber>>>,
 }
 
 impl EventPublisher {
     pub fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
+        // Preserve tokio::broadcast's validation for zero-capacity channels at
+        // construction time, even though each subscriber owns its channel.
+        let (_tx, _) = broadcast::channel::<(EventType, DownloadEvent)>(capacity);
         Self {
-            tx,
+            capacity,
             subscribers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    fn register(&self, id: String, filter: Option<Vec<EventType>>) {
+    fn register(
+        &self,
+        id: String,
+        filter: Option<Vec<EventType>>,
+        sender: broadcast::Sender<(EventType, DownloadEvent)>,
+    ) {
         let mut subscribers = self
             .subscribers
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        subscribers.insert(id.clone(), Subscriber { id, filter });
+        subscribers.insert(id, Subscriber { filter, sender });
     }
 
     pub async fn subscribe(
@@ -235,10 +246,11 @@ impl EventPublisher {
         filter: Option<Vec<EventType>>,
     ) -> ScopedSubscription {
         let id = sub_id.into();
-        self.register(id.clone(), filter);
+        let (sender, receiver) = broadcast::channel(self.capacity);
+        self.register(id.clone(), filter, sender);
         ScopedSubscription {
             id,
-            receiver: self.tx.subscribe(),
+            receiver,
             subscribers: Arc::clone(&self.subscribers),
         }
     }
@@ -253,10 +265,11 @@ impl EventPublisher {
         filter: Option<Vec<EventType>>,
     ) -> ScopedSubscription {
         let id = sub_id.into();
-        self.register(id.clone(), filter);
+        let (sender, receiver) = broadcast::channel(self.capacity);
+        self.register(id.clone(), filter, sender);
         ScopedSubscription {
             id,
-            receiver: self.tx.subscribe(),
+            receiver,
             subscribers: Arc::clone(&self.subscribers),
         }
     }
@@ -277,10 +290,31 @@ impl EventPublisher {
     }
 
     pub fn publish(&self, event_type: EventType, event: DownloadEvent) -> Result<usize, String> {
-        match self.tx.send((event_type, event)) {
-            Ok(_) => Ok(self.tx.receiver_count()),
-            Err(e) => Err(format!("No subscribers: {}", e)),
+        let subscribers = self
+            .subscribers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if subscribers.is_empty() {
+            return Err("No subscribers".to_string());
         }
+
+        let mut delivered = 0;
+        for subscriber in subscribers.values() {
+            let accepts = subscriber
+                .filter
+                .as_ref()
+                .is_none_or(|filter| filter.contains(&event_type));
+            if accepts
+                && subscriber
+                    .sender
+                    .send((event_type.clone(), event.clone()))
+                    .is_ok()
+            {
+                delivered += 1;
+            }
+        }
+
+        Ok(delivered)
     }
 
     pub fn publish_event(&self, event: DownloadEvent) -> Result<usize, String> {
@@ -466,8 +500,16 @@ impl WsSession {
         &self.id
     }
 
+    /// Receive the next event while preserving broadcast closure and lag
+    /// errors for callers that need explicit recovery behavior.
+    pub async fn recv_result(
+        &mut self,
+    ) -> Result<(EventType, DownloadEvent), broadcast::error::RecvError> {
+        self.rx.recv().await
+    }
+
     pub async fn recv(&mut self) -> Option<(EventType, DownloadEvent)> {
-        self.rx.recv().await.ok()
+        self.recv_result().await.ok()
     }
 }
 
@@ -731,6 +773,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_publisher_subscription_filter() {
+        let publisher = EventPublisher::new(2);
+        let mut subscription = publisher
+            .subscribe("client-filtered", Some(vec![EventType::DownloadComplete]))
+            .await;
+
+        for index in 0..8 {
+            assert_eq!(
+                publisher
+                    .publish(
+                        EventType::DownloadStart,
+                        DownloadEvent::download_start(format!("ignored-{index}")),
+                    )
+                    .expect("subscriber should remain registered"),
+                0,
+                "filtered events should not be delivered"
+            );
+        }
+
+        assert_eq!(
+            publisher
+                .publish(
+                    EventType::DownloadComplete,
+                    DownloadEvent::download_complete("accepted-gid"),
+                )
+                .expect("subscriber should receive the broadcast"),
+            1
+        );
+
+        let (event_type, event) = subscription.recv().await.unwrap();
+        assert_eq!(event_type, EventType::DownloadComplete);
+        assert_eq!(event.gid(), "accepted-gid");
+    }
+
+    #[tokio::test]
     async fn test_publisher_unsubscribe() {
         let publisher = EventPublisher::new(16);
         let _subscription = publisher.subscribe("client-1", None).await;
@@ -758,6 +835,30 @@ mod tests {
 
         drop(subscription);
         assert_eq!(publisher.subscriber_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_subscription_reports_broadcast_lag() {
+        let publisher = EventPublisher::new(1);
+        let mut subscription = publisher.subscribe("lagging-client", None).await;
+
+        publisher
+            .publish(
+                EventType::DownloadStart,
+                DownloadEvent::download_start("gid-1"),
+            )
+            .unwrap();
+        publisher
+            .publish(
+                EventType::DownloadComplete,
+                DownloadEvent::download_complete("gid-1"),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            subscription.recv().await,
+            Err(broadcast::error::RecvError::Lagged(1))
+        ));
     }
 
     #[tokio::test]

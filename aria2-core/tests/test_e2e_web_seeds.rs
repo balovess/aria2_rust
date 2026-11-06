@@ -15,7 +15,7 @@ use e2e_helpers::mock_http_server::MockHttpServer;
 
 #[tokio::test]
 async fn test_web_seed_client_basic() {
-    use aria2_core::engine::bt_web_seed::WebSeedClient;
+    use aria2_core::engine::bittorrent::download::web_seed::WebSeedClient;
 
     // Create test data (4 pieces of 16KB each)
     let piece_length = 16384u64;
@@ -51,7 +51,7 @@ async fn test_web_seed_client_basic() {
 
 #[tokio::test]
 async fn test_web_seed_manager_fallback() {
-    use aria2_core::engine::bt_web_seed::WebSeedManager;
+    use aria2_core::engine::bittorrent::download::web_seed::WebSeedManager;
 
     // Create test data
     let piece_length = 16384u32;
@@ -94,7 +94,7 @@ async fn test_web_seed_manager_fallback() {
 
 #[tokio::test]
 async fn test_web_seed_last_piece() {
-    use aria2_core::engine::bt_web_seed::WebSeedClient;
+    use aria2_core::engine::bittorrent::download::web_seed::WebSeedClient;
 
     // Create data where last piece is smaller
     let piece_length = 16384u64;
@@ -134,7 +134,7 @@ async fn test_web_seed_last_piece() {
 
 #[tokio::test]
 async fn test_web_seed_stats() {
-    use aria2_core::engine::bt_web_seed::{WebSeedClient, WebSeedStats};
+    use aria2_core::engine::bittorrent::download::web_seed::{WebSeedClient, WebSeedStats};
     use std::sync::Arc;
 
     // Create test data
@@ -173,7 +173,7 @@ async fn test_web_seed_stats() {
 
 #[tokio::test]
 async fn test_web_seed_manager_multiple_urls() {
-    use aria2_core::engine::bt_web_seed::WebSeedManager;
+    use aria2_core::engine::bittorrent::download::web_seed::WebSeedManager;
 
     // Create test data
     let piece_length = 16384u32;

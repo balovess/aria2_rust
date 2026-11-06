@@ -1,12 +1,19 @@
 //! FileEntry struct definition, construction, simple accessors, and comparison traits.
 
-use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
 use super::types::UriResult;
 use crate::download::request::Request;
+
+/// URI lifecycle shared by immutable `DownloadContext` snapshots.
+#[derive(Debug, Default)]
+pub(super) struct UriState {
+    pub(super) remaining: std::collections::VecDeque<String>,
+    pub(super) spent: std::collections::VecDeque<String>,
+    pub(super) results: std::collections::VecDeque<UriResult>,
+}
 
 // ---------------------------------------------------------------------------
 // FileEntry — per-file tracking object
@@ -40,12 +47,8 @@ pub struct FileEntry {
     pub(super) offset: u64,
 
     // ── URI state machine ────────────────────────────────────────────────
-    /// URIs not yet used or currently in-flight.
-    pub(super) remaining_uris: VecDeque<String>,
-    /// URIs already dispatched (consumed from `remaining_uris`).
-    pub(super) spent_uris: VecDeque<String>,
-    /// URI attempt results, sorted ascending by time of result.
-    pub(super) uri_results: VecDeque<UriResult>,
+    /// URI queues are the only mutable part shared with active download sessions.
+    pub(super) uri_state: RwLock<UriState>,
 
     // ── Request state machine ────────────────────────────────────────────
     /// Idle/queued requests sorted by avg download speed (fastest first).
@@ -85,9 +88,7 @@ impl Default for FileEntry {
         Self {
             length: 0,
             offset: 0,
-            remaining_uris: VecDeque::new(),
-            spent_uris: VecDeque::new(),
-            uri_results: VecDeque::new(),
+            uri_state: RwLock::new(UriState::default()),
             request_pool: Vec::new(),
             in_flight_requests: Vec::new(),
             path: String::new(),
@@ -103,6 +104,18 @@ impl Default for FileEntry {
 }
 
 impl FileEntry {
+    pub(super) fn read_uri_state(&self) -> RwLockReadGuard<'_, UriState> {
+        self.uri_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn write_uri_state(&self) -> RwLockWriteGuard<'_, UriState> {
+        self.uri_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Create a new `FileEntry` with the given path, length, offset, and URIs.
     ///
     /// Sets `requested` to `true` (matching C++ parameterized constructor).

@@ -5,11 +5,11 @@
 mod fixtures;
 
 #[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_download_command::BtDownloadCommand;
+use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 #[cfg(feature = "metalink")]
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::validation::protocol_detector::detect;
 use aria2_core::validation::uri::validate;

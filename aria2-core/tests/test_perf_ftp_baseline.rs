@@ -1,7 +1,7 @@
 use std::time::Instant;
 mod fixtures;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::ftp::download_command::FtpDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use fixtures::mock_ftp_server::MockFtpServer;
 

@@ -17,9 +17,7 @@ use aria2_core::engine::download_event_hooks::{
 };
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
-use aria2_rpc::server::{
-    AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig,
-};
+use aria2_rpc::server::{AuthConfig, CorsConfig, RpcServer, ServerConfig, TlsConfig};
 use aria2_rpc::websocket::{DownloadEvent as RpcDownloadEvent, EventType};
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info};
@@ -82,13 +80,11 @@ fn rpc_bind_hosts(host: &str, listen_all: bool, disable_ipv6: bool) -> Result<Ve
 ///
 /// # Lifetime
 ///
-/// The bridge holds a [`Weak`] reference to the [`RpcEngine`]. The core bus is
-/// a process-wide singleton with no listener-removal API, so a strong
-/// reference would keep the engine (and everything it owns — the group
-/// manager, the command channel, all task state) alive for the whole process
-/// lifetime even after the RPC server has been torn down. When the upgrade
-/// fails the event is silently dropped: there is no publisher left to receive
-/// it.
+/// The bridge holds a [`Weak`] reference to the [`RpcEngine`]. The registration
+/// is also explicitly removed when the RPC serving task exits, so a restarted
+/// server does not accumulate stale adapters on the process-wide core bus.
+/// When the weak upgrade fails, the event is silently dropped: there is no
+/// publisher left to receive it.
 pub struct CoreEventBridge {
     engine: Weak<RpcEngine>,
 }
@@ -200,13 +196,11 @@ impl App {
     /// - `rpc-cors-domain` — CORS allowed origins
     ///
     /// Returns a handle to the server task on success.
-    pub(super) async fn start_rpc_server<
-        T: Into<aria2_core::engine::engine_command::EngineCommandSender>,
-    >(
+    pub(super) async fn start_rpc_server(
         &self,
         startup_plan: StartupPlan,
         group_man: Arc<RequestGroupMan>,
-        engine_cmd_tx: T,
+        engine_cmd_tx: aria2_core::engine::engine_command::EngineCommandSender,
     ) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
         if !startup_plan.starts_rpc() {
             return Err("The startup plan does not include an RPC server".to_string());
@@ -288,7 +282,7 @@ impl App {
         #[allow(unused_mut)]
         let mut backend = super::rpc_backend::CoreRpcBackend::new(
             group_man,
-            engine_cmd_tx.into(),
+            engine_cmd_tx,
             Arc::clone(&self.config),
             save_session_path,
             crate::identity::PRODUCT_VERSION,
@@ -298,8 +292,6 @@ impl App {
             backend.set_bt_registry(bt_registry);
         }
         let backend = Arc::new(backend);
-        let rpc_engine =
-            RpcEngine::with_backend(backend).with_auth_middleware(RpcAuthMiddleware::new(&secret));
 
         // Build server config
         let max_request_size = self
@@ -314,10 +306,21 @@ impl App {
             .with_cors(cors)
             .with_max_request_size(max_request_size);
 
-        // Share the engine before the server takes ownership so the core →
-        // RPC event bridge can hold a `Weak` handle to the very same
-        // instance the WebSocket sessions read from.
-        let rpc_engine = Arc::new(rpc_engine);
+        // Configure TLS before constructing the server through the public
+        // backend seam. The server owns the engine, and exposes that same
+        // shared instance for the core → RPC event bridge below.
+        let server_label = if rpc_secure { "HTTPS RPC" } else { "RPC" };
+        if rpc_secure {
+            let cert = cert_path.ok_or("rpc-certificate is required when rpc-secure is enabled")?;
+            let key = key_path.ok_or("rpc-private-key is required when rpc-secure is enabled")?;
+            info!("Starting HTTPS RPC server on {}:{}", host, port);
+            config = config.with_tls(TlsConfig::new(cert, key));
+        } else {
+            info!("Starting HTTP RPC server on {}:{}", host, port);
+        }
+        let server = RpcServer::new_with_backend(config, backend)
+            .map_err(|e| format!("Failed to create {server_label} server: {e}"))?;
+        let rpc_engine = server.engine();
 
         // Install the download lifecycle bridge on the process-wide core
         // event bus. Without this, `aria2.onDownloadComplete` /
@@ -328,25 +331,11 @@ impl App {
         // Registration must happen *before* the server starts serving so no
         // completion can slip through unobserved.
         let hooks = DownloadEventHooks::shared();
-        hooks.add_listener(Arc::new(CoreEventBridge::new(&rpc_engine)));
+        let listener_id = hooks.add_listener_with_id(Arc::new(CoreEventBridge::new(&rpc_engine)));
         info!(
             listeners = hooks.listener_count(),
             "Registered core→RPC download event bridge"
         );
-
-        // Create server with the pre-configured shared engine
-        let server = if rpc_secure {
-            let cert = cert_path.ok_or("rpc-certificate is required when rpc-secure is enabled")?;
-            let key = key_path.ok_or("rpc-private-key is required when rpc-secure is enabled")?;
-            info!("Starting HTTPS RPC server on {}:{}", host, port);
-            config = config.with_tls(TlsConfig::new(cert, key));
-            RpcServer::new_with_engine(config, Arc::clone(&rpc_engine))
-                .map_err(|e| format!("Failed to create HTTPS RPC server: {}", e))?
-        } else {
-            info!("Starting HTTP RPC server on {}:{}", host, port);
-            RpcServer::new_with_engine(config, Arc::clone(&rpc_engine))
-                .map_err(|e| format!("Failed to create RPC server: {}", e))?
-        };
 
         // Keep the user-requested one-shot CLI separate from RPC startup, but
         // retain aria2_original's address-family fallback when RPC is wanted.
@@ -361,6 +350,7 @@ impl App {
             }
         }
         if listeners.is_empty() {
+            hooks.remove_listener(listener_id);
             return Err(format!(
                 "Failed to bind RPC server on {}: {}",
                 server.addr(),
@@ -379,6 +369,7 @@ impl App {
 
         // Spawn server in background
         let server = Arc::new(server);
+        let hooks = Arc::clone(hooks);
         let handle = tokio::spawn(async move {
             let mut tasks = Vec::with_capacity(listeners.len());
             for listener in listeners {
@@ -392,6 +383,7 @@ impl App {
             for task in tasks {
                 let _ = task.await;
             }
+            hooks.remove_listener(listener_id);
         });
 
         Ok(handle)
@@ -404,7 +396,7 @@ use colored::Colorize;
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
-    use tokio::sync::mpsc;
+    use aria2_core::engine::engine_command::channel;
 
     const GID: &str = "2089b05ecca3d829";
 
@@ -569,7 +561,7 @@ mod bridge_tests {
                 .expect("rpc-listen-address should be valid");
         }
 
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, _cmd_rx) = channel();
         let error = app
             .start_rpc_server(
                 StartupPlan::resolve(crate::app::startup::StartupInputs {

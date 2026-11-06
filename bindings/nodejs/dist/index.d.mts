@@ -7,10 +7,26 @@ interface StatusInfo {
     uploadLength?: string;
     downloadSpeed?: string;
     uploadSpeed?: string;
+    connections?: string;
     errorCode?: string;
+    errorMessage?: string;
     status: DownloadStatus;
     dir?: string;
     files?: FileInfo[];
+    bittorrent?: Record<string, unknown>;
+    following?: string;
+    seeder?: string;
+    bitfield?: string;
+    pieceLength?: string;
+    numPieces?: string;
+    completedPieces?: string;
+    missingPieces?: string;
+    followedBy?: string[];
+    belongsTo?: string;
+    infoHash?: string;
+    numSeeders?: string;
+    verifiedLength?: string;
+    verifyIntegrityPending?: string;
 }
 interface GlobalStat {
     downloadSpeed: string;
@@ -39,11 +55,64 @@ interface UriEntry {
     uri: string;
     status: 'used' | 'waiting';
 }
+/** Queue-position operation accepted by aria2.changePosition. */
+declare const enum PositionMode {
+    SetFromStart = "POS_SET",
+    MoveFromStart = "POS_CUR",
+    SetFromEnd = "POS_END"
+}
+interface ServerInfo {
+    uri: string;
+    currentUri: string;
+    downloadSpeed: string;
+}
+interface ServerInfoIndex {
+    index: string;
+    servers: ServerInfo[];
+}
+interface PeerInfo {
+    peerId: string;
+    ip: string;
+    port: string;
+    bitfield?: string;
+    amChoking: string;
+    peerChoking: string;
+    downloadSpeed: string;
+    uploadSpeed: string;
+    seeder?: string;
+}
+interface TrackerInfo {
+    uri: string;
+    tier: number;
+    current: boolean;
+    lastAttempt: boolean;
+    announceReady: boolean;
+    allFailed: boolean;
+    inFlight: number;
+    interval: string;
+    minInterval: number;
+    seeders: number;
+    leechers: number;
+    trackerId: string;
+    lastFailureKind?: TrackerFailureKind;
+    secondsSinceLastSuccess?: number;
+}
+type TrackerFailureKind = 'network' | 'timeout' | 'remoteTemporary' | 'trackerRejected' | 'malformedResponse';
+interface DhtStatus {
+    state: string;
+    totalNodes: string;
+    goodNodes: string;
+    pendingTransactions: string;
+    peerInfoHashes: string;
+    storedPeers: string;
+    peerStorageEvictions: string;
+    maxPeerInfoHashes: string;
+}
 interface DownloadEvent {
     type: EventType;
     gid: string;
     errorCode?: number;
-    files?: unknown[];
+    files?: FileInfo[];
 }
 declare const enum EventType {
     DownloadStart = "aria2.onDownloadStart",
@@ -51,8 +120,7 @@ declare const enum EventType {
     DownloadStop = "aria2.onDownloadStop",
     DownloadComplete = "aria2.onDownloadComplete",
     DownloadError = "aria2.onDownloadError",
-    BtDownloadComplete = "aria2.onBtDownloadComplete",
-    BtDownloadError = "aria2.onBtDownloadError"
+    BtDownloadComplete = "aria2.onBtDownloadComplete"
 }
 declare const enum DownloadStatus {
     Active = "active",
@@ -68,7 +136,35 @@ interface ClientOptions {
     secret?: string;
 }
 
-declare const WS_EVENT_NAMES: readonly ["downloadStart", "downloadPause", "downloadStop", "downloadComplete", "downloadError", "btDownloadComplete", "btDownloadError"];
+declare class Aria2EventEmitter extends EventEmitter {
+    private wsUrl;
+    private ws;
+    private pendingWs;
+    private reconnectAttempts;
+    private reconnectTimer;
+    private closed;
+    private connectPromise;
+    private pendingConnectReject;
+    private terminalWaiters;
+    constructor(wsUrl: string, _options?: ClientOptions);
+    connect(): Promise<void>;
+    /**
+     * Wait for a terminal event for one GID without polling status.
+     *
+     * Events for other GIDs and non-terminal transitions are ignored. Register
+     * the wait before submitting a task when a fast completion must not be
+     * missed. The timeout covers waiting for the event after the WebSocket is
+     * connected; omit it for an unbounded download.
+     */
+    waitForTerminal(gid: string, timeoutMs?: number): Promise<DownloadEvent>;
+    private doConnect;
+    private setupMessageHandler;
+    private setupCloseHandler;
+    private attemptReconnect;
+    close(): Promise<void>;
+}
+
+declare const WS_EVENT_NAMES: readonly ["downloadStart", "downloadPause", "downloadStop", "downloadComplete", "downloadError", "btDownloadComplete"];
 type WsEventName = (typeof WS_EVENT_NAMES)[number];
 declare class Aria2Client {
     private transport;
@@ -77,16 +173,30 @@ declare class Aria2Client {
     private options;
     constructor(url?: string, options?: ClientOptions);
     private ensureEventEmitter;
-    addUri(uris: string[], options?: Record<string, unknown>): Promise<string>;
-    addTorrent(torrent: Buffer, options?: Record<string, unknown>): Promise<string>;
-    addMetalink(metalink: Buffer, options?: Record<string, unknown>): Promise<string>;
+    private getOrCreateEventEmitter;
+    /** Connect the notification WebSocket before starting a download. */
+    connectEvents(): Promise<Aria2EventEmitter>;
+    call<T = unknown>(method: string, params?: unknown[]): Promise<T>;
+    addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>;
+    addTorrent(torrent: Buffer, options?: Record<string, unknown>, webSeedUris?: string[], position?: number): Promise<string>;
+    addMetalink(metalink: Buffer, options?: Record<string, unknown>, position?: number): Promise<string[]>;
     remove(gid: string): Promise<string>;
     pause(gid: string): Promise<string>;
     unpause(gid: string): Promise<string>;
     forcePause(gid: string): Promise<string>;
     forceRemove(gid: string): Promise<string>;
-    forceUnpause(gid: string): Promise<string>;
+    pauseAll(): Promise<string>;
+    forcePauseAll(): Promise<string>;
+    unpauseAll(): Promise<string>;
+    changePosition(gid: string, position: number, mode: PositionMode): Promise<number>;
+    changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>;
     tellStatus(gid: string, keys?: string[]): Promise<StatusInfo>;
+    getFiles(gid: string): Promise<FileInfo[]>;
+    getUris(gid: string): Promise<UriEntry[]>;
+    getServers(gid: string): Promise<ServerInfoIndex[]>;
+    getPeers(gid: string): Promise<PeerInfo[]>;
+    getTrackers(gid: string): Promise<TrackerInfo[]>;
+    getDhtStatus(): Promise<DhtStatus>;
     tellActive(keys?: string[]): Promise<StatusInfo[]>;
     tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
     tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
@@ -102,7 +212,18 @@ declare class Aria2Client {
     shutdown(): Promise<string>;
     forceShutdown(): Promise<string>;
     saveSession(): Promise<string>;
+    updateBrowserContext(context: unknown): Promise<string>;
+    clearBrowserContext(): Promise<string>;
+    systemMulticall(calls: Array<{
+        methodName: string;
+        params?: unknown[];
+    }>): Promise<unknown[]>;
+    systemListMethods(): Promise<string[]>;
+    systemListNotifications(): Promise<string[]>;
+    private registerEventListener;
     on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
+    once(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
+    off(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
     close(): Promise<void>;
     destroy(): void;
 }
@@ -124,20 +245,4 @@ declare class TimeoutError extends Aria2Error {
     constructor(message: string);
 }
 
-declare class Aria2EventEmitter extends EventEmitter {
-    private wsUrl;
-    private ws;
-    private reconnectAttempts;
-    private reconnectTimer;
-    private closed;
-    private connectPromise;
-    constructor(wsUrl: string, _options?: ClientOptions);
-    connect(): Promise<void>;
-    private doConnect;
-    private setupMessageHandler;
-    private setupCloseHandler;
-    private attemptReconnect;
-    close(): Promise<void>;
-}
-
-export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, RpcError, type SessionInfo, type StatusInfo, TimeoutError, type UriEntry, type VersionInfo };
+export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, PositionMode, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerFailureKind, type TrackerInfo, type UriEntry, type VersionInfo };

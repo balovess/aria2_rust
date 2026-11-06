@@ -1,24 +1,7 @@
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
-
-use tokio::io::AsyncReadExt;
-use tokio::sync::Semaphore;
 
 use super::message_digest::{HashType, MessageDigest};
 use crate::error::{Aria2Error, Result};
-
-const MAX_CHECKSUM_WORKERS: usize = 4;
-
-fn checksum_slots() -> &'static Arc<Semaphore> {
-    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SLOTS.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(1, MAX_CHECKSUM_WORKERS);
-        Arc::new(Semaphore::new(workers))
-    })
-}
 
 #[derive(Debug, Clone)]
 pub struct Checksum {
@@ -86,21 +69,20 @@ impl Checksum {
     /// The payload is returned from the blocking worker so callers can retain
     /// it for the completed in-memory download without cloning the buffer.
     pub async fn verify_async(&self, data: Vec<u8>) -> Result<(Vec<u8>, bool)> {
-        let permit = checksum_slots()
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|error| Aria2Error::Io(format!("checksum dispatcher closed: {error}")))?;
         let hash_type = self.hash_type;
         let expected_hex = self.expected_hex.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let computed = MessageDigest::hash_hex(hash_type, &data);
-            let verified = computed.eq_ignore_ascii_case(&expected_hex);
-            (data, verified)
-        })
-        .await
-        .map_err(|error| Aria2Error::Io(format!("checksum task failed: {error}")))
+        crate::checksum::hash_worker_pool::shared()
+            .run(
+                move || {
+                    Ok({
+                        let computed = MessageDigest::hash_hex(hash_type, &data);
+                        let verified = computed.eq_ignore_ascii_case(&expected_hex);
+                        (data, verified)
+                    })
+                },
+                "checksum",
+            )
+            .await
     }
 
     pub fn create_validator<'a>(&'a self) -> ChecksumValidator<'a> {
@@ -113,17 +95,42 @@ impl Checksum {
 
 /// Verify a file incrementally without loading it into memory.
 pub async fn verify_file(path: &Path, checksum: &Checksum) -> Result<bool> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|error| Aria2Error::Io(format!("Failed to open {}: {}", path.display(), error)))?;
-    let mut reader = tokio::io::BufReader::with_capacity(65536, file);
+    let open_path = path.to_path_buf();
+    let mut file = crate::filesystem::disk_io_pool::shared()
+        .run(
+            move || {
+                std::fs::File::open(&open_path).map_err(|error| {
+                    Aria2Error::Io(format!("Failed to open {}: {error}", open_path.display()))
+                })
+            },
+            "checksum file open",
+        )
+        .await?;
     let mut digest = MessageDigest::new(checksum.hash_type);
-    let mut buffer = vec![0u8; 65536];
 
     loop {
-        let bytes_read = reader.read(&mut buffer).await.map_err(|error| {
-            Aria2Error::Io(format!("Failed to read {}: {}", path.display(), error))
-        })?;
+        let read_path = path.to_path_buf();
+        let (returned_file, read_result) = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    use std::io::Read;
+                    let mut buffer = vec![0u8; 65536];
+                    let result = file
+                        .read(&mut buffer)
+                        .map(|bytes_read| (buffer, bytes_read))
+                        .map_err(|error| {
+                            Aria2Error::Io(format!(
+                                "Failed to read {}: {error}",
+                                read_path.display()
+                            ))
+                        });
+                    Ok((file, result))
+                },
+                "checksum file read",
+            )
+            .await?;
+        file = returned_file;
+        let (mut buffer, bytes_read) = read_result?;
         if bytes_read == 0 {
             break;
         }
@@ -142,33 +149,24 @@ async fn update_digest_async(
     digest: MessageDigest,
     data: Vec<u8>,
 ) -> Result<(MessageDigest, Vec<u8>)> {
-    let permit = checksum_slots()
-        .clone()
-        .acquire_owned()
+    crate::checksum::hash_worker_pool::shared()
+        .run(
+            move || {
+                Ok({
+                    let mut digest = digest;
+                    digest.update(&data);
+                    (digest, data)
+                })
+            },
+            "checksum digest update",
+        )
         .await
-        .map_err(|error| Aria2Error::Io(format!("checksum dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let mut digest = digest;
-        digest.update(&data);
-        (digest, data)
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("checksum task failed: {error}")))
 }
 
 async fn finalize_digest_async(digest: MessageDigest) -> Result<String> {
-    let permit = checksum_slots()
-        .clone()
-        .acquire_owned()
+    crate::checksum::hash_worker_pool::shared()
+        .run(|| Ok(digest.finalize_hex()), "checksum digest finalize")
         .await
-        .map_err(|error| Aria2Error::Io(format!("checksum dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        digest.finalize_hex()
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("checksum task failed: {error}")))
 }
 
 pub struct ChecksumValidator<'a> {

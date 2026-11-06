@@ -132,6 +132,45 @@ impl MirrorCoordinator {
         Some((mirror_idx, mirror_url, seg_info))
     }
 
+    /// Select a mirror for a dynamically sized range within the next parent.
+    pub fn select_mirror_for_range_excluding(
+        &mut self,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, String, (u32, u64, u64))> {
+        let result = self
+            .segment_manager
+            .select_mirror_for_next_range_excluding(excluded_mirrors, max_lengths)?;
+        let (mirror_idx, range) = result;
+        let mirror_url = self.urls.get(mirror_idx).cloned()?;
+        Some((mirror_idx, mirror_url, range))
+    }
+
+    pub(crate) fn select_mirror_for_work_range_excluding(
+        &mut self,
+        segment_idx: u32,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, String, (u32, u64, u64))> {
+        let (mirror_idx, range) = self
+            .segment_manager
+            .select_mirror_for_segment_range_excluding(
+                segment_idx,
+                excluded_mirrors,
+                max_lengths,
+            )?;
+        let mirror_url = self.urls.get(mirror_idx).cloned()?;
+        Some((mirror_idx, mirror_url, range))
+    }
+
+    pub(crate) fn segment_is_complete(&self, segment_idx: u32) -> bool {
+        self.segment_manager
+            .segment_status(segment_idx as usize)
+            .is_some_and(|status| {
+                status == crate::engine::concurrent_segment_manager::SegmentStatus::Done
+            })
+    }
+
     /// Report a successful segment download.
     ///
     /// This updates server statistics with the measured speed and
@@ -162,6 +201,28 @@ impl MirrorCoordinator {
         }
 
         success
+    }
+
+    /// Report a successful dynamic subrange and return whether its parent
+    /// piece is now complete.
+    pub fn on_range_complete(
+        &mut self,
+        mirror_idx: usize,
+        seg_idx: u32,
+        len: u64,
+        bytes_per_sec: u64,
+    ) -> Option<bool> {
+        let is_multi = self.segment_manager.mirror_active_segments(mirror_idx) > 1;
+        let complete = self.segment_manager.report_segment_range_complete(
+            seg_idx,
+            len,
+            bytes_per_sec,
+            is_multi,
+        );
+        if complete.is_some() {
+            self.maybe_rebalance_connections();
+        }
+        complete
     }
 
     /// Report a failed segment download.
@@ -216,6 +277,16 @@ impl MirrorCoordinator {
     /// control file has no compatible segment layout.
     pub fn restore_completed_prefix(&mut self, length: u64) -> u64 {
         self.segment_manager.restore_completed_prefix(length)
+    }
+
+    /// Restore a durable contiguous prefix within one parent segment.
+    pub(crate) fn restore_completed_segment_prefix(
+        &mut self,
+        index: u32,
+        length: u64,
+    ) -> Option<u64> {
+        self.segment_manager
+            .restore_completed_segment_prefix(index, length)
     }
 
     /// Get the maximum download speed across all mirrors.
@@ -372,14 +443,6 @@ impl MirrorCoordinator {
     /// Get the configuration.
     pub fn config(&self) -> &MirrorConfig {
         &self.config
-    }
-
-    /// Return the number of prior attempts for one segment.
-    ///
-    /// The concurrent pipeline uses this value to apply the shared retry
-    /// policy without exposing the segment manager itself.
-    pub(crate) fn segment_retry_count(&self, seg_idx: u32) -> u32 {
-        self.segment_manager.segment_retry_count(seg_idx)
     }
 
     /// Expose the manager to the coordinator's white-box tests only.

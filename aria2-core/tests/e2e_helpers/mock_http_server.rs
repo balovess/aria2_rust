@@ -350,9 +350,9 @@ impl MockHttpServer {
         );
     }
 
-    /// Register a Range-capable response that emits fixed-size chunks slowly.
-    /// This lets lifecycle E2E tests issue pause/remove while a segment is in
-    /// flight, instead of racing a single buffered response to completion.
+    /// Register a response that emits fixed-size chunks slowly and supports
+    /// both full GETs and byte ranges. This lets lifecycle E2E tests issue
+    /// pause/remove while a segment is in flight.
     pub fn register_slow_range_response(
         &self,
         path: &str,
@@ -375,7 +375,16 @@ impl MockHttpServer {
                         .unwrap();
                 }
 
-                let Some((start, end)) = req
+                if body.is_empty() {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Accept-Ranges", "bytes")
+                        .header("Content-Length", 0)
+                        .body(empty_body())
+                        .unwrap();
+                }
+
+                let range = req
                     .headers()
                     .get("Range")
                     .and_then(|value| value.to_str().ok())
@@ -383,15 +392,30 @@ impl MockHttpServer {
                     .and_then(|value| value.split_once('-'))
                     .and_then(|(start, end)| {
                         let start = start.parse::<usize>().ok()?;
-                        let end = end.parse::<usize>().ok()?.min(body.len().saturating_sub(1));
+                        let end = if end.is_empty() {
+                            body.len() - 1
+                        } else {
+                            end.parse::<usize>().ok()?.min(body.len() - 1)
+                        };
                         (start <= end && start < body.len()).then_some((start, end))
-                    })
-                else {
+                    });
+                let (start, end) = if let Some(range) = range {
+                    range
+                } else if req.headers().contains_key("Range") {
                     return Response::builder()
                         .status(StatusCode::RANGE_NOT_SATISFIABLE)
                         .header("Content-Range", format!("bytes=*/{}", body.len()))
                         .body(empty_body())
                         .unwrap();
+                } else {
+                    (0, body.len() - 1)
+                };
+
+                let is_range_request = req.headers().contains_key("Range");
+                let status = if is_range_request {
+                    StatusCode::PARTIAL_CONTENT
+                } else {
+                    StatusCode::OK
                 };
 
                 let range = Arc::new(body[start..=end].to_vec());
@@ -413,16 +437,19 @@ impl MockHttpServer {
                     }
                 });
 
-                Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
+                let builder = Response::builder()
+                    .status(status)
                     .header("Accept-Ranges", "bytes")
-                    .header(
+                    .header("Content-Length", end - start + 1);
+                let builder = if is_range_request {
+                    builder.header(
                         "Content-Range",
                         format!("bytes={}-{}/{}", start, end, total_length),
                     )
-                    .header("Content-Length", end - start + 1)
-                    .body(StreamBody::new(stream).boxed())
-                    .unwrap()
+                } else {
+                    builder
+                };
+                builder.body(StreamBody::new(stream).boxed()).unwrap()
             },
         );
     }

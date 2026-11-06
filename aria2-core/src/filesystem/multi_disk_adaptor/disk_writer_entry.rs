@@ -38,7 +38,7 @@ pub(crate) enum OpenMode {
 /// This is the Rust equivalent of the C++ `DiskWriterEntry`.
 pub struct DiskWriterEntry {
     pub(super) file_entry: FileEntry,
-    file: Option<tokio::fs::File>,
+    file: Option<std::sync::Arc<std::fs::File>>,
     is_open: bool,
     pub(super) needs_file_allocation: bool,
     pub(super) needs_disk_writer: bool,
@@ -76,16 +76,24 @@ impl DiskWriterEntry {
     /// Creates parent directories if needed, truncates the file to
     /// `file_entry.length`, and marks the entry as open.
     pub(super) async fn init_and_open_file(&mut self, read_only: bool) -> Result<()> {
-        self.ensure_parent_dirs()?;
-        let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(!read_only)
-            .read(true)
-            .create(true)
-            .truncate(true);
-        let f = opts.open(&self.file_entry.path).await.map_err(|e| {
-            Aria2Error::FileCreate(format!("initAndOpenFile {:?}: {}", self.file_entry.path, e))
-        })?;
-        self.file = Some(f);
+        self.ensure_parent_dirs().await?;
+        let path = self.file_entry.path.clone();
+        let f = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    let mut opts = std::fs::OpenOptions::new();
+                    opts.write(!read_only)
+                        .read(true)
+                        .create(true)
+                        .truncate(true);
+                    opts.open(&path).map_err(|e| {
+                        Aria2Error::FileCreate(format!("initAndOpenFile {:?}: {e}", path))
+                    })
+                },
+                "multi-file writer open",
+            )
+            .await?;
+        self.file = Some(std::sync::Arc::new(f));
         self.is_open = true;
         debug!("initAndOpenFile: {:?}", self.file_entry.path);
         Ok(())
@@ -95,17 +103,24 @@ impl DiskWriterEntry {
     ///
     /// Creates the file if it doesn't exist (including parent directories).
     pub(super) async fn open_file(&mut self, read_only: bool) -> Result<()> {
-        self.ensure_parent_dirs()?;
-        let mut opts = tokio::fs::OpenOptions::new();
-        if read_only {
-            opts.read(true);
-        } else {
-            opts.write(true).read(true).create(true);
-        }
-        let f = opts.open(&self.file_entry.path).await.map_err(|e| {
-            Aria2Error::FileOpen(format!("openFile {:?}: {}", self.file_entry.path, e))
-        })?;
-        self.file = Some(f);
+        self.ensure_parent_dirs().await?;
+        let path = self.file_entry.path.clone();
+        let f = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    let mut opts = std::fs::OpenOptions::new();
+                    if read_only {
+                        opts.read(true);
+                    } else {
+                        opts.write(true).read(true).create(true);
+                    }
+                    opts.open(&path)
+                        .map_err(|e| Aria2Error::FileOpen(format!("openFile {:?}: {e}", path)))
+                },
+                "multi-file writer open",
+            )
+            .await?;
+        self.file = Some(std::sync::Arc::new(f));
         self.is_open = true;
         debug!("openFile: {:?}", self.file_entry.path);
         Ok(())
@@ -115,19 +130,23 @@ impl DiskWriterEntry {
     ///
     /// Does NOT create the file or parent directories.
     pub(super) async fn open_existing_file(&mut self, read_only: bool) -> Result<()> {
-        let mut opts = tokio::fs::OpenOptions::new();
-        if read_only {
-            opts.read(true);
-        } else {
-            opts.write(true).read(true);
-        }
-        let f = opts.open(&self.file_entry.path).await.map_err(|e| {
-            Aria2Error::Io(format!(
-                "openExistingFile {:?}: {}",
-                self.file_entry.path, e
-            ))
-        })?;
-        self.file = Some(f);
+        let path = self.file_entry.path.clone();
+        let f = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    let mut opts = std::fs::OpenOptions::new();
+                    if read_only {
+                        opts.read(true);
+                    } else {
+                        opts.write(true).read(true);
+                    }
+                    opts.open(&path)
+                        .map_err(|e| Aria2Error::Io(format!("openExistingFile {:?}: {e}", path)))
+                },
+                "multi-file existing writer open",
+            )
+            .await?;
+        self.file = Some(std::sync::Arc::new(f));
         self.is_open = true;
         debug!("openExistingFile: {:?}", self.file_entry.path);
         Ok(())
@@ -147,8 +166,17 @@ impl DiskWriterEntry {
         if self.is_open {
             // Convert to std::fs::File and drop synchronously to avoid
             // Windows "Access denied" from background close task.
-            if let Some(f) = self.file.take() {
-                drop(f.into_std().await);
+            if let Some(file) = self.file.take() {
+                crate::filesystem::disk_io_pool::shared()
+                    .run(
+                        move || {
+                            drop(file);
+                            Ok(())
+                        },
+                        "multi-file writer close",
+                    )
+                    .await
+                    .ok();
             }
             self.is_open = false;
             trace!("closeFile: {:?}", self.file_entry.path);
@@ -167,30 +195,43 @@ impl DiskWriterEntry {
 
     /// Actual size of the file on disk.
     pub async fn size(&self) -> Result<u64> {
-        let meta = tokio::fs::metadata(&self.file_entry.path)
+        let path = self.file_entry.path.clone();
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    std::fs::metadata(path)
+                        .map(|metadata| metadata.len())
+                        .map_err(Aria2Error::from)
+                },
+                "multi-file writer metadata",
+            )
             .await
-            .map_err(|e| Aria2Error::Io(format!("metadata {:?}: {}", self.file_entry.path, e)))?;
-        Ok(meta.len())
     }
 
     /// Write `data` at `offset` within this file.
     ///
     /// The file must already be open.
     pub(super) async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-        let file = self.file.as_mut().ok_or_else(|| {
+        let path = self.file_entry.path.clone();
+        let file = self.file.as_ref().cloned().ok_or_else(|| {
             Aria2Error::Io(format!(
-                "write_at: file not open: {:?}",
-                self.file_entry.path
+                "multi-file writer write: file not open: {:?}",
+                path
             ))
         })?;
-        file.seek(std::io::SeekFrom::Start(offset))
+        let data = data.to_vec();
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    crate::filesystem::positioned_disk_writer::platform_io::write_all_at(
+                        file.as_ref(),
+                        &data,
+                        offset,
+                    )
+                },
+                "multi-file writer write",
+            )
             .await
-            .map_err(|e| Aria2Error::Io(format!("seek {:?}: {}", self.file_entry.path, e)))?;
-        file.write_all(data)
-            .await
-            .map_err(|e| Aria2Error::Io(format!("write {:?}: {}", self.file_entry.path, e)))?;
-        Ok(())
     }
 
     /// Read exactly `buf.len()` bytes from `offset` within this file.
@@ -198,28 +239,27 @@ impl DiskWriterEntry {
     /// Returns the number of bytes actually read (may be less than `buf.len()`
     /// at EOF). The file must already be open.
     pub(super) async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let file = self.file.as_mut().ok_or_else(|| {
-            Aria2Error::Io(format!(
-                "read_at: file not open: {:?}",
-                self.file_entry.path
-            ))
+        let path = self.file_entry.path.clone();
+        let file = self.file.as_ref().cloned().ok_or_else(|| {
+            Aria2Error::Io(format!("multi-file writer read: file not open: {:?}", path))
         })?;
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|e| Aria2Error::Io(format!("seek {:?}: {}", self.file_entry.path, e)))?;
-        match file.read(buf).await {
-            Ok(0) => Ok(0),
-            Ok(n) => Ok(n),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Partial read at end of file — return what we got.
-                Ok(0)
-            }
-            Err(e) => Err(Aria2Error::Io(format!(
-                "read {:?}: {}",
-                self.file_entry.path, e
-            ))),
-        }
+        let mut data = buf.to_vec();
+        let read = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    crate::filesystem::positioned_disk_writer::platform_io::read_exact_at(
+                        file.as_ref(),
+                        &mut data,
+                        offset,
+                    )
+                    .map(|read| (data, read))
+                },
+                "multi-file writer read",
+            )
+            .await?;
+        let (data, read) = read;
+        buf[..read].copy_from_slice(&data[..read]);
+        Ok(read)
     }
 
     /// Advise the OS that a recently read file range is no longer needed.
@@ -231,27 +271,29 @@ impl DiskWriterEntry {
         let Some(file) = self.file.as_ref() else {
             return;
         };
-        crate::filesystem::disk_adaptor::advise_drop_cache(file, offset, length);
+        crate::filesystem::disk_adaptor::advise_drop_cache(file.as_ref(), offset, length);
     }
 
     /// Truncate this file to `length` bytes.
     pub(super) async fn truncate(&mut self, length: u64) -> Result<()> {
-        if let Some(ref mut file) = self.file {
-            file.set_len(length).await.map_err(|e| {
-                Aria2Error::Io(format!("truncate {:?}: {}", self.file_entry.path, e))
-            })?;
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        file.set_len(length)
+                            .map_err(|e| Aria2Error::Io(format!("truncate: {e}")))
+                    },
+                    "multi-file writer truncate",
+                )
+                .await?;
         }
         Ok(())
     }
 
     /// Flush OS buffers for this file.
     pub(super) async fn flush(&mut self) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
-        if let Some(ref mut file) = self.file {
-            file.flush()
-                .await
-                .map_err(|e| Aria2Error::Io(format!("flush {:?}: {}", self.file_entry.path, e)))?;
-        }
+        // std::fs::File is unbuffered; flush has no work to do. Keep this
+        // operation a no-op, matching the previous Tokio file semantics.
         Ok(())
     }
 
@@ -285,16 +327,24 @@ impl DiskWriterEntry {
     }
 
     /// Create parent directories for the file path if they don't exist.
-    fn ensure_parent_dirs(&self) -> Result<()> {
-        if let Some(parent) = self.file_entry.path.parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Aria2Error::DirCreate(format!("create_dir_all {:?}: {}", parent, e))
-            })?;
-            debug!("Created parent directories: {:?}", parent);
-        }
-        Ok(())
+    async fn ensure_parent_dirs(&self) -> Result<()> {
+        let path = self.file_entry.path.clone();
+        crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    if let Some(parent) = path.parent()
+                        && !parent.as_os_str().is_empty()
+                        && !parent.exists()
+                    {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            Aria2Error::DirCreate(format!("create_dir_all {:?}: {}", parent, e))
+                        })?;
+                        debug!("Created parent directories: {:?}", parent);
+                    }
+                    Ok(())
+                },
+                "multi-file parent directory creation",
+            )
+            .await
     }
 }

@@ -7,12 +7,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
+
+const MAX_OUTPUT_FILENAME_BYTES: usize = 255;
 
 /// Compatibility policy used when selecting a local output path.
 ///
@@ -45,13 +46,30 @@ impl Default for OutputPathPolicy {
     }
 }
 
-/// Process-wide registry of output paths that are currently being written by active downloads.
+/// Process-wide registry of output paths claimed by active downloads.
 ///
-/// All download command types (`DownloadCommand`, `MetalinkDownloadCommand`,
-/// `ConcurrentDownloadCommand`) consult this registry **before** opening their disk writer,
-/// so that concurrent downloads targeting the same filename receive distinct paths.
+/// HTTP and Metalink resolve collisions to a distinct filename. BitTorrent
+/// reserves its complete file set and rejects an overlap, matching aria2's
+/// duplicate-download contract. All paths share the same set so the policies
+/// remain effective across protocols.
 pub struct ActiveOutputRegistry {
-    inner: Arc<RwLock<HashSet<PathBuf>>>,
+    inner: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+/// Exact output paths owned by one BitTorrent command. Dropping the command
+/// releases the complete reservation, including on failed or cancelled runs.
+#[cfg(feature = "bittorrent")]
+#[must_use = "dropping the reservation releases its output paths"]
+pub(crate) struct OutputPathReservation {
+    inner: Arc<Mutex<HashSet<PathBuf>>>,
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(feature = "bittorrent")]
+impl Drop for OutputPathReservation {
+    fn drop(&mut self) {
+        release_paths(&self.inner, &self.paths);
+    }
 }
 
 impl Default for ActiveOutputRegistry {
@@ -64,8 +82,40 @@ impl ActiveOutputRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(HashSet::new())),
+            inner: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    fn lock_paths(&self) -> MutexGuard<'_, HashSet<PathBuf>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Atomically reserve a set of exact paths for a long-lived command.
+    ///
+    /// Unlike `resolve_with_policy`, this does not rename colliding paths or
+    /// reject paths merely because a file already exists on disk.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn reserve_exact_paths(
+        &self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> std::result::Result<OutputPathReservation, PathBuf> {
+        let paths = paths
+            .into_iter()
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect::<Vec<_>>();
+
+        let mut registry = self.lock_paths();
+        if let Some(conflict) = paths.iter().find(|path| registry.contains(*path)) {
+            return Err(conflict.clone());
+        }
+        registry.extend(paths.iter().cloned());
+
+        Ok(OutputPathReservation {
+            inner: Arc::clone(&self.inner),
+            paths,
+        })
     }
 
     /// Resolve the final output path for a download, registering it to prevent collisions.
@@ -79,7 +129,7 @@ impl ActiveOutputRegistry {
     /// The resolved `PathBuf` that the caller should use for all subsequent disk I/O.
     /// The caller **must** call [`Self::release`] when the download finishes (success or failure).
     pub async fn resolve(&self, desired: &Path) -> PathBuf {
-        let mut registry = self.inner.write().await;
+        let mut registry = self.lock_paths();
 
         if !registry.contains(desired) {
             registry.insert(desired.to_path_buf());
@@ -91,21 +141,13 @@ impl ActiveOutputRegistry {
         }
 
         // Collision detected — generate unique name with numeric suffix.
-        let stem = desired
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        let ext = desired
-            .extension()
-            .map(|e| format!(".{}", e.to_string_lossy()))
-            .unwrap_or_default();
+        let (stem, ext) = split_filename_for_aria2(desired);
 
         let parent = desired.parent().unwrap_or_else(|| Path::new("."));
 
         let mut counter: u32 = 1;
         loop {
-            let candidate = parent.join(format!("{}.{}{}", stem, counter, ext));
+            let candidate = parent.join(numbered_filename(&stem, &ext, counter));
 
             // Check both the in-progress registry AND the filesystem to avoid conflicts
             // with previously completed downloads that happened to use the same suffix.
@@ -123,7 +165,7 @@ impl ActiveOutputRegistry {
 
             // Safety upper bound to prevent unbounded looping in pathological cases.
             if counter > 10_000 {
-                let fallback = parent.join(format!("{}.{}", stem, counter));
+                let fallback = parent.join(numbered_filename(&stem, "", counter));
                 registry.insert(fallback.clone());
                 warn!(
                     "Exhausted normal suffix range for '{}', using fallback '{}'",
@@ -147,7 +189,7 @@ impl ActiveOutputRegistry {
         desired: &Path,
         policy: OutputPathPolicy,
     ) -> Result<PathBuf> {
-        let mut registry = self.inner.write().await;
+        let mut registry = self.lock_paths();
         let desired_claimed = registry.contains(desired);
         let desired_exists = desired.exists();
         let desired_has_control = ControlFile::control_path_for(desired).exists();
@@ -177,7 +219,7 @@ impl ActiveOutputRegistry {
         let (stem, ext) = split_filename_for_aria2(desired);
         let parent = desired.parent().unwrap_or_else(|| Path::new("."));
         for counter in 1..10_000u32 {
-            let candidate = parent.join(format!("{stem}.{counter}{ext}"));
+            let candidate = parent.join(numbered_filename(&stem, &ext, counter));
             let candidate_has_control = ControlFile::control_path_for(&candidate).exists();
             if !registry.contains(&candidate) && (!candidate.exists() || candidate_has_control) {
                 registry.insert(candidate.clone());
@@ -200,7 +242,7 @@ impl ActiveOutputRegistry {
     /// Must be called when a download completes (success or failure) so that the path
     /// becomes available for future downloads if needed.
     pub async fn release(&self, path: &Path) {
-        let mut registry = self.inner.write().await;
+        let mut registry = self.lock_paths();
         if registry.remove(path) {
             debug!("Output path released: {}", path.display());
         }
@@ -208,12 +250,22 @@ impl ActiveOutputRegistry {
 
     /// Return the number of paths currently registered (for diagnostics / testing).
     pub async fn len(&self) -> usize {
-        self.inner.read().await.len()
+        self.lock_paths().len()
     }
 
     /// Check whether the registry is empty.
     pub async fn is_empty(&self) -> bool {
-        self.inner.read().await.is_empty()
+        self.lock_paths().is_empty()
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+fn release_paths(inner: &Mutex<HashSet<PathBuf>>, paths: &[PathBuf]) {
+    let mut registry = inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for path in paths {
+        registry.remove(path);
     }
 }
 
@@ -246,6 +298,27 @@ fn split_filename_for_aria2(path: &Path) -> (String, String) {
         ),
         None => (file_name, String::new()),
     }
+}
+
+/// Build an aria2-style numbered filename without exceeding the portable
+/// basename limit. The suffix and extension are retained whenever possible;
+/// the stem is shortened first because it carries the least structural value.
+fn numbered_filename(stem: &str, ext: &str, counter: u32) -> String {
+    let suffix = format!(".{counter}");
+    let extension = truncate_utf8(ext, MAX_OUTPUT_FILENAME_BYTES.saturating_sub(suffix.len()));
+    let stem_limit = MAX_OUTPUT_FILENAME_BYTES
+        .saturating_sub(suffix.len())
+        .saturating_sub(extension.len());
+    let stem = truncate_utf8(stem, stem_limit);
+    format!("{stem}{suffix}{extension}")
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +423,70 @@ mod tests {
 
         assert_eq!(resolved, dir.path().join("download.1.bin"));
         assert_eq!(tokio::fs::read(&desired).await.unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn policy_rename_keeps_extension_and_portable_length_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join(format!("{}{}", "a".repeat(251), ".bin"));
+        tokio::fs::write(&desired, b"existing").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let resolved = registry
+            .resolve_with_policy(&desired, OutputPathPolicy::default())
+            .await
+            .unwrap();
+        let expected = format!("{}{}", "a".repeat(249), ".1.bin");
+
+        assert_eq!(
+            resolved.file_name().unwrap().to_str(),
+            Some(expected.as_str())
+        );
+        assert_eq!(resolved.file_name().unwrap().len(), 255);
+    }
+
+    #[tokio::test]
+    async fn active_collision_keeps_unextended_name_within_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("a".repeat(255));
+
+        let registry = ActiveOutputRegistry::new();
+        let _first = registry.resolve(&desired).await;
+        let resolved = registry.resolve(&desired).await;
+        let expected = format!("{}{}", "a".repeat(253), ".1");
+
+        assert_eq!(
+            resolved.file_name().unwrap().to_str(),
+            Some(expected.as_str())
+        );
+        assert_eq!(resolved.file_name().unwrap().len(), 255);
+    }
+
+    #[tokio::test]
+    async fn concurrent_policy_reservations_are_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("shared.bin");
+        let registry = Arc::new(ActiveOutputRegistry::new());
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let registry = Arc::clone(&registry);
+            let desired = desired.clone();
+            tasks.push(tokio::spawn(async move {
+                registry
+                    .resolve_with_policy(&desired, OutputPathPolicy::default())
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut resolved = HashSet::new();
+        for task in tasks {
+            resolved.insert(task.await.unwrap());
+        }
+
+        assert_eq!(resolved.len(), 16);
+        assert_eq!(registry.len().await, 16);
     }
 
     #[tokio::test]

@@ -10,31 +10,33 @@ pub const UTP_VERSION: u8 = 1;
 /// Size of uTP header in bytes
 pub const UTP_HEADER_SIZE: usize = 20;
 
+const SELECTIVE_ACK_EXTENSION: u8 = 1;
+
 /// Packet type constants as defined in BEP 29
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PacketType {
-    /// SYN packet - initiates connection
-    StSyn = 0,
     /// DATA packet - contains payload
-    StData = 1,
+    StData = 0,
+    /// FIN packet - gracefully closes connection
+    StFin = 1,
     /// ACK packet - acknowledges received data
     StAck = 2,
-    /// FIN packet - gracefully closes connection
-    StFin = 3,
     /// RESET packet - abruptly closes connection
-    StReset = 4,
+    StReset = 3,
+    /// SYN packet - initiates connection
+    StSyn = 4,
 }
 
 impl PacketType {
     /// Convert from u8 to PacketType
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => Some(PacketType::StSyn),
-            1 => Some(PacketType::StData),
+            0 => Some(PacketType::StData),
+            1 => Some(PacketType::StFin),
             2 => Some(PacketType::StAck),
-            3 => Some(PacketType::StFin),
-            4 => Some(PacketType::StReset),
+            3 => Some(PacketType::StReset),
+            4 => Some(PacketType::StSyn),
             _ => None,
         }
     }
@@ -114,8 +116,13 @@ pub struct UtpPacket {
     pub seq_nr: u16,
     /// Acknowledgment number (16 bits, big-endian)
     pub ack_nr: u16,
-    /// Optional payload (only for DATA and SYN packets)
+    /// Raw bytes after the fixed header, including extensions and application data.
     pub payload: Vec<u8>,
+}
+
+pub(crate) struct PacketExtensions<'a> {
+    pub selective_ack: Option<&'a [u8]>,
+    pub application_payload: &'a [u8],
 }
 
 impl UtpPacket {
@@ -146,7 +153,7 @@ impl UtpPacket {
 
     /// Create a SYN-ACK packet (server response to SYN)
     pub fn syn_ack(connection_id: u16, seq_nr: u16, ack_nr: u16, wnd_size: u32) -> Self {
-        let mut packet = Self::new(PacketType::StSyn);
+        let mut packet = Self::new(PacketType::StAck);
         packet.connection_id = connection_id;
         packet.seq_nr = seq_nr;
         packet.ack_nr = ack_nr;
@@ -309,11 +316,58 @@ impl UtpPacket {
         })
     }
 
-    /// Calculate the timestamp difference from a remote timestamp
-    pub fn calculate_timestamp_diff(&self, remote_timestamp: u32) -> u32 {
-        // Timestamp difference is the time since the remote packet was sent
-        // This is used for delay calculation
-        remote_timestamp.wrapping_sub(self.timestamp_difference_microseconds)
+    /// Calculate the local delay sample for this packet's remote send timestamp.
+    pub fn calculate_timestamp_diff(&self, local_timestamp: u32) -> u32 {
+        local_timestamp.wrapping_sub(self.timestamp_microseconds)
+    }
+
+    pub(crate) fn parse_extensions(&self) -> Result<PacketExtensions<'_>, UtpPacketError> {
+        let mut extension_type = self.extension;
+        let mut offset = 0;
+        let mut selective_ack = None;
+
+        while extension_type != 0 {
+            if self.payload.len().saturating_sub(offset) < 2 {
+                return Err(UtpPacketError::InvalidExtension(extension_type));
+            }
+            let next_extension = self.payload[offset];
+            let extension_length = usize::from(self.payload[offset + 1]);
+            let extension_start = offset + 2;
+            let extension_end = extension_start
+                .checked_add(extension_length)
+                .filter(|end| *end <= self.payload.len())
+                .ok_or(UtpPacketError::InvalidExtension(extension_type))?;
+
+            if extension_type == SELECTIVE_ACK_EXTENSION {
+                if extension_length < 4 || !extension_length.is_multiple_of(4) {
+                    return Err(UtpPacketError::InvalidExtension(extension_type));
+                }
+                if selective_ack.is_some() {
+                    return Err(UtpPacketError::InvalidExtension(extension_type));
+                }
+                selective_ack = Some(&self.payload[extension_start..extension_end]);
+            }
+
+            extension_type = next_extension;
+            offset = extension_end;
+        }
+
+        Ok(PacketExtensions {
+            selective_ack,
+            application_payload: &self.payload[offset..],
+        })
+    }
+
+    pub(crate) fn set_selective_ack(&mut self, mask: &[u8]) {
+        debug_assert!(mask.len() >= 4);
+        debug_assert!(mask.len().is_multiple_of(4));
+        debug_assert!(mask.len() <= usize::from(u8::MAX));
+
+        self.extension = SELECTIVE_ACK_EXTENSION;
+        self.payload.clear();
+        self.payload.reserve(mask.len() + 2);
+        self.payload.extend_from_slice(&[0, mask.len() as u8]);
+        self.payload.extend_from_slice(mask);
     }
 }
 
@@ -344,18 +398,18 @@ mod tests {
 
     #[test]
     fn test_packet_type_conversion() {
-        assert_eq!(PacketType::from_u8(0), Some(PacketType::StSyn));
-        assert_eq!(PacketType::from_u8(1), Some(PacketType::StData));
+        assert_eq!(PacketType::from_u8(0), Some(PacketType::StData));
+        assert_eq!(PacketType::from_u8(1), Some(PacketType::StFin));
         assert_eq!(PacketType::from_u8(2), Some(PacketType::StAck));
-        assert_eq!(PacketType::from_u8(3), Some(PacketType::StFin));
-        assert_eq!(PacketType::from_u8(4), Some(PacketType::StReset));
+        assert_eq!(PacketType::from_u8(3), Some(PacketType::StReset));
+        assert_eq!(PacketType::from_u8(4), Some(PacketType::StSyn));
         assert_eq!(PacketType::from_u8(5), None);
 
-        assert_eq!(PacketType::StSyn.to_u8(), 0);
-        assert_eq!(PacketType::StData.to_u8(), 1);
+        assert_eq!(PacketType::StData.to_u8(), 0);
+        assert_eq!(PacketType::StFin.to_u8(), 1);
         assert_eq!(PacketType::StAck.to_u8(), 2);
-        assert_eq!(PacketType::StFin.to_u8(), 3);
-        assert_eq!(PacketType::StReset.to_u8(), 4);
+        assert_eq!(PacketType::StReset.to_u8(), 3);
+        assert_eq!(PacketType::StSyn.to_u8(), 4);
     }
 
     #[test]
@@ -385,6 +439,15 @@ mod tests {
         assert_eq!(packet.seq_nr, 10);
         assert_eq!(packet.ack_nr, 5);
         assert_eq!(packet.payload, payload);
+    }
+
+    #[test]
+    fn timestamp_difference_uses_wrapping_local_minus_remote_time() {
+        let mut packet = UtpPacket::data(1, 2, 0, 1024, vec![1]);
+        packet.timestamp_microseconds = u32::MAX - 4;
+        packet.timestamp_difference_microseconds = 123_456;
+
+        assert_eq!(packet.calculate_timestamp_diff(7), 12);
     }
 
     #[test]
@@ -546,5 +609,28 @@ mod tests {
         assert_eq!(format!("{}", PacketType::StAck), "ACK");
         assert_eq!(format!("{}", PacketType::StFin), "FIN");
         assert_eq!(format!("{}", PacketType::StReset), "RESET");
+    }
+
+    #[test]
+    fn extension_chain_skips_unknown_extensions_and_separates_application_payload() {
+        let mut packet = UtpPacket::data(1, 2, 0, 1024, vec![]);
+        packet.extension = 42;
+        packet.payload = [1, 1, 0xAA, 0, 4, 0x05, 0, 0, 0, b'o', b'k'].to_vec();
+
+        let extensions = packet.parse_extensions().unwrap();
+        assert_eq!(extensions.selective_ack, Some([0x05, 0, 0, 0].as_slice()));
+        assert_eq!(extensions.application_payload, b"ok");
+    }
+
+    #[test]
+    fn selective_ack_extension_requires_a_nonempty_32_bit_multiple() {
+        let mut packet = UtpPacket::ack(1, 0, 1, 1024);
+        packet.extension = SELECTIVE_ACK_EXTENSION;
+        packet.payload = [0, 3, 0x01, 0, 0].to_vec();
+
+        assert!(matches!(
+            packet.parse_extensions(),
+            Err(UtpPacketError::InvalidExtension(SELECTIVE_ACK_EXTENSION))
+        ));
     }
 }

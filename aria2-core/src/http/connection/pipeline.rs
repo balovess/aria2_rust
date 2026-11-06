@@ -26,7 +26,7 @@ use crate::error::{Aria2Error, Result};
 use crate::http::auth::erase_confidential_info;
 use crate::http::connection::write_buffer::HttpWriteBuffer;
 use crate::http::header_processor::{HttpHeaderParseState, HttpHeaderProcessor, HttpResponseHead};
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 
 // ---------------------------------------------------------------------------
 // PendingRequest — mirrors C++ HttpRequestEntry

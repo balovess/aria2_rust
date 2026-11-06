@@ -15,7 +15,7 @@ use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
-use crate::engine::metalink_request_graph::MetalinkRequestGraph;
+use crate::engine::metalink::request_graph::MetalinkRequestGraph;
 use crate::error::Aria2Error;
 use crate::network::ConnectionContext;
 use crate::request::request_group::{GroupId, HaltReason, RequestGroup};
@@ -159,13 +159,12 @@ enum EngineCommandSenderBackend {
         pending_keys: Arc<Mutex<HashSet<EngineCommandCoalesceKey>>>,
         wake: Arc<Notify>,
     },
-    Legacy(mpsc::UnboundedSender<EngineCommand>),
 }
 
 /// Cloneable producer for engine commands.
 ///
-/// New engines use bounded normal/control queues. `From<UnboundedSender<_>>`
-/// remains available for older embedding fixtures and tests.
+/// New engines use bounded normal/control queues for both normal and control
+/// traffic.
 pub struct EngineCommandSender {
     backend: Arc<EngineCommandSenderBackend>,
 }
@@ -192,7 +191,6 @@ enum EngineCommandReceiverBackend {
         control_closed: bool,
         normal_closed: bool,
     },
-    Legacy(mpsc::UnboundedReceiver<EngineCommand>),
 }
 
 pub fn channel() -> (EngineCommandSender, EngineCommandReceiver) {
@@ -228,9 +226,6 @@ pub fn channel() -> (EngineCommandSender, EngineCommandReceiver) {
 impl EngineCommandSender {
     pub fn send(&self, command: EngineCommand) -> Result<(), EngineCommandSendError> {
         match self.backend.as_ref() {
-            EngineCommandSenderBackend::Legacy(sender) => sender
-                .send(command)
-                .map_err(|_| EngineCommandSendError::Closed),
             EngineCommandSenderBackend::Bounded {
                 control_tx,
                 normal_tx,
@@ -308,41 +303,19 @@ impl EngineCommandSender {
     pub async fn closed(&self) {
         match self.backend.as_ref() {
             EngineCommandSenderBackend::Bounded { normal_tx, .. } => normal_tx.closed().await,
-            EngineCommandSenderBackend::Legacy(sender) => sender.closed().await,
         }
     }
 
     pub fn snapshot(&self) -> EngineCommandQueueSnapshot {
         match self.backend.as_ref() {
             EngineCommandSenderBackend::Bounded { metrics, .. } => metrics.snapshot(),
-            EngineCommandSenderBackend::Legacy(_) => EngineCommandQueueSnapshot::default(),
-        }
-    }
-}
-
-impl From<mpsc::UnboundedSender<EngineCommand>> for EngineCommandSender {
-    fn from(sender: mpsc::UnboundedSender<EngineCommand>) -> Self {
-        Self {
-            backend: Arc::new(EngineCommandSenderBackend::Legacy(sender)),
         }
     }
 }
 
 impl EngineCommandReceiver {
-    pub fn from_unbounded(receiver: mpsc::UnboundedReceiver<EngineCommand>) -> Self {
-        Self {
-            backend: EngineCommandReceiverBackend::Legacy(receiver),
-        }
-    }
-
     pub fn try_recv(&mut self) -> Result<EngineCommand, EngineCommandTryRecvError> {
         match &mut self.backend {
-            EngineCommandReceiverBackend::Legacy(receiver) => {
-                receiver.try_recv().map_err(|error| match error {
-                    mpsc::error::TryRecvError::Empty => EngineCommandTryRecvError::Empty,
-                    mpsc::error::TryRecvError::Disconnected => EngineCommandTryRecvError::Closed,
-                })
-            }
             EngineCommandReceiverBackend::Bounded {
                 control_rx,
                 normal_rx,
@@ -403,16 +376,8 @@ impl EngineCommandReceiver {
     /// receiver still drains control traffic first through `try_recv`, while
     /// `Notify` keeps the idle engine parked until a producer enqueues work.
     pub async fn recv(&mut self) -> Result<EngineCommand, EngineCommandTryRecvError> {
-        if let EngineCommandReceiverBackend::Legacy(receiver) = &mut self.backend {
-            return receiver
-                .recv()
-                .await
-                .ok_or(EngineCommandTryRecvError::Closed);
-        }
-
         let wake = match &self.backend {
             EngineCommandReceiverBackend::Bounded { wake, .. } => Arc::clone(wake),
-            EngineCommandReceiverBackend::Legacy(_) => unreachable!("legacy receiver handled"),
         };
 
         loop {

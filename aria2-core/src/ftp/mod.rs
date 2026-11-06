@@ -1,23 +1,23 @@
-//! FTP protocol client module
+//! FTP protocol client module.
 //!
-//! Provides a complete FTP protocol implementation with support for:
+//! The engine's FTP path is built from the connection streams and negotiation
+//! primitives in [`connection`].
+//!
+//! The module provides support for:
 //! - Passive mode (PASV/EPSV) and active mode (PORT/EPRT)
 //! - Binary/ASCII transfer mode switching
 //! - Directory listing parsing (Unix/Windows formats)
 //! - Resume/restart transfers (REST command)
 //! - Comprehensive error handling
-//! - Connection pool reuse (40-60% performance improvement)
+//! - Optional standalone connection-pool support for callers that can safely
+//!   reuse plain FTP control streams
 //! - Post-SIZE file reconciliation and resume handling
 
 pub mod connection;
 pub mod connection_pool;
 
-#[cfg(test)]
-mod connection_tests;
-
 pub use connection::{
-    FtpClient, FtpDataProxyConfig, FtpDataStream, FtpFileInfo, FtpMode, FtpProxyConfig,
-    FtpProxyGetRequest, FtpProxyGetRequestBuilder, FtpResponse, FtpTransferType, ProxyMethod,
+    FtpMode, FtpProxyConfig, FtpProxyGetRequest, FtpProxyGetRequestBuilder, ProxyMethod,
     resolve_proxy_method,
 };
 pub use connection_pool::{

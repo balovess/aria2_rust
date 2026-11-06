@@ -20,33 +20,38 @@
 //!   GID generation utility.
 //!
 //! - **[`engine`]** — `RpcEngine` bridge implementing the feature-specific
-//!   aria2 RPC catalog (33 core methods, plus BitTorrent/Metalink extensions):
+//!   aria2 RPC catalog (35 core methods, plus BitTorrent/Metalink extensions):
 //!   addUri/addTorrent/remove/pause/unpause/tellStatus/tellActive/tellWaiting/
-//!   tellStopped/getGlobalStat/purgeDownloadResult/getGlobalOption/changeGlobalOption/
+//!   tellStopped/getGlobalStat/getUris/getFiles/getServers/getPeers/
+//!   purgeDownloadResult/getGlobalOption/changeGlobalOption/
 //!   getOption/changeOption/getVersion/getSessionInfo/saveSession/shutdown/forceShutdown/
 //!   system.multicall/system.listMethods/system.listNotifications.
 //!
+//! `RpcEngine` owns RPC parsing and dispatch, not download state. The
+//! `RpcEngine::new()` constructor deliberately uses an `UnsupportedBackend`,
+//! so stateful methods such as `aria2.addUri` return an unsupported-operation
+//! error. Applications that serve downloads must provide an
+//! [`RpcBackend`](backend::RpcBackend) with [`RpcEngine::with_backend`]. The
+//! example below uses the backend-independent method catalog.
+//!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```rust
 //! use aria2_rpc::engine::RpcEngine;
 //! use aria2_rpc::json_rpc::JsonRpcRequest;
+//! use serde_json::json;
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let engine = RpcEngine::new();
 //!
-//!     let req = JsonRpcRequest {
-//!         version: Some("2.0".into()),
-//!         method: "aria2.addUri".into(),
-//!         params: serde_json::json!([["http://example.com/file.zip"]]),
-//!         id: Some(serde_json::Value::String("req-1".into())),
-//!     };
+//!     let req = JsonRpcRequest::new("system.listMethods", json!([])).with_id("req-1");
 //!
 //!     let resp = engine.handle_request(&req).await;
-//!     if resp.is_success() {
-//!         println!("GID: {:?}", resp.result);
-//!     }
+//!     let methods = resp.result.expect("method catalog is backend-independent");
+//!     assert!(methods.as_array().is_some_and(|methods| {
+//!         methods.iter().any(|method| method == "aria2.addUri")
+//!     }));
 //! }
 //! ```
 //!
@@ -55,10 +60,14 @@
 //! The implemented catalog follows the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
+// `async_trait` marks its boxed futures as `must_use`; Clippy 1.99 also sees
+// the wrapped `Result` and flags the generated trait methods as double-must-use.
+#![allow(clippy::double_must_use)]
+
 pub mod backend;
 pub mod constants;
 pub mod engine;
-pub mod handlers;
+mod handlers;
 pub mod json_rpc;
 pub mod rpc_helpers;
 pub mod server;
@@ -77,9 +86,9 @@ pub use server::{
     AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig, TlsError,
 };
 pub use types::{
-    BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat, PeerInfo,
-    ServerInfo, ServerInfoIndex, SessionInfo, StatusInfo, TrackerInfo, UriEntry, UriInfo,
-    UriStatus, VersionInfo, create_gid,
+    BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat,
+    PeerDetails, PeerFlags, PeerInfo, PeerStats, ServerInfo, ServerInfoIndex, SessionInfo,
+    StatusInfo, TrackerInfo, UriEntry, UriStatus, VersionInfo, create_gid,
 };
 pub use websocket::{
     DownloadEvent, EventPublisher, EventType, NotificationBatcher, WsConfig, WsSession,

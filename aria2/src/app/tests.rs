@@ -3,6 +3,7 @@
 use super::cli::CliArgs;
 use super::*;
 use aria2_core::config::{OptionType, OptionValue};
+use aria2_core::engine::engine_command::channel;
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use clap::CommandFactory;
@@ -329,6 +330,8 @@ fn cli_contract_value(definition: &aria2_core::config::OptionDef) -> String {
         OptionType::Path | OptionType::String => {
             if definition.name() == "checksum" {
                 "sha-256=contract-digest".to_string()
+            } else if definition.name() == "async-dns-server" {
+                "127.0.0.1,::1".to_string()
             } else {
                 "contract-consumer-value".to_string()
             }
@@ -426,6 +429,43 @@ async fn test_load_cli_args_rejects_invalid_split() {
         .expect_err("the registry must reject split=0");
 
     assert!(error.contains("--split"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn test_load_cli_args_accepts_min_http_range_size() {
+    let cli = CliArgs::try_parse_from(["aria2", "--min-http-range-size=32K"])
+        .expect("clap should parse the HTTP Range size before registry validation");
+    let mut app = App::new();
+
+    app.load_cli_args(cli)
+        .await
+        .expect("the registry should accept a valid configured Range floor");
+
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("min-http-range-size")
+            .await,
+        Some(32 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_too_small_min_http_range_size() {
+    let cli = CliArgs::try_parse_from(["aria2", "--min-http-range-size=512"])
+        .expect("clap should parse the size before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the configured Range floor must be at least 1 KiB");
+
+    assert!(
+        error.contains("min-http-range-size"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -563,7 +603,7 @@ async fn application_rpc_does_not_enable_cors_by_default() {
             .expect("rpc-listen-port should be valid");
     }
 
-    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (cmd_tx, _cmd_rx) = channel();
     let server = app
         .start_rpc_server(
             super::startup::StartupPlan::resolve(super::startup::StartupInputs {
@@ -596,6 +636,102 @@ async fn application_rpc_does_not_enable_cors_by_default() {
             .any(|line| line.eq_ignore_ascii_case("access-control-allow-origin: *")),
         "aria2_original only emits CORS headers after explicit opt-in, response was:\n{response}"
     );
+}
+
+#[tokio::test]
+async fn application_rpc_routes_add_uri_and_tell_status_end_to_end() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let port = probe
+        .local_addr()
+        .expect("test listener should expose an address")
+        .port();
+    drop(probe);
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option("enable-rpc", OptionValue::Bool(true))
+            .await
+            .expect("enable-rpc should be valid");
+        config
+            .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
+            .await
+            .expect("rpc-listen-port should be valid");
+        config
+            .set_global_option(
+                "rpc-listen-address",
+                OptionValue::Str("127.0.0.1".to_string()),
+            )
+            .await
+            .expect("rpc-listen-address should be valid");
+        config
+            .set_global_option("disable-ipv6", OptionValue::Bool(true))
+            .await
+            .expect("disable-ipv6 should be valid");
+        config
+            .set_global_option("rpc-secret", OptionValue::Str("secret".to_string()))
+            .await
+            .expect("rpc-secret should be valid");
+    }
+
+    let (cmd_tx, _cmd_rx) = channel();
+    let server = app
+        .start_rpc_server(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: false,
+                has_input_file: false,
+                restored_tasks: 0,
+                tui: false,
+                configured_rpc: true,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            app.request_man.clone(),
+            cmd_tx,
+        )
+        .await
+        .expect("RPC server should start");
+
+    let add_body = r#"{"jsonrpc":"2.0","id":1,"method":"aria2.addUri","params":["token:secret",["http://127.0.0.1:1/library-api-test"]]}"#;
+    let add_request = format!(
+        "POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{add_body}",
+        add_body.len()
+    );
+    let add_response = read_http_response(port, &add_request).await;
+    let add_json: serde_json::Value = serde_json::from_str(
+        add_response
+            .split_once("\r\n\r\n")
+            .expect("RPC response should contain an HTTP body")
+            .1,
+    )
+    .expect("addUri response should be valid JSON");
+    let gid = add_json["result"]
+        .as_str()
+        .expect("addUri should return a GID")
+        .to_string();
+
+    let status_body = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"aria2.tellStatus","params":["token:secret","{gid}"]}}"#
+    );
+    let status_request = format!(
+        "POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{status_body}",
+        status_body.len()
+    );
+    let status_response = read_http_response(port, &status_request).await;
+    let status_json: serde_json::Value = serde_json::from_str(
+        status_response
+            .split_once("\r\n\r\n")
+            .expect("RPC response should contain an HTTP body")
+            .1,
+    )
+    .expect("tellStatus response should be valid JSON");
+
+    server.abort();
+    assert!(status_json["error"].is_null(), "tellStatus should succeed");
+    assert_eq!(status_json["result"]["gid"].as_str(), Some(gid.as_str()));
 }
 
 #[tokio::test]
@@ -646,23 +782,45 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
         .expect("download listener should expose an address")
         .port();
     let download_server = tokio::spawn(async move {
-        let (mut stream, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            download_listener.accept(),
-        )
-        .await
-        .expect("download request should arrive")
-        .expect("download listener should accept");
-        let mut request = [0u8; 2048];
-        let bytes_read = stream
-            .read(&mut request)
+        loop {
+            let (mut stream, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                download_listener.accept(),
+            )
             .await
-            .expect("download request should be readable");
-        assert!(bytes_read > 0, "download request should not be empty");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
-            .await
-            .expect("download response should be writable");
+            .expect("download request should arrive")
+            .expect("download listener should accept");
+            let mut request = Vec::with_capacity(1024);
+            let mut chunk = [0u8; 2048];
+            loop {
+                let bytes_read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("download request should be readable");
+                assert!(bytes_read > 0, "download request should not be empty");
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let is_head = request.starts_with(b"HEAD ");
+            if is_head {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("HEAD response should be writable");
+            } else {
+                assert!(request.starts_with(b"GET "), "expected a GET request");
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+                    )
+                    .await
+                    .expect("GET response should be writable");
+                break;
+            }
+        }
     });
 
     let temp_dir = TempDir::new().expect("temporary config directory");
@@ -671,7 +829,7 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
     tokio::fs::write(
         &config_path,
         format!(
-            "enable-rpc=true\ndisable-ipv6=true\nrpc-listen-port={rpc_port}\nstop=1\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=1\n",
+            "enable-rpc=true\nenable-public-trackers=false\ndisable-ipv6=true\nrpc-listen-port={rpc_port}\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=5\n",
             temp_dir.path().display()
         ),
     )
@@ -687,15 +845,21 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
     .expect("download CLI arguments should parse");
 
     let mut app = App::new();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), app.run(cli))
-        .await
-        .expect("download should not hang");
+    let run_result = tokio::time::timeout(std::time::Duration::from_secs(2), app.run(cli)).await;
+    let server_finished = download_server.is_finished();
+    assert!(
+        run_result.is_ok(),
+        "application did not finish; local server completed the request: {server_finished}"
+    );
+    let result = run_result.expect("run result was checked above");
     download_server
         .await
         .expect("download server task should finish");
     assert_eq!(
-        result, 0,
-        "a CLI download must ignore enable-rpc from the shared config"
+        result,
+        0,
+        "a CLI download must ignore enable-rpc from the shared config; stopped results: {:?}",
+        app.request_man.get_stopped_results(0, usize::MAX)
     );
 }
 
@@ -736,6 +900,216 @@ async fn test_original_cli_options_reach_config_registry() {
     assert_eq!(app.get_opt_bool("pause-metadata").await, Some(true));
     assert_eq!(app.get_opt_bool("show-console-readout").await, Some(false));
     assert_eq!(app.get_opt_i64("max-resume-failure-tries").await, Some(3));
+}
+
+#[tokio::test]
+async fn test_verbose_cli_option_reaches_logging_configuration() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--verbose"])
+            .expect("--verbose should parse through the CLI seam"),
+    )
+    .await
+    .expect("--verbose should update the logging configuration");
+    assert_eq!(
+        app.get_opt_str("console-log-level").await.as_deref(),
+        Some("debug")
+    );
+
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--verbose=false"])
+            .expect("--verbose=false should parse through the CLI seam"),
+    )
+    .await
+    .expect("--verbose=false should update the logging configuration");
+    assert_eq!(
+        app.get_opt_str("console-log-level").await.as_deref(),
+        Some("notice")
+    );
+}
+
+#[tokio::test]
+async fn test_original_async_dns_options_reach_the_engine_resolver() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from([
+            "aria2",
+            "--async-dns=false",
+            "--dns-timeout=17",
+            "--async-dns-server=127.0.0.1,::1",
+        ])
+        .expect("original async DNS options should parse through the CLI seam"),
+    )
+    .await
+    .expect("original async DNS options should update the configuration");
+
+    assert_eq!(
+        app.get_opt_bool("async-dns").await,
+        Some(false),
+        "--async-dns=false must remain a task option"
+    );
+    assert_eq!(
+        app.get_opt_i64("dns-timeout").await,
+        Some(17),
+        "--dns-timeout must remain a process option"
+    );
+    assert_eq!(
+        app.get_opt_str("async-dns-server").await.as_deref(),
+        Some("127.0.0.1,::1"),
+        "--async-dns-server must remain a process option"
+    );
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for the resolver path");
+    assert_eq!(
+        engine.dns_cache().lock().await.dns_timeout(),
+        std::time::Duration::from_secs(17),
+        "dns-timeout must configure the resolver used by download commands"
+    );
+    assert_eq!(
+        engine.dns_cache().lock().await.dns_server_addresses(),
+        ["127.0.0.1:53".parse().unwrap(), "[::1]:53".parse().unwrap(),],
+        "async-dns-server must configure the resolver nameservers"
+    );
+}
+
+#[tokio::test]
+async fn test_original_interface_reaches_outgoing_connection_configuration() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--interface=127.0.0.1"])
+            .expect("--interface should parse through the CLI seam"),
+    )
+    .await
+    .expect("--interface should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for network binding");
+    let policy = engine.outbound_network_policy();
+    assert_eq!(
+        policy.addresses(),
+        vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
+    );
+}
+
+#[tokio::test]
+async fn test_multiple_interface_reaches_all_outgoing_connection_sources() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--multiple-interface=127.0.0.1,127.0.0.2"])
+            .expect("--multiple-interface should parse through the CLI seam"),
+    )
+    .await
+    .expect("--multiple-interface should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for network binding");
+    assert_eq!(
+        engine.outbound_network_policy().addresses(),
+        vec![
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "127.0.0.2".parse::<std::net::IpAddr>().unwrap(),
+        ]
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_global_interface_reaches_lpd_multicast_interface() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--interface=127.0.0.1"])
+            .expect("--interface should parse through the CLI seam"),
+    )
+    .await
+    .expect("--interface should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for LPD binding");
+    assert_eq!(
+        engine.lpd_manager().interface(),
+        Some(std::net::Ipv4Addr::LOCALHOST),
+        "global interface must control BT LPD when bt-lpd-interface is absent"
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_dual_stack_global_interface_selects_ipv4_lpd_source() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--multiple-interface=::1,127.0.0.1"])
+            .expect("dual-stack interface list should parse through the CLI seam"),
+    )
+    .await
+    .expect("dual-stack interface list should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for dual-stack LPD binding");
+    assert_eq!(
+        engine.lpd_manager().interface(),
+        Some("127.0.0.1".parse().unwrap()),
+        "IPv4-only LPD must select the IPv4 source from a dual-stack policy"
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_explicit_lpd_interface_overrides_global_interface() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from([
+            "aria2",
+            "--interface=127.0.0.2",
+            "--bt-lpd-interface=127.0.0.1",
+        ])
+        .expect("both interface options should parse through the CLI seam"),
+    )
+    .await
+    .expect("both interface options should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for LPD binding");
+    assert_eq!(
+        engine.lpd_manager().interface(),
+        Some("127.0.0.1".parse().unwrap()),
+        "explicit bt-lpd-interface must retain precedence over global interface"
+    );
+}
+
+#[tokio::test]
+async fn test_async_dns_server_rejects_non_ip_addresses() {
+    let mut app = App::new();
+    let cli = CliArgs::try_parse_from(["aria2", "--async-dns-server=not-an-ip"])
+        .expect("the CLI parser should defer DNS server validation to the config seam");
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("async-dns-server must reject values that are not IP addresses");
+    assert!(
+        error.contains("--async-dns-server"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -1047,7 +1421,7 @@ async fn test_standard_session_restores_metalink_graph() {
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_session_save_then_restart_restores_metalink_graph() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");
@@ -1075,7 +1449,11 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
         .request_man
         .find_group(GroupId::new(0x40))
         .expect("payload group should be indexed");
+    let torrent_metadata = b"d8:announce27:http://127.0.0.1:1/announce4:infod6:lengthi0e4:name9:empty.bin12:piece lengthi16384e6:pieces0:ee".to_vec();
     payload.recover().set_bt_bitfield(Some(vec![0xa5, 0x03]));
+    payload
+        .recover()
+        .set_bt_metadata_data(torrent_metadata.clone());
     payload.recover().set_bt_metadata(
         11,
         16_384,
@@ -1148,6 +1526,11 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
         metadata.recover().belongs_to_gid(),
         Some(GroupId::new(0x40))
     );
+    assert_eq!(
+        metadata.recover().in_memory_data(),
+        Some(torrent_metadata),
+        "a memory-backed Metalink graph must retain its torrent metadata across session restore"
+    );
 
     let payload = groups
         .iter()
@@ -1170,7 +1553,7 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_process_restart_executes_restored_metalink_graph() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadStatus, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");
@@ -1294,7 +1677,7 @@ async fn test_process_restart_executes_restored_metalink_graph() {
 #[tokio::test]
 async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() {
     use aria2_core::checksum::message_digest::{HashType, MessageDigest};
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::filesystem::control_file::ControlFile;
     use aria2_core::request::request_group::{DownloadStatus, GroupId};
 
@@ -1455,7 +1838,7 @@ async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadStatus, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");
@@ -1625,7 +2008,7 @@ async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_paused_session_graph_unpauses_both_groups() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");

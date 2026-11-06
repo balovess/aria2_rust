@@ -1,16 +1,12 @@
 //! PieceStorage trait definition.
 //!
 //! This is the Rust equivalent of the C++ `PieceStorage` abstract class.
-//! Methods are aligned with the C++ interface; BT-specific peer-overloaded
-//! methods live in the separate `PieceProvider` trait.
 
 use super::super::piece::Piece;
 
 /// Trait interface for piece storage operations.
 ///
 /// This is the Rust equivalent of the C++ `PieceStorage` abstract class.
-/// Methods are aligned with the C++ interface; BT-specific peer-overloaded
-/// methods live in the separate `PieceProvider` trait.
 pub trait PieceStorage: Send + Sync {
     // ── Piece query ──────────────────────────────────────────────────────
 

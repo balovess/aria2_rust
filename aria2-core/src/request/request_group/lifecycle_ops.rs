@@ -28,7 +28,11 @@ impl super::RequestGroup {
     /// owned by the engine-loop hook sites where a runtime is guaranteed.
     fn notify_terminal_event(&self, event: DownloadEvent) {
         self.notify_activity_changed();
-        DownloadEventHooks::shared().notify_listeners(event, &self.gid.to_hex_string());
+        DownloadEventHooks::shared().notify_listeners_scoped(
+            event,
+            &self.gid.to_hex_string(),
+            self.event_scope_id(),
+        );
     }
 
     // ── Status Transitions ───────────────────────────────────────────────

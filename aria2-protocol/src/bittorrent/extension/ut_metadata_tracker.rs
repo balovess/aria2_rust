@@ -53,10 +53,10 @@ struct RequestEntry {
 }
 
 impl RequestEntry {
-    fn new(index: u32) -> Self {
+    fn new(index: u32, dispatched_at: Instant) -> Self {
         Self {
             index,
-            dispatched_at: Instant::now(),
+            dispatched_at,
         }
     }
 
@@ -64,8 +64,8 @@ impl RequestEntry {
     /// `timeout`.
     ///
     /// C++: `RequestEntry::elapsed(t)`
-    fn is_timed_out(&self, timeout: Duration) -> bool {
-        self.dispatched_at.elapsed() >= timeout
+    fn is_timed_out_at(&self, now: Instant, timeout: Duration) -> bool {
+        now.saturating_duration_since(self.dispatched_at) >= timeout
     }
 }
 
@@ -143,7 +143,11 @@ impl UTMetadataRequestTracker {
     /// Does not panic, but callers should check `avail()` first to avoid
     /// exceeding [`MAX_OUTSTANDING_REQUESTS`].
     pub fn add(&mut self, index: u32) {
-        self.tracked.push(RequestEntry::new(index));
+        self.add_at(index, Instant::now());
+    }
+
+    fn add_at(&mut self, index: u32, now: Instant) {
+        self.tracked.push(RequestEntry::new(index, now));
     }
 
     /// Returns `true` if the given piece index is currently being tracked.
@@ -175,10 +179,14 @@ impl UTMetadataRequestTracker {
     ///
     /// The returned indexes should be re-requested by the caller.
     pub fn remove_timeout_entries(&mut self) -> Vec<u32> {
+        self.remove_timeout_entries_at(Instant::now())
+    }
+
+    fn remove_timeout_entries_at(&mut self, now: Instant) -> Vec<u32> {
         let mut timed_out = Vec::new();
 
         self.tracked.retain(|e| {
-            if e.is_timed_out(self.timeout) {
+            if e.is_timed_out_at(now, self.timeout) {
                 tracing::debug!(index = e.index, "ut_metadata request timed out");
                 timed_out.push(e.index);
                 false
@@ -233,7 +241,13 @@ impl UTMetadataRequestTracker {
     /// Useful for polling-based architectures where removal must happen
     /// at a specific point in the event loop.
     pub fn has_timeouts(&self) -> bool {
-        self.tracked.iter().any(|e| e.is_timed_out(self.timeout))
+        self.has_timeouts_at(Instant::now())
+    }
+
+    fn has_timeouts_at(&self, now: Instant) -> bool {
+        self.tracked
+            .iter()
+            .any(|entry| entry.is_timed_out_at(now, self.timeout))
     }
 }
 
@@ -325,14 +339,11 @@ mod tests {
     #[test]
     fn test_timeout_with_custom_duration() {
         let mut tracker = UTMetadataRequestTracker::with_timeout(Duration::from_millis(1));
-        tracker.add(0);
-        assert!(!tracker.has_timeouts());
+        let now = Instant::now();
+        tracker.add_at(0, now - Duration::from_millis(5));
+        assert!(tracker.has_timeouts_at(now));
 
-        // Spin briefly to ensure the instant advances
-        std::thread::sleep(Duration::from_millis(5));
-
-        assert!(tracker.has_timeouts());
-        let timed_out = tracker.remove_timeout_entries();
+        let timed_out = tracker.remove_timeout_entries_at(now);
         assert_eq!(timed_out, vec![0]);
         assert_eq!(tracker.count(), 0);
     }
@@ -340,12 +351,10 @@ mod tests {
     #[test]
     fn test_remove_timeout_preserves_not_timed_out() {
         let mut tracker = UTMetadataRequestTracker::with_timeout(Duration::from_millis(1));
-        tracker.add(0);
-        std::thread::sleep(Duration::from_millis(5));
-
-        // Add a fresh entry that hasn't timed out yet
-        tracker.add(1);
-        let timed_out = tracker.remove_timeout_entries();
+        let now = Instant::now();
+        tracker.add_at(0, now - Duration::from_millis(5));
+        tracker.add_at(1, now);
+        let timed_out = tracker.remove_timeout_entries_at(now);
 
         assert_eq!(timed_out, vec![0]);
         assert!(tracker.tracks(1));

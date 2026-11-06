@@ -14,7 +14,9 @@ pub struct DownloadStatusSnapshot {
     pub total_length: u64,
     pub completed_length: u64,
     pub upload_length: u64,
+    /// Current transfer rate, which is zero for terminal download states.
     pub download_speed: u64,
+    /// Current transfer rate, which is zero for terminal download states.
     pub upload_speed: u64,
     /// Number of currently active protocol connections.
     pub connections: u32,
@@ -41,6 +43,10 @@ impl BtStatusSnapshot {
         self.peers.len()
     }
 
+    /// Count connected peers whose advertised bitfield is complete.
+    ///
+    /// This is deliberately different from the Tracker swarm `complete`
+    /// statistic.
     pub fn seeder_count(&self) -> usize {
         self.peers
             .iter()
@@ -76,13 +82,25 @@ impl super::RequestGroup {
             }
         });
 
+        let status = self.status();
+        // A stopped result always reports zero live speeds. Keep snapshots
+        // consistent even while a terminal group is still awaiting demotion.
+        let (download_speed, upload_speed) = if status.is_terminal() {
+            (0, 0)
+        } else {
+            (
+                self.get_download_speed_cached(),
+                self.get_upload_speed_cached(),
+            )
+        };
+
         DownloadStatusSnapshot {
-            status: self.status(),
+            status,
             total_length: self.get_total_length_atomic(),
             completed_length: self.get_completed_length(),
             upload_length: self.get_uploaded_length(),
-            download_speed: self.get_download_speed_cached(),
-            upload_speed: self.get_upload_speed_cached(),
+            download_speed,
+            upload_speed,
             connections: self.active_connection_count(),
             elapsed: self.elapsed_time(),
             bt,

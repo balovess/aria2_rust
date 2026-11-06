@@ -48,6 +48,36 @@ Common BitTorrent settings include `enable-dht`, `enable-dht6`,
 Set values explicitly in a configuration file, for example
 `bt-force-encryption=true`.
 
+### Public tracker catalog
+
+Public trackers are enabled by default in the standard BitTorrent build. The
+default catalog is fetched from `https://cf.trackerslist.com/best.txt` and
+refreshed every 86,400 seconds (24 hours). Public trackers are appended after
+trackers from the torrent and explicit user configuration; duplicate URLs are
+ignored. A refresh can therefore add newly available trackers to a download
+that is already running without replacing its existing tracker tiers.
+
+Configure the catalog in `aria2.conf`:
+
+```ini
+enable-public-trackers=true
+bt-tracker-source=https://cf.trackerslist.com/best.txt
+bt-tracker-update-interval=86400
+```
+
+Set `enable-public-trackers=false` to disable the catalog. Use
+`bt-exclude-tracker` to exclude tracker URLs; `*` excludes all public
+trackers. Multiple `bt-tracker-source` values may be supplied as a cumulative
+list. Each source is fetched with a bounded amount of concurrency, and a
+failed source does not discard entries obtained from other sources.
+
+DHT maintenance can be tuned with `dht-refresh-check-interval`,
+`dht-token-rotation-interval`, `dht-node-contact-interval`,
+`dht-cleanup-interval`, `dht-save-interval`, `dht-bootstrap-timeout`,
+`dht-max-concurrent-lookups`, and `dht-persistence-max-age`. The same names are
+accepted by `aria2.changeOption` and `aria2.changeGlobalOption`; runtime state is
+available from `aria2.getDhtStatus`.
+
 ## Configuration Files
 
 A configuration file contains one option per line:

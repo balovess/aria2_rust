@@ -49,10 +49,10 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
     );
 
     match msg_type {
-        MessageType::Choke => Ok(Some(BtMessage::Choke)),
-        MessageType::Unchoke => Ok(Some(BtMessage::Unchoke)),
-        MessageType::Interested => Ok(Some(BtMessage::Interested)),
-        MessageType::NotInterested => Ok(Some(BtMessage::NotInterested)),
+        MessageType::Choke => parse_zero_payload(payload, "Choke"),
+        MessageType::Unchoke => parse_zero_payload(payload, "Unchoke"),
+        MessageType::Interested => parse_zero_payload(payload, "Interested"),
+        MessageType::NotInterested => parse_zero_payload(payload, "NotInterested"),
         MessageType::Have => parse_have(payload),
         MessageType::Bitfield => parse_bitfield(payload),
         MessageType::Request => parse_block_op(payload, true),
@@ -62,16 +62,37 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
         MessageType::AllowedFast => parse_allowed_fast(payload),
         MessageType::Suggest => parse_suggest(payload),
         MessageType::Reject => parse_reject(payload),
-        MessageType::HaveAll => Ok(Some(BtMessage::HaveAll)),
-        MessageType::HaveNone => Ok(Some(BtMessage::HaveNone)),
+        MessageType::HaveAll => parse_zero_payload(payload, "HaveAll"),
+        MessageType::HaveNone => parse_zero_payload(payload, "HaveNone"),
         MessageType::Extended => parse_extended(payload),
     }
 }
 
-fn parse_have(payload: &[u8]) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 4 {
+fn parse_zero_payload(payload: &[u8], message_name: &str) -> Result<Option<BtMessage>, String> {
+    if !payload.is_empty() {
         return Err(format!(
-            "Have message payload too short: {} bytes",
+            "{} message payload must be empty, got {} bytes",
+            message_name,
+            payload.len()
+        ));
+    }
+
+    let message = match message_name {
+        "Choke" => BtMessage::Choke,
+        "Unchoke" => BtMessage::Unchoke,
+        "Interested" => BtMessage::Interested,
+        "NotInterested" => BtMessage::NotInterested,
+        "HaveAll" => BtMessage::HaveAll,
+        "HaveNone" => BtMessage::HaveNone,
+        _ => return Err(format!("unsupported zero-payload message: {message_name}")),
+    };
+    Ok(Some(message))
+}
+
+fn parse_have(payload: &[u8]) -> Result<Option<BtMessage>, String> {
+    if payload.len() != 4 {
+        return Err(format!(
+            "Have message payload must be 4 bytes, got {}",
             payload.len()
         ));
     }
@@ -89,9 +110,9 @@ fn parse_bitfield(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 }
 
 fn parse_block_op(payload: &[u8], is_request: bool) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 12 {
+    if payload.len() != 12 {
         return Err(format!(
-            "{} message payload too short: {} bytes",
+            "{} message payload must be 12 bytes, got {}",
             if is_request { "Request" } else { "Cancel" },
             payload.len()
         ));
@@ -108,9 +129,9 @@ fn parse_block_op(payload: &[u8], is_request: bool) -> Result<Option<BtMessage>,
 }
 
 fn parse_piece(payload: &[u8]) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 8 {
+    if payload.len() <= 8 {
         return Err(format!(
-            "Piece message payload too short: {} bytes",
+            "Piece message payload must contain data after the 8-byte header, got {} bytes",
             payload.len()
         ));
     }
@@ -143,9 +164,9 @@ pub fn parse_message_bytes(data: Bytes) -> Result<Option<BtMessage>, String> {
     }
 
     if data[4] == MessageType::Piece as u8 {
-        if len < 9 {
+        if len <= 9 {
             return Err(format!(
-                "Piece message payload too short: {} bytes",
+                "Piece message payload must contain data after the 8-byte header, got {} bytes",
                 len.saturating_sub(1)
             ));
         }
@@ -162,9 +183,9 @@ pub fn parse_message_bytes(data: Bytes) -> Result<Option<BtMessage>, String> {
 }
 
 fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 2 {
+    if payload.len() != 2 {
         return Err(format!(
-            "Port message payload too short: {} bytes",
+            "Port message payload must be 2 bytes, got {}",
             payload.len()
         ));
     }
@@ -173,9 +194,9 @@ fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 }
 
 fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 4 {
+    if payload.len() != 4 {
         return Err(format!(
-            "AllowedFast message payload too short: {} bytes",
+            "AllowedFast message payload must be 4 bytes, got {}",
             payload.len()
         ));
     }
@@ -184,9 +205,9 @@ fn parse_allowed_fast(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 }
 
 fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 4 {
+    if payload.len() != 4 {
         return Err(format!(
-            "Suggest message payload too short: {} bytes",
+            "Suggest message payload must be 4 bytes, got {}",
             payload.len()
         ));
     }
@@ -195,9 +216,9 @@ fn parse_suggest(payload: &[u8]) -> Result<Option<BtMessage>, String> {
 }
 
 fn parse_reject(payload: &[u8]) -> Result<Option<BtMessage>, String> {
-    if payload.len() < 12 {
+    if payload.len() != 12 {
         return Err(format!(
-            "Reject message payload too short: {} bytes",
+            "Reject message payload must be 12 bytes, got {}",
             payload.len()
         ));
     }
@@ -366,6 +387,29 @@ mod tests {
             }
             other => panic!("expected piece, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_fixed_length_messages_reject_trailing_payload() {
+        let mut have = vec![0, 0, 0, 6, 4];
+        have.extend_from_slice(&7u32.to_be_bytes());
+        have.push(0xFF);
+        assert!(parse_message(&have).is_err());
+
+        let mut port = vec![0, 0, 0, 4, 9];
+        port.extend_from_slice(&6881u16.to_be_bytes());
+        port.push(0xFF);
+        assert!(parse_message(&port).is_err());
+
+        assert!(parse_message(&[0, 0, 0, 2, 0, 0xFF]).is_err());
+    }
+
+    #[test]
+    fn test_piece_requires_non_empty_data() {
+        // Message length = ID + index + begin, with no block bytes.
+        let frame = [0, 0, 0, 9, 7, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(parse_message(&frame).is_err());
+        assert!(parse_message_bytes(Bytes::copy_from_slice(&frame)).is_err());
     }
 
     #[test]

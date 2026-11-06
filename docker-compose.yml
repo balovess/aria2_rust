@@ -17,7 +17,7 @@ services:
     
     # Ports
     ports:
-      - "6800:6800"  # RPC port
+      - "127.0.0.1:6800:6800"  # Host-only publish; peer containers can still reach RPC
     
     # Volumes
     volumes:
@@ -27,7 +27,6 @@ services:
     
     # Environment variables
     environment:
-      - RPC_SECRET=${RPC_SECRET:-}  # RPC secret token (optional)
       - TZ=Asia/Shanghai            # Timezone
     
     # Command line arguments

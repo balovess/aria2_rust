@@ -317,7 +317,7 @@ fn test_auto_select_no_encoding() {
 
 #[test]
 fn test_http_response_decoded_body_integration() {
-    use super::request_response::HttpResponse;
+    use super::response::HttpResponse;
     use std::collections::HashMap;
 
     // Prepare original data and GZip compressed data
@@ -348,7 +348,7 @@ fn test_http_response_decoded_body_integration() {
 
 #[test]
 fn test_http_response_decoded_body_no_body() {
-    use super::request_response::HttpResponse;
+    use super::response::HttpResponse;
     use std::collections::HashMap;
 
     // Response without body
@@ -372,7 +372,7 @@ fn test_http_response_decoded_body_no_body() {
 
 #[test]
 fn test_http_response_decoded_body_rejects_unsupported_transfer_encoding() {
-    use super::request_response::HttpResponse;
+    use super::response::HttpResponse;
     use std::collections::HashMap;
 
     let mut headers = HashMap::new();

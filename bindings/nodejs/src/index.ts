@@ -6,9 +6,15 @@ export type {
   SessionInfo,
   FileInfo,
   UriEntry,
+  ServerInfo,
+  ServerInfoIndex,
+  PeerInfo,
+  TrackerInfo,
+  TrackerFailureKind,
+  DhtStatus,
   DownloadEvent,
   ClientOptions,
 } from './types.js';
-export { EventType, DownloadStatus } from './types.js';
+export { EventType, DownloadStatus, PositionMode } from './types.js';
 export { Aria2Error, ConnectionError, AuthError, RpcError, TimeoutError } from './errors.js';
 export { Aria2EventEmitter } from './events.js';

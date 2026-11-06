@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { EventType, DownloadStatus } from '../../src/types.js';
+import { EventType, DownloadStatus, PositionMode } from '../../src/types.js';
 import type {
   StatusInfo,
   GlobalStat,
@@ -9,6 +9,8 @@ import type {
   FileInfo,
   UriEntry,
   DownloadEvent,
+  TrackerInfo,
+  DhtStatus,
 } from '../../src/types.js';
 
 describe('EventType', () => {
@@ -36,13 +38,9 @@ describe('EventType', () => {
     expect(EventType.BtDownloadComplete).toBe('aria2.onBtDownloadComplete');
   });
 
-  it('has BtDownloadError', () => {
-    expect(EventType.BtDownloadError).toBe('aria2.onBtDownloadError');
-  });
-
-  it('has exactly 7 values', () => {
+  it('has exactly 6 values', () => {
     const values = Object.values(EventType);
-    expect(values).toHaveLength(7);
+    expect(values).toHaveLength(6);
   });
 });
 
@@ -178,5 +176,60 @@ describe('DownloadEvent', () => {
     };
     expect(event.type).toBe('aria2.onDownloadStart');
     expect(event.gid).toBe('2089b05ecca3d829');
+  });
+
+  it('supports error metadata and file metadata', () => {
+    const event: DownloadEvent = {
+      type: EventType.DownloadError,
+      gid: 'gid1',
+      errorCode: 3,
+      files: [],
+    };
+    expect(event.errorCode).toBe(3);
+    expect(event.files).toEqual([]);
+  });
+});
+
+describe('PositionMode', () => {
+  it('matches the aria2 wire values', () => {
+    expect(PositionMode.SetFromStart).toBe('POS_SET');
+    expect(PositionMode.MoveFromStart).toBe('POS_CUR');
+    expect(PositionMode.SetFromEnd).toBe('POS_END');
+  });
+});
+
+describe('TrackerInfo and DhtStatus', () => {
+  it('can represent tracker runtime state', () => {
+    const tracker: TrackerInfo = {
+      uri: 'udp://tracker.example/announce',
+      tier: 1,
+      current: true,
+      lastAttempt: false,
+      announceReady: true,
+      allFailed: false,
+      inFlight: 0,
+      interval: '1800',
+      minInterval: 60,
+      seeders: 3,
+      leechers: 1,
+      trackerId: 'tracker-id',
+      lastFailureKind: 'timeout',
+    };
+    expect(tracker.trackerId).toBe('tracker-id');
+    expect(tracker.lastFailureKind).toBe('timeout');
+  });
+
+  it('can represent DHT counters', () => {
+    const status: DhtStatus = {
+      state: 'running',
+      totalNodes: '10',
+      goodNodes: '8',
+      pendingTransactions: '1',
+      peerInfoHashes: '12',
+      storedPeers: '38',
+      peerStorageEvictions: '4',
+      maxPeerInfoHashes: '4096',
+    };
+    expect(status.goodNodes).toBe('8');
   });
 });

@@ -79,9 +79,17 @@ class MockAria2Server:
             return gid, None
 
         elif method == "aria2.addMetalink":
-            gid = self._next_gid()
-            self._tasks[gid] = {"status": "active", "data": self._make_status(gid, "active")}
-            return gid, None
+            metadata_gid = self._next_gid()
+            payload_gid = self._next_gid()
+            self._tasks[metadata_gid] = {
+                "status": "active",
+                "data": self._make_status(metadata_gid, "active"),
+            }
+            self._tasks[payload_gid] = {
+                "status": "active",
+                "data": self._make_status(payload_gid, "active"),
+            }
+            return [metadata_gid, payload_gid], None
 
         elif method == "aria2.remove":
             gid = params[0] if params else ""
@@ -121,13 +129,6 @@ class MockAria2Server:
                 return gid, None
             return None, {"code": 1, "message": f"GID {gid} not found"}
 
-        elif method == "aria2.forceUnpause":
-            gid = params[0] if params else ""
-            if gid in self._tasks:
-                self._tasks[gid]["status"] = "active"
-                return gid, None
-            return None, {"code": 1, "message": f"GID {gid} not found"}
-
         elif method == "aria2.tellStatus":
             gid = params[0] if params else ""
             if gid in self._tasks:
@@ -151,6 +152,36 @@ class MockAria2Server:
                 "numWaiting": "0",
                 "numStopped": str(len([t for t in self._tasks.values() if t["status"] != "active"])),
                 "numStoppedTotal": "0",
+            }, None
+
+        elif method == "aria2.getTrackers":
+            return [
+                {
+                    "uri": "udp://tracker.example/announce",
+                    "tier": 1,
+                    "current": True,
+                    "lastAttempt": False,
+                    "announceReady": True,
+                    "allFailed": False,
+                    "inFlight": 0,
+                    "interval": "1800",
+                    "minInterval": 60,
+                    "seeders": 3,
+                    "leechers": 1,
+                    "trackerId": "tracker-id",
+                }
+            ], None
+
+        elif method == "aria2.getDhtStatus":
+            return {
+                "state": "running",
+                "totalNodes": "10",
+                "goodNodes": "8",
+                "pendingTransactions": "1",
+                "peerInfoHashes": "12",
+                "storedPeers": "38",
+                "peerStorageEvictions": "4",
+                "maxPeerInfoHashes": "4096",
             }, None
 
         elif method == "aria2.purgeDownloadResult":

@@ -37,6 +37,16 @@ describe('Aria2Client', () => {
         { dir: '/tmp' },
       ]);
     });
+
+    it('sends with position', async () => {
+      mockTransport.sendRequest.mockResolvedValue('gid1');
+      await client.addUri(['http://example.com/file.zip'], undefined, 3);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addUri', [
+        ['http://example.com/file.zip'],
+        {},
+        3,
+      ]);
+    });
   });
 
   describe('addTorrent', () => {
@@ -55,19 +65,73 @@ describe('Aria2Client', () => {
       await client.addTorrent(torrent, { dir: '/tmp' });
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addTorrent', [
         torrent.toString('base64'),
+        [],
         { dir: '/tmp' },
+      ]);
+    });
+
+    it('sends web seeds, options, and position in aria2 order', async () => {
+      mockTransport.sendRequest.mockResolvedValue('gid1');
+      const torrent = Buffer.from('torrent-data');
+      await client.addTorrent(
+        torrent,
+        { dir: '/tmp' },
+        ['https://example.com/file'],
+        2,
+      );
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addTorrent', [
+        torrent.toString('base64'),
+        ['https://example.com/file'],
+        { dir: '/tmp' },
+        2,
       ]);
     });
   });
 
   describe('addMetalink', () => {
     it('base64-encodes metalink Buffer', async () => {
-      mockTransport.sendRequest.mockResolvedValue('gid1');
+      mockTransport.sendRequest.mockResolvedValue(['gid1', 'gid2']);
       const metalink = Buffer.from('metalink-data');
-      await client.addMetalink(metalink);
+      const gids = await client.addMetalink(metalink);
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addMetalink', [
         metalink.toString('base64'),
       ]);
+      expect(gids).toEqual(['gid1', 'gid2']);
+    });
+
+    it('sends an empty options object when only position is set', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['gid1']);
+      const metalink = Buffer.from('metalink-data');
+      await client.addMetalink(metalink, undefined, 1);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addMetalink', [
+        metalink.toString('base64'),
+        {},
+        1,
+      ]);
+    });
+
+    it('rejects a malformed GID list', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['gid1', 2]);
+      await expect(client.addMetalink(Buffer.from('metalink-data'))).rejects.toThrow(
+        'Unexpected item type for addMetalink',
+      );
+    });
+  });
+
+  describe('call', () => {
+    it('sends an arbitrary RPC method and returns its result', async () => {
+      mockTransport.sendRequest.mockResolvedValue({ ok: true });
+
+      const result = await client.call<{ ok: boolean }>('aria2.customMethod', [
+        'value',
+        7,
+      ]);
+
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.customMethod', [
+        'value',
+        7,
+      ]);
+      expect(result).toEqual({ ok: true });
     });
   });
 
@@ -102,11 +166,68 @@ describe('Aria2Client', () => {
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.forceRemove', ['gid1']);
     });
 
-    it('forceUnpause sends correct method', async () => {
-      mockTransport.sendRequest.mockResolvedValue('gid1');
-      await client.forceUnpause('gid1');
-      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.forceUnpause', ['gid1']);
+    it('pauseAll sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue('OK');
+      await client.pauseAll();
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.pauseAll', []);
     });
+
+    it('forcePauseAll sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue('OK');
+      await client.forcePauseAll();
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.forcePauseAll', []);
+    });
+
+    it('unpauseAll sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue('OK');
+      await client.unpauseAll();
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.unpauseAll', []);
+    });
+
+    it('changePosition sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue('2');
+      const result = await client.changePosition('gid1', 2, 'POS_SET');
+      expect(result).toBe(2);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.changePosition', [
+        'gid1',
+        2,
+        'POS_SET',
+      ]);
+    });
+
+    it('rejects a malformed changePosition result', async () => {
+      mockTransport.sendRequest.mockResolvedValue('not-a-position');
+
+      await expect(client.changePosition('gid1', 2, 'POS_SET')).rejects.toThrow(
+        'Unexpected result type for changePosition',
+      );
+    });
+
+    it('changeUri sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['1', '2']);
+      const result = await client.changeUri('gid1', 1, ['old'], ['new'], 0);
+      expect(result).toEqual(['1', '2']);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.changeUri', [
+        'gid1',
+        1,
+        ['old'],
+        ['new'],
+        0,
+      ]);
+    });
+
+    it('changeUri accepts numeric wire counts', async () => {
+      mockTransport.sendRequest.mockResolvedValue([0, 1]);
+      await expect(client.changeUri('gid1', 1, [], ['new'])).resolves.toEqual(['0', '1']);
+    });
+
+    it('changeUri requires two string counts', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['1']);
+      await expect(client.changeUri('gid1', 1, [], ['new'])).rejects.toThrow(
+        'Unexpected result length for changeUri',
+      );
+    });
+
   });
 
   describe('tellStatus', () => {
@@ -129,6 +250,102 @@ describe('Aria2Client', () => {
         'gid1',
         ['gid', 'status'],
       ]);
+    });
+
+    it('rejects a non-object result', async () => {
+      mockTransport.sendRequest.mockResolvedValue([]);
+      await expect(client.tellStatus('gid1')).rejects.toThrow(
+        'Unexpected result type for tellStatus',
+      );
+    });
+  });
+
+  describe('getFiles', () => {
+    it('returns file metadata for a GID', async () => {
+      const files = [
+        {
+          index: '1',
+          path: '/downloads/file.zip',
+          length: '1024',
+          completedLength: '0',
+          selected: 'true',
+          uris: [],
+        },
+      ];
+      mockTransport.sendRequest.mockResolvedValue(files);
+
+      const result = await client.getFiles('gid1');
+
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getFiles', ['gid1']);
+      expect(result).toEqual(files);
+    });
+
+    it('rejects a non-object item', async () => {
+      mockTransport.sendRequest.mockResolvedValue([null]);
+      await expect(client.getFiles('gid1')).rejects.toThrow(
+        'Unexpected item type for getFiles',
+      );
+    });
+  });
+
+  describe('getUris / getServers / getPeers', () => {
+    it('queries URIs', async () => {
+      const uris = [{ uri: 'https://example.com/a', status: 'waiting' as const }];
+      mockTransport.sendRequest.mockResolvedValue(uris);
+      expect(await client.getUris('gid1')).toEqual(uris);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getUris', ['gid1']);
+    });
+
+    it('queries servers', async () => {
+      const servers = [{ index: '1', servers: [] }];
+      mockTransport.sendRequest.mockResolvedValue(servers);
+      expect(await client.getServers('gid1')).toEqual(servers);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getServers', ['gid1']);
+    });
+
+    it('queries peers', async () => {
+      const peers = [{ peerId: 'peer', ip: '127.0.0.1', port: '6881' }];
+      mockTransport.sendRequest.mockResolvedValue(peers);
+      expect(await client.getPeers('gid1')).toEqual(peers);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getPeers', ['gid1']);
+    });
+
+    it('queries trackers', async () => {
+      const trackers = [
+        {
+          uri: 'udp://tracker.example/announce',
+          tier: 1,
+          current: true,
+          lastAttempt: false,
+          announceReady: true,
+          allFailed: false,
+          inFlight: 0,
+          interval: '1800',
+          minInterval: 60,
+          seeders: 3,
+          leechers: 1,
+          trackerId: 'tracker-id',
+        },
+      ];
+      mockTransport.sendRequest.mockResolvedValue(trackers);
+      expect(await client.getTrackers('gid1')).toEqual(trackers);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getTrackers', ['gid1']);
+    });
+
+    it('queries DHT status', async () => {
+      const status = {
+        state: 'running',
+        totalNodes: '10',
+        goodNodes: '8',
+        pendingTransactions: '1',
+        peerInfoHashes: '12',
+        storedPeers: '38',
+        peerStorageEvictions: '4',
+        maxPeerInfoHashes: '4096',
+      };
+      mockTransport.sendRequest.mockResolvedValue(status);
+      expect(await client.getDhtStatus()).toEqual(status);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getDhtStatus', []);
     });
   });
 
@@ -155,6 +372,13 @@ describe('Aria2Client', () => {
       const result = await client.tellStopped(0, 10);
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.tellStopped', [0, 10]);
       expect(result).toEqual(items);
+    });
+
+    it('rejects a non-object item', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['invalid']);
+      await expect(client.tellActive()).rejects.toThrow(
+        'Unexpected item type for tellActive',
+      );
     });
   });
 
@@ -204,6 +428,13 @@ describe('Aria2Client', () => {
       expect(result).toEqual(opts);
     });
 
+    it('getGlobalOption rejects a non-object result', async () => {
+      mockTransport.sendRequest.mockResolvedValue([]);
+      await expect(client.getGlobalOption()).rejects.toThrow(
+        'Unexpected result type for getGlobalOption',
+      );
+    });
+
     it('changeGlobalOption sends options', async () => {
       mockTransport.sendRequest.mockResolvedValue('OK');
       await client.changeGlobalOption({ 'max-overall-download-limit': '1M' });
@@ -220,6 +451,13 @@ describe('Aria2Client', () => {
       const result = await client.getOption('gid1');
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getOption', ['gid1']);
       expect(result).toEqual(opts);
+    });
+
+    it('getOption rejects a non-object result', async () => {
+      mockTransport.sendRequest.mockResolvedValue(null);
+      await expect(client.getOption('gid1')).rejects.toThrow(
+        'Unexpected result type for getOption',
+      );
     });
 
     it('changeOption for task', async () => {
@@ -268,6 +506,41 @@ describe('Aria2Client', () => {
     });
   });
 
+  describe('system methods', () => {
+    it('systemMulticall sends method calls', async () => {
+      const calls = [{ methodName: 'aria2.getVersion', params: [] }];
+      mockTransport.sendRequest.mockResolvedValue(['gid1', 'OK']);
+      expect(await client.systemMulticall(calls)).toEqual(['gid1', 'OK']);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('system.multicall', [calls]);
+    });
+
+    it('systemListMethods sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['aria2.addUri']);
+      expect(await client.systemListMethods()).toEqual(['aria2.addUri']);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('system.listMethods', []);
+    });
+
+    it('systemListMethods rejects non-string items', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['aria2.addUri', 2]);
+      await expect(client.systemListMethods()).rejects.toThrow(
+        'Unexpected item type for system.listMethods',
+      );
+    });
+
+    it('systemListNotifications sends correct method', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['aria2.onDownloadStart']);
+      expect(await client.systemListNotifications()).toEqual(['aria2.onDownloadStart']);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('system.listNotifications', []);
+    });
+
+    it('systemListNotifications rejects non-string items', async () => {
+      mockTransport.sendRequest.mockResolvedValue([{ method: 'invalid' }]);
+      await expect(client.systemListNotifications()).rejects.toThrow(
+        'Unexpected item type for system.listNotifications',
+      );
+    });
+  });
+
   describe('close', () => {
     it('calls transport close', async () => {
       await client.close();
@@ -280,5 +553,36 @@ describe('Aria2Client', () => {
       client.destroy();
       expect(mockTransport.close).toHaveBeenCalledOnce();
     });
+  });
+});
+
+describe('Aria2Client argument validation', () => {
+  let client: Aria2Client;
+  let mockTransport: ReturnType<typeof createMockTransport>;
+
+  beforeEach(() => {
+    mockTransport = createMockTransport();
+    client = new Aria2Client('http://localhost:6800/jsonrpc');
+    (client as unknown as { transport: Transport }).transport = mockTransport;
+  });
+
+  it('rejects invalid pagination before sending an RPC request', async () => {
+    await expect(client.tellWaiting(-1, 10)).rejects.toThrow(TypeError);
+    expect(mockTransport.sendRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid queue position arguments before sending', async () => {
+    await expect(client.changePosition('gid1', 1, 'INVALID' as never)).rejects.toThrow(
+      TypeError,
+    );
+    expect(mockTransport.sendRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed URI and multicall arguments before sending', async () => {
+    await expect(client.addUri([])).rejects.toThrow(TypeError);
+    await expect(client.systemMulticall([{ methodName: '', params: [] }])).rejects.toThrow(
+      TypeError,
+    );
+    expect(mockTransport.sendRequest).not.toHaveBeenCalled();
   });
 });

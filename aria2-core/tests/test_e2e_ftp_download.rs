@@ -2,7 +2,7 @@ mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::ftp::download_command::FtpDownloadCommand;
 use aria2_core::error::{Aria2Error, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{
@@ -541,7 +541,7 @@ async fn test_e2e_ftp_memory_download_keeps_source_out_of_filesystem() {
     let server = start_server().await;
     let dir = tmp_dir();
     let addr = server.addr();
-    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin.torrent", addr.port());
     let options = DownloadOptions {
         follow_torrent: Some(FollowMode::Memory),
         ..DownloadOptions::default()

@@ -27,6 +27,18 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(v) = opts.max_connection_per_server {
         map.insert("max-connection-per-server".to_string(), v.to_string());
     }
+    if let Some(v) = opts.max_http2_sessions_per_server {
+        map.insert("max-http2-sessions-per-server".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.max_http2_streams_per_session {
+        map.insert("max-http2-streams-per-session".to_string(), v.to_string());
+    }
+    if opts.http_version != crate::http::HttpVersion::Auto {
+        map.insert(
+            "http-version".to_string(),
+            opts.http_version.option_value().to_string(),
+        );
+    }
     if let Some(v) = opts.max_download_limit {
         map.insert("max-download-limit".to_string(), v.to_string());
     }
@@ -154,6 +166,11 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     {
         map.insert("min-split-size".to_string(), v.to_string());
     }
+    if let Some(v) = opts.min_http_range_size
+        && v != crate::constants::DEFAULT_HTTP_RANGE_SIZE_FLOOR_BYTES
+    {
+        map.insert("min-http-range-size".to_string(), v.to_string());
+    }
     if !opts.parameterized_uri {
         map.insert("parameterized-uri".to_string(), "false".to_string());
     }
@@ -197,7 +214,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.bt_external_ip {
         map.insert("bt-external-ip".to_string(), v.clone());
     }
-    if !opts.bt_load_saved_metadata {
+    if opts.bt_load_saved_metadata {
+        map.insert("bt-load-saved-metadata".to_string(), "true".to_string());
+    } else {
         map.insert("bt-load-saved-metadata".to_string(), "false".to_string());
     }
     if opts.bt_metadata_only {
@@ -215,7 +234,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
             opts.bt_request_peer_speed_limit.to_string(),
         );
     }
-    if !opts.bt_save_metadata {
+    if opts.bt_save_metadata {
+        map.insert("bt-save-metadata".to_string(), "true".to_string());
+    } else {
         map.insert("bt-save-metadata".to_string(), "false".to_string());
     }
     if !opts.bt_enable_web_seed {
@@ -261,6 +282,41 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert(
             "dht-message-timeout".to_string(),
             opts.dht_message_timeout.to_string(),
+        );
+    }
+    for (name, value, default) in [
+        (
+            "dht-refresh-check-interval",
+            opts.dht_refresh_check_interval,
+            300,
+        ),
+        (
+            "dht-token-rotation-interval",
+            opts.dht_token_rotation_interval,
+            600,
+        ),
+        (
+            "dht-node-contact-interval",
+            opts.dht_node_contact_interval,
+            900,
+        ),
+        ("dht-cleanup-interval", opts.dht_cleanup_interval, 300),
+        ("dht-save-interval", opts.dht_save_interval, 1800),
+        ("dht-bootstrap-timeout", opts.dht_bootstrap_timeout, 60),
+        (
+            "dht-persistence-max-age",
+            opts.dht_persistence_max_age,
+            24 * 60 * 60,
+        ),
+    ] {
+        if value != default {
+            map.insert(name.to_string(), value.to_string());
+        }
+    }
+    if opts.dht_max_concurrent_lookups != 16 {
+        map.insert(
+            "dht-max-concurrent-lookups".to_string(),
+            opts.dht_max_concurrent_lookups.to_string(),
         );
     }
     if opts.enable_dht6 {

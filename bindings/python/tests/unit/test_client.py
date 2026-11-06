@@ -8,7 +8,18 @@ import pytest
 
 from aria2_rust_client.client import Aria2Client
 from aria2_rust_client.errors import Aria2Error
-from aria2_rust_client.types import GlobalStat, SessionInfo, StatusInfo, VersionInfo
+from aria2_rust_client.types import (
+    FileInfo,
+    GlobalStat,
+    PeerInfo,
+    ServerInfoIndex,
+    SessionInfo,
+    StatusInfo,
+    TrackerInfo,
+    DhtStatus,
+    UriEntry,
+    VersionInfo,
+)
 
 
 class MockTransport:
@@ -59,6 +70,14 @@ class TestAddUri:
         )
         assert result == "gid1"
 
+    @pytest.mark.asyncio
+    async def test_with_position(self, client, mock_transport):
+        mock_transport.send_request.return_value = "gid1"
+        await client.add_uri(["http://example.com/file.zip"], position=3)
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.addUri", [["http://example.com/file.zip"], {}, 3]
+        )
+
 
 class TestAddTorrent:
     @pytest.mark.asyncio
@@ -79,7 +98,28 @@ class TestAddTorrent:
         await client.add_torrent(torrent_data, {"dir": "/tmp"})
         expected_encoded = base64.b64encode(torrent_data).decode("ascii")
         mock_transport.send_request.assert_called_once_with(
-            "aria2.addTorrent", [expected_encoded, {"dir": "/tmp"}]
+            "aria2.addTorrent", [expected_encoded, [], {"dir": "/tmp"}]
+        )
+
+    @pytest.mark.asyncio
+    async def test_with_web_seeds_and_position(self, client, mock_transport):
+        torrent_data = b"data"
+        mock_transport.send_request.return_value = "gid"
+        await client.add_torrent(
+            torrent_data,
+            options={"dir": "/tmp"},
+            web_seed_uris=["https://example.com/file"],
+            position=2,
+        )
+        expected_encoded = base64.b64encode(torrent_data).decode("ascii")
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.addTorrent",
+            [
+                expected_encoded,
+                ["https://example.com/file"],
+                {"dir": "/tmp"},
+                2,
+            ],
         )
 
 
@@ -87,13 +127,40 @@ class TestAddMetalink:
     @pytest.mark.asyncio
     async def test_base64_encodes_metalink(self, client, mock_transport):
         metalink_data = b"<metalink>content</metalink>"
-        mock_transport.send_request.return_value = "metalink-gid"
+        mock_transport.send_request.return_value = ["metalink-gid-1", "metalink-gid-2"]
         result = await client.add_metalink(metalink_data)
         expected_encoded = base64.b64encode(metalink_data).decode("ascii")
         mock_transport.send_request.assert_called_once_with(
             "aria2.addMetalink", [expected_encoded]
         )
-        assert result == "metalink-gid"
+        assert result == ["metalink-gid-1", "metalink-gid-2"]
+
+    @pytest.mark.asyncio
+    async def test_with_position(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["metalink-gid"]
+        await client.add_metalink(b"<metalink />", position=1)
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.addMetalink", [base64.b64encode(b"<metalink />").decode("ascii"), {}, 1]
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_gid_list(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["gid1", 2]
+        with pytest.raises(Aria2Error, match="Unexpected item type for addMetalink"):
+            await client.add_metalink(b"<metalink />")
+
+
+class TestGenericCall:
+    @pytest.mark.asyncio
+    async def test_calls_arbitrary_rpc_method(self, client, mock_transport):
+        mock_transport.send_request.return_value = {"ok": True}
+
+        result = await client.call("aria2.customMethod", ["value", 7])
+
+        assert result == {"ok": True}
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.customMethod", ["value", 7]
+        )
 
 
 class TestSimpleMethods:
@@ -133,12 +200,56 @@ class TestSimpleMethods:
         assert result == "gid1"
 
     @pytest.mark.asyncio
-    async def test_force_unpause(self, client, mock_transport):
-        mock_transport.send_request.return_value = "gid1"
-        result = await client.force_unpause("gid1")
-        mock_transport.send_request.assert_called_once_with("aria2.forceUnpause", ["gid1"])
-        assert result == "gid1"
+    async def test_pause_all(self, client, mock_transport):
+        mock_transport.send_request.return_value = "OK"
+        assert await client.pause_all() == "OK"
+        mock_transport.send_request.assert_called_once_with("aria2.pauseAll", [])
 
+    @pytest.mark.asyncio
+    async def test_force_pause_all(self, client, mock_transport):
+        mock_transport.send_request.return_value = "OK"
+        assert await client.force_pause_all() == "OK"
+        mock_transport.send_request.assert_called_once_with("aria2.forcePauseAll", [])
+
+    @pytest.mark.asyncio
+    async def test_unpause_all(self, client, mock_transport):
+        mock_transport.send_request.return_value = "OK"
+        assert await client.unpause_all() == "OK"
+        mock_transport.send_request.assert_called_once_with("aria2.unpauseAll", [])
+
+    @pytest.mark.asyncio
+    async def test_change_position(self, client, mock_transport):
+        mock_transport.send_request.return_value = "2"
+        assert await client.change_position("gid1", 2, "POS_SET") == 2
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.changePosition", ["gid1", 2, "POS_SET"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_change_position_rejects_malformed_result(self, client, mock_transport):
+        mock_transport.send_request.return_value = "not-a-position"
+        with pytest.raises(Aria2Error, match="Unexpected result type for changePosition"):
+            await client.change_position("gid1", 2, "POS_SET")
+
+    @pytest.mark.asyncio
+    async def test_change_uri(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["1", "2"]
+        result = await client.change_uri("gid1", 1, ["old"], ["new"], 0)
+        assert result == ["1", "2"]
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.changeUri", ["gid1", 1, ["old"], ["new"], 0]
+        )
+
+    @pytest.mark.asyncio
+    async def test_change_uri_accepts_numeric_wire_counts(self, client, mock_transport):
+        mock_transport.send_request.return_value = [0, 1]
+        assert await client.change_uri("gid1", 1, [], ["new"]) == ["0", "1"]
+
+    @pytest.mark.asyncio
+    async def test_change_uri_requires_two_string_counts(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["1"]
+        with pytest.raises(Aria2Error, match="Unexpected result length for changeUri"):
+            await client.change_uri("gid1", 1, [], ["new"])
 
 class TestTellStatus:
     @pytest.mark.asyncio
@@ -153,6 +264,100 @@ class TestTellStatus:
         assert isinstance(result, StatusInfo)
         assert result.gid == "2089b05ecca3d829"
         assert result.status == "complete"
+        assert result.files is None
+        assert result.followed_by is None
+
+
+class TestGetFiles:
+    @pytest.mark.asyncio
+    async def test_returns_file_info_list(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {
+                "index": "1",
+                "path": "/downloads/file.zip",
+                "length": "1024",
+                "completedLength": "0",
+                "selected": "true",
+                "uris": [],
+            }
+        ]
+
+        result = await client.get_files("gid1")
+
+        mock_transport.send_request.assert_called_once_with("aria2.getFiles", ["gid1"])
+        assert len(result) == 1
+        assert isinstance(result[0], FileInfo)
+        assert result[0].path == "/downloads/file.zip"
+        assert result[0].length == "1024"
+
+    @pytest.mark.asyncio
+    async def test_get_uris(self, client, mock_transport):
+        mock_transport.send_request.return_value = [{"uri": "https://example.com/a", "status": "waiting"}]
+        result = await client.get_uris("gid1")
+        assert isinstance(result[0], UriEntry)
+        mock_transport.send_request.assert_called_once_with("aria2.getUris", ["gid1"])
+
+    @pytest.mark.asyncio
+    async def test_get_servers(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {"index": "1", "servers": [{"uri": "https://example.com/a", "currentUri": "https://example.com/a", "downloadSpeed": "0"}]}
+        ]
+        result = await client.get_servers("gid1")
+        assert isinstance(result[0], ServerInfoIndex)
+        assert result[0].servers[0].download_speed == "0"
+
+    @pytest.mark.asyncio
+    async def test_get_peers(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {"peerId": "peer", "ip": "127.0.0.1", "port": "6881"}
+        ]
+        result = await client.get_peers("gid1")
+        assert isinstance(result[0], PeerInfo)
+        mock_transport.send_request.assert_called_once_with("aria2.getPeers", ["gid1"])
+
+    @pytest.mark.asyncio
+    async def test_get_trackers(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {
+                "uri": "udp://tracker.example/announce",
+                "tier": 1,
+                "current": True,
+                "lastAttempt": False,
+                "announceReady": True,
+                "allFailed": False,
+                "inFlight": 0,
+                "interval": "1800",
+                "minInterval": 60,
+                "seeders": 3,
+                "leechers": 1,
+                "trackerId": "tracker-id",
+                "lastFailureKind": "network",
+            }
+        ]
+        result = await client.get_trackers("gid1")
+        assert isinstance(result[0], TrackerInfo)
+        assert result[0].tracker_id == "tracker-id"
+        assert result[0].last_failure_kind == "network"
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.getTrackers", ["gid1"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_dht_status(self, client, mock_transport):
+        mock_transport.send_request.return_value = {
+            "state": "running",
+            "totalNodes": "10",
+            "goodNodes": "8",
+            "pendingTransactions": "1",
+            "peerInfoHashes": "12",
+            "storedPeers": "38",
+            "peerStorageEvictions": "4",
+            "maxPeerInfoHashes": "4096",
+        }
+        result = await client.get_dht_status()
+        assert isinstance(result, DhtStatus)
+        assert result.good_nodes == "8"
+        mock_transport.send_request.assert_called_once_with("aria2.getDhtStatus", [])
 
     @pytest.mark.asyncio
     async def test_with_keys(self, client, mock_transport):
@@ -208,6 +413,27 @@ class TestTellLists:
         mock_transport.send_request.return_value = "not-a-list"
         with pytest.raises(Aria2Error):
             await client.tell_active()
+
+    @pytest.mark.parametrize(
+        ("method_name", "args"),
+        [
+            ("get_files", ("gid1",)),
+            ("get_uris", ("gid1",)),
+            ("get_servers", ("gid1",)),
+            ("get_peers", ("gid1",)),
+            ("get_trackers", ("gid1",)),
+            ("tell_active", ()),
+            ("tell_waiting", (0, 10)),
+            ("tell_stopped", (0, 10)),
+        ],
+    )
+    async def test_list_methods_reject_non_object_items(
+        self, client, mock_transport, method_name, args
+    ):
+        mock_transport.send_request.return_value = [{"gid": "valid"}, "malformed"]
+
+        with pytest.raises(Aria2Error, match="Unexpected item type"):
+            await getattr(client, method_name)(*args)
 
 
 class TestGetGlobalStat:
@@ -273,6 +499,25 @@ class TestOptions:
         assert result == {"dir": "/downloads"}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "rpc_method"),
+        [
+            ("get_global_option", "getGlobalOption"),
+            ("get_option", "getOption"),
+        ],
+    )
+    async def test_option_reads_reject_non_object_results(
+        self, client, mock_transport, method_name, rpc_method
+    ):
+        mock_transport.send_request.return_value = []
+
+        with pytest.raises(Aria2Error, match=f"Unexpected result type for {rpc_method}"):
+            if method_name == "get_option":
+                await client.get_option("gid1")
+            else:
+                await client.get_global_option()
+
+    @pytest.mark.asyncio
     async def test_change_option(self, client, mock_transport):
         mock_transport.send_request.return_value = "OK"
         result = await client.change_option("gid1", {"dir": "/tmp"})
@@ -324,6 +569,44 @@ class TestShutdown:
         mock_transport.send_request.assert_called_once_with("aria2.saveSession", [])
         assert result == "OK"
 
+    @pytest.mark.asyncio
+    async def test_system_multicall(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["gid1", "OK"]
+        calls = [{"methodName": "aria2.getVersion", "params": []}]
+        result = await client.system_multicall(calls)
+        assert result == ["gid1", "OK"]
+        mock_transport.send_request.assert_called_once_with("system.multicall", [calls])
+
+    @pytest.mark.asyncio
+    async def test_system_list_methods(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["aria2.addUri"]
+        assert await client.system_list_methods() == ["aria2.addUri"]
+        mock_transport.send_request.assert_called_once_with("system.listMethods", [])
+
+    @pytest.mark.asyncio
+    async def test_system_list_methods_rejects_non_string_items(
+        self, client, mock_transport
+    ):
+        mock_transport.send_request.return_value = ["aria2.addUri", 2]
+        with pytest.raises(Aria2Error, match="Unexpected item type for system.listMethods"):
+            await client.system_list_methods()
+
+    @pytest.mark.asyncio
+    async def test_system_list_notifications(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["aria2.onDownloadStart"]
+        assert await client.system_list_notifications() == ["aria2.onDownloadStart"]
+        mock_transport.send_request.assert_called_once_with("system.listNotifications", [])
+
+    @pytest.mark.asyncio
+    async def test_system_list_notifications_rejects_non_string_items(
+        self, client, mock_transport
+    ):
+        mock_transport.send_request.return_value = [{"method": "invalid"}]
+        with pytest.raises(
+            Aria2Error, match="Unexpected item type for system.listNotifications"
+        ):
+            await client.system_list_notifications()
+
 
 class TestContextManager:
     @pytest.mark.asyncio
@@ -336,3 +619,29 @@ class TestContextManager:
     async def test_close(self, client, mock_transport):
         await client.close()
         mock_transport.close.assert_called_once()
+
+
+class TestArgumentValidation:
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_pagination_before_sending(self, client, mock_transport):
+        with pytest.raises(TypeError, match="offset must be a non-negative integer"):
+            await client.tell_waiting(-1, 10)
+        mock_transport.send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_queue_position_before_sending(
+        self, client, mock_transport
+    ):
+        with pytest.raises(TypeError, match="mode must be POS_SET"):
+            await client.change_position("gid1", 1, "INVALID")
+        mock_transport.send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_uri_and_multicall_before_sending(
+        self, client, mock_transport
+    ):
+        with pytest.raises(TypeError, match="uris must be a non-empty string list"):
+            await client.add_uri([])
+        with pytest.raises(TypeError, match=r"calls\[0\]"):
+            await client.system_multicall([{"methodName": ""}])
+        mock_transport.send_request.assert_not_called()

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use bytes::Bytes;

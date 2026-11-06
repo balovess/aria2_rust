@@ -1,7 +1,7 @@
 #![cfg(feature = "sftp")]
 
 use aria2_core::engine::command::Command;
-use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
+use aria2_core::engine::sftp::download_command::SftpDownloadCommand;
 use aria2_core::error::{Aria2Error, FatalError};
 use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
 use aria2_core::util::rwlock_ext::RwLockRecover;

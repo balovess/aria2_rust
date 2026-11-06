@@ -201,6 +201,24 @@ async fn standalone_engine_is_explicitly_backendless() {
     assert!(response.is_error());
 }
 
+#[tokio::test]
+async fn typed_requests_are_validated_before_backend_dispatch() {
+    let engine = test_engine();
+    let request = JsonRpcRequest {
+        version: Some("1.0".to_string()),
+        method: "aria2.getVersion".to_string(),
+        params: json!([]),
+        id: Some(json!(7)),
+    };
+
+    let response = engine.handle_request(&request).await;
+
+    assert!(response.is_error());
+    let error = response.error.expect("invalid request response");
+    assert_eq!(error.code, -32600);
+    assert!(error.message.contains("unsupported jsonrpc version"));
+}
+
 #[test]
 fn server_configuration_and_auth_remain_transport_only() {
     let config = ServerConfig::default();

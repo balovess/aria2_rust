@@ -8,9 +8,9 @@ mod e2e_helpers;
 mod fixtures;
 
 use aria2_core::engine::command::Command;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::ftp::download_command::FtpDownloadCommand;
 #[cfg(feature = "metalink")]
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
 use aria2_core::filesystem::disk_writer::{ByteArrayDiskWriter, DefaultDiskWriter, DiskWriter};
 use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};

@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
-use super::auth::AuthConfig;
 use super::config::ServerConfig;
-use super::cors::CorsConfig;
+use super::http_handlers::{
+    DropHttpConnection, RpcState, build_cors_layer, handle_jsonrpc, handle_jsonrpc_or_ws,
+    handle_xmlrpc, http_auth_middleware,
+};
 use super::tls::{TlsConfig, TlsError};
-use super::ws_session::handle_ws_socket;
-use crate::engine::{RpcEngine, dispatch_wire_entries};
+use crate::backend::RpcBackend;
+use crate::engine::RpcEngine;
 
 /// RPC HTTP server supporting both HTTP and HTTPS.
 ///
@@ -24,19 +26,46 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
+    fn from_parts(
+        config: ServerConfig,
+        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+        engine: Arc<RpcEngine>,
+    ) -> Self {
+        Self {
+            config,
+            tls_acceptor,
+            engine,
+        }
+    }
+
+    fn load_tls_acceptor(
+        config: &ServerConfig,
+    ) -> Result<Option<tokio_rustls::TlsAcceptor>, TlsError> {
+        config
+            .tls
+            .as_ref()
+            .map(|tls_config| {
+                tls_config
+                    .load_server_config()
+                    .map(tokio_rustls::TlsAcceptor::from)
+            })
+            .transpose()
+    }
+
+    fn from_config_and_engine(
+        config: ServerConfig,
+        engine: Arc<RpcEngine>,
+    ) -> Result<Self, TlsError> {
+        let tls_acceptor = Self::load_tls_acceptor(&config)?;
+        Ok(Self::from_parts(config, tls_acceptor, engine))
+    }
+
     /// Create a new RPC server with the given configuration.
     ///
     /// # Errors
     ///
     /// Returns an error if TLS configuration is provided but fails to load.
     pub fn new(config: ServerConfig) -> Result<Self, TlsError> {
-        let tls_acceptor = if let Some(ref tls_config) = config.tls {
-            let server_config = tls_config.load_server_config()?;
-            Some(tokio_rustls::TlsAcceptor::from(server_config))
-        } else {
-            None
-        };
-
         let engine = if let Some(token) = config.auth.token.as_deref() {
             Arc::new(
                 RpcEngine::new().with_auth_middleware(super::auth::RpcAuthMiddleware::new(token)),
@@ -45,38 +74,49 @@ impl RpcServer {
             Arc::new(RpcEngine::new())
         };
 
-        Ok(Self {
-            config,
-            tls_acceptor,
-            engine,
-        })
+        Self::from_config_and_engine(config, engine)
     }
 
     /// Create a new RPC server with a pre-configured shared engine.
     /// Use this when the caller has already set up `group_man` and `cmd_tx`
     /// on the engine (e.g., when wiring to a running DownloadEngine).
     pub fn new_with_engine(config: ServerConfig, engine: Arc<RpcEngine>) -> Result<Self, TlsError> {
-        let tls_acceptor = if let Some(ref tls_config) = config.tls {
-            let server_config = tls_config.load_server_config()?;
-            Some(tokio_rustls::TlsAcceptor::from(server_config))
-        } else {
-            None
-        };
+        Self::from_config_and_engine(config, engine)
+    }
 
-        Ok(Self {
-            config,
-            tls_acceptor,
-            engine,
-        })
+    /// Create a new RPC server from an application-owned backend.
+    ///
+    /// This constructor wires the backend into [`RpcEngine`] and mirrors the
+    /// configured token into the engine's library-facing authentication layer.
+    /// It is the compact alternative to constructing an `RpcEngine` manually
+    /// before calling [`Self::new_with_engine`].
+    pub fn new_with_backend(
+        config: ServerConfig,
+        backend: Arc<dyn RpcBackend>,
+    ) -> Result<Self, TlsError> {
+        let engine = RpcEngine::with_backend(backend);
+        let engine = match config.auth.token.as_deref() {
+            Some(token) => engine.with_auth_middleware(super::auth::RpcAuthMiddleware::new(token)),
+            None => engine,
+        };
+        Self::from_config_and_engine(config, Arc::new(engine))
+    }
+
+    /// Get the shared engine used by this server.
+    ///
+    /// Applications can use this handle to install lifecycle bridges or
+    /// otherwise coordinate with the same engine that serves RPC requests.
+    pub fn engine(&self) -> Arc<RpcEngine> {
+        Arc::clone(&self.engine)
     }
 
     /// Create a new HTTP RPC server (no TLS).
     pub fn new_http(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            config: ServerConfig::default().with_host(host).with_port(port),
-            tls_acceptor: None,
-            engine: Arc::new(RpcEngine::new()),
-        }
+        Self::from_parts(
+            ServerConfig::default().with_host(host).with_port(port),
+            None,
+            Arc::new(RpcEngine::new()),
+        )
     }
 
     /// Create a new HTTPS RPC server with TLS.
@@ -91,17 +131,11 @@ impl RpcServer {
         key_path: impl Into<String>,
     ) -> Result<Self, TlsError> {
         let tls_config = TlsConfig::new(cert_path, key_path);
-        let server_config = tls_config.load_server_config()?;
-        let tls_acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-
-        Ok(Self {
-            config: ServerConfig::default()
-                .with_host(host)
-                .with_port(port)
-                .with_tls(tls_config),
-            tls_acceptor: Some(tls_acceptor),
-            engine: Arc::new(RpcEngine::new()),
-        })
+        let config = ServerConfig::default()
+            .with_host(host)
+            .with_port(port)
+            .with_tls(tls_config);
+        Self::from_config_and_engine(config, Arc::new(RpcEngine::new()))
     }
 
     /// Get the server address string.
@@ -200,6 +234,25 @@ impl RpcServer {
         self.serve_on_listener(listener).await
     }
 
+    /// Start the RPC server and stop accepting new connections when
+    /// `shutdown` completes.
+    ///
+    /// Existing connection tasks are allowed to finish independently. This
+    /// keeps shutdown ownership with the application that owns the listener,
+    /// while preserving the established `serve` behavior for callers that
+    /// intentionally run the server for the process lifetime.
+    pub async fn serve_with_shutdown<F>(
+        &self,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
+        let listener = self.bind_listener().await?;
+        self.serve_on_listener_with_shutdown(listener, shutdown)
+            .await
+    }
+
     /// Serve requests on a listener that was bound by the caller.
     ///
     /// This keeps listener ownership separate from router construction so an
@@ -209,6 +262,22 @@ impl RpcServer {
         &self,
         listener: tokio::net::TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.serve_on_listener_with_shutdown(listener, std::future::pending())
+            .await
+    }
+
+    /// Serve requests on a caller-owned listener until `shutdown` completes.
+    ///
+    /// The listener is closed by returning from this method. Connections that
+    /// were already accepted are handled by their existing detached tasks.
+    pub async fn serve_on_listener_with_shutdown<F>(
+        &self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
         use axum::{
             Router, middleware,
             routing::{get, post},
@@ -245,9 +314,10 @@ impl RpcServer {
             // HTTPS mode — accept TCP connections, perform TLS handshake,
             // then hand the encrypted stream to hyper/axum.
             tracing::info!("TLS enabled, serving HTTPS");
-            self.serve_tls(listener, tls_acceptor.clone(), app).await?;
+            self.serve_tls(listener, tls_acceptor.clone(), app, shutdown)
+                .await?;
         } else {
-            self.serve_http(listener, app).await?;
+            self.serve_http(listener, app, shutdown).await?;
         }
 
         Ok(())
@@ -263,14 +333,19 @@ impl RpcServer {
         &self,
         listener: tokio::net::TcpListener,
         app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::extract::Request;
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::net::SocketAddr;
         use tower_service::Service;
 
+        let mut shutdown = Box::pin(shutdown);
         loop {
-            let (connection, remote_addr) = listener.accept().await?;
+            let (connection, remote_addr) = tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                accepted = listener.accept() => accepted?,
+            };
             let mut make_service = app
                 .clone()
                 .into_make_service_with_connect_info::<SocketAddr>();
@@ -316,14 +391,19 @@ impl RpcServer {
         listener: tokio::net::TcpListener,
         tls_acceptor: tokio_rustls::TlsAcceptor,
         app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::extract::Request;
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::net::SocketAddr;
         use tower_service::Service;
 
+        let mut shutdown = Box::pin(shutdown);
         loop {
-            let (cnx, remote_addr) = listener.accept().await?;
+            let (cnx, remote_addr) = tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                accepted = listener.accept() => accepted?,
+            };
             let tls_acceptor = tls_acceptor.clone();
 
             // Convert the Router into a MakeService that provides
@@ -376,344 +456,6 @@ impl RpcServer {
     }
 }
 
-/// Shared state for RPC handlers
-#[derive(Clone)]
-pub struct RpcState {
-    pub(crate) engine: Arc<RpcEngine>,
-    /// HTTP Basic Auth configuration. Token auth remains in `RpcEngine` and
-    /// is carried in the JSON/XML-RPC parameter contract.
-    pub(crate) auth: AuthConfig,
-    /// Maximum JSON/XML-RPC parser input size in bytes.
-    pub(crate) max_request_size: usize,
-}
-
-/// Marks a response that must become a connection close without wire bytes.
-///
-/// The marker is consumed by the low-level HTTP/TLS connection services after
-/// the regular Router middleware has preserved original authentication order.
-#[derive(Clone, Debug)]
-struct DropHttpConnection;
-
-/// Convert the public CORS configuration into tower-http's request-aware
-/// layer. `AllowOrigin::list` mirrors an allowed origin back to the browser,
-/// while wildcard mode retains aria2's literal `*` response.
-fn build_cors_layer(config: &CorsConfig) -> tower_http::cors::CorsLayer {
-    use axum::http::{HeaderName, HeaderValue, Method};
-    use std::time::Duration;
-    use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, Any, CorsLayer};
-
-    // An empty origin list is the aria2_original default: do not emit any
-    // CORS response or preflight headers until the user opts in.
-    if config.allowed_origins().is_empty() {
-        return CorsLayer::new();
-    }
-
-    let methods = if config.allow_methods.trim() == "*" {
-        AllowMethods::any()
-    } else {
-        AllowMethods::list(
-            config
-                .allow_methods
-                .split(',')
-                .filter_map(|method| method.trim().parse::<Method>().ok()),
-        )
-    };
-    let headers = if config.allow_headers.trim() == "*" {
-        AllowHeaders::any()
-    } else {
-        AllowHeaders::list(
-            config
-                .allow_headers
-                .split(',')
-                .filter_map(|header| header.trim().parse::<HeaderName>().ok()),
-        )
-    };
-    let max_age = crate::constants::CORS_MAX_AGE;
-
-    let origin = if config.is_wildcard() {
-        if config.allow_credentials {
-            AllowOrigin::mirror_request()
-        } else {
-            Any.into()
-        }
-    } else {
-        AllowOrigin::list(
-            config
-                .allowed_origins()
-                .iter()
-                .filter_map(|origin| HeaderValue::from_str(origin).ok()),
-        )
-    };
-
-    CorsLayer::new()
-        .allow_origin(origin)
-        .allow_methods(methods)
-        .allow_headers(headers)
-        .allow_credentials(config.allow_credentials)
-        .max_age(Duration::from_secs(max_age))
-}
-
-/// Enforce HTTP Basic Auth at the transport seam. `OPTIONS` is deliberately
-/// exempt, matching aria2's CORS preflight behavior; RPC token auth still
-/// applies after a request reaches the JSON/XML engine.
-async fn http_auth_middleware(
-    axum::extract::State(state): axum::extract::State<RpcState>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::http::{Method, StatusCode, header};
-    use axum::response::IntoResponse;
-
-    let authorized = request.method() == Method::OPTIONS
-        || !state.auth.has_basic()
-        || state.auth.verify_authorization(
-            request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-        );
-
-    if authorized {
-        if request_content_length_exceeds_limit(&request, state.max_request_size) {
-            let mut response = axum::response::Response::new(axum::body::Body::empty());
-            response.extensions_mut().insert(DropHttpConnection);
-            return response;
-        }
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"aria2\"")],
-            "Unauthorized",
-        )
-            .into_response()
-    }
-}
-
-/// Match `HttpServerCommand`: only non-WebSocket requests with a declared
-/// Content-Length greater than the configured cap are dropped at header time.
-fn request_content_length_exceeds_limit(
-    request: &axum::extract::Request,
-    max_request_size: usize,
-) -> bool {
-    use axum::http::header;
-
-    let is_websocket_upgrade = request
-        .headers()
-        .get(header::UPGRADE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
-        && request
-            .headers()
-            .get(header::CONNECTION)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-            });
-    if is_websocket_upgrade {
-        return false;
-    }
-
-    request
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|content_length| content_length > max_request_size as u64)
-}
-
-struct JsonGetRequest {
-    body: Vec<u8>,
-    callback: Option<String>,
-}
-
-/// Parse aria2's legacy JSON-RPC GET/JSONP query format.
-///
-/// The C++ implementation intentionally has a small, legacy grammar here:
-/// it matches raw `key=value` prefixes, percent-decodes only `params`, and
-/// copies `method`, `id`, and `jsoncallback` into the generated request or
-/// response without form normalization. Keep those rules at this wire seam;
-/// the POST JSON parser must not inherit them.
-fn parse_json_get_query(query: &str) -> JsonGetRequest {
-    let query = query.strip_prefix('?').unwrap_or(query);
-    let mut method = None;
-    let mut id = None;
-    let mut params = None;
-    let mut callback = None;
-
-    for item in query.split('&') {
-        if let Some(value) = item.strip_prefix("method=") {
-            method = Some(value);
-        } else if let Some(value) = item.strip_prefix("id=") {
-            id = Some(value);
-        } else if let Some(value) = item.strip_prefix("params=") {
-            params = Some(value);
-        } else if let Some(value) = item.strip_prefix("jsoncallback=") {
-            callback = Some(value);
-        }
-    }
-
-    let has_params = params.is_some_and(|encoded| !encoded.is_empty());
-    let decoded_params = params.map(|encoded| {
-        let decoded = crate::rpc_helpers::percent_decode(encoded);
-        crate::rpc_helpers::decode_aria2_base64(&decoded)
-    });
-
-    let body = match (method, id) {
-        (None, None) => decoded_params.unwrap_or_default(),
-        (method, id) => {
-            let mut body = Vec::new();
-            body.extend_from_slice(b"{");
-            if let Some(method) = method {
-                body.extend_from_slice(b"\"method\":\"");
-                body.extend_from_slice(method.as_bytes());
-                body.extend_from_slice(b"\"");
-            }
-            if let Some(id) = id {
-                // The leading comma when `method` is absent is an observable
-                // quirk of aria2_original's string builder.
-                body.extend_from_slice(b",\"id\":\"");
-                body.extend_from_slice(id.as_bytes());
-                body.extend_from_slice(b"\"");
-            }
-            if has_params {
-                let params = decoded_params
-                    .as_deref()
-                    .expect("non-empty params must have a decoded value");
-                body.extend_from_slice(b",\"params\":");
-                body.extend_from_slice(params);
-            }
-            body.extend_from_slice(b"}");
-            body
-        }
-    };
-
-    JsonGetRequest {
-        body,
-        // aria2_original emits this value verbatim as JavaScript. In
-        // particular, it does not percent-decode or validate the callback.
-        callback: callback.map(str::to_owned),
-    }
-}
-
-struct JsonRpcHttpResponse {
-    status: axum::http::StatusCode,
-    body: Vec<u8>,
-    close_connection: bool,
-}
-
-fn http_status_for_jsonrpc_error(code: i32) -> axum::http::StatusCode {
-    use axum::http::StatusCode;
-
-    match code {
-        // aria2 maps execution failures and malformed requests to 400. Keep
-        // the standard MethodNotFound mapping available for callers that use
-        // -32601, although aria2's own unknown-method path uses code 1.
-        1 | -32600 => StatusCode::BAD_REQUEST,
-        -32601 => StatusCode::NOT_FOUND,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
-fn serialize_jsonrpc_response(response: crate::json_rpc::JsonRpcResponse) -> JsonRpcHttpResponse {
-    let status = response
-        .error
-        .as_ref()
-        .map(|error| http_status_for_jsonrpc_error(error.code))
-        .unwrap_or(axum::http::StatusCode::OK);
-    let body = response.to_bytes().unwrap_or_else(|error| {
-        format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
-            serde_json::Value::String(error.to_string())
-        )
-        .into_bytes()
-    });
-    JsonRpcHttpResponse {
-        status,
-        body,
-        // `HttpServerBodyCommand::sendJsonRpcResponse` disables keep-alive
-        // for every single-response error. Batch responses use a separate
-        // original path and remain eligible for connection reuse.
-        close_connection: response.error.is_some(),
-    }
-}
-
-async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpResponse {
-    use crate::json_rpc::{JsonRpcBatchResponse, JsonRpcWireEntry, parse_aria2_wire_document};
-
-    match parse_aria2_wire_document(body) {
-        Ok(document) if !document.is_batch => {
-            let entry = document
-                .entries
-                .into_iter()
-                .next()
-                .expect("single JSON-RPC document must contain one entry");
-            let response = match entry {
-                JsonRpcWireEntry::Request(request) => engine.handle_request_owned(request).await,
-                JsonRpcWireEntry::Error(response) => response,
-            };
-            serialize_jsonrpc_response(response)
-        }
-        Ok(document) => {
-            let body = JsonRpcBatchResponse(dispatch_wire_entries(engine, document.entries).await)
-                .to_bytes()
-                .unwrap_or_else(|error| {
-                    format!(
-                        "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
-                        serde_json::Value::String(error.to_string())
-                    )
-                    .into_bytes()
-                });
-            // aria2 always returns HTTP 200 for a batch envelope, even when
-            // individual entries contain RPC errors.
-            JsonRpcHttpResponse {
-                status: axum::http::StatusCode::OK,
-                body,
-                close_connection: false,
-            }
-        }
-        Err(error) => serialize_jsonrpc_response(error.into_response(None)),
-    }
-}
-
-fn into_jsonrpc_http_response(
-    response: JsonRpcHttpResponse,
-    content_type: &'static str,
-) -> axum::response::Response {
-    use axum::http::{HeaderValue, header};
-    use axum::response::IntoResponse;
-
-    let close_connection = response.close_connection;
-    let mut http_response = (
-        response.status,
-        [(header::CONTENT_TYPE, content_type)],
-        response.body,
-    )
-        .into_response();
-    if close_connection {
-        http_response
-            .headers_mut()
-            .insert(header::CONNECTION, HeaderValue::from_static("close"));
-    }
-    http_response
-}
-
-fn wrap_jsonp(body: Vec<u8>, callback: Option<&str>) -> Vec<u8> {
-    match callback {
-        Some(callback) => {
-            let mut wrapped = Vec::with_capacity(callback.len() + body.len() + 2);
-            wrapped.extend_from_slice(callback.as_bytes());
-            wrapped.push(b'(');
-            wrapped.extend_from_slice(&body);
-            wrapped.push(b')');
-            wrapped
-        }
-        None => body,
-    }
-}
-
 impl std::fmt::Debug for RpcServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RpcServer")
@@ -724,160 +466,42 @@ impl std::fmt::Debug for RpcServer {
     }
 }
 
-/// Handle JSON-RPC POST requests
-async fn handle_jsonrpc(
-    axum::extract::State(state): axum::extract::State<RpcState>,
-    body: axum::body::Bytes,
-) -> impl axum::response::IntoResponse {
-    let response = dispatch_jsonrpc_body(&state.engine, &body).await;
-    into_jsonrpc_http_response(response, "application/json-rpc")
-}
-
-/// Handle the original aria2 XML-RPC endpoint at `/rpc`.
-async fn handle_xmlrpc(
-    axum::extract::State(state): axum::extract::State<RpcState>,
-    body: axum::body::Bytes,
-) -> impl axum::response::IntoResponse {
-    use crate::json_rpc::JsonRpcRequest;
-    use crate::xml_rpc::{XmlRpcResponse, XmlRpcValue, parse_request};
-    use axum::http::{StatusCode, header};
-
-    let (status, content_type, response_body) = match parse_request(&body) {
-        Ok(request) => {
-            let params = request
-                .params
-                .iter()
-                .map(XmlRpcValue::to_json_value)
-                .collect::<Result<Vec<_>, _>>();
-            match params {
-                Ok(params) => {
-                    let json_request =
-                        JsonRpcRequest::new(request.method_name, serde_json::Value::Array(params))
-                            .with_id(serde_json::Value::String("xmlrpc".into()));
-                    let json_response = state.engine.handle_request(&json_request).await;
-                    let response = match json_response.result {
-                        Some(result) => XmlRpcValue::from_json_value(result)
-                            .map(XmlRpcResponse::single)
-                            .unwrap_or_else(|error| {
-                                // Once XML-RPC parsing has succeeded, aria2
-                                // reports method-side failures as faultCode=1
-                                // regardless of the JSON-RPC adapter code.
-                                XmlRpcResponse::fault(1, &error.to_string())
-                            }),
-                        None => {
-                            let message = json_response
-                                .error
-                                .map(|error| error.message)
-                                .unwrap_or_else(|| "Missing RPC response".into());
-                            XmlRpcResponse::fault(1, &message)
-                        }
-                    };
-                    (StatusCode::OK, Some("text/xml"), response.to_xml())
-                }
-                // aria2_original treats XML value conversion failures as
-                // request parse failures: HTTP 400 with an empty body.
-                Err(_) => (StatusCode::BAD_REQUEST, None, String::new()),
-            }
-        }
-        // Keep the original HTTP/XML-RPC split. The C++ body command sends
-        // `feedResponse(400)` for parser errors, which has no XML fault body.
-        Err(_) => (StatusCode::BAD_REQUEST, None, String::new()),
-    };
-
-    let mut response = axum::response::Response::new(axum::body::Body::from(response_body));
-    *response.status_mut() = status;
-    if let Some(content_type) = content_type {
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static(content_type),
-        );
-    }
-    response
-}
-
-/// Handle GET requests at `/jsonrpc`.
-///
-/// Supports WebSocket upgrades and aria2's legacy GET/JSONP transport.
-/// 1. **WebSocket upgrade** — If the request has `Upgrade: websocket` headers,
-///    the connection is upgraded to WebSocket for real-time download events.
-/// 2. **Regular GET** — Dispatches aria2's legacy GET/JSONP transport.
-///
-/// Upstream aria2 accepts WebSocket upgrades only at `/jsonrpc`; regular GET
-/// requests at that same path retain its legacy JSONP behavior.
-async fn handle_jsonrpc_or_ws(
-    axum::extract::State(state): axum::extract::State<RpcState>,
-    ws: Option<axum::extract::ws::WebSocketUpgrade>,
-    query: axum::extract::RawQuery,
-) -> impl axum::response::IntoResponse {
-    match ws {
-        Some(upgrade) => {
-            // WebSocket upgrade request from Aria2 Explorer or other clients.
-            // An oversized RPC document receives a JSON-RPC parse error rather
-            // than a transport-level disconnect.
-            let max_request_size = state.max_request_size;
-            upgrade.on_upgrade(move |socket| {
-                handle_ws_socket(socket, state.engine.clone(), max_request_size)
-            })
-        }
-        None => {
-            let parsed = parse_json_get_query(query.0.as_deref().unwrap_or_default());
-            let response = dispatch_jsonrpc_body(&state.engine, &parsed.body).await;
-            let content_type = if parsed.callback.is_some() {
-                "text/javascript"
-            } else {
-                "application/json-rpc"
-            };
-            let body = wrap_jsonp(response.body, parsed.callback.as_deref());
-            into_jsonrpc_http_response(JsonRpcHttpResponse { body, ..response }, content_type)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::auth::AuthConfig;
     use super::*;
+    use crate::backend::{
+        BackendError, BackendRequest, BackendResponse, BackendResult, RpcBackend,
+    };
+    use async_trait::async_trait;
+    use std::sync::Mutex;
 
-    #[test]
-    fn test_json_get_query_matches_aria2_wire_grammar() {
-        use base64::Engine;
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode("[]");
-        let parsed = parse_json_get_query(&format!(
-            "method=aria2.getVersion&id=foo%20bar&params={encoded}&jsoncallback=cb%2Ename"
-        ));
-
-        assert_eq!(
-            parsed.body,
-            br#"{"method":"aria2.getVersion","id":"foo%20bar","params":[]}"#
-        );
-        assert_eq!(parsed.callback.as_deref(), Some("cb%2Ename"));
+    #[derive(Clone, Default)]
+    struct RecordingBackend {
+        requests: Arc<Mutex<Vec<BackendRequest>>>,
     }
 
-    #[test]
-    fn test_json_get_query_keeps_original_malformed_cases_for_json_parser() {
-        let no_query = parse_json_get_query("");
-        assert!(no_query.body.is_empty());
+    #[async_trait]
+    impl RpcBackend for RecordingBackend {
+        fn metadata(&self) -> crate::backend::BackendMetadata {
+            crate::backend::BackendMetadata::base("test")
+        }
 
-        let id_only = parse_json_get_query("id=only-id");
-        assert_eq!(id_only.body, br#"{,"id":"only-id"}"#);
-
-        let invalid_base64 = parse_json_get_query("method=aria2.getVersion&params=not-base64");
-        assert!(!invalid_base64.body.is_empty());
-    }
-
-    #[test]
-    fn test_json_get_query_omits_empty_params_like_aria2() {
-        let parsed = parse_json_get_query("method=aria2.getVersion&id=empty&params=");
-        assert_eq!(
-            parsed.body,
-            br#"{"method":"aria2.getVersion","id":"empty"}"#
-        );
-    }
-
-    #[test]
-    fn test_json_get_callback_is_not_normalized() {
-        let parsed = parse_json_get_query("jsoncallback=bad;alert(1)//");
-        assert_eq!(parsed.callback.as_deref(), Some("bad;alert(1)//"));
+        async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
+            let response = match &request {
+                BackendRequest::AddUri { .. } => BackendResponse::Gid("0123456789abcdef".into()),
+                _ => {
+                    return Err(BackendError::Unsupported(format!(
+                        "unexpected test request: {request:?}"
+                    )));
+                }
+            };
+            self.requests
+                .lock()
+                .expect("test backend lock poisoned")
+                .push(request);
+            Ok(BackendResult::response(response))
+        }
     }
 
     #[test]
@@ -897,6 +521,46 @@ mod tests {
         let server = RpcServer::new(config).expect("Failed to create server");
         assert_eq!(server.addr(), "0.0.0.0:8080");
         assert!(!server.is_secure());
+    }
+
+    #[test]
+    fn test_rpc_server_from_backend_preserves_server_configuration() {
+        let config = ServerConfig::default()
+            .with_host("127.0.0.1")
+            .with_port(6801)
+            .with_auth(AuthConfig::default().with_token("secret"));
+
+        let server =
+            RpcServer::new_with_backend(config, Arc::new(crate::backend::UnsupportedBackend))
+                .expect("backend-backed server should construct");
+
+        assert_eq!(server.addr(), "127.0.0.1:6801");
+        assert!(server.config().auth.has_token());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_from_backend_dispatches_to_the_same_engine() {
+        let backend = RecordingBackend::default();
+        let requests = Arc::clone(&backend.requests);
+        let server = RpcServer::new_with_backend(
+            ServerConfig::default().with_auth(AuthConfig::default().with_token("secret")),
+            Arc::new(backend),
+        )
+        .expect("backend-backed server should construct");
+
+        let request = crate::json_rpc::JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!(["token:secret", ["https://example.test/file"]]),
+        )
+        .with_id(1);
+        let response = server.engine().handle_request(&request).await;
+
+        assert_eq!(response.result, Some(serde_json::json!("0123456789abcdef")));
+        assert!(response.error.is_none());
+        assert!(matches!(
+            requests.lock().expect("test backend lock poisoned").as_slice(),
+            [BackendRequest::AddUri { uris, .. }] if uris == &["https://example.test/file"]
+        ));
     }
 
     #[test]
@@ -924,5 +588,29 @@ mod tests {
     fn test_rpc_server_tls_acceptor_none_for_http() {
         let server = RpcServer::new_http("127.0.0.1", 6800);
         assert!(server.tls_acceptor().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_stops_accepting_after_shutdown_signal() {
+        let server = RpcServer::new_http("127.0.0.1", 0);
+        let listener = server.bind_listener().await.expect("listener should bind");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            server
+                .serve_on_listener_with_shutdown(listener, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+
+        shutdown_tx
+            .send(())
+            .expect("shutdown receiver should exist");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("server should stop after shutdown")
+            .expect("server task should not panic");
+        assert!(result.is_ok());
     }
 }

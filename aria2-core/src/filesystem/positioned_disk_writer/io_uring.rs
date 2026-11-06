@@ -180,6 +180,17 @@ impl SeekableDiskWriter for IoUringDiskWriter {
         Ok(())
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        // The io_uring writer's existing flush syncs the file itself. The
+        // checkpoint path uses `sync_all` below to include namespace entries.
+        self.flush().await
+    }
+
+    async fn sync_all(&mut self) -> Result<()> {
+        self.flush().await?;
+        crate::filesystem::durability::sync_parent_directories(&self.path).await
+    }
+
     async fn len(&self) -> Result<u64> {
         if self.file.is_some() {
             // Use a synchronous `stat` (fast, non-blocking syscall) to get

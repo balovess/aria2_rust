@@ -31,10 +31,10 @@ describe('RPC Methods Integration', () => {
     expect(gid).toBe('2089b05ecca3d829');
   });
 
-  it('addMetalink returns GID', async () => {
+  it('addMetalink returns GIDs', async () => {
     const metalink = Buffer.from('fake-metalink-data');
-    const gid = await client.addMetalink(metalink);
-    expect(gid).toBe('2089b05ecca3d829');
+    const gids = await client.addMetalink(metalink);
+    expect(gids).toEqual(['2089b05ecca3d829-metadata', '2089b05ecca3d829-payload']);
   });
 
   it('remove existing task', async () => {
@@ -101,6 +101,18 @@ describe('RPC Methods Integration', () => {
     const stat = await client.getGlobalStat();
     expect(stat.downloadSpeed).toBe('20480');
     expect(stat.numActive).toBe('1');
+  });
+
+  it('getTrackers', async () => {
+    const trackers = await client.getTrackers('2089b05ecca3d829');
+    expect(trackers).toHaveLength(1);
+    expect(trackers[0].trackerId).toBe('tracker-id');
+  });
+
+  it('getDhtStatus', async () => {
+    const status = await client.getDhtStatus();
+    expect(status.state).toBe('running');
+    expect(status.goodNodes).toBe('8');
   });
 
   it('getVersion', async () => {

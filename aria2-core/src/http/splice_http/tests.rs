@@ -10,10 +10,12 @@
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::super::download::try_splice_download;
+    use super::super::download::try_splice_download_with_policy;
     use super::super::helpers::{
         find_header_end, is_chunked, parse_content_length, parse_status_code, write_all_at_offset,
     };
     use std::io;
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Spawn a mock HTTP server that responds to a Range request with 206
@@ -113,6 +115,78 @@ mod linux_tests {
         drop(file);
         let content = std::fs::read(&out_path).expect("read output file");
         assert_eq!(content, payload);
+    }
+
+    #[tokio::test]
+    async fn test_splice_download_uses_configured_source_address() {
+        use crate::network::OutboundNetworkPolicy;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind source-address splice server");
+        let server_addr = listener
+            .local_addr()
+            .expect("read source-address splice server");
+        let (peer_sender, peer_receiver) = tokio::sync::oneshot::channel();
+        let payload = b"policy-bound splice body".to_vec();
+        let server_payload = payload.clone();
+        tokio::spawn(async move {
+            let (mut socket, peer_addr) = listener
+                .accept()
+                .await
+                .expect("accept source-address splice request");
+            let _ = peer_sender.send(peer_addr);
+            let mut request = [0u8; 4096];
+            let _ = socket
+                .read(&mut request)
+                .await
+                .expect("read source-address splice request");
+            let response = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-{}/{}\r\nConnection: close\r\n\r\n",
+                server_payload.len(),
+                server_payload.len().saturating_sub(1),
+                server_payload.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write source-address splice headers");
+            socket
+                .write_all(&server_payload)
+                .await
+                .expect("write source-address splice body");
+        });
+
+        let directory = tempfile::tempdir().expect("create source-address splice directory");
+        let output = directory.path().join("bound.bin");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&output)
+            .expect("create source-address splice output");
+        let policy = Arc::new(OutboundNetworkPolicy::single(
+            "127.0.0.2".parse().expect("loopback source address"),
+        ));
+
+        try_splice_download_with_policy(
+            &format!("http://{server_addr}/bound.bin"),
+            0,
+            payload.len() as u64,
+            &file,
+            0,
+            &policy,
+        )
+        .await
+        .expect("policy-bound splice download should succeed");
+
+        let peer_addr = peer_receiver
+            .await
+            .expect("source-address splice server should observe peer");
+        assert_eq!(
+            peer_addr.ip(),
+            "127.0.0.2".parse::<std::net::IpAddr>().unwrap()
+        );
     }
 
     #[tokio::test]

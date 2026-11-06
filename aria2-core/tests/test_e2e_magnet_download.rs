@@ -1,22 +1,21 @@
 #![cfg(feature = "bittorrent")]
 
 mod fixtures;
-use aria2_core::engine::command::{Command, CommandStatus};
-use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
-use aria2_core::engine::metadata_exchange::{
+use aria2_core::engine::bittorrent::magnet::download_command::MagnetDownloadCommand;
+use aria2_core::engine::bittorrent::magnet::metadata_collector::MetadataCollector;
+use aria2_core::engine::bittorrent::magnet::metadata_exchange::{
     MetadataExchangeConfig, MetadataExchangeError, MetadataExchangeSession,
 };
+use aria2_core::engine::command::{Command, CommandStatus};
+use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
-use aria2_protocol::bittorrent::dht::client::{
-    DhtClient, DhtClientConfig, generate_random_node_id,
-};
-use aria2_protocol::bittorrent::extension::ut_metadata::{
-    ExtensionHandshake, MetadataCollector, UtMetadataMsg,
-};
+use aria2_protocol::bittorrent::dht::compact::extract_compact_peers_from_response;
 use aria2_protocol::bittorrent::magnet::MagnetLink;
+use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
-use fixtures::mock_dht_node::MockDhtNode;
-use fixtures::test_torrent_builder::build_test_torrent;
+use fixtures::mock_bt_peer::MockBtPeerServer;
+use fixtures::mock_udp_tracker::MockUdpTracker;
+use fixtures::test_torrent_builder::{build_test_torrent, generate_file_data};
 use std::net::SocketAddr;
 use tracing::info;
 
@@ -52,53 +51,43 @@ fn test_magnet_parse_invalid() {
 
 #[test]
 fn test_extension_handshake_roundtrip() {
-    let hs = ExtensionHandshake::new(12345);
-    let encoded = hs.to_bencode();
-    let parsed = ExtensionHandshake::parse(&encoded).unwrap();
-    assert_eq!(parsed.metadata_size, Some(12345));
-    assert_eq!(parsed.get_ut_metadata_id(), Some(1));
+    let mut hs = ExtensionHandshake::new();
+    hs.with_metadata_size(12345);
+    let encoded = hs.to_bytes();
+    let parsed = ExtensionHandshake::from_bytes(&encoded).unwrap();
+    assert_eq!(parsed.metadata_size(), Some(12345));
+    assert_eq!(parsed.ut_metadata_id(), Some(1));
 }
 
 #[test]
 fn test_ut_metadata_request_encode_decode() {
-    let msg = UtMetadataMsg::Request(0);
-    let encoded = msg.encode(1);
-    let decoded = UtMetadataMsg::decode(&encoded[5..]).unwrap();
-    match decoded {
-        UtMetadataMsg::Request(p) => assert_eq!(p, 0),
-        _ => panic!("Expected Request"),
-    }
+    let msg = UtMetadataMessage::Request { piece: 0 };
+    let decoded = UtMetadataMessage::from_payload(&msg.to_payload()).unwrap();
+    assert_eq!(decoded, msg);
 }
 
 #[test]
 fn test_ut_metadata_data_encode_decode() {
     let data = b"fake torrent metadata".to_vec();
-    let msg = UtMetadataMsg::Data(0, data.clone());
-    let encoded = msg.encode(2);
-    let decoded = UtMetadataMsg::decode(&encoded[5..]).unwrap();
-    match decoded {
-        UtMetadataMsg::Data(p, d) => {
-            assert_eq!(p, 0);
-            assert_eq!(&d[..], &data[..]);
-        }
-        _ => panic!("Expected Data"),
-    }
+    let msg = UtMetadataMessage::Data {
+        piece: 0,
+        total_size: data.len() as u32,
+        data,
+    };
+    let decoded = UtMetadataMessage::from_payload(&msg.to_payload()).unwrap();
+    assert_eq!(decoded, msg);
 }
 
 #[test]
 fn test_ut_metadata_reject_encode_decode() {
-    let msg = UtMetadataMsg::Reject(0);
-    let encoded = msg.encode(3);
-    let decoded = UtMetadataMsg::decode(&encoded[5..]).unwrap();
-    match decoded {
-        UtMetadataMsg::Reject(p) => assert_eq!(p, 0),
-        _ => panic!("Expected Reject"),
-    }
+    let msg = UtMetadataMessage::Reject { piece: 0 };
+    let decoded = UtMetadataMessage::from_payload(&msg.to_payload()).unwrap();
+    assert_eq!(decoded, msg);
 }
 
 #[test]
 fn test_metadata_collector_basic() {
-    let mut collector = MetadataCollector::new(2000, 1000);
+    let mut collector = MetadataCollector::new(2000, 1000).unwrap();
     assert!(!collector.is_complete());
 
     collector.add_piece(0, &vec![0xAB; 1000]);
@@ -108,18 +97,18 @@ fn test_metadata_collector_basic() {
     collector.add_piece(1, &vec![0xCD; 1000]);
     assert!(collector.is_complete());
 
-    let assembled = collector.assemble().unwrap();
+    let assembled = collector.into_bytes().unwrap();
     assert_eq!(assembled.len(), 2000);
 }
 
 #[test]
 fn test_metadata_collector_single_piece() {
-    let mut collector = MetadataCollector::new(500, 16384);
+    let mut collector = MetadataCollector::new(500, 16384).unwrap();
 
     collector.add_piece(0, &vec![0x42; 500]);
     assert!(collector.is_complete());
 
-    let assembled = collector.assemble().unwrap();
+    let assembled = collector.into_bytes().unwrap();
     assert_eq!(assembled.len(), 500);
     assert!(assembled.iter().all(|&b| b == 0x42));
 }
@@ -164,40 +153,6 @@ fn test_magnet_url_decode() {
 }
 
 #[tokio::test]
-async fn test_dht_client_discover_peers_via_mock() {
-    let target_hash = [0xABu8; 20];
-    let peer_addr: std::net::SocketAddr = "127.0.0.1:6889".parse().unwrap();
-    let _mock = MockDhtNode::start(vec![peer_addr]).await;
-    let dht_port = _mock.addr().port();
-
-    let bootstrap_addr: std::net::SocketAddr = format!("127.0.0.1:{}", dht_port).parse().unwrap();
-
-    let config = DhtClientConfig {
-        self_id: generate_random_node_id(),
-        bootstrap_nodes: vec![bootstrap_addr],
-        max_concurrent_queries: 4,
-        query_timeout: std::time::Duration::from_secs(5),
-        max_rounds: 2,
-    };
-    let mut client = DhtClient::new(config);
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let result = client.discover_peers(&target_hash).await;
-    assert!(
-        result.is_ok(),
-        "discover_peers should complete without error: {:?}",
-        result.err()
-    );
-    let discovered = result.unwrap();
-    // nodes_contacted is u32, always >= 0, so we just log the count
-    tracing::info!(
-        "DHT discovery completed with {} nodes",
-        discovered.nodes_contacted
-    );
-}
-
-#[tokio::test]
 async fn test_metadata_exchange_no_peers_error() {
     let session = MetadataExchangeSession::new(MetadataExchangeConfig {
         connect_timeout: std::time::Duration::from_millis(50),
@@ -210,41 +165,9 @@ async fn test_metadata_exchange_no_peers_error() {
     let result = session.fetch_metadata(&target_hash, &empty_peers).await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        aria2_core::engine::metadata_exchange::MetadataExchangeError::NoPeersAvailable => {}
+        aria2_core::engine::bittorrent::magnet::metadata_exchange::MetadataExchangeError::NoPeersAvailable => {}
         other => panic!("Expected NoPeersAvailable, got {:?}", other),
     }
-}
-
-#[tokio::test]
-async fn test_dht_client_no_bootstrap_returns_empty() {
-    let config = DhtClientConfig {
-        self_id: generate_random_node_id(),
-        bootstrap_nodes: vec![],
-        max_concurrent_queries: 1,
-        query_timeout: std::time::Duration::from_millis(50),
-        max_rounds: 1,
-    };
-    let mut client = DhtClient::new(config);
-    let target = [0u8; 20];
-
-    let result = client.discover_peers(&target).await.unwrap();
-    assert!(result.addresses.is_empty());
-}
-
-#[tokio::test]
-async fn test_dht_client_bootstrap_only_contacts_bootstrap_nodes() {
-    let config = DhtClientConfig {
-        self_id: generate_random_node_id(),
-        bootstrap_nodes: vec![
-            "10.255.255.254:6881".parse().unwrap(),
-            "10.255.255.253:6882".parse().unwrap(),
-        ],
-        max_concurrent_queries: 2,
-        query_timeout: std::time::Duration::from_millis(100),
-        max_rounds: 1,
-    };
-    let client = DhtClient::new(config);
-    let _rt = client.routing_table();
 }
 
 #[tokio::test]
@@ -255,15 +178,7 @@ async fn test_metadata_exchange_config_default() {
 }
 
 #[tokio::test]
-async fn test_generate_random_node_id_variety() {
-    let id1 = generate_random_node_id();
-    let id2 = generate_random_node_id();
-    assert_ne!(id1, id2, "Two random IDs should differ");
-    assert!(!id1.iter().all(|&b| b == 0));
-}
-
-#[tokio::test]
-async fn test_dht_client_extract_compact_peers_from_mock_response() {
+async fn test_extract_compact_peers_from_mock_response() {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
     use std::collections::BTreeMap;
 
@@ -279,7 +194,7 @@ async fn test_dht_client_extract_compact_peers_from_mock_response() {
         BencodeValue::Dict(r_dict),
     );
 
-    let peers = aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&msg);
+    let peers = extract_compact_peers_from_response(&msg);
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].port(), 8080);
 }
@@ -302,7 +217,7 @@ async fn test_e2e_magnet_metadata_exchange_with_mock_seeder() {
     let num_pieces = total_size.div_ceil(piece_length as u64);
     assert!(num_pieces > 1, "Test torrent should have multiple pieces");
 
-    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024).unwrap();
     assert!(!collector.is_complete());
 
     let metadata_piece_size = 16 * 1024;
@@ -320,7 +235,9 @@ async fn test_e2e_magnet_metadata_exchange_with_mock_seeder() {
         collector.is_complete(),
         "MetadataCollector should be complete after all pieces"
     );
-    let assembled = collector.assemble().expect("Should assemble successfully");
+    let assembled = collector
+        .into_bytes()
+        .expect("Should assemble successfully");
 
     assert_eq!(
         assembled.len(),
@@ -362,7 +279,7 @@ async fn test_e2e_magnet_metadata_exchange_produces_valid_torrent_file() {
     let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse test torrent");
     let info_hash = meta.info_hash.bytes;
 
-    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024).unwrap();
     collector.add_piece(0, &torrent_data);
 
     assert!(
@@ -370,7 +287,7 @@ async fn test_e2e_magnet_metadata_exchange_produces_valid_torrent_file() {
         "Single-piece metadata should be complete"
     );
     let assembled = collector
-        .assemble()
+        .into_bytes()
         .expect("Should assemble single-piece metadata");
 
     let torrent_path = dir.path().join("downloaded.torrent");
@@ -400,15 +317,15 @@ async fn test_e2e_metadata_exchange_extension_handshake_cycle() {
     let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse torrent");
     let info_hash = meta.info_hash.bytes;
 
-    let hs = ExtensionHandshake::new(torrent_data.len() as u64);
-    let encoded_value = hs.to_bencode();
-    let _encoded_bytes = encoded_value.encode();
+    let mut hs = ExtensionHandshake::new();
+    hs.with_metadata_size(torrent_data.len() as u32);
+    let encoded_bytes = hs.to_bytes();
 
     let parsed =
-        ExtensionHandshake::parse(&encoded_value).expect("Should parse extension handshake");
-    assert_eq!(parsed.metadata_size, Some(torrent_data.len() as u64));
+        ExtensionHandshake::from_bytes(&encoded_bytes).expect("Should parse extension handshake");
+    assert_eq!(parsed.metadata_size(), Some(torrent_data.len() as u32));
     assert!(
-        parsed.get_ut_metadata_id().is_some(),
+        parsed.ut_metadata_id().is_some(),
         "Should have ut_metadata extension ID"
     );
 
@@ -423,6 +340,319 @@ async fn test_e2e_metadata_exchange_extension_handshake_cycle() {
     }
 
     info!("Extension handshake cycle test completed successfully");
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_over_peer_wire() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "metadata_wire_test",
+        512,
+        256,
+        "http://tracker.test/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse torrent");
+    let info_hash = meta.info_hash.bytes;
+    let (root, consumed) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    assert_eq!(consumed, torrent_data.len());
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("test torrent should contain info dictionary")
+        .encode();
+    let peer =
+        MockBtPeerServer::start_with_metadata(info_hash, Vec::new(), Some(info_metadata.clone()))
+            .await;
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        max_peers_to_try: 1,
+        connect_timeout: std::time::Duration::from_secs(2),
+        request_timeout: std::time::Duration::from_secs(2),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    });
+    let received = session
+        .fetch_metadata(&info_hash, &[peer.addr()])
+        .await
+        .expect("metadata exchange should complete over the peer wire");
+
+    assert_eq!(received, info_metadata);
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_rejects_peer_without_extended_capability() {
+    use aria2_protocol::bittorrent::message::handshake::Handshake;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let info_hash = [0x46u8; 20];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback peer");
+    let peer_addr = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, request) = loop {
+            let (mut stream, _) = listener.accept().await.expect("accept metadata peer");
+            let mut request = [0u8; 68];
+            if stream.read_exact(&mut request[..1]).await.is_err() || request[0] != 19 {
+                continue;
+            }
+            if stream.read_exact(&mut request[1..]).await.is_err()
+                || &request[1..20] != b"BitTorrent protocol"
+            {
+                continue;
+            }
+            break (stream, request);
+        };
+        assert_eq!(&request[28..48], &info_hash);
+
+        let mut response = Handshake::new(&info_hash, &[0x47u8; 20]);
+        response.reserved[5] &= !0x10;
+        stream
+            .write_all(&response.to_bytes())
+            .await
+            .expect("send handshake without BEP 10 capability");
+
+        let mut frame_length = [0u8; 4];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_exact(&mut frame_length),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                let frame_size = u32::from_be_bytes(frame_length) as usize;
+                let mut payload = vec![0u8; frame_size];
+                if frame_size == 0 || stream.read_exact(&mut payload).await.is_err() {
+                    return false;
+                }
+                let sent_extended = payload.first() == Some(&20);
+                if sent_extended {
+                    let mut next_frame = [0u8; 4];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        stream.read_exact(&mut next_frame),
+                    )
+                    .await;
+                }
+                sent_extended
+            }
+            Ok(Err(_)) | Err(_) => false,
+        }
+    });
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        max_peers_to_try: 1,
+        connect_timeout: std::time::Duration::from_secs(1),
+        request_timeout: std::time::Duration::from_secs(4),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    });
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        session.fetch_metadata(&info_hash, &[peer_addr]),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        !peer.await.expect("peer observer should finish"),
+        "metadata client must not send an Extended frame without negotiating BEP 10"
+    );
+    let result =
+        result.expect("unsupported peer should be rejected before metadata request timeout");
+    let error = result.expect_err("peer without BEP 10 cannot serve ut_metadata");
+    assert!(matches!(
+        error,
+        MetadataExchangeError::AllPeersFailed { attempts: 1, .. }
+    ));
+    assert!(error.to_string().contains("unsupported"));
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "peer classification took {elapsed:?}, request timeout is 4 seconds"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_magnet_metadata_resolution_with_udp_only_tracker() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "udp_only_magnet",
+        512,
+        256,
+        "http://tracker.invalid/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("parse test torrent");
+    let (root, consumed) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    assert_eq!(consumed, torrent_data.len());
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("test torrent should contain info dictionary")
+        .encode();
+    let peer = MockBtPeerServer::start_with_metadata(
+        meta.info_hash.bytes,
+        Vec::new(),
+        Some(info_metadata),
+    )
+    .await;
+    let tracker = MockUdpTracker::start_with_peers(vec![peer.addr()]).await;
+    let dir = tmp_dir();
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&dn=udp_only_magnet&tr={}",
+        meta.info_hash.as_hex(),
+        tracker.url()
+    );
+    let options = DownloadOptions {
+        enable_dht: false,
+        bt_metadata_only: true,
+        bt_save_metadata: true,
+        bt_tracker_timeout: 3,
+        bt_tracker_connect_timeout: 3,
+        ..DownloadOptions::default()
+    };
+    let mut command =
+        MagnetDownloadCommand::new(GroupId::new(7001), &magnet, &options, dir.path().to_str())
+            .expect("create UDP-only magnet command");
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), command.execute())
+        .await
+        .expect("UDP-only metadata lookup should finish promptly")
+        .expect("UDP tracker should discover the metadata peer");
+
+    let saved_metadata = dir
+        .path()
+        .join(format!("{}.torrent", meta.info_hash.as_hex()));
+    let saved = std::fs::read(saved_metadata).expect("metadata should be saved");
+    assert_eq!(
+        TorrentMeta::parse(&saved)
+            .expect("saved metadata should parse")
+            .info_hash
+            .bytes,
+        meta.info_hash.bytes
+    );
+}
+
+#[tokio::test]
+async fn magnet_metadata_swarm_reuses_peer_actor_for_payload_download() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "magnet_actor_handoff",
+        512,
+        256,
+        "http://tracker.invalid/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("parse test torrent");
+    let (root, consumed) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    assert_eq!(consumed, torrent_data.len());
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("torrent should include info dictionary")
+        .encode();
+    let piece_data = vec![generate_file_data(256), generate_file_data(256)];
+    let peer = MockBtPeerServer::start_requesting_metadata_upload(
+        meta.info_hash.bytes,
+        piece_data.clone(),
+        info_metadata.clone(),
+    )
+    .await;
+    let tracker = MockUdpTracker::start_with_peers(vec![peer.addr()]).await;
+    let dir = tmp_dir();
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&dn=magnet_actor_handoff&tr={}",
+        meta.info_hash.as_hex(),
+        tracker.url()
+    );
+    let options = DownloadOptions {
+        enable_dht: false,
+        disable_ipv6: true,
+        seed_time: Some(0.0),
+        bt_tracker_timeout: 3,
+        bt_tracker_connect_timeout: 3,
+        ..DownloadOptions::default()
+    };
+    let mut command =
+        MagnetDownloadCommand::new(GroupId::new(7002), &magnet, &options, dir.path().to_str())
+            .expect("create magnet download command");
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("magnet metadata-to-payload transition should finish")
+        .expect("magnet payload should download");
+
+    assert_eq!(
+        std::fs::read(dir.path().join("magnet_actor_handoff")).expect("read downloaded payload"),
+        [piece_data[0].as_slice(), piece_data[1].as_slice()].concat()
+    );
+    assert_eq!(
+        peer.completed_handshake_count(),
+        1,
+        "metadata and payload must share one established BitTorrent peer connection; the standard MSE probe may be accepted but does not complete a handshake"
+    );
+    assert_eq!(
+        peer.wait_for_metadata_size(std::time::Duration::from_millis(100))
+            .await,
+        Some(info_metadata.len() as u32),
+        "the retained peer actor must advertise the resolved metadata size"
+    );
+    let uploaded_metadata = peer
+        .wait_for_metadata_upload(std::time::Duration::from_secs(2))
+        .await
+        .expect("the retained peer actor should serve BEP 9 metadata after payload activation");
+    assert_eq!(uploaded_metadata.0, 0);
+    assert_eq!(uploaded_metadata.1 as usize, info_metadata.len());
+    assert_eq!(uploaded_metadata.2, info_metadata);
+    let mut requested_pieces = peer.requested_pieces().await;
+    requested_pieces.sort_unstable();
+    requested_pieces.dedup();
+    assert_eq!(requested_pieces, [0, 1]);
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_uses_configured_source_address() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "metadata_source_binding_test",
+        512,
+        256,
+        "http://tracker.test/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("parse test torrent");
+    let info_hash = meta.info_hash.bytes;
+    let (root, _) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("test torrent should contain info dictionary")
+        .encode();
+    let peer =
+        MockBtPeerServer::start_with_metadata(info_hash, Vec::new(), Some(info_metadata)).await;
+    let policy = std::sync::Arc::new(OutboundNetworkPolicy::single(
+        "127.0.0.2".parse().expect("loopback source address"),
+    ));
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        max_peers_to_try: 1,
+        connect_timeout: std::time::Duration::from_secs(2),
+        request_timeout: std::time::Duration::from_secs(2),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    })
+    .with_outbound_network_policy(policy);
+
+    session
+        .fetch_metadata(&info_hash, &[peer.addr()])
+        .await
+        .expect("metadata exchange should complete over the configured source");
+
+    let accepted_peers = peer.accepted_peers().await;
+    let configured_source: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+    assert!(!accepted_peers.is_empty());
+    assert!(
+        accepted_peers
+            .iter()
+            .all(|accepted| accepted.ip() == configured_source)
+    );
+    assert_eq!(peer.completed_handshake_count(), 1);
 }
 
 #[tokio::test]
@@ -441,7 +671,7 @@ async fn test_e2e_metadata_exchange_multiple_pieces() {
     let expected_num_pieces = large_size.div_ceil(piece_len as u64);
     assert!(expected_num_pieces > 1, "Test should use multiple pieces");
 
-    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024).unwrap();
     assert!(!collector.is_complete());
 
     let metadata_piece_size = 16 * 1024;
@@ -466,7 +696,7 @@ async fn test_e2e_metadata_exchange_multiple_pieces() {
         metadata_num_pieces
     );
     let assembled = collector
-        .assemble()
+        .into_bytes()
         .expect("Should assemble multi-piece metadata");
     assert_eq!(
         assembled.len(),
@@ -518,7 +748,7 @@ async fn test_e2e_metadata_collector_assembles_complete_torrent() {
     let piece_size: u32 = 1024;
     let num_pieces = (total_size / piece_size as u64) as u32;
 
-    let mut collector = MetadataCollector::new(total_size, piece_size);
+    let mut collector = MetadataCollector::new(total_size, piece_size).unwrap();
     assert!(!collector.is_complete());
 
     for i in 0..num_pieces {
@@ -541,7 +771,9 @@ async fn test_e2e_metadata_collector_assembles_complete_torrent() {
         "Should be complete after all pieces added"
     );
 
-    let assembled = collector.assemble().expect("Should assemble successfully");
+    let assembled = collector
+        .into_bytes()
+        .expect("Should assemble successfully");
     assert_eq!(
         assembled.len(),
         total_size as usize,

@@ -1,5 +1,4 @@
-//! Benchmark: PositionedDiskWriter vs old Arc<tokio::sync::Mutex<DirectDiskAdaptor>>
-//! for concurrent non-overlapping writes.
+//! Benchmark concurrent positioned writes against mutex-serialized writes.
 //!
 //! # What this measures
 //!
@@ -13,17 +12,15 @@
 //!   mutex — writes proceed concurrently at the OS level because `pwrite` is
 //!   atomic and does not mutate the shared file cursor.
 //!
-//! - **DirectDiskAdaptor + Arc<tokio::sync::Mutex<>>** (old): All tasks share
-//!   one persistent adaptor behind a `tokio::sync::Mutex`. The mutex is held
-//!   across `.await` points (seek + write_all), serializing every write. This
-//!   is the legacy contention bottleneck the positioned-writer design
-//!   eliminates.
+//! - **Mutexed PositionedDiskWriter**: All tasks share one persistent writer
+//!   behind a `tokio::sync::Mutex`, so the four writes are serialized. Both
+//!   strategies use the same disk worker pool and positioned OS write helper;
+//!   this measures the concurrency shape.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use aria2_core::filesystem::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use aria2_core::filesystem::disk_writer::SeekableDiskWriter;
 use aria2_core::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
@@ -58,9 +55,9 @@ fn bench_concurrent_positioned_writes(c: &mut Criterion) {
     let dir = TempDir::new().unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let (mut positioned_writers, old_adaptor) = rt.block_on(async {
+    let (mut positioned_writers, mutexed_writer) = rt.block_on(async {
         let path_pos = dir.path().join("pos.bin");
-        let path_old = dir.path().join("old.bin");
+        let path_mutexed = dir.path().join("mutexed.bin");
 
         let mut positioned_writers = Vec::with_capacity(num_tasks);
         for _ in 0..num_tasks {
@@ -69,18 +66,16 @@ fn bench_concurrent_positioned_writes(c: &mut Criterion) {
             positioned_writers.push(writer);
         }
 
-        let old_adaptor = Arc::new(tokio::sync::Mutex::new(DirectDiskAdaptor::new()));
-        {
-            let mut adaptor = old_adaptor.lock().await;
-            adaptor.open(&path_old).await.unwrap();
-            adaptor.truncate(total).await.unwrap();
-        }
+        let mut writer = PositionedDiskWriter::new(&path_mutexed, Some(total));
+        writer.open().await.unwrap();
+        writer.truncate(total).await.unwrap();
+        let mutexed_writer = Arc::new(tokio::sync::Mutex::new(writer));
 
         let positioned_writers = match positioned_writers.try_into() {
             Ok(writers) => writers,
             Err(_) => unreachable!("benchmark uses exactly four positioned writers"),
         };
-        (positioned_writers, old_adaptor)
+        (positioned_writers, mutexed_writer)
     });
 
     let mut group = c.benchmark_group("positioned_write");
@@ -99,28 +94,27 @@ fn bench_concurrent_positioned_writes(c: &mut Criterion) {
         });
     });
 
-    // ── Old: persistent Arc<tokio::sync::Mutex<DirectDiskAdaptor>> ──
+    // ── Mutexed: persistent Arc<tokio::sync::Mutex<PositionedDiskWriter>> ──
     //
-    // All 4 tasks share one DirectDiskAdaptor behind a tokio mutex. Each write
-    // (seek + write_all) holds the lock across .await points, serializing all
-    // writes even though they target non-overlapping offsets.
-    group.bench_function("OldMutexDirectDiskAdaptor_4x1MB", |b| {
+    // All 4 tasks share one adaptor behind a Tokio mutex. Each write awaits
+    // the same positioned writer while holding the mutex, so writes serialize.
+    group.bench_function("MutexedPositionedDiskWriter_4x1MB", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let mut handles = Vec::with_capacity(num_tasks);
                 for i in 0..num_tasks {
                     let offset = (i as u64) * chunk_size as u64;
                     let data = vec![(i as u8) + 1; chunk_size];
-                    let adaptor = old_adaptor.clone();
+                    let writer = mutexed_writer.clone();
                     handles.push(tokio::spawn(async move {
-                        let mut guard = adaptor.lock().await;
-                        guard.write(offset, &data).await.unwrap();
+                        let mut guard = writer.lock().await;
+                        guard.write_at(offset, &data).await.unwrap();
                     }));
                 }
                 for h in handles {
                     h.await.unwrap();
                 }
-                old_adaptor.lock().await.flush().await.unwrap();
+                mutexed_writer.lock().await.flush().await.unwrap();
             });
         });
     });

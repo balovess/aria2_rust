@@ -64,68 +64,62 @@ impl RoutingTable {
         }
 
         let node_id = node.id;
-        let node_addr = node.addr;
+        let mut node = node;
 
-        // Find the leaf bucket for this node.
-        let leaf = find_tree_node_for_mut(&mut self.root, &node_id);
-
-        match leaf {
-            BucketTreeNode::Leaf { bucket } => {
-                if bucket.add_node(node) {
+        loop {
+            let leaf = find_tree_node_for_mut(&mut self.root, &node_id);
+            node = match leaf {
+                BucketTreeNode::Leaf { bucket } => match bucket.try_add_node(node) {
+                    Ok(()) => {
+                        debug!(
+                            id = %hex::encode(node_id),
+                            "Added DHT node to routing table"
+                        );
+                        return;
+                    }
+                    Err(node) => node,
+                },
+                BucketTreeNode::Internal { .. } => {
                     debug!(
                         id = %hex::encode(node_id),
-                        "Added DHT node to routing table"
+                        "Unexpected internal node in insert()"
                     );
                     return;
                 }
+            };
 
-                // Bucket is full. Can we split it?
-                if bucket.split_allowed() {
-                    debug!(
-                        "Splitting bucket (prefix={}) to add node {}",
-                        bucket.prefix_length(),
-                        hex::encode(node_id),
-                    );
-
-                    // Split the leaf node into two children.
-                    leaf.split(&self.self_id);
-                    self.num_buckets += 1;
-
-                    // Find the correct child and add the node with original address.
-                    let node_for_retry = DhtNode::new(node_id, node_addr);
-                    let child = find_tree_node_for_mut(&mut self.root, &node_id);
-                    if let BucketTreeNode::Leaf { bucket } = child {
-                        bucket.add_node(node_for_retry);
-                        debug!(
-                            id = %hex::encode(node_id),
-                            "Added DHT node after split"
-                        );
+            let split_allowed = match leaf {
+                BucketTreeNode::Leaf { bucket } => bucket.split_allowed(),
+                BucketTreeNode::Internal { .. } => unreachable!("leaf lookup returned a branch"),
+            };
+            if split_allowed {
+                let prefix_length = match leaf {
+                    BucketTreeNode::Leaf { bucket } => bucket.prefix_length(),
+                    BucketTreeNode::Internal { .. } => {
+                        unreachable!("leaf lookup returned a branch")
                     }
-                } else {
-                    // Cannot split — cache the node for potential replacement.
-                    let cache_node = DhtNode::new(node_id, node_addr);
-                    bucket.cache_node(cache_node);
-                    debug!(
-                        id = %hex::encode(node_id),
-                        "Cached DHT node (bucket full, split not allowed)"
-                    );
-                }
-            }
-            BucketTreeNode::Internal { .. } => {
-                // This shouldn't happen after find_tree_node_for_mut.
+                };
                 debug!(
-                    id = %hex::encode(node_id),
-                    "Unexpected internal node in insert()"
+                    "Splitting bucket (prefix={}) to add node {}",
+                    prefix_length,
+                    hex::encode(node_id),
                 );
+                leaf.split(&self.self_id);
+                self.num_buckets += 1;
+                continue;
             }
-        }
-    }
 
-    /// Insert a node that is known to be good (responsive).
-    ///
-    /// Equivalent to C++ `DHTRoutingTable::addGoodNode()`.
-    pub fn insert_good_node(&mut self, node: DhtNode) {
-        self.insert(node);
+            if let BucketTreeNode::Leaf { bucket } = leaf
+                && node.is_good()
+            {
+                bucket.cache_node(node);
+            }
+            debug!(
+                id = %hex::encode(node_id),
+                "Cached DHT node (bucket full, split not allowed)"
+            );
+            return;
+        }
     }
 
     /// Remove a node from the routing table by its ID.
@@ -152,6 +146,39 @@ impl RoutingTable {
         bucket.replace_node(node_id, replacement)
     }
 
+    /// Rebind a routed endpoint to the node ID returned by a valid response.
+    ///
+    /// A peer endpoint may begin answering with a different Kademlia ID. The
+    /// old identity must be removed and the responder inserted according to
+    /// its actual ID range; it may not belong to the old node's bucket.
+    pub(crate) fn replace_node_identity(
+        &mut self,
+        old_node_id: &[u8; 20],
+        replacement: DhtNode,
+    ) -> bool {
+        let old_bucket = find_bucket_for(&self.root, old_node_id);
+        if !old_bucket
+            .nodes()
+            .iter()
+            .any(|node| &node.id == old_node_id)
+            || !replacement.is_good()
+        {
+            return false;
+        }
+
+        if old_node_id == replacement.id() {
+            return self.mark_good(old_node_id);
+        }
+
+        let replacement_id = *replacement.id();
+        self.remove(old_node_id);
+        self.root.for_each_bucket_mut(&mut |bucket| {
+            bucket.remove_cached_node(&replacement_id);
+        });
+        self.insert(replacement);
+        true
+    }
+
     /// Find the K closest nodes to the given target ID.
     ///
     /// Uses tree-based traversal to efficiently locate the closest nodes.
@@ -162,8 +189,8 @@ impl RoutingTable {
     }
 
     /// Find the bucket that contains the given node ID.
-    pub fn get_bucket_for(&self, node_id: &[u8; 20]) -> Option<&Bucket> {
-        Some(find_bucket_for(&self.root, node_id))
+    pub fn get_bucket_for(&self, node_id: &[u8; 20]) -> &Bucket {
+        find_bucket_for(&self.root, node_id)
     }
 
     /// Get all buckets in the routing table.
@@ -178,7 +205,7 @@ impl RoutingTable {
         self.get_all_buckets().iter().map(|b| b.count_node()).sum()
     }
 
-    /// Return the number of good (non-bad) nodes across all buckets.
+    /// Return the number of recently verified good nodes across all buckets.
     pub fn good_node_count(&self) -> usize {
         self.get_all_buckets()
             .iter()
@@ -196,7 +223,7 @@ impl RoutingTable {
     /// Returns the number of nodes evicted.
     pub fn evict_bad_nodes(&mut self) -> usize {
         let mut total = 0;
-        self.for_each_bucket_mut(&mut |bucket| {
+        self.root.for_each_bucket_mut(&mut |bucket| {
             total += bucket.evict_bad();
         });
         total
@@ -236,14 +263,6 @@ impl RoutingTable {
         Some(&nodes[idx])
     }
 
-    /// Get all buckets that need refresh.
-    pub fn get_buckets_needing_refresh(&self) -> Vec<&Bucket> {
-        self.get_all_buckets()
-            .into_iter()
-            .filter(|b| b.needs_refresh())
-            .collect()
-    }
-
     /// Count questionable nodes in the routing table.
     pub fn questionable_node_count(&self) -> usize {
         self.get_all_buckets()
@@ -268,30 +287,6 @@ impl RoutingTable {
             .collect()
     }
 
-    /// Get all questionable nodes.
-    pub fn get_questionable_nodes(&self) -> Vec<&DhtNode> {
-        let mut nodes = Vec::new();
-        for bucket in self.get_all_buckets() {
-            for node in bucket.nodes() {
-                if node.is_questionable() {
-                    nodes.push(node);
-                }
-            }
-        }
-        nodes
-    }
-
-    /// Fill the routing table by finding nodes close to our own ID.
-    ///
-    /// Returns a list of target IDs to query.
-    pub fn fill_routing_table(&self) -> Vec<[u8; 20]> {
-        self.get_all_buckets()
-            .iter()
-            .filter(|b| !b.is_full())
-            .map(|b| b.get_random_node_id())
-            .collect()
-    }
-
     /// Collect all good nodes from the routing table (for persistence).
     pub fn collect_good_nodes(&self) -> Vec<DhtNode> {
         let mut nodes = Vec::new();
@@ -303,52 +298,6 @@ impl RoutingTable {
             }
         }
         nodes
-    }
-
-    /// Iterate over all nodes in all buckets.
-    pub fn all_nodes(&self) -> Vec<&DhtNode> {
-        let mut nodes = Vec::new();
-        for bucket in self.get_all_buckets() {
-            for node in bucket.nodes() {
-                nodes.push(node);
-            }
-        }
-        nodes
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
-
-    /// Call `f` for each bucket (mutable).
-    fn for_each_bucket_mut(&mut self, f: &mut impl FnMut(&mut Bucket)) {
-        Self::for_each_bucket_mut_recursive(&mut self.root, f);
-    }
-
-    fn for_each_bucket_mut_recursive(node: &mut BucketTreeNode, f: &mut impl FnMut(&mut Bucket)) {
-        match node {
-            BucketTreeNode::Leaf { bucket } => {
-                f(bucket);
-            }
-            BucketTreeNode::Internal { left, right, .. } => {
-                Self::for_each_bucket_mut_recursive(left, f);
-                Self::for_each_bucket_mut_recursive(right, f);
-            }
-        }
-    }
-}
-
-// Implement Clone for RoutingTable (needed by engine.rs).
-impl Clone for RoutingTable {
-    fn clone(&self) -> Self {
-        // Clone by collecting all nodes and re-inserting.
-        let mut new_table = Self::new(self.self_id);
-        for bucket in self.get_all_buckets() {
-            for node in bucket.nodes() {
-                new_table.insert(node.clone());
-            }
-        }
-        new_table
     }
 }
 
@@ -382,6 +331,20 @@ mod tests {
     }
 
     #[test]
+    fn bucket_lookup_returns_a_covering_leaf_for_any_id_range() {
+        let mut table = RoutingTable::new([0u8; 20]);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
+        table.insert(DhtNode::new([0x80; 20], make_addr(6999)));
+
+        let low_id = [0u8; 20];
+        let high_id = [0xFF; 20];
+        assert!(table.get_bucket_for(&low_id).is_in_range(&low_id));
+        assert!(table.get_bucket_for(&high_id).is_in_range(&high_id));
+    }
+
+    #[test]
     fn test_remove_node() {
         let mut table = RoutingTable::new([0u8; 20]);
         let id = [1u8; 20];
@@ -411,6 +374,23 @@ mod tests {
     }
 
     #[test]
+    fn bucket_split_preserves_discovered_node_verification_state() {
+        let mut table = RoutingTable::new([0u8; 20]);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
+
+        table.insert(DhtNode::unverified([0x80u8; 20], make_addr(9999)));
+
+        assert_eq!(table.total_node_count(), super::super::bucket::K + 1);
+        assert_eq!(
+            table.good_node_count(),
+            super::super::bucket::K,
+            "inserting across a bucket split must not promote an unverified node"
+        );
+    }
+
+    #[test]
     fn test_mark_good() {
         let mut table = RoutingTable::new([0u8; 20]);
         let id = [1u8; 20];
@@ -428,9 +408,9 @@ mod tests {
         let id = [2u8; 20];
         table.insert(DhtNode::new(id, make_addr(6881)));
 
-        assert!(table.mark_bad(&id));
-        assert!(table.mark_bad(&id));
-        assert!(table.mark_bad(&id));
+        for _ in 0..5 {
+            assert!(table.mark_bad(&id));
+        }
     }
 
     #[test]
@@ -458,14 +438,6 @@ mod tests {
 
         let good = table.collect_good_nodes();
         assert_eq!(good.len(), 1);
-    }
-
-    #[test]
-    fn test_fill_routing_table() {
-        let table = RoutingTable::new([0u8; 20]);
-        let targets = table.fill_routing_table();
-        // Empty bucket should generate a target.
-        assert!(!targets.is_empty());
     }
 
     #[test]
@@ -511,35 +483,159 @@ mod tests {
     }
 
     #[test]
-    fn test_get_buckets_needing_refresh() {
-        let table = RoutingTable::new([0u8; 20]);
-        // Empty bucket needs refresh.
-        let needing = table.get_buckets_needing_refresh();
-        assert!(!needing.is_empty());
+    fn full_non_local_bucket_caches_only_verified_replacements() {
+        let self_id = [0xFF; 20];
+        let mut table = RoutingTable::new(self_id);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
+
+        let candidate_id = [0x40; 20];
+        table.insert(DhtNode::unverified(candidate_id, make_addr(6990)));
+        assert_eq!(table.num_buckets(), 2);
+
+        let bucket = table.get_bucket_for(&candidate_id);
+        assert!(
+            !bucket.is_in_range(&self_id),
+            "candidate must be in a non-local bucket"
+        );
+        assert_eq!(bucket.count_node(), super::super::bucket::K);
+        assert!(bucket.nodes().iter().all(|node| node.id() != &candidate_id));
+        assert!(
+            bucket
+                .cached_nodes()
+                .iter()
+                .all(|node| node.id() != &candidate_id),
+            "unverified candidates must not enter the replacement cache"
+        );
+
+        let verified_id = [0x41; 20];
+        table.insert(DhtNode::new(verified_id, make_addr(6991)));
+        assert!(
+            table
+                .get_bucket_for(&verified_id)
+                .cached_nodes()
+                .iter()
+                .any(|node| node.id() == &verified_id),
+            "verified candidates must enter the replacement cache"
+        );
     }
 
     #[test]
-    fn test_routing_table_clone() {
-        let mut table = RoutingTable::new([0u8; 20]);
-        table.insert(DhtNode::new([1u8; 20], make_addr(6881)));
+    fn unverified_candidate_cannot_replace_bad_lru_in_full_non_local_bucket() {
+        let self_id = [0xFF; 20];
+        let mut table = RoutingTable::new(self_id);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
 
-        let cloned = table.clone();
-        assert_eq!(cloned.total_node_count(), 1);
+        let failed_id = [1; 20];
+        for _ in 0..5 {
+            assert!(table.mark_bad(&failed_id));
+        }
+
+        let unverified_id = [0x40; 20];
+        table.insert(DhtNode::unverified(unverified_id, make_addr(6990)));
+
+        let bucket = table.get_bucket_for(&unverified_id);
+        assert_eq!(bucket.count_node(), super::super::bucket::K);
+        assert!(
+            bucket.nodes().iter().any(|node| node.id() == &failed_id),
+            "insertion must not evict a bad node in favor of an unverified candidate"
+        );
+        assert!(
+            bucket
+                .nodes()
+                .iter()
+                .all(|node| node.id() != &unverified_id),
+            "an unverified candidate must not enter a full non-local bucket"
+        );
+        assert!(
+            bucket
+                .cached_nodes()
+                .iter()
+                .all(|node| node.id() != &unverified_id),
+            "an unverified candidate must not enter the replacement cache"
+        );
+
+        assert_eq!(table.evict_bad_nodes(), 1);
+        let bucket = table.get_bucket_for(&unverified_id);
+        assert_eq!(bucket.count_node(), super::super::bucket::K - 1);
+        assert!(
+            bucket
+                .nodes()
+                .iter()
+                .all(|node| node.id() != &unverified_id),
+            "bad-node eviction must not promote the rejected unverified candidate"
+        );
     }
 
     #[test]
     fn test_evict_bad_nodes() {
         let mut table = RoutingTable::new([0u8; 20]);
-        for i in 0..5u8 {
-            let mut node = DhtNode::new([i; 20], make_addr(6881 + i as u16));
-            if i < 3 {
-                for _ in 0..3 {
-                    node.record_failure();
-                }
-            }
-            table.insert(node);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
         }
-        assert!(table.evict_bad_nodes() > 0);
-        assert_eq!(table.total_node_count(), 2);
+        let lower_bad_id = [1; 20];
+        let upper_bad_id = [0x80; 20];
+        table.insert(DhtNode::new(upper_bad_id, make_addr(6999)));
+        assert_eq!(table.num_buckets(), 2);
+        for _ in 0..5 {
+            assert!(table.mark_bad(&lower_bad_id));
+            assert!(table.mark_bad(&upper_bad_id));
+        }
+
+        assert_eq!(table.evict_bad_nodes(), 2);
+        assert_eq!(table.total_node_count(), super::super::bucket::K - 1);
+    }
+
+    #[test]
+    fn evicting_bad_node_promotes_the_newest_verified_cached_replacement() {
+        let mut table = RoutingTable::new([0xFF; 20]);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
+
+        let older_candidate = [0x40; 20];
+        let replacement_id = [0x41; 20];
+        table.insert(DhtNode::new(older_candidate, make_addr(6990)));
+        table.insert(DhtNode::new(replacement_id, make_addr(6991)));
+        let unverified_id = [0x3F; 20];
+        table.insert(DhtNode::unverified(unverified_id, make_addr(6989)));
+
+        let failed_id = [1; 20];
+        for _ in 0..5 {
+            assert!(table.mark_bad(&failed_id));
+        }
+
+        assert_eq!(table.evict_bad_nodes(), 1);
+        let bucket = table.get_bucket_for(&replacement_id);
+        assert_eq!(bucket.count_node(), super::super::bucket::K);
+        assert!(
+            bucket
+                .nodes()
+                .iter()
+                .any(|node| node.id() == &replacement_id)
+        );
+        assert!(
+            bucket
+                .cached_nodes()
+                .iter()
+                .any(|node| node.id() == &older_candidate),
+            "remaining replacement cache: {:?}",
+            bucket
+                .cached_nodes()
+                .iter()
+                .map(DhtNode::id)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            bucket
+                .nodes()
+                .iter()
+                .chain(bucket.cached_nodes())
+                .all(|node| node.id() != &unverified_id),
+            "unverified candidate must not be promoted or retained in the replacement cache"
+        );
     }
 }

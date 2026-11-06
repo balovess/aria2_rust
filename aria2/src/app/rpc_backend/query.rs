@@ -1,0 +1,1080 @@
+use std::path::PathBuf;
+#[cfg(feature = "bittorrent")]
+use std::sync::Arc;
+
+#[cfg(feature = "bittorrent")]
+use aria2_core::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bittorrent::tracker::communication::TrackerRuntimeSnapshot;
+use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
+use aria2_core::segment::piece_storage::BitfieldMan;
+use aria2_core::util::rwlock_ext::RwLockRecover;
+use aria2_rpc::{
+    BackendError, BackendReadSnapshot, BackendResponse, BackendResult, BittorrentInfo,
+    BittorrentMetaInfo, FileInfo, GlobalStat, PeerInfo, ServerInfo, ServerInfoIndex, StatusInfo,
+    UriEntry, UriStatus,
+};
+
+use super::{CoreRpcBackend, rpc_peer_port};
+
+impl CoreRpcBackend {
+    pub(super) fn status_from_group(group: &RequestGroup, gid: &str) -> StatusInfo {
+        let snapshot = group.status_snapshot();
+        let status = map_status(snapshot.status.clone());
+        let bt = snapshot.bt.as_ref();
+        let mut info = StatusInfo::new(gid)
+            .with_status(status.clone())
+            .with_total_length(snapshot.total_length)
+            .with_completed_length(snapshot.completed_length)
+            .with_upload_length(snapshot.upload_length)
+            .with_download_speed(snapshot.download_speed)
+            .with_upload_speed(snapshot.upload_speed)
+            .with_connections(snapshot.connections)
+            .with_dir(group.options().dir.clone().unwrap_or_default())
+            .with_files(build_file_infos(group, snapshot.completed_length));
+
+        if let Some(context) = group.get_download_context() {
+            info = info
+                .with_piece_length(context.get_piece_length() as u64)
+                .with_num_pieces(context.get_num_pieces() as u32);
+        }
+
+        let followed_by = group.followed_by_gids();
+        if !followed_by.is_empty() {
+            info = info.with_followed_by(
+                followed_by
+                    .into_iter()
+                    .map(|gid| gid.to_hex_string())
+                    .collect(),
+            );
+        }
+        if let Some(following) = group.following_gid() {
+            info = info.with_following(following.to_hex_string());
+        }
+        if let Some(belongs_to) = group.belongs_to_gid() {
+            info = info.with_belongs_to(belongs_to.to_hex_string());
+        }
+
+        let integrity_man = aria2_core::checksum::check_integrity::man::shared();
+        if let Ok(man) = integrity_man.try_read() {
+            let (verified_length, pending) = man.status_for_gid(group.gid().value());
+            if let Some(length) = verified_length {
+                info = info.with_verified_length(length);
+            }
+            if pending {
+                info = info.with_verify_integrity_pending("true");
+            }
+        }
+
+        if let Some(bt) = bt {
+            info = info
+                .with_info_hash(bt.info_hash.clone())
+                // `numSeeders` is the number of connected seeder peers, not
+                // the swarm count reported by a Tracker.
+                .with_num_seeders(bt.seeder_count() as u32)
+                .with_num_pieces(bt.num_pieces)
+                .with_piece_length(bt.piece_length as u64)
+                .with_completed_pieces(bt.completed_pieces)
+                .with_missing_pieces(bt.missing_pieces)
+                .with_seeder(if bt.is_complete() { "true" } else { "false" });
+            if let Some(bitfield) = &bt.bitfield {
+                info = info.with_bitfield(
+                    bitfield
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            if let Some(context) = group.get_download_context()
+                && let Some(attribute) = context
+                    .get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|value| value.downcast_ref::<TorrentAttribute>())
+            {
+                let mode = match attribute.mode {
+                    BtFileMode::Single => "single",
+                    BtFileMode::Multi => "multi",
+                };
+                info = info.with_bittorrent(BittorrentInfo {
+                    announce_list: attribute.announce_list.clone(),
+                    comment: (!attribute.comment.is_empty()).then(|| attribute.comment.clone()),
+                    creation_date: (attribute.creation_date != 0)
+                        .then_some(attribute.creation_date),
+                    mode: Some(mode.to_string()),
+                    info: (!attribute.name.is_empty()).then(|| BittorrentMetaInfo {
+                        name: attribute.name.clone(),
+                    }),
+                });
+            }
+        }
+        info
+    }
+
+    pub(super) fn status_from_result(
+        result: &aria2_core::request::request_group::DownloadResult,
+    ) -> StatusInfo {
+        let mut info = StatusInfo::new(result.gid_hex())
+            .with_status(map_status(result.status.clone()))
+            .with_total_length(result.total_length)
+            .with_completed_length(result.completed_length)
+            .with_upload_length(result.upload_length)
+            .with_download_speed(result.download_speed)
+            .with_upload_speed(result.upload_speed)
+            .with_error_code(result.code.as_code() as i32)
+            .with_error_message(result.message.clone())
+            .with_dir(result.dir.clone())
+            .with_files(build_file_infos_from_result(result))
+            .with_connections(0)
+            .with_piece_length(result.piece_length as u64)
+            .with_num_pieces(result.num_pieces);
+
+        if !result.followed_by.is_empty() {
+            info = info.with_followed_by(
+                result
+                    .followed_by
+                    .iter()
+                    .map(|gid| gid.to_hex_string())
+                    .collect(),
+            );
+        }
+        if let Some(following) = result.following {
+            info = info.with_following(following.to_hex_string());
+        }
+        if let Some(belongs_to) = result.belongs_to {
+            info = info.with_belongs_to(belongs_to.to_hex_string());
+        }
+        if !result.info_hash.is_empty() {
+            info = info
+                .with_info_hash(result.info_hash.clone())
+                .with_num_seeders(0);
+        }
+        if result.num_pieces > 0 {
+            let completed_pieces =
+                Self::completed_pieces_from_bitfield(result.num_pieces, &result.bitfield);
+            info = info
+                .with_num_pieces(result.num_pieces)
+                .with_piece_length(result.piece_length as u64)
+                .with_completed_pieces(completed_pieces)
+                .with_missing_pieces(result.num_pieces.saturating_sub(completed_pieces));
+            if !result.bitfield.is_empty() {
+                info = info.with_bitfield(result.bitfield.clone());
+            }
+        }
+        if let Some(metadata) = &result.bt_metadata {
+            info = info.with_bittorrent(BittorrentInfo {
+                announce_list: metadata.announce_list.clone(),
+                comment: metadata.comment.clone(),
+                creation_date: metadata.creation_date,
+                mode: metadata.mode.clone(),
+                info: metadata
+                    .name
+                    .clone()
+                    .map(|name| BittorrentMetaInfo { name }),
+            });
+        }
+        info
+    }
+
+    fn completed_pieces_from_bitfield(num_pieces: u32, bitfield: &str) -> u32 {
+        bitfield
+            .as_bytes()
+            .chunks(2)
+            .enumerate()
+            .map(|(byte_index, pair)| {
+                let Ok(pair) = std::str::from_utf8(pair) else {
+                    return 0;
+                };
+                let Ok(byte) = u8::from_str_radix(pair, 16) else {
+                    return 0;
+                };
+                (0..8)
+                    .take_while(|bit| byte_index * 8 + bit < num_pieces as usize)
+                    .filter(|bit| byte & (0x80 >> bit) != 0)
+                    .count() as u32
+            })
+            .sum()
+    }
+
+    pub(super) fn capture_snapshot(&self) -> BackendReadSnapshot {
+        let active = self
+            .group_man
+            .get_active_groups()
+            .into_iter()
+            .map(|group| {
+                let group = group.recover();
+                Self::status_from_group(&group, &group.gid().to_hex_string())
+            })
+            .collect::<Vec<_>>();
+        let waiting = self
+            .group_man
+            .get_waiting_groups()
+            .into_iter()
+            .map(|group| {
+                let group = group.recover();
+                Self::status_from_group(&group, &group.gid().to_hex_string())
+            })
+            .collect::<Vec<_>>();
+        let stopped = self
+            .group_man
+            .get_stopped_results(0, usize::MAX)
+            .iter()
+            .map(Self::status_from_result)
+            .collect::<Vec<_>>();
+        let global_stat = global_stat(&active, &waiting, stopped.len());
+        BackendReadSnapshot {
+            active,
+            waiting,
+            stopped,
+            global_stat,
+        }
+    }
+
+    pub(super) fn tell_status(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        if let Some(group) = self.group_man.group_by_hex(&gid) {
+            let group = group.recover();
+            return Ok(BackendResult::response(BackendResponse::Status(
+                Self::status_from_group(&group, &group.gid().to_hex_string()),
+            )));
+        }
+        if let Some(result) = self.group_man.find_stopped_result(&gid) {
+            return Ok(BackendResult::response(BackendResponse::Status(
+                Self::status_from_result(&result),
+            )));
+        }
+        Err(Self::execution(format!("No such download for GID#{gid}")))
+    }
+
+    pub(super) fn tell_active(&self, keys: Vec<String>) -> Result<BackendResult, BackendError> {
+        let statuses = self
+            .group_man
+            .get_active_groups()
+            .into_iter()
+            .map(|group| {
+                let group = group.recover();
+                Self::status_from_group(&group, &group.gid().to_hex_string())
+            })
+            .collect();
+        let _ = keys;
+        Ok(BackendResult::response(BackendResponse::Statuses(statuses)))
+    }
+
+    pub(super) fn tell_waiting(
+        &self,
+        offset: i64,
+        num: usize,
+        keys: Vec<String>,
+    ) -> Result<BackendResult, BackendError> {
+        let statuses = self
+            .group_man
+            .get_waiting_groups()
+            .into_iter()
+            .map(|group| {
+                let group = group.recover();
+                Self::status_from_group(&group, &group.gid().to_hex_string())
+            })
+            .collect::<Vec<_>>();
+        let _ = keys;
+        Ok(BackendResult::response(BackendResponse::Statuses(
+            paginate(statuses, offset, num),
+        )))
+    }
+
+    pub(super) fn tell_stopped(
+        &self,
+        offset: i64,
+        num: usize,
+        keys: Vec<String>,
+    ) -> Result<BackendResult, BackendError> {
+        let statuses = self
+            .group_man
+            .get_stopped_results(0, usize::MAX)
+            .iter()
+            .map(Self::status_from_result)
+            .collect::<Vec<_>>();
+        let _ = keys;
+        Ok(BackendResult::response(BackendResponse::Statuses(
+            paginate(statuses, offset, num),
+        )))
+    }
+
+    pub(super) async fn get_option(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        if let Some(group) = self.group_man.group_by_hex(&gid) {
+            let (snapshot, runtime) = {
+                let group = group.recover();
+                (group.effective_option_snapshot(), group.runtime_options())
+            };
+            if let Some(options) = snapshot {
+                return Ok(BackendResult::response(BackendResponse::Options(options)));
+            }
+            if !runtime.is_empty() {
+                return Ok(BackendResult::response(BackendResponse::Options(runtime)));
+            }
+            return Ok(BackendResult::response(BackendResponse::Options(
+                self.global_options().await,
+            )));
+        }
+        if let Some(result) = self.group_man.find_stopped_result(&gid) {
+            return Ok(BackendResult::response(BackendResponse::Options(
+                result.option_snapshot().cloned().unwrap_or_default(),
+            )));
+        }
+        Err(Self::execution(format!("Cannot get option for GID#{gid}")))
+    }
+
+    pub(super) fn get_peers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No peer data is available for GID#{gid}")))?;
+        let peers = group
+            .recover()
+            .status_snapshot()
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|peer| PeerInfo {
+                peer_id: super::rpc_peer_id(&peer.peer_id),
+                ip: peer.addr.ip().to_string(),
+                source: peer.source.as_str().to_string(),
+                port: rpc_peer_port(peer.addr, peer.is_incoming),
+                bitfield: Some(
+                    peer.bitfield
+                        .map(|bitfield| bitfield.iter().map(|byte| format!("{byte:02x}")).collect())
+                        .unwrap_or_default(),
+                ),
+                am_choking: peer.am_choking,
+                peer_choking: peer.peer_choking,
+                download_speed: peer.download_speed.max(0.0) as u64,
+                upload_speed: peer.upload_speed.max(0.0) as u64,
+                seeder: Some(peer.seeder.unwrap_or(false).to_string()),
+            })
+            .collect();
+        Ok(BackendResult::response(BackendResponse::Peers(peers)))
+    }
+
+    pub(super) fn get_peer_stats(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No peer data is available for GID#{gid}")))?;
+        let peers = group
+            .recover()
+            .status_snapshot()
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default();
+        let peer_count = peers.len();
+        let seeders = peers
+            .iter()
+            .filter(|peer| peer.seeder == Some(true))
+            .count();
+        let leechers = peers
+            .iter()
+            .filter(|peer| peer.seeder == Some(false))
+            .count();
+        Ok(BackendResult::response(BackendResponse::PeerStats(
+            aria2_rpc::PeerStats {
+                peer_count,
+                seeders,
+                leechers,
+                unknown: peer_count - seeders - leechers,
+            },
+        )))
+    }
+
+    pub(super) fn get_peer_details(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No peer data is available for GID#{gid}")))?;
+        let snapshot = group.recover().status_snapshot();
+        let num_pieces = snapshot.bt.as_ref().map_or(0, |bt| bt.num_pieces);
+        let peers = snapshot
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|peer| aria2_rpc::PeerDetails {
+                peer_id: super::rpc_peer_id(&peer.peer_id),
+                ip: peer.addr.ip().to_string(),
+                source: peer.source.as_str().to_string(),
+                port: rpc_peer_port(peer.addr, peer.is_incoming),
+                client: peer.client,
+                bitfield: peer
+                    .bitfield
+                    .as_ref()
+                    .map(|bits| bits.iter().map(|byte| format!("{byte:02x}")).collect()),
+                progress_percent: peer_progress_percent(
+                    peer.seeder,
+                    peer.bitfield.as_deref(),
+                    num_pieces,
+                ),
+                seeder: peer.seeder,
+                flags: Some(aria2_rpc::PeerFlags {
+                    am_choking: peer.am_choking,
+                    peer_choking: peer.peer_choking,
+                    am_interested: peer.am_interested,
+                    peer_interested: peer.peer_interested,
+                    snubbed: peer.is_snubbed,
+                    incoming: peer.is_incoming,
+                }),
+                uploaded_bytes: Some(peer.uploaded_bytes.to_string()),
+                downloaded_bytes: Some(peer.downloaded_bytes.to_string()),
+                download_speed: peer.download_speed.max(0.0) as u64,
+                upload_speed: peer.upload_speed.max(0.0) as u64,
+                avg_download_speed: peer.avg_download_speed,
+                avg_upload_speed: peer.avg_upload_speed,
+                outstanding_requests_to_peer: Some(peer.outstanding_download_requests),
+                outstanding_requests_from_peer: Some(peer.outstanding_upload_requests),
+            })
+            .collect();
+        Ok(BackendResult::response(BackendResponse::PeerDetails(peers)))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) fn get_trackers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.value();
+        let registry = self
+            .bt_registry
+            .as_ref()
+            .ok_or_else(|| Self::execution("BitTorrent registry is unavailable"))?;
+        let guard = registry
+            .read()
+            .map_err(|_| BackendError::Internal("Failed to lock BitTorrent registry".into()))?;
+        let object = guard
+            .get(gid)
+            .ok_or_else(|| Self::execution(format!("GID {gid:x} is not a BitTorrent task")))?;
+        if let Some(runtime) = object.tracker_runtime.as_ref() {
+            let snapshot = runtime.read().map_err(|_| {
+                BackendError::Internal("Failed to lock tracker runtime snapshot".into())
+            })?;
+            return Ok(BackendResult::response(BackendResponse::Trackers(
+                tracker_infos_from_runtime(&snapshot, unix_millis(std::time::SystemTime::now())),
+            )));
+        }
+        let announce = object
+            .bt_announce
+            .as_ref()
+            .ok_or_else(|| Self::execution("Tracker announcer is unavailable"))?;
+        let current_announce = announce.as_ref();
+        let current = current_announce
+            .announce_list()
+            .get_announce()
+            .map(str::to_owned);
+        let mut trackers = Vec::new();
+        for tier in 0..current_announce.announce_list().tier_count() {
+            let mut entry = 0;
+            while let Some(uri) = current_announce
+                .announce_list()
+                .get_tracker_url(tier, entry)
+            {
+                trackers.push(aria2_rpc::TrackerInfo {
+                    uri: uri.clone(),
+                    tier: tier + 1,
+                    current: current.as_deref() == Some(uri.as_str()),
+                    last_attempt: false,
+                    announce_ready: current.as_deref() == Some(uri.as_str())
+                        && announce.is_announce_ready(),
+                    all_failed: false,
+                    in_flight: if current.as_deref() == Some(uri.as_str()) {
+                        current_announce.in_flight_announces()
+                    } else {
+                        0
+                    },
+                    interval: if current.as_deref() == Some(uri.as_str()) {
+                        announce.interval().as_secs()
+                    } else {
+                        0
+                    },
+                    min_interval: if current.as_deref() == Some(uri.as_str()) {
+                        announce.min_interval().as_secs()
+                    } else {
+                        0
+                    },
+                    seeders: None,
+                    leechers: None,
+                    downloaded: None,
+                    last_failure_kind: None,
+                    tracker_id: if current.as_deref() == Some(uri.as_str()) {
+                        current_announce.tracker_id().to_string()
+                    } else {
+                        String::new()
+                    },
+                    seconds_since_last_success: if current.as_deref() == Some(uri.as_str()) {
+                        current_announce.seconds_since_last_success()
+                    } else {
+                        None
+                    },
+                    last_success_at_unix_millis: None,
+                    snapshot_at_unix_millis: unix_millis(std::time::SystemTime::now()).to_string(),
+                    status: if current.as_deref() == Some(uri.as_str())
+                        && announce.is_announce_ready()
+                    {
+                        "ready".to_string()
+                    } else {
+                        "unknown".to_string()
+                    },
+                });
+                entry += 1;
+            }
+        }
+        Ok(BackendResult::response(BackendResponse::Trackers(trackers)))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) async fn get_dht_status(&self) -> Result<BackendResult, BackendError> {
+        let engines = self
+            .bt_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .read()
+                    .ok()
+                    .map(|registry| registry.get_dht_engines())
+            })
+            .unwrap_or_default();
+        let mut stats = aria2_protocol::bittorrent::dht::engine::DhtEngineStats {
+            total_nodes: 0,
+            good_nodes: 0,
+            pending_transactions: 0,
+            questionable_nodes: 0,
+            bad_nodes: 0,
+            cached_nodes: 0,
+            bucket_count: 0,
+            peer_info_hashes: 0,
+            stored_peers: 0,
+            peer_storage_evictions: 0,
+            max_peer_info_hashes: 0,
+            persistence_enabled: false,
+            persistence_max_age_secs: 0,
+            cleanup_interval_secs: 0,
+            save_interval_secs: 0,
+            state: aria2_protocol::bittorrent::dht::engine::DhtEngineState::Stopped,
+        };
+        for engine in engines {
+            let current = engine.stats().await;
+            stats.total_nodes += current.total_nodes;
+            stats.good_nodes += current.good_nodes;
+            stats.pending_transactions += current.pending_transactions;
+            stats.questionable_nodes += current.questionable_nodes;
+            stats.bad_nodes += current.bad_nodes;
+            stats.cached_nodes += current.cached_nodes;
+            stats.bucket_count += current.bucket_count;
+            stats.peer_info_hashes += current.peer_info_hashes;
+            stats.stored_peers += current.stored_peers;
+            stats.peer_storage_evictions += current.peer_storage_evictions;
+            stats.max_peer_info_hashes += current.max_peer_info_hashes;
+            stats.persistence_enabled |= current.persistence_enabled;
+            stats.persistence_max_age_secs = stats
+                .persistence_max_age_secs
+                .max(current.persistence_max_age_secs);
+            stats.cleanup_interval_secs = stats
+                .cleanup_interval_secs
+                .max(current.cleanup_interval_secs);
+            stats.save_interval_secs = stats.save_interval_secs.max(current.save_interval_secs);
+            if dht_state_priority(current.state) > dht_state_priority(stats.state) {
+                stats.state = current.state;
+            }
+        }
+        Ok(BackendResult::response(BackendResponse::DhtStatus(
+            aria2_rpc::DhtStatus {
+                state: format!("{:?}", stats.state).to_lowercase(),
+                total_nodes: stats.total_nodes,
+                good_nodes: stats.good_nodes,
+                pending_transactions: stats.pending_transactions,
+                questionable_nodes: stats.questionable_nodes,
+                bad_nodes: stats.bad_nodes,
+                cached_nodes: stats.cached_nodes,
+                bucket_count: stats.bucket_count,
+                peer_info_hashes: stats.peer_info_hashes,
+                stored_peers: stats.stored_peers,
+                peer_storage_evictions: stats.peer_storage_evictions,
+                max_peer_info_hashes: stats.max_peer_info_hashes,
+                persistence_enabled: stats.persistence_enabled,
+                persistence_max_age_secs: stats.persistence_max_age_secs,
+                cleanup_interval_secs: stats.cleanup_interval_secs,
+                save_interval_secs: stats.save_interval_secs,
+            },
+        )))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) async fn save_dht_state(&self) -> Result<BackendResult, BackendError> {
+        let engines = self.dht_engines();
+        if engines.is_empty() {
+            return Err(Self::execution("DHT engine is not running"));
+        }
+        for engine in engines {
+            engine
+                .save_state()
+                .await
+                .map_err(|error| Self::execution(format!("Failed to save DHT state: {error}")))?;
+        }
+        Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) async fn evict_dht_nodes(&self) -> Result<BackendResult, BackendError> {
+        let engines = self.dht_engines();
+        if engines.is_empty() {
+            return Err(Self::execution("DHT engine is not running"));
+        }
+        let mut evicted = 0;
+        let mut replacements = 0;
+        for engine in engines {
+            let (current_evicted, current_replacements) = engine.evict_nodes().await;
+            evicted += current_evicted;
+            replacements += current_replacements;
+        }
+        Ok(BackendResult::response(BackendResponse::Counts([
+            evicted,
+            replacements,
+        ])))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    fn dht_engines(&self) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        self.bt_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .read()
+                    .ok()
+                    .map(|registry| registry.get_dht_engines())
+            })
+            .unwrap_or_default()
+    }
+
+    pub(super) fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No URI data is available for GID#{gid}")))?;
+        let group = group.recover();
+        // Match aria2_original's GetUrisRpcMethod: it delegates to
+        // createUriEntry() for the first FileEntry only, rather than
+        // flattening every file in a multi-file download.
+        let entries = group
+            .get_download_context()
+            .and_then(|context| context.get_file_entries().first().map(build_uri_entries))
+            .unwrap_or_else(|| group.uris().iter().cloned().map(UriEntry::new).collect());
+        Ok(BackendResult::response(BackendResponse::Uris(entries)))
+    }
+
+    pub(super) fn get_files(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        if let Some(group) = self.group_man.group_by_hex(&gid) {
+            let group = group.recover();
+            return Ok(BackendResult::response(BackendResponse::Files(
+                build_file_infos(&group, group.get_completed_length()),
+            )));
+        }
+        if let Some(result) = self.group_man.find_stopped_result(&gid) {
+            return Ok(BackendResult::response(BackendResponse::Files(
+                build_file_infos_from_result(&result),
+            )));
+        }
+        Err(Self::execution(format!(
+            "No file data is available for GID#{gid}"
+        )))
+    }
+
+    pub(super) fn get_servers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No active download for GID#{gid}")))?;
+        let group = group.recover();
+        if !matches!(group.status(), DownloadStatus::Active) {
+            return Err(Self::execution(format!("No active download for GID#{gid}")));
+        }
+        let servers = group
+            .get_download_context()
+            .map(|context| {
+                context
+                    .get_file_entries()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| ServerInfoIndex {
+                        index: index + 1,
+                        servers: file
+                            .in_flight_requests()
+                            .iter()
+                            .filter_map(|request| {
+                                let stats = request.peer_stat()?;
+                                Some(
+                                    ServerInfo::new(request.uri())
+                                        .with_current_uri(request.current_uri())
+                                        .with_download_speed(stats.download_speed),
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(BackendResult::response(BackendResponse::Servers(servers)))
+    }
+}
+
+fn peer_progress_percent(
+    seeder: Option<bool>,
+    bitfield: Option<&[u8]>,
+    num_pieces: u32,
+) -> Option<f64> {
+    if seeder == Some(true) {
+        return Some(100.0);
+    }
+    let bitfield = bitfield?;
+    if num_pieces == 0 {
+        return None;
+    }
+    let full_bytes = (num_pieces / 8) as usize;
+    let mut completed = bitfield
+        .iter()
+        .take(full_bytes)
+        .map(|byte| byte.count_ones())
+        .sum::<u32>();
+    let remaining_bits = num_pieces % 8;
+    if remaining_bits > 0 {
+        let mask = 0xff << (8 - remaining_bits);
+        completed += bitfield
+            .get(full_bytes)
+            .map_or(0, |byte| (byte & mask).count_ones());
+    }
+    Some((f64::from(completed.min(num_pieces)) * 100.0) / f64::from(num_pieces))
+}
+
+fn unix_millis(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(feature = "bittorrent")]
+fn tracker_infos_from_runtime(
+    snapshot: &TrackerRuntimeSnapshot,
+    now_unix_millis: u64,
+) -> Vec<aria2_rpc::TrackerInfo> {
+    if !snapshot.trackers.is_empty() {
+        return snapshot
+            .trackers
+            .iter()
+            .map(|tracker| aria2_rpc::TrackerInfo {
+                uri: tracker.uri.clone(),
+                tier: tracker.tier,
+                current: tracker.current,
+                last_attempt: tracker.last_attempt,
+                announce_ready: tracker.announce_ready,
+                all_failed: tracker.all_failed,
+                in_flight: tracker.in_flight,
+                interval: tracker.interval_secs,
+                min_interval: tracker.min_interval_secs,
+                seeders: tracker.seeders,
+                leechers: tracker.leechers,
+                downloaded: tracker.downloaded.map(|value| value.to_string()),
+                last_failure_kind: tracker
+                    .last_failure_kind
+                    .map(|failure| failure.as_str().to_string()),
+                tracker_id: tracker.tracker_id.clone(),
+                seconds_since_last_success: tracker
+                    .last_success_at_unix_millis
+                    .map(|last_success| now_unix_millis.saturating_sub(last_success) / 1_000)
+                    .or(tracker.seconds_since_last_success),
+                last_success_at_unix_millis: tracker
+                    .last_success_at_unix_millis
+                    .map(|value| value.to_string()),
+                snapshot_at_unix_millis: tracker.snapshot_at_unix_millis.to_string(),
+                status: tracker.status.clone(),
+            })
+            .collect();
+    }
+
+    snapshot
+        .tracker_tiers
+        .iter()
+        .enumerate()
+        .flat_map(|(tier, uris)| {
+            uris.iter().map(move |uri| aria2_rpc::TrackerInfo {
+                uri: uri.clone(),
+                tier: tier + 1,
+                current: snapshot.current_url.as_deref() == Some(uri.as_str()),
+                last_attempt: snapshot.last_attempt_url.as_deref() == Some(uri.as_str()),
+                announce_ready: snapshot.announce_ready
+                    && snapshot.current_url.as_deref() == Some(uri.as_str()),
+                all_failed: false,
+                in_flight: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.in_flight
+                } else {
+                    0
+                },
+                interval: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.interval_secs
+                } else {
+                    0
+                },
+                min_interval: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.min_interval_secs
+                } else {
+                    0
+                },
+                seeders: None,
+                leechers: None,
+                downloaded: None,
+                last_failure_kind: if snapshot.last_attempt_url.as_deref() == Some(uri.as_str()) {
+                    snapshot
+                        .last_failure_kind
+                        .map(|failure| failure.as_str().to_string())
+                } else {
+                    None
+                },
+                tracker_id: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.tracker_id.clone()
+                } else {
+                    String::new()
+                },
+                seconds_since_last_success: if snapshot.current_url.as_deref() == Some(uri.as_str())
+                {
+                    snapshot.seconds_since_last_success
+                } else {
+                    None
+                },
+                last_success_at_unix_millis: None,
+                snapshot_at_unix_millis: unix_millis(std::time::SystemTime::now()).to_string(),
+                status: if snapshot.in_flight > 0 {
+                    "announcing".to_string()
+                } else if snapshot.all_failed {
+                    "failed".to_string()
+                } else if snapshot.last_attempt_url.as_deref() == Some(uri.as_str()) {
+                    "succeeded".to_string()
+                } else {
+                    "unknown".to_string()
+                },
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "bittorrent")]
+fn dht_state_priority(state: aria2_protocol::bittorrent::dht::engine::DhtEngineState) -> u8 {
+    use aria2_protocol::bittorrent::dht::engine::DhtEngineState;
+    match state {
+        DhtEngineState::Stopped => 1,
+        DhtEngineState::ShuttingDown => 2,
+        DhtEngineState::Bootstrapping => 3,
+        DhtEngineState::Running => 4,
+    }
+}
+
+fn map_status(status: DownloadStatus) -> aria2_rpc::DownloadStatus {
+    match status {
+        DownloadStatus::Waiting => aria2_rpc::DownloadStatus::Waiting,
+        DownloadStatus::Active => aria2_rpc::DownloadStatus::Active,
+        DownloadStatus::Paused => aria2_rpc::DownloadStatus::Paused,
+        DownloadStatus::Error(message) => aria2_rpc::DownloadStatus::Error(message),
+        DownloadStatus::Complete => aria2_rpc::DownloadStatus::Complete,
+        DownloadStatus::Removed => aria2_rpc::DownloadStatus::Removed,
+    }
+}
+
+fn global_stat(active: &[StatusInfo], waiting: &[StatusInfo], stopped: usize) -> GlobalStat {
+    GlobalStat {
+        download_speed: active
+            .iter()
+            .chain(waiting)
+            .filter_map(|status| status.download_speed)
+            .fold(0, u64::saturating_add),
+        upload_speed: active
+            .iter()
+            .chain(waiting)
+            .filter_map(|status| status.upload_speed)
+            .fold(0, u64::saturating_add),
+        num_active: active.len(),
+        num_waiting: waiting.len(),
+        num_stopped: stopped,
+        num_stopped_total: stopped,
+    }
+}
+
+pub(super) fn paginate<T>(items: Vec<T>, offset: i64, num: usize) -> Vec<T> {
+    if num == 0 {
+        return Vec::new();
+    }
+    let size = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    let originally_negative = offset < 0;
+    let (start, count) = if originally_negative {
+        let end = offset.saturating_add(size);
+        if end < 0 {
+            return Vec::new();
+        }
+        let count = i64::try_from(num).unwrap_or(i64::MAX);
+        let mut start = end.saturating_sub(count.saturating_sub(1));
+        let count = if start < 0 {
+            start = 0;
+            end.saturating_add(1)
+        } else {
+            count
+        };
+        (start, count)
+    } else {
+        if offset >= size {
+            return Vec::new();
+        }
+        (offset, i64::try_from(num).unwrap_or(i64::MAX))
+    };
+    if start < 0 || start >= size {
+        return Vec::new();
+    }
+    let end = start.saturating_add(count).min(size).max(start);
+    let mut selected = items
+        .into_iter()
+        .skip(start as usize)
+        .take((end - start) as usize)
+        .collect::<Vec<_>>();
+    if originally_negative {
+        selected.reverse();
+    }
+    selected
+}
+
+fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
+    let resolved_path = group.resolved_output_path();
+    let fallback_path = || {
+        if let Some(path) = &resolved_path {
+            return path.clone();
+        }
+        let name = group
+            .options()
+            .out
+            .clone()
+            .or_else(|| group.output_name())
+            .or_else(|| {
+                group
+                    .uris()
+                    .first()
+                    .map(|uri| aria2_core::validation::uri::sanitize_filename_from_uri(uri))
+            })
+            .unwrap_or_default();
+        match group.options().dir.as_deref().filter(|dir| !dir.is_empty()) {
+            Some(dir) if !name.is_empty() => PathBuf::from(dir).join(name).to_string_lossy().into(),
+            _ => name,
+        }
+    };
+
+    if let Some(context) = group.get_download_context() {
+        let completion = bt_completion_bitfield(group);
+        return context
+            .get_file_entries()
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                let path = if index == 0 {
+                    resolved_path.clone().unwrap_or_else(|| {
+                        if file.path().is_empty() {
+                            fallback_path()
+                        } else {
+                            file.path().to_owned()
+                        }
+                    })
+                } else if file.path().is_empty() {
+                    fallback_path()
+                } else {
+                    file.path().to_owned()
+                };
+                let mut info = FileInfo::new(path, file.length())
+                    .with_index(index + 1)
+                    .with_completed(completed_length_for_file(
+                        completion.as_ref(),
+                        completed,
+                        file.offset(),
+                        file.length(),
+                    ))
+                    .with_uris(build_uri_entries(file));
+                info.selected = file.is_requested();
+                info
+            })
+            .collect();
+    }
+
+    let mut info = FileInfo::new(fallback_path(), group.get_total_length_atomic())
+        .with_index(1)
+        .with_completed(completed)
+        .with_uris(group.uris().iter().cloned().map(UriEntry::new).collect());
+    info.selected = true;
+    vec![info]
+}
+
+fn completed_length_for_file(
+    completion: Option<&BitfieldMan>,
+    total_completed: u64,
+    offset: u64,
+    length: u64,
+) -> u64 {
+    completion
+        .map(|bitfield| bitfield.get_offset_completed_length(offset, length))
+        .unwrap_or_else(|| total_completed.saturating_sub(offset).min(length))
+}
+
+fn bt_completion_bitfield(group: &RequestGroup) -> Option<BitfieldMan> {
+    let piece_length = group.get_bt_piece_length() as u64;
+    let bitfield = group.get_bt_bitfield()?;
+    if piece_length == 0 || bitfield.is_empty() {
+        return None;
+    }
+    let mut completion = BitfieldMan::new(piece_length, group.get_total_length_atomic());
+    completion.set_bitfield(&bitfield);
+    Some(completion)
+}
+
+fn build_uri_entries(file: &aria2_core::download::file_entry::FileEntry) -> Vec<UriEntry> {
+    let remaining = file.remaining_uris();
+    file.uris()
+        .into_iter()
+        .map(|uri| UriEntry {
+            status: if remaining.iter().any(|candidate| candidate == &uri) {
+                UriStatus::Waiting
+            } else {
+                UriStatus::Used
+            },
+            uri,
+        })
+        .collect()
+}
+
+fn build_file_infos_from_result(
+    result: &aria2_core::request::request_group::DownloadResult,
+) -> Vec<FileInfo> {
+    result
+        .files
+        .iter()
+        .map(|file| {
+            let mut info = FileInfo::new(file.path.clone(), file.length)
+                .with_index(file.index)
+                .with_completed(file.completed_length)
+                .with_uris(
+                    file.uris
+                        .iter()
+                        .map(|uri| UriEntry {
+                            uri: uri.uri.clone(),
+                            status: match uri.status.as_str() {
+                                "used" | "spent" => UriStatus::Used,
+                                _ => UriStatus::Waiting,
+                            },
+                        })
+                        .collect(),
+                );
+            info.selected = file.selected;
+            info
+        })
+        .collect()
+}

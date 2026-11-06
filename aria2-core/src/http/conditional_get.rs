@@ -24,10 +24,9 @@ impl SimpleDateTime {
 
     /// Try to parse any RFC 7231 HTTP-date form.
     ///
-    /// The historical method name is retained for API compatibility. The
-    /// parser accepts IMF-fixdate, RFC 850 (two- or four-digit year),
-    /// RFC1123 numeric-zone variants, and ANSI C asctime.
-    pub fn parse_rfc2822(date_str: &str) -> Option<Self> {
+    /// Parse IMF-fixdate, RFC 850 (two- or four-digit year), RFC1123
+    /// numeric-zone variants, or ANSI C asctime.
+    pub fn parse_http_date(date_str: &str) -> Option<Self> {
         crate::http::cookie::parsing::parse_http_date(date_str).map(Self::from_timestamp)
     }
 }
@@ -97,7 +96,7 @@ impl ConditionalRequest {
         for (name, value) in headers {
             match name.to_lowercase().as_str() {
                 "last-modified" => {
-                    if let Some(dt) = SimpleDateTime::parse_rfc2822(value) {
+                    if let Some(dt) = SimpleDateTime::parse_http_date(value) {
                         self.last_modified = Some(dt);
                     }
                 }
@@ -416,7 +415,7 @@ mod tests {
         ];
 
         for input in inputs {
-            let dt = SimpleDateTime::parse_rfc2822(input)
+            let dt = SimpleDateTime::parse_http_date(input)
                 .unwrap_or_else(|| panic!("failed to parse HTTP-date: {input}"));
             assert_eq!(
                 dt.timestamp, 784_111_777,
@@ -434,7 +433,7 @@ mod tests {
             "Wed, 31 Dec 1969 23:59:59 GMT"
         );
         assert_eq!(
-            SimpleDateTime::parse_rfc2822("Wed, 31 Dec 1969 23:59:59 GMT")
+            SimpleDateTime::parse_http_date("Wed, 31 Dec 1969 23:59:59 GMT")
                 .expect("pre-epoch HTTP-date should parse")
                 .timestamp,
             -1
@@ -445,7 +444,7 @@ mod tests {
         );
 
         assert!(
-            SimpleDateTime::parse_rfc2822("invalid-date").is_none(),
+            SimpleDateTime::parse_http_date("invalid-date").is_none(),
             "invalid HTTP-date must be rejected"
         );
     }

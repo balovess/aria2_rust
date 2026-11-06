@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::http::cookie_storage::{CookieJar, JarCookie};
+use crate::http::cookie::CookieStorage;
 
 use super::super::manager::HttpConnectionManager;
 use super::super::types::{HttpConfig, HttpResponse};
@@ -353,42 +353,33 @@ fn test_shared_cookie_storage_is_used_by_manager() {
 }
 
 #[test]
-fn test_cookie_jar_initially_none() {
-    let mut manager = HttpConnectionManager::new(&create_test_config());
-    assert!(manager.cookie_jar().is_none());
-    assert!(manager.cookie_jar_mut().is_none());
+fn test_cookie_storage_initially_none() {
+    let manager = HttpConnectionManager::new(&create_test_config());
 
-    // Attaching cookies without a jar should return None
+    // Attaching cookies without storage should return None
     let url = Url::parse("https://example.com/").unwrap();
     assert!(manager.attach_cookies_to_request(&url).is_none());
 }
 
 #[test]
-fn test_set_and_get_cookie_jar() {
+fn test_set_cookie_storage() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
-
-    // Initially no jar
-    assert!(manager.cookie_jar().is_none());
-
-    // Set a cookie jar
-    let jar = CookieJar::new();
-    manager.set_cookie_jar(Some(jar));
-    assert!(manager.cookie_jar().is_some());
-
-    // Clear it
-    manager.set_cookie_jar(None);
-    assert!(manager.cookie_jar().is_none());
+    manager.set_cookie_storage(Some(std::sync::Arc::new(CookieStorage::new())));
+    assert!(
+        manager
+            .attach_cookies_to_request(&Url::parse("https://example.com/").unwrap())
+            .is_none()
+    );
 }
 
 #[test]
 fn test_attach_cookies_to_request() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
 
-    // Create jar and add cookies
-    let mut jar = CookieJar::new();
-    jar.store(JarCookie::new("session_id", "abc123", "example.com"));
-    jar.store(JarCookie::new("theme", "dark", "example.com"));
-    manager.set_cookie_jar(Some(jar));
+    let storage = std::sync::Arc::new(CookieStorage::new());
+    storage.parse_and_store("session_id=abc123; Path=/", "example.com", "/");
+    storage.parse_and_store("theme=dark; Path=/", "example.com", "/");
+    manager.set_cookie_storage(Some(storage));
 
     // Attach cookies for example.com URL
     let url = Url::parse("http://example.com/api/data").unwrap();
@@ -415,7 +406,8 @@ fn test_attach_cookies_to_request() {
 #[test]
 fn test_extract_cookies_from_response() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
-    manager.set_cookie_jar(Some(CookieJar::new()));
+    let storage = std::sync::Arc::new(CookieStorage::new());
+    manager.set_cookie_storage(Some(std::sync::Arc::clone(&storage)));
 
     // Simulate response headers with Set-Cookie
     let response_headers = vec![
@@ -435,31 +427,15 @@ fn test_extract_cookies_from_response() {
 
     assert_eq!(count, 2, "Should extract exactly 2 cookies");
 
-    // Verify cookies were stored
-    let jar = manager.cookie_jar().as_ref().unwrap();
-    assert_eq!(jar.len(), 2, "Jar should contain 2 stored cookies");
-
-    // Verify we can retrieve them
-    let cookies = jar.get_cookies_for_url("https://example.com/", true);
-    assert_eq!(cookies.len(), 2);
-
-    let names: Vec<&str> = cookies.iter().map(|c| c.name.as_str()).collect();
-    assert!(names.contains(&"session"));
-    assert!(names.contains(&"prefs"));
-
-    // Verify Secure flag was parsed correctly
-    let prefs_cookie = cookies.iter().find(|c| c.name == "prefs").unwrap();
-    assert!(prefs_cookie.secure, "prefs cookie should be marked secure");
-    assert!(
-        prefs_cookie.http_only,
-        "prefs cookie should be marked http_only"
-    );
+    let header = storage.to_header_string("example.com", "/", true);
+    assert!(header.contains("session=xyz789"));
+    assert!(header.contains("prefs=en-US"));
 }
 
 #[test]
-fn test_extract_cookies_no_jar_returns_zero() {
+fn test_extract_cookies_without_storage_returns_zero() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
-    // No cookie jar set
+    // No cookie storage set
 
     let headers = vec![("Set-Cookie".to_string(), "test=val".to_string())];
     let url = Url::parse("http://example.com/").unwrap();
@@ -471,7 +447,8 @@ fn test_extract_cookies_no_jar_returns_zero() {
 #[test]
 fn test_extract_cookies_invalid_header_skipped() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
-    manager.set_cookie_jar(Some(CookieJar::new()));
+    let storage = std::sync::Arc::new(CookieStorage::new());
+    manager.set_cookie_storage(Some(std::sync::Arc::clone(&storage)));
 
     // Mix of valid and invalid Set-Cookie headers
     let headers = vec![
@@ -488,38 +465,33 @@ fn test_extract_cookies_invalid_header_skipped() {
 
     assert_eq!(count, 1, "Only 1 valid cookie should be extracted");
 
-    let jar = manager.cookie_jar().as_ref().unwrap();
-    assert_eq!(jar.len(), 1);
-    let cookies = jar.get_cookies_for_url("http://x.com/", false);
-    assert_eq!(cookies[0].name, "valid");
+    assert_eq!(
+        storage.to_header_string("x.com", "/", false),
+        "valid=test_value"
+    );
 }
 
 #[test]
-fn test_debug_format_includes_cookie_jar() {
+fn test_debug_format_includes_cookie_storage() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
     let debug_str = format!("{:?}", manager);
-    assert!(!debug_str.contains("cookie_jar_set: true"));
+    assert!(!debug_str.contains("cookie_storage_set: true"));
 
-    manager.set_cookie_jar(Some(CookieJar::new()));
-    let debug_str_with_jar = format!("{:?}", manager);
+    manager.set_cookie_storage(Some(std::sync::Arc::new(CookieStorage::new())));
+    let debug_str_with_storage = format!("{:?}", manager);
     assert!(
-        debug_str_with_jar.contains("cookie_jar_set: true"),
-        "Debug output should show cookie_jar is set: {}",
-        debug_str_with_jar
+        debug_str_with_storage.contains("cookie_storage_set: true"),
+        "Debug output should show cookie storage is set: {}",
+        debug_str_with_storage
     );
 }
 
 #[test]
 fn test_secure_cookie_not_sent_over_http() {
     let mut manager = HttpConnectionManager::new(&create_test_config());
-    let mut jar = CookieJar::new();
-
-    // Add a secure-only cookie
-    let mut secure_cookie = JarCookie::new("token", "secret", "secure.example.com");
-    secure_cookie.secure = true;
-    jar.store(secure_cookie);
-
-    manager.set_cookie_jar(Some(jar));
+    let storage = std::sync::Arc::new(CookieStorage::new());
+    storage.parse_and_store("token=secret; Path=/; Secure", "secure.example.com", "/");
+    manager.set_cookie_storage(Some(storage));
 
     // Over HTTP — should NOT get the secure cookie
     let url_http = Url::parse("http://secure.example.com/api").unwrap();

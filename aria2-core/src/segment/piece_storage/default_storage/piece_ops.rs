@@ -207,7 +207,7 @@ impl PieceStorage for DefaultPieceStorage {
 
     fn get_completed_length(&self) -> u64 {
         // C++ adds in-flight piece completed lengths, capped at total
-        let bfman_completed = self.bfman.get_total_completed_length();
+        let bfman_completed = self.bfman.get_completed_length();
         let in_flight_completed: u64 = self
             .used_pieces
             .values()

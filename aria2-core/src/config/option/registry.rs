@@ -233,7 +233,11 @@ impl OptionRegistry {
             | "retry-wait"
             | "split"
             | "min-split-size"
+            | "min-http-range-size"
             | "max-connection-per-server"
+            | "max-http2-sessions-per-server"
+            | "max-http2-streams-per-session"
+            | "http-version"
             | "check-certificate"
             | "ca-certificate"
             | "allow-overwrite"
@@ -304,6 +308,9 @@ impl OptionRegistry {
             | "seed-time"
             | "seed-ratio"
             | "bt-max-peers"
+            | "bt-max-upload-slots"
+            | "bt-optimistic-unchoke-interval"
+            | "bt-snubbed-timeout"
             | "bt-request-peer-speed-limit"
             | "bt-max-open-files"
             | "bt-seed-unverified"
@@ -340,6 +347,14 @@ impl OptionRegistry {
             | "bt-tracker-timeout"
             | "bt-tracker-stopped-timeout"
             | "dht-message-timeout"
+            | "dht-refresh-check-interval"
+            | "dht-token-rotation-interval"
+            | "dht-node-contact-interval"
+            | "dht-cleanup-interval"
+            | "dht-save-interval"
+            | "dht-bootstrap-timeout"
+            | "dht-max-concurrent-lookups"
+            | "dht-persistence-max-age"
             | "enable-dht6"
             | "dht-listen-addr6"
             | "peer-id-prefix"
@@ -563,7 +578,7 @@ mod tests {
             );
             options.insert(
                 "bt-tracker-update-interval".to_string(),
-                serde_json::json!(86400),
+                serde_json::json!(604800),
             );
             options.insert(
                 "enable-public-trackers".to_string(),
@@ -582,9 +597,18 @@ mod tests {
         {
             assert!(!projected.contains_key("enable-utp"));
             assert!(!projected.contains_key("utp-listen-port"));
-            assert!(!projected.contains_key("bt-tracker-source"));
-            assert!(!projected.contains_key("bt-tracker-update-interval"));
-            assert!(!projected.contains_key("enable-public-trackers"));
+            assert_eq!(
+                projected.get("bt-tracker-source"),
+                Some(&serde_json::json!("https://example.test/trackers.txt"))
+            );
+            assert_eq!(
+                projected.get("bt-tracker-update-interval"),
+                Some(&serde_json::json!(604800))
+            );
+            assert_eq!(
+                projected.get("enable-public-trackers"),
+                Some(&serde_json::json!(true))
+            );
         }
     }
 }

@@ -58,27 +58,35 @@ fn test_generated_child_groups_are_not_saved() {
 }
 
 #[test]
-fn test_group_session_entry_preserves_min_split_size_snapshot() {
+fn test_group_session_entry_preserves_size_option_snapshots() {
     let group = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
         GroupId::new(3),
         vec!["http://example.com/file.bin".to_string()],
         DownloadOptions::default(),
     )));
-    group.recover_mut().set_option_snapshot(HashMap::from([(
-        "min-split-size".to_string(),
-        serde_json::json!("10M"),
-    )]));
+    group.recover_mut().set_option_snapshot(HashMap::from([
+        ("min-split-size".to_string(), serde_json::json!("10M")),
+        ("min-http-range-size".to_string(), serde_json::json!("128K")),
+    ]));
 
     let entry = group_to_entry(&group.recover()).expect("waiting group should be serializable");
     assert_eq!(
         entry.options.get("min-split-size"),
         Some(&"10M".to_string())
     );
+    assert_eq!(
+        entry.options.get("min-http-range-size"),
+        Some(&"128K".to_string())
+    );
 
     let restored = deserialize(&entry.serialize()).expect("session entry should deserialize");
     assert_eq!(
         restored[0].options.get("min-split-size"),
         Some(&"10M".to_string())
+    );
+    assert_eq!(
+        restored[0].options.get("min-http-range-size"),
+        Some(&"128K".to_string())
     );
 }
 
@@ -265,7 +273,7 @@ fn ordinary_follow_child_keeps_plain_session_identity() {
 #[test]
 fn metalink_graph_session_entry_uses_metadata_identity_and_descriptor() {
     let graph =
-        crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory_with_fallback(
+        crate::engine::metalink::request_graph::MetalinkRequestGraph::new_memory_with_fallback(
             "https://example.test/metadata.torrent",
             "payload.bin",
             &DownloadOptions::default(),

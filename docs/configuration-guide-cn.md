@@ -188,6 +188,43 @@ aria2c --conf-path=aria2.conf --reset-config
 这些选项覆盖做种、DHT/IPv6 DHT、PEX、LPD/uTP、tracker、peer、文件选择和事件 hook。
 事件 hook 选项为 `on-bt-download-complete` 和 `on-bt-download-error`。
 
+#### 公共 Tracker 列表
+
+BitTorrent 默认启用公共 Tracker 列表：
+
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enable-public-trackers` | `true` | 将公共列表中的 Tracker 加入 BitTorrent 任务 |
+| `bt-tracker-source` | `https://cf.trackerslist.com/best.txt` | 一个或多个以换行分隔的列表 URL |
+| `bt-tracker-update-interval` | `86400` | 列表刷新间隔（秒），最小值为 `1` |
+
+公共 Tracker 会追加在 torrent 和用户显式配置的 Tracker 之后；已存在于任意
+Tracker tier 的 URL 不会重复添加。刷新时可以向运行中的任务追加新 Tracker，
+不会替换原有 tier。使用 `bt-exclude-tracker` 排除 Tracker，使用 `*` 排除所有
+公共 Tracker。这三个列表选项也通过 `aria2.getGlobalOption` 暴露，并可用
+`aria2.changeGlobalOption` 修改。
+
+#### DHT 维护链路
+
+DHT 的协议引擎维护参数也可从配置文件、CLI 和 RPC 统一设置；它们会进入
+任务选项并在引擎启动时生效：
+
+| 选项 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `dht-refresh-check-interval` | `300` | bucket 刷新检查周期（秒） |
+| `dht-token-rotation-interval` | `600` | token 轮换周期（秒） |
+| `dht-node-contact-interval` | `900` | 节点 keep-alive 周期（秒） |
+| `dht-cleanup-interval` | `300` | peer/事务清理及 bad 节点淘汰周期（秒） |
+| `dht-save-interval` | `1800` | 路由表和 BEP 44 保存周期（秒） |
+| `dht-bootstrap-timeout` | `60` | bootstrap 后台任务上限（秒） |
+| `dht-max-concurrent-lookups` | `16` | 并发 DHT lookup 数量上限 |
+| `dht-persistence-max-age` | `86400` | 接受磁盘快照的最大年龄（秒） |
+
+快照会复用其中保存的本地 node id；超过 `dht-persistence-max-age` 的快照不会
+注入路由表，合并保存时也不会继续保留过期旧节点。`aria2.getDhtStatus` 会
+返回当前 `questionableNodes`、`badNodes`、`cachedNodes`、`bucketCount` 以及
+持久化和周期配置，便于外部监控淘汰链路。
+
 ### Advanced：磁盘、带宽和进程级限制
 
 `file-allocation`、`secure-falloc`、`mmap-threshold`、`max-concurrent-downloads`、`max-overall-download-limit`、`max-download-limit`、`max-overall-upload-limit`、`max-upload-limit`、`piece-length`、`disk-cache`、`stop`、`force-save`、`save-server-stat-interval`、`socket-recv-buffer-size`、`dscp`、`max-resume-failure-tries`、`log-max-size`、`log-max-files`。

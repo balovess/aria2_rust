@@ -11,7 +11,7 @@
 mod fixtures;
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use fixtures::mock_dht_server::MockDhtServer;
@@ -19,7 +19,7 @@ use fixtures::mock_dht_server::MockDhtServer;
 use aria2_protocol::bittorrent::dht::{
     bootstrap::DhtBootstrap,
     bucket::Bucket,
-    client::{DhtClient, DhtClientConfig},
+    compact::{extract_compact_nodes_from_response, extract_compact_peers_from_response},
     engine::{DhtEngine, DhtEngineConfig},
     message::{DhtMessage, DhtMessageBuilder},
     node::DhtNode,
@@ -116,7 +116,7 @@ fn test_message_encode_decode_roundtrip() {
 
     // --- Ping message ---
     let ping = DhtMessageBuilder::ping(42, &sender_id);
-    let encoded_ping = ping.encode().expect("ping encode should succeed");
+    let encoded_ping = ping.encode();
     let decoded_ping = DhtMessage::decode(&encoded_ping).expect("ping decode should succeed");
 
     assert!(decoded_ping.is_query(), "decoded ping must be a query");
@@ -133,7 +133,7 @@ fn test_message_encode_decode_roundtrip() {
     // --- Find_node message ---
     let target = [0xBBu8; 20];
     let find_node = DhtMessageBuilder::find_node(43, &sender_id, &target);
-    let encoded_fn = find_node.encode().expect("find_node encode should succeed");
+    let encoded_fn = find_node.encode();
     let decoded_fn = DhtMessage::decode(&encoded_fn).expect("find_node decode should succeed");
 
     assert!(decoded_fn.is_query());
@@ -142,7 +142,7 @@ fn test_message_encode_decode_roundtrip() {
     // --- Get_peers message ---
     let info_hash = [0xCCu8; 20];
     let get_peers = DhtMessageBuilder::get_peers(44, &sender_id, &info_hash);
-    let encoded_gp = get_peers.encode().expect("get_peers encode should succeed");
+    let encoded_gp = get_peers.encode();
     let decoded_gp = DhtMessage::decode(&encoded_gp).expect("get_peers decode should succeed");
 
     assert!(decoded_gp.is_query());
@@ -167,7 +167,7 @@ fn test_persistence_v3_roundtrip() {
         DhtNode::new([0x03u8; 20], "10.0.0.5:6883".parse::<SocketAddr>().unwrap()),
     ];
 
-    let serialized = DhtPersistence::serialize(&self_id, &nodes).expect("serialize should succeed");
+    let serialized = DhtPersistence::serialize(&self_id, &nodes);
     let deserialized =
         DhtPersistence::deserialize(&serialized).expect("deserialize should succeed");
 
@@ -182,7 +182,7 @@ fn test_persistence_v3_roundtrip() {
     );
 
     // Verify each node's address survived the roundtrip
-    let expected_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.addr).collect();
+    let expected_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.addr()).collect();
     let actual_addrs: Vec<SocketAddr> = deserialized.nodes.iter().map(|n| n.addr).collect();
     assert_eq!(
         actual_addrs, expected_addrs,
@@ -203,19 +203,19 @@ fn test_node_state_transitions() {
         "new node must not be 'questionable'"
     );
 
-    // Record failure once -> still below threshold of 3
+    // Four consecutive failures remain below aria2's eviction threshold.
     node.record_failure();
     assert!(node.is_good(), "1 failure: still good");
     assert!(!node.is_bad());
+    for failures in 2..=4 {
+        node.record_failure();
+        assert!(node.is_good(), "{failures} failures: still good");
+        assert!(!node.is_bad());
+    }
 
-    // Record second failure -> still below threshold
+    // Fifth failure crosses the upstream threshold.
     node.record_failure();
-    assert!(node.is_good(), "2 failures: still good");
-    assert!(!node.is_bad());
-
-    // Third failure crosses threshold -> node becomes bad
-    node.record_failure();
-    assert!(node.is_bad(), "3 failures: node should now be 'bad'");
+    assert!(node.is_bad(), "5 failures: node should now be 'bad'");
     assert!(!node.is_good(), "bad node cannot also be good");
 
     // Touch resets failure count and updates last_seen -> becomes good again
@@ -230,9 +230,7 @@ fn test_node_state_transitions() {
 /// D6: Verify DhtBootstrap returns valid nodes and integrates with RoutingTable.
 #[tokio::test]
 async fn test_bootstrap_nodes_validity() {
-    // Use the synchronous version (no DNS resolution) for deterministic testing.
-    // The async resolve_bootstrap_nodes() requires network access.
-    let boot_nodes = DhtBootstrap::get_bootstrap_nodes_unreachable();
+    let boot_nodes = DhtBootstrap::bootstrap_node_list();
 
     // Verify we get well-known router node definitions
     assert!(
@@ -241,7 +239,7 @@ async fn test_bootstrap_nodes_validity() {
     );
 
     for node in &boot_nodes {
-        assert_eq!(node.id.len(), 20, "each node ID must be 20 bytes");
+        assert!(node.contains(':'), "bootstrap entry must include a port");
     }
 
     // Add bootstrap nodes to a fresh routing table
@@ -255,64 +253,6 @@ async fn test_bootstrap_nodes_validity() {
 // ---------------------------------------------------------------------------
 // Tier B: Integration Tests with MockDhtServer
 // ---------------------------------------------------------------------------
-
-/// D7: Use MockDhtServer to verify DhtClient::discover_peers returns expected peers.
-#[tokio::test]
-async fn test_dht_client_discover_peers_mocked() {
-    // Start mock DHT server on a random port
-    let server = MockDhtServer::bind(0)
-        .await
-        .expect("mock server bind failed");
-
-    // Register expectation: get_peers will return 2 peer addresses
-    let expected_peers: Vec<SocketAddr> = vec![
-        "10.0.0.1:6881".parse().unwrap(),
-        "10.0.0.2:6882".parse().unwrap(),
-    ];
-    server
-        .expect_get_peers(expected_peers.clone(), vec![])
-        .await;
-
-    // Build DhtClient pointed at the mock server
-    let config = DhtClientConfig {
-        self_id: [0xABu8; 20],
-        bootstrap_nodes: vec![server.addr()],
-        max_concurrent_queries: 1,
-        query_timeout: Duration::from_secs(3),
-        max_rounds: 1,
-    };
-    let mut client = DhtClient::new(config);
-
-    // Discover peers for an arbitrary info hash
-    let info_hash = [0xCDu8; 20];
-    let result = client
-        .discover_peers(&info_hash)
-        .await
-        .expect("discover_peers should succeed against mock");
-
-    // Verify both expected peers are present in the result
-    assert!(
-        result.addresses.len() >= 2,
-        "expected at least 2 peers, got {}",
-        result.addresses.len()
-    );
-    for peer in &expected_peers {
-        assert!(
-            result.addresses.contains(peer),
-            "result should contain expected peer {:?}",
-            peer
-        );
-    }
-
-    // At least one node was contacted during discovery
-    assert!(
-        result.nodes_contacted >= 1,
-        "should have contacted at least 1 node, got {}",
-        result.nodes_contacted
-    );
-
-    server.shutdown().await;
-}
 
 /// D8: Verify DhtEngine can start, call find_peers without panicking, and shut down cleanly
 /// even when backed by a mock server. The mock may receive ping + get_peers queries.
@@ -432,11 +372,15 @@ async fn test_dht_announce_peer_flow() {
     let self_id = [0xCCu8; 20];
     let info_hash = [0xDDu8; 20];
     let token = "abc123token";
-    let announce_msg = DhtMessageBuilder::announce_peer(99, &self_id, &info_hash, 9999, token);
+    let announce_msg = DhtMessageBuilder::announce_peer_with_token(
+        99,
+        &self_id,
+        &info_hash,
+        9999,
+        token.as_bytes(),
+    );
 
-    let encoded = announce_msg
-        .encode()
-        .expect("encode announce_peer should succeed");
+    let encoded = announce_msg.encode();
     sock.send_to(server.addr(), &encoded)
         .await
         .expect("send announce_peer should succeed");
@@ -491,7 +435,7 @@ async fn test_dht_persistence_save_load_roundtrip() {
     );
 
     // Collect good nodes and persist to disk
-    let good_nodes = DhtPersistence::collect_good_nodes(&rt);
+    let good_nodes = rt.collect_good_nodes();
     assert_eq!(good_nodes.len(), 5, "all 5 nodes should be good");
 
     let saved_count = DhtPersistence::save_to_file(&dht_path, &self_id, &good_nodes)
@@ -691,10 +635,6 @@ fn test_engine_uses_token_tracker() {
 // Enhancement Tests: IPv6 Compact (4 tests)
 // =========================================================================
 
-use aria2_protocol::bittorrent::dht::client::{
-    extract_compact_nodes_from_response, extract_compact_peers_from_response,
-};
-
 #[test]
 fn test_extract_ipv6_peers() {
     let mut r_dict = std::collections::BTreeMap::new();
@@ -794,7 +734,7 @@ fn test_mock_dht_server_returns_ipv6_peers() {
         use aria2_protocol::bittorrent::dht::socket::DhtSocket;
         let client = DhtSocket::bind(0).await.expect("client bind failed");
         let query = DhtMessageBuilder::get_peers(55, &[0xCCu8; 20], &[0xBBu8; 20]);
-        client.send_to(server.addr(), &query.encode()?).await?;
+        client.send_to(server.addr(), &query.encode()).await?;
 
         let mut buf = [0u8; 1024];
         let (n, _) = client
@@ -824,96 +764,6 @@ fn test_mock_dht_server_returns_ipv6_peers() {
     assert!(
         result.is_ok(),
         "MockDHT should return IPv6 peer: {:?}",
-        result.err()
-    );
-}
-
-// =========================================================================
-// Enhancement Tests: Async Concurrent (2 tests)
-// =========================================================================
-
-/// Requires real DHT network; may hang without connectivity.
-/// Run with `cargo test -- --ignored` to include network-dependent tests.
-#[test]
-#[ignore]
-fn test_concurrent_query_faster_than_sequential() {
-    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
-
-    let config = DhtEngineConfig {
-        query_timeout: Duration::from_millis(200), // short timeout for speed test
-        max_concurrent_lookups: 8,
-        ..DhtEngineConfig::local()
-    };
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
-        let start = Instant::now();
-
-        // Query with 8 concurrent targets — should complete in ~1 timeout (not 8)
-        let discovery = engine.find_peers(&[0xFFu8; 20]).await;
-        let elapsed = start.elapsed();
-
-        // Even with no real peers, the concurrent batch should finish quickly.
-        // With sequential: 8 × 200ms = 1600ms minimum.
-        // With concurrent: ~200ms (all queries run in parallel).
-        // We allow generous margin but check it's under 5 seconds.
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "concurrent batch took {:?}, expected < 5s",
-            elapsed
-        );
-
-        let _ = discovery;
-        engine.shutdown_async().await;
-        Ok(())
-    });
-
-    assert!(
-        result.is_ok(),
-        "Concurrent query test failed: {:?}",
-        result.err()
-    );
-}
-
-/// Requires real DHT network; may hang without connectivity.
-/// Run with `cargo test -- --ignored` to include network-dependent tests.
-#[test]
-#[ignore]
-fn test_concurrent_announce_multiple_nodes() {
-    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
-
-    let config = DhtEngineConfig::local();
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result: Result<(), String> = rt.block_on(async {
-        let engine = DhtEngine::start(config).await.map_err(|e| e.to_string())?;
-        let start = Instant::now();
-
-        // announce_peer now uses join_all internally — should not hang or error
-        let result = engine.announce_peer(&[0xAAu8; 20], 9999).await;
-
-        let elapsed = start.elapsed();
-        assert!(
-            result.is_ok(),
-            "announce_peer should succeed: {:?}",
-            result.err()
-        );
-
-        // Should be fast (concurrent), not slow (sequential)
-        assert!(
-            elapsed < Duration::from_secs(30),
-            "concurrent announce took {:?}",
-            elapsed
-        );
-
-        engine.shutdown_async().await;
-        Ok(())
-    });
-
-    assert!(
-        result.is_ok(),
-        "Concurrent announce test failed: {:?}",
         result.err()
     );
 }

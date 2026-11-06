@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Aria2Client } from '../../src/client.js';
-import { RpcError } from '../../src/errors.js';
+import { AuthError } from '../../src/errors.js';
 import { startMockServer } from './helpers.js';
 
 describe('Auth Integration', () => {
@@ -16,7 +16,7 @@ describe('Auth Integration', () => {
   it('token auth failure', async () => {
     const { url, stop } = await startMockServer({ token: 'mysecret' });
     const client = new Aria2Client(url, { token: 'wrongtoken' });
-    await expect(client.getVersion()).rejects.toThrow(RpcError);
+    await expect(client.getVersion()).rejects.toThrow(AuthError);
     await client.close();
     await stop();
   });

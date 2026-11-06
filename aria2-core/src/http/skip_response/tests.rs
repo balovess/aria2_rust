@@ -3,7 +3,7 @@
 use url::Url;
 
 use crate::error::Aria2Error;
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 
 use super::handler::{HttpResponse, HttpSkipResponseHandler};
 use super::types::*;

@@ -118,7 +118,7 @@ async fn test_throttled_writer_multiple_writes() {
 
 #[tokio::test]
 async fn test_engine_global_lifecycle() {
-    use aria2_core::retry::RetryPolicy;
+    use aria2_core::engine::retry_policy::RetryPolicy;
 
     let policy = RetryPolicy::default();
     let mut engine = DownloadEngine::with_retry_policy(policy.clone());
@@ -141,7 +141,7 @@ async fn test_engine_global_lifecycle() {
 
 #[tokio::test]
 async fn test_engine_global_limiter_limits() {
-    use aria2_core::retry::RetryPolicy;
+    use aria2_core::engine::retry_policy::RetryPolicy;
 
     let mut engine = DownloadEngine::with_retry_policy(RetryPolicy::default());
     engine.set_global_rate_limiter(

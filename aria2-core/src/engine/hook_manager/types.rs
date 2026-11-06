@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::request::request_group::GroupId;
 
-// Re-export DownloadStatus for backward compatibility
+// Keep the hook context status type available from the hook API.
 pub use crate::request::request_group::DownloadStatus;
 
 // ============================================================================
@@ -129,6 +129,7 @@ impl std::fmt::Display for DownloadStats {
 ///
 /// Implement this trait to customize behavior after download completion.
 /// All methods are async, supporting time-consuming operations in async contexts.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PostDownloadHook: Send + Sync {
     /// Callback when download completes successfully

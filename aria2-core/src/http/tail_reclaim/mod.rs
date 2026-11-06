@@ -21,9 +21,9 @@
 //!    If remaining > min_tail_length, the tail starts at
 //!    `start + bytes_received + bytes_in_flight`
 //!
-//! # Relationship to engine::http_tail_reclaim
+//! # Relationship to engine::http::tail_reclaim
 //!
-//! The `engine::http_tail_reclaim` module makes the *global* decision of whether
+//! The `engine::http::tail_reclaim` module makes the *global* decision of whether
 //! the download as a whole should reclaim its HTTP tail segment (considering
 //! protocol, p2p involvement, concurrent command counts, etc.).
 //!
@@ -39,8 +39,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-// Re-export all public items for backward compatibility so that external code
-// can still use `aria2_core::http::tail_reclaim::TailReclaimConfig` etc.
+// Public API for per-connection tail reclaim tracking.
 pub use tracker::ConnectionStallTracker;
 pub use types::{
     DEFAULT_MIN_TAIL_LENGTH, DEFAULT_STALL_TIMEOUT_SECS, DEFAULT_TAIL_RECLAIM_ENABLED,

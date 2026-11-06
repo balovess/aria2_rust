@@ -10,7 +10,8 @@ use tracing::{debug, info, warn};
 
 use super::RequestGroup;
 use crate::engine::download_event_hooks::{
-    DownloadEvent, DownloadEventContext, DownloadEventHooks, determine_stop_event,
+    DownloadEvent, DownloadEventContext, DownloadEventHooks, MetadataResolvedEvent,
+    determine_stop_event,
 };
 use crate::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
@@ -89,7 +90,7 @@ impl super::RequestGroupMan {
                 g.rate_limiter.recover_mut().take(); // Drop rate limiter
             }
 
-            self.stopped.add(result);
+            self.record_stopped_result(result);
 
             info!(gid = gid.value(), "Demoted group from active to stopped");
             true
@@ -142,7 +143,6 @@ impl super::RequestGroupMan {
         for (gid, group) in to_move {
             let was_pause_requested = group.recover().is_pause_requested();
             let was_restart_requested = group.recover().is_restart_requested();
-            let was_halt_requested = group.recover().is_halt_requested();
 
             if self.active.remove(&gid).is_none() {
                 continue;
@@ -183,12 +183,13 @@ impl super::RequestGroupMan {
 
             // Fire on-download-pause hook for groups that are actually
             // pausing (not the reduce-to-limit auto-restart case).
-            if let (Some(hooks), true, false, false) = (
-                event_hooks,
-                was_pause_requested,
-                was_restart_requested,
-                was_halt_requested,
-            ) {
+            // Pause and force-pause both set the shared halt flag so the
+            // active command exits. The pause request is the authoritative
+            // discriminator; only scheduler-driven restart pauses suppress
+            // the user-visible pause event.
+            if let (Some(hooks), true, false) =
+                (event_hooks, was_pause_requested, was_restart_requested)
+            {
                 hooks.fire_event(DownloadEvent::Pause, &group.recover());
             }
 
@@ -253,6 +254,17 @@ impl super::RequestGroupMan {
             } else {
                 Vec::new()
             };
+            let metadata_event = if child_groups.is_empty() {
+                None
+            } else {
+                Some(MetadataResolvedEvent::new(
+                    gid,
+                    child_groups
+                        .iter()
+                        .map(|child| child.recover().gid())
+                        .collect(),
+                ))
+            };
 
             // Post-download processing may add followed-by child GIDs to a
             // completed parent. Refresh the result after that mutation so
@@ -279,6 +291,13 @@ impl super::RequestGroupMan {
                 );
             }
 
+            // Notify after insertion so observers can immediately resolve the
+            // child GIDs through the request manager. This is a library event,
+            // not a standard aria2 lifecycle/RPC notification.
+            if let (Some(hooks), Some(event)) = (event_hooks, metadata_event) {
+                hooks.notify_metadata_resolved(event);
+            }
+
             // ── Resolve dependencies ────────────────────────────────────
             // When a download completes successfully, resolve any
             // CompletionDependency waiting on this GID.
@@ -286,7 +305,7 @@ impl super::RequestGroupMan {
                 status,
                 DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
             ) {
-                self.resolve_dependencies_for_status(gid, status.clone());
+                self.resolve_dependencies_for_status_with_events(gid, status.clone(), event_hooks);
             }
 
             // ── Fire download event hooks ───────────────────────────────
@@ -317,12 +336,13 @@ impl super::RequestGroupMan {
                     // those notifications.
                     match command {
                         Some(cmd) if !cmd.is_empty() => {
-                            hooks.fire_event_with_params(
+                            hooks.fire_event_with_params_scoped(
                                 event,
                                 &ctx.gid_hex,
                                 ctx.num_files,
                                 &ctx.first_file_path,
                                 cmd,
+                                dg.group.recover().event_scope_id(),
                             );
                         }
                         // No per-group command: fall back to global hooks
@@ -387,23 +407,27 @@ impl super::RequestGroupMan {
     /// inside `fillRequestGroupFromReserver` when it encounters a
     /// dependency whose prerequisite has finished.
     pub fn resolve_dependencies_for(&self, completed_gid: crate::request::request_group::GroupId) {
-        self.resolve_dependencies_for_status(completed_gid, DownloadStatus::Complete);
+        self.resolve_dependencies_for_status_with_events(
+            completed_gid,
+            DownloadStatus::Complete,
+            None,
+        );
     }
 
-    /// Resolve dependencies after a prerequisite reaches any terminal state.
-    ///
-    /// A failed metadata download must wake its payload just as a successful
-    /// one does: payloads with direct mirrors fall back to those mirrors, while
-    /// torrent-only payloads are recorded as a terminal error instead of
-    /// remaining in the reserved queue forever.
-    pub fn resolve_dependencies_for_status(
+    /// Resolve dependencies after a prerequisite reaches any terminal state
+    /// and optionally notify observers when BitTorrent metadata is injected
+    /// into a payload group.
+    pub fn resolve_dependencies_for_status_with_events(
         &self,
         completed_gid: crate::request::request_group::GroupId,
         prerequisite_status: DownloadStatus,
+        event_hooks: Option<&DownloadEventHooks>,
     ) {
         let mut failed_dependencies: Vec<(GroupId, String)> = Vec::new();
         #[cfg(feature = "bittorrent")]
         let mut failed_payloads: Vec<(crate::request::request_group::GroupId, String)> = Vec::new();
+        #[cfg(feature = "bittorrent")]
+        let mut resolved_metadata: Vec<MetadataResolvedEvent> = Vec::new();
 
         for group in self.reserved.iter_snapshot() {
             let (payload_gid, dependency) = {
@@ -452,6 +476,8 @@ impl super::RequestGroupMan {
                 {
                     match bt_dep.resolve_after_prerequisite(&prerequisite_status) {
                         crate::request::request_group::BtDependencyResolution::Resolved => {
+                            resolved_metadata
+                                .push(MetadataResolvedEvent::new(completed_gid, vec![payload_gid]));
                             debug!(
                                 gid = payload_gid.value(),
                                 depends_on = completed_gid.value(),
@@ -482,5 +508,15 @@ impl super::RequestGroupMan {
                 &format!("BitTorrent metadata dependency failed: {error}"),
             );
         }
+
+        #[cfg(feature = "bittorrent")]
+        if let Some(hooks) = event_hooks {
+            for event in resolved_metadata {
+                hooks.notify_metadata_resolved(event);
+            }
+        }
+
+        #[cfg(not(feature = "bittorrent"))]
+        let _ = event_hooks;
     }
 }

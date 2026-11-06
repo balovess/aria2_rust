@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::{ProgressMessage, ProgressUpdate};
 use crate::request::global_net_stat::GlobalNetStat;
 use crate::request::request_group::AtomicProgress;
 use crate::util::perf_monitor::{AtomicMetrics, PerformanceMonitor};
 
 pub struct ProgressUpdater {
-    progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    progress_sender: Option<mpsc::Sender<ProgressMessage>>,
     global_net_stat: Option<Arc<GlobalNetStat>>,
     /// Direct access to progress counters — avoids `RwLock` on the hot path.
     progress: Arc<AtomicProgress>,
@@ -38,7 +38,7 @@ impl Clone for ProgressUpdater {
 
 impl ProgressUpdater {
     pub(crate) fn new(
-        progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+        progress_sender: Option<mpsc::Sender<ProgressMessage>>,
         global_net_stat: Option<Arc<GlobalNetStat>>,
         progress: Arc<AtomicProgress>,
         atomic_metrics: Arc<AtomicMetrics>,
@@ -70,6 +70,40 @@ impl ProgressUpdater {
         progress_update_threshold: u64,
         speed_update_interval_ms: u64,
     ) {
+        self.update_progress_inner(
+            completed_bytes,
+            progress_update_threshold,
+            speed_update_interval_ms,
+            true,
+        )
+        .await;
+    }
+
+    /// Update progress accounting when another component owns the live speed
+    /// estimate. The channel receives length-only messages and preserves the
+    /// directly published speed value.
+    pub(crate) async fn update_progress_without_speed(
+        &mut self,
+        completed_bytes: u64,
+        progress_update_threshold: u64,
+        speed_update_interval_ms: u64,
+    ) {
+        self.update_progress_inner(
+            completed_bytes,
+            progress_update_threshold,
+            speed_update_interval_ms,
+            false,
+        )
+        .await;
+    }
+
+    async fn update_progress_inner(
+        &mut self,
+        completed_bytes: u64,
+        progress_update_threshold: u64,
+        speed_update_interval_ms: u64,
+        publish_speed: bool,
+    ) {
         if completed_bytes > self.last_global_progress {
             let delta = completed_bytes - self.last_global_progress;
             if let Some(global) = self.global_net_stat.as_ref() {
@@ -94,16 +128,20 @@ impl ProgressUpdater {
         };
 
         if let Some(ref sender) = self.progress_sender {
-            let _ = sender
-                .send(ProgressUpdate {
-                    completed_bytes,
-                    download_speed: speed,
-                    upload_speed: 0,
-                })
-                .await;
+            let update = ProgressUpdate {
+                completed_bytes,
+                download_speed: speed,
+                upload_speed: 0,
+            };
+            let message = if publish_speed {
+                ProgressMessage::Update(update)
+            } else {
+                ProgressMessage::LengthOnly(update)
+            };
+            let _ = sender.send(message).await;
         } else {
             self.progress.set_completed_length(completed_bytes);
-            if speed > 0 {
+            if publish_speed && speed > 0 {
                 self.progress.set_download_speed(speed);
                 self.progress.set_upload_speed(0);
             }
@@ -134,6 +172,7 @@ impl ProgressUpdater {
 #[cfg(test)]
 mod tests {
     use super::ProgressUpdater;
+    use crate::engine::command::ProgressMessage;
     use crate::request::global_net_stat::GlobalNetStat;
     use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
     use crate::util::rwlock_ext::RwLockRecover;
@@ -163,5 +202,38 @@ mod tests {
         updater.update_progress(1200, 4096, 1_000).await;
 
         assert_eq!(global.session_download_length_for_test(), 176);
+    }
+
+    #[tokio::test]
+    async fn external_speed_updates_do_not_publish_a_second_speed_sample() {
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(1),
+            Vec::new(),
+            DownloadOptions::default(),
+        )));
+        let global = Arc::new(GlobalNetStat::default());
+        group.recover_mut().set_global_net_stat(Arc::clone(&global));
+        let progress = group.recover().progress.clone();
+        progress.set_download_speed(12_345);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let mut updater = ProgressUpdater::new(
+            Some(sender),
+            group.recover().global_net_stat(),
+            Arc::clone(&progress),
+            Arc::new(crate::util::perf_monitor::AtomicMetrics::new()),
+            None,
+        );
+
+        updater
+            .update_progress_without_speed(4096, 1, u64::MAX)
+            .await;
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ProgressMessage::LengthOnly(update)) if update.completed_bytes == 4096
+        ));
+        assert_eq!(progress.download_speed(), 12_345);
+        assert_eq!(global.session_download_length_for_test(), 4096);
+        assert_eq!(updater.last_progress_update(), 4096);
     }
 }

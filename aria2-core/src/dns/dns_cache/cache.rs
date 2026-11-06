@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioAsyncResolver;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
 
 use super::entry::DnsEntry;
 use crate::error::Aria2Error;
@@ -33,6 +33,10 @@ pub struct DnsCache {
     pub(crate) negative_entries: HashMap<EndpointKey, Instant>,
     /// Whether to prefer IPv4 addresses when sorting results
     ipv4_preference: bool,
+    /// Maximum time allowed for one DNS lookup.
+    dns_timeout: Duration,
+    /// Explicit DNS servers, or an empty list when system defaults are used.
+    dns_server_addresses: Vec<SocketAddr>,
     /// Fully-async hickory DNS resolver. When `None` (or on lookup error) resolution
     /// falls back to `tokio::net::lookup_host`. `TokioAsyncResolver` is `Arc`-backed
     /// internally, so cloning is cheap and no outer `Arc` is required.
@@ -40,21 +44,17 @@ pub struct DnsCache {
 }
 
 impl DnsCache {
+    const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// Create a new DNS cache with default settings.
     ///
     /// Default values:
     /// - TTL: 300 seconds (5 minutes)
     /// - Negative TTL: 60 seconds (1 minute)
+    /// - DNS timeout: 30 seconds (matching aria2_original)
     /// - IPv4 preference: enabled
     pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-            default_ttl: Duration::from_secs(300), // 5 minutes default
-            negative_ttl: Duration::from_secs(60), // 1 minute for failures
-            negative_entries: HashMap::new(),
-            ipv4_preference: true, // Prefer IPv4 by default (like C++ aria2)
-            resolver: build_default_resolver(),
-        }
+        Self::with_ttl_and_dns_timeout(300, 60, Self::DEFAULT_DNS_TIMEOUT)
     }
 
     /// Create a new DNS cache with custom TTL values.
@@ -64,10 +64,56 @@ impl DnsCache {
     /// * `default_ttl_secs` - Time-to-live for successful resolutions (in seconds)
     /// * `negative_ttl_secs` - Time-to-live for failed lookups (in seconds)
     pub fn with_ttl(default_ttl_secs: u64, negative_ttl_secs: u64) -> Self {
+        Self::with_ttl_and_dns_timeout(
+            default_ttl_secs,
+            negative_ttl_secs,
+            Self::DEFAULT_DNS_TIMEOUT,
+        )
+    }
+
+    /// Create a cache with an explicit DNS lookup timeout.
+    pub fn with_dns_timeout(timeout: Duration) -> Self {
+        Self::with_ttl_and_dns_timeout(300, 60, timeout)
+    }
+
+    /// Create a cache using explicit UDP DNS servers.
+    pub fn with_dns_servers(timeout: Duration, servers: Vec<SocketAddr>) -> Self {
+        let mut cache = Self::with_dns_timeout(timeout);
+        cache.dns_server_addresses = servers.clone();
+        cache.resolver = build_resolver(timeout, Some(&servers));
+        cache
+    }
+
+    /// Parse aria2's comma-separated IP address syntax for `async-dns-server`.
+    pub fn parse_dns_server_list(raw: &str) -> Result<Vec<SocketAddr>, String> {
+        raw.split(',')
+            .map(str::trim)
+            .map(|value| {
+                if value.is_empty() {
+                    return Err("DNS server list contains an empty address".to_string());
+                }
+                value
+                    .parse::<IpAddr>()
+                    .map(|ip| SocketAddr::new(ip, 53))
+                    .map_err(|error| format!("invalid DNS server address '{}': {}", value, error))
+            })
+            .collect()
+    }
+
+    fn with_ttl_and_dns_timeout(
+        default_ttl_secs: u64,
+        negative_ttl_secs: u64,
+        dns_timeout: Duration,
+    ) -> Self {
         Self {
+            cache: HashMap::new(),
             default_ttl: Duration::from_secs(default_ttl_secs),
             negative_ttl: Duration::from_secs(negative_ttl_secs),
-            ..Self::new()
+            negative_entries: HashMap::new(),
+            ipv4_preference: true, // Prefer IPv4 by default (like C++ aria2)
+            dns_timeout,
+            dns_server_addresses: Vec::new(),
+            resolver: build_resolver(dns_timeout, None),
         }
     }
 
@@ -130,8 +176,24 @@ impl DnsCache {
 
         // 3. Try the hickory async resolver first; fall back to tokio::net::lookup_host on failure.
         if let Some(resolver) = self.resolver.as_ref() {
-            match resolver.lookup_ip(hostname).await {
-                Ok(lookup) => {
+            match tokio::time::timeout(self.dns_timeout, resolver.lookup_ip(hostname)).await {
+                Err(error) => {
+                    tracing::debug!(
+                        hostname = hostname,
+                        timeout = ?self.dns_timeout,
+                        error = %error,
+                        "hickory DNS lookup timed out, falling back to tokio::net::lookup_host"
+                    );
+                }
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        hostname = hostname,
+                        error = %error,
+                        "hickory DNS lookup failed, falling back to tokio::net::lookup_host"
+                    );
+                    // Fall through to the OS-level fallback below.
+                }
+                Ok(Ok(lookup)) => {
                     let mut addrs: Vec<SocketAddr> =
                         lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
 
@@ -174,21 +236,22 @@ impl DnsCache {
                     );
                     // Fall through to the OS-level fallback below.
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        hostname = hostname,
-                        error = %e,
-                        "hickory DNS lookup failed, falling back to tokio::net::lookup_host"
-                    );
-                    // Fall through to the OS-level fallback below.
-                }
             }
         }
 
         // 4. Fallback: OS-level resolution via tokio (blocking getaddrinfo on a thread pool).
         //    Used when the hickory resolver is unavailable, returns no addresses, or errors.
         let addr_str = format!("{}:{}", hostname, port);
-        match tokio::net::lookup_host(&addr_str).await {
+        let fallback = tokio::time::timeout(self.dns_timeout, tokio::net::lookup_host(&addr_str))
+            .await
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("DNS lookup timed out after {:?}: {error}", self.dns_timeout),
+                )
+            })
+            .and_then(|result| result);
+        match fallback {
             Ok(addrs) => {
                 let mut sorted: Vec<SocketAddr> = addrs.collect();
 
@@ -355,6 +418,16 @@ impl DnsCache {
         self.negative_ttl
     }
 
+    /// Get the maximum time allowed for one DNS lookup.
+    pub fn dns_timeout(&self) -> Duration {
+        self.dns_timeout
+    }
+
+    /// Get the explicit DNS servers configured for this cache.
+    pub fn dns_server_addresses(&self) -> &[SocketAddr] {
+        &self.dns_server_addresses
+    }
+
     /// Manually record a failed lookup in the negative cache.
     ///
     /// This is useful for testing negative cache behavior without
@@ -411,10 +484,22 @@ impl DnsCache {
 /// construction time and captures no runtime handle), so this is safe to call outside of an
 /// async context. The returned value is wrapped in `Some`; callers fall back to
 /// `tokio::net::lookup_host` whenever the resolver is `None`.
-fn build_default_resolver() -> Option<TokioAsyncResolver> {
+fn build_resolver(
+    dns_timeout: Duration,
+    servers: Option<&[SocketAddr]>,
+) -> Option<TokioAsyncResolver> {
     let mut opts = ResolverOpts::default();
     opts.use_hosts_file = true;
-    Some(TokioAsyncResolver::tokio(ResolverConfig::default(), opts))
+    opts.timeout = dns_timeout;
+    let config = servers.map_or_else(ResolverConfig::default, |servers| {
+        let nameservers = servers
+            .iter()
+            .copied()
+            .map(|address| NameServerConfig::new(address, Protocol::Udp))
+            .collect::<Vec<_>>();
+        ResolverConfig::from_parts(None, Vec::new(), nameservers)
+    });
+    Some(TokioAsyncResolver::tokio(config, opts))
 }
 
 impl Default for DnsCache {

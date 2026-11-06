@@ -1,13 +1,15 @@
 use crate::error::{Aria2Error, Result};
 use std::path::{Path, PathBuf};
 
-const CONTROL_MAGIC: &[u8; 4] = b"A2CF";
-const CONTROL_VERSION: u16 = 1;
-const FLAG_HAS_CHECKSUM: u8 = 0x01;
-const FLAG_TORRENT_CHECKPOINT: u8 = 0x02;
-const FLAG_TORRENT_INFO_HASH: u8 = 0x04;
-const FLAG_TORRENT_PIECE_LENGTH: u8 = 0x08;
-const CONTROL_HEADER_LEN: usize = 39;
+mod native;
+mod persistence;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFileInFlightPiece {
+    pub index: u32,
+    pub length: u32,
+    pub bitfield: Vec<u8>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ControlFile {
@@ -16,12 +18,15 @@ pub struct ControlFile {
     completed_length: u64,
     upload_length: u64,
     bitfield: Vec<u8>,
+    in_flight_pieces: Vec<ControlFileInFlightPiece>,
     num_pieces: usize,
     checksum_algo: u8,
     checksum_value: Vec<u8>,
     torrent_checkpoint: bool,
     torrent_info_hash: Option<[u8; 20]>,
     torrent_piece_length: Option<u32>,
+    native_piece_length: Option<u32>,
+    native_layout: bool,
 }
 
 impl ControlFile {
@@ -31,11 +36,27 @@ impl ControlFile {
     pub fn total_length(&self) -> u64 {
         self.total_length
     }
+
+    /// Piece length explicitly represented by this native checkpoint layout.
+    ///
+    /// Legacy A2CF checkpoints did not store a generic piece length, so they
+    /// return `None` and must not be interpreted using a new segment layout.
+    pub fn piece_length(&self) -> Option<u32> {
+        self.native_piece_length.or(self.torrent_piece_length)
+    }
     pub fn completed_length(&self) -> u64 {
         self.completed_length
     }
     pub fn bitfield(&self) -> &[u8] {
         &self.bitfield
+    }
+
+    pub fn in_flight_pieces(&self) -> &[ControlFileInFlightPiece] {
+        &self.in_flight_pieces
+    }
+
+    pub fn set_in_flight_pieces(&mut self, pieces: Vec<ControlFileInFlightPiece>) {
+        self.in_flight_pieces = pieces;
     }
     pub fn set_checksum(&mut self, algo: u8, value: Vec<u8>) {
         self.checksum_algo = algo;
@@ -43,6 +64,19 @@ impl ControlFile {
     }
     pub fn checksum_algo(&self) -> u8 {
         self.checksum_algo
+    }
+
+    pub fn checksum_value(&self) -> &[u8] {
+        &self.checksum_value
+    }
+
+    pub fn upload_length(&self) -> u64 {
+        self.upload_length
+    }
+
+    /// Whether this value was decoded from aria2's native v0/v1 layout.
+    pub fn uses_native_layout(&self) -> bool {
+        self.native_layout
     }
 
     /// Mark this Rust-owned checkpoint as BitTorrent state.
@@ -80,6 +114,13 @@ impl ControlFile {
         self.bitfield = bitfield;
     }
 
+    pub(crate) fn normalize_legacy_piece_layout(&mut self, num_pieces: usize) -> Result<()> {
+        if !self.native_layout {
+            self.normalize_bitfield(num_pieces)?;
+        }
+        Ok(())
+    }
+
     pub async fn open_or_create(
         ctrl_path: &Path,
         total_length: u64,
@@ -92,229 +133,77 @@ impl ControlFile {
                     ctrl_path.display()
                 ))
             })?;
-            // The serialized A2CF bitfield stores bytes, not the caller's
-            // logical piece count. Restore that count at the typed open seam
-            // so trailing bits and short final pieces are interpreted using
-            // the current download layout.
-            control_file.normalize_bitfield(num_pieces);
+            // Legacy A2CF has no official piece-length field, so restore its
+            // logical layout at the typed open seam. Native files retain the
+            // piece layout encoded by aria2 itself.
+            if !control_file.native_layout {
+                control_file.normalize_bitfield(num_pieces)?;
+            }
             Ok(control_file)
         } else {
-            let bitfield_len = num_pieces.div_ceil(8);
-            Ok(Self {
-                path: ctrl_path.to_path_buf(),
-                total_length,
-                completed_length: 0,
-                upload_length: 0,
-                bitfield: vec![0u8; bitfield_len],
-                num_pieces,
-                checksum_algo: 0,
-                checksum_value: Vec::new(),
-                torrent_checkpoint: false,
-                torrent_info_hash: None,
-                torrent_piece_length: None,
-            })
+            let piece_length = piece_length_for(total_length, num_pieces)?;
+            Self::new_with_piece_length(ctrl_path, total_length, piece_length)
         }
     }
 
-    pub async fn load(path: &Path) -> Result<Option<Self>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let data = tokio::fs::read(path)
-            .await
-            .map_err(|e| Aria2Error::FileIo(format!("{}: {e}", path.display())))?;
-
-        if data.len() < CONTROL_HEADER_LEN {
-            return Err(Aria2Error::FileIo(format!(
-                "Truncated control file header: {} bytes (expected at least {})",
-                data.len(),
-                CONTROL_HEADER_LEN
-            )));
-        }
-
-        if &data[0..4] != CONTROL_MAGIC {
-            return Err(Aria2Error::FileIo("Invalid control file magic".to_string()));
-        }
-
-        let version = u16_from_le(&data[4..6]);
-        if version > CONTROL_VERSION {
-            return Err(Aria2Error::FileIo(format!(
-                "Unsupported version: {}",
-                version
-            )));
-        }
-
-        let flags = data[6];
-        let total_length = u64_from_le(&data[7..15]);
-        let completed_length = u64_from_le(&data[15..23]);
-        let upload_length = u64_from_le(&data[23..31]);
-        let bitfield_length = usize::try_from(u64_from_le(&data[31..39])).map_err(|_| {
-            Aria2Error::FileIo("Control file bitfield length exceeds platform limits".to_string())
-        })?;
-
-        let mut offset = CONTROL_HEADER_LEN;
-        let checksum_algo = if flags & FLAG_HAS_CHECKSUM != 0 {
-            let algo = *data.get(offset).ok_or_else(|| {
-                Aria2Error::FileIo("Truncated control file checksum algorithm".to_string())
-            })?;
-            offset += 1;
-            algo
-        } else {
-            0
-        };
-
-        let checksum_value = if flags & FLAG_HAS_CHECKSUM != 0 && checksum_algo > 0 {
-            let len = match checksum_algo {
-                1 => 16,
-                2 => 20,
-                3 => 32,
-                4 => 8,
-                _ => {
-                    return Err(Aria2Error::FileIo(format!(
-                        "Unsupported control file checksum algorithm: {}",
-                        checksum_algo
-                    )));
-                }
-            };
-            let end = offset.checked_add(len).ok_or_else(|| {
-                Aria2Error::FileIo("Control file checksum length overflow".to_string())
-            })?;
-            if end > data.len() {
-                return Err(Aria2Error::FileIo(
-                    "Truncated control file checksum".to_string(),
-                ));
-            }
-            let val = data[offset..end].to_vec();
-            offset = end;
-            val
-        } else {
-            Vec::new()
-        };
-
-        let torrent_info_hash = if flags & FLAG_TORRENT_INFO_HASH != 0 {
-            let end = offset.checked_add(20).ok_or_else(|| {
-                Aria2Error::FileIo("Control file torrent info hash length overflow".to_string())
-            })?;
-            if end > data.len() {
-                return Err(Aria2Error::FileIo(
-                    "Truncated control file torrent info hash".to_string(),
-                ));
-            }
-            let mut info_hash = [0u8; 20];
-            info_hash.copy_from_slice(&data[offset..end]);
-            offset = end;
-            Some(info_hash)
-        } else {
-            None
-        };
-
-        let torrent_piece_length = if flags & FLAG_TORRENT_PIECE_LENGTH != 0 {
-            let end = offset.checked_add(4).ok_or_else(|| {
-                Aria2Error::FileIo("Control file torrent piece length overflow".to_string())
-            })?;
-            if end > data.len() {
-                return Err(Aria2Error::FileIo(
-                    "Truncated control file torrent piece length".to_string(),
-                ));
-            }
-            let piece_length = u32_from_le(&data[offset..end]);
-            if piece_length == 0 {
-                return Err(Aria2Error::FileIo(
-                    "Control file torrent piece length must not be 0".to_string(),
-                ));
-            }
-            offset = end;
-            Some(piece_length)
-        } else {
-            None
-        };
-
-        let bitfield_end = offset.checked_add(bitfield_length).ok_or_else(|| {
-            Aria2Error::FileIo("Control file bitfield length overflow".to_string())
-        })?;
-        if bitfield_end != data.len() {
-            return Err(Aria2Error::FileIo(format!(
-                "Control file bitfield length mismatch: declared {}, available {}",
-                bitfield_length,
-                data.len().saturating_sub(offset)
-            )));
-        }
-        let bitfield = data[offset..bitfield_end].to_vec();
-        let num_pieces = bitfield.len() * 8;
-        if completed_length > total_length {
-            return Err(Aria2Error::FileIo(
-                "Control file completed length exceeds total length".to_string(),
+    /// Open an existing checkpoint only when it uses this exact fixed-piece
+    /// layout, or create a new checkpoint with the supplied piece length.
+    pub async fn open_or_create_with_piece_length(
+        ctrl_path: &Path,
+        total_length: u64,
+        piece_length: u32,
+    ) -> Result<Self> {
+        if piece_length == 0 {
+            return Err(Aria2Error::InvalidArgument(
+                "Control file piece length must not be 0".to_string(),
             ));
         }
-
-        Ok(Some(Self {
-            path: path.to_path_buf(),
-            total_length,
-            completed_length,
-            upload_length,
-            bitfield,
-            num_pieces,
-            checksum_algo,
-            checksum_value,
-            torrent_checkpoint: flags & FLAG_TORRENT_CHECKPOINT != 0,
-            torrent_info_hash,
-            torrent_piece_length,
-        }))
+        if ctrl_path.exists() {
+            let control_file = Self::load(ctrl_path).await?.ok_or_else(|| {
+                Aria2Error::FileIo(format!(
+                    "Failed to load control file: {}",
+                    ctrl_path.display()
+                ))
+            })?;
+            let expected_pieces = piece_count(total_length, piece_length)?;
+            if control_file.total_length() == total_length
+                && control_file.piece_length() == Some(piece_length)
+                && control_file.bitfield().len() == expected_pieces.div_ceil(8)
+            {
+                return Ok(control_file);
+            }
+            return Err(Aria2Error::InvalidArgument(format!(
+                "Control file layout does not match piece length {}: {}",
+                piece_length,
+                ctrl_path.display()
+            )));
+        }
+        Self::new_with_piece_length(ctrl_path, total_length, piece_length)
     }
 
-    pub async fn save(&self) -> Result<()> {
-        let mut buf = Vec::with_capacity(64 + self.bitfield.len());
-
-        buf.extend_from_slice(CONTROL_MAGIC);
-        buf.extend_from_slice(&CONTROL_VERSION.to_le_bytes());
-        let mut flags: u8 = 0;
-        if self.checksum_algo > 0 && !self.checksum_value.is_empty() {
-            flags |= FLAG_HAS_CHECKSUM;
-        }
-        if self.torrent_checkpoint {
-            flags |= FLAG_TORRENT_CHECKPOINT;
-        }
-        if self.torrent_info_hash.is_some() {
-            flags |= FLAG_TORRENT_INFO_HASH;
-        }
-        if self.torrent_piece_length.is_some() {
-            flags |= FLAG_TORRENT_PIECE_LENGTH;
-        }
-        buf.push(flags);
-        buf.extend_from_slice(&self.total_length.to_le_bytes());
-        buf.extend_from_slice(&self.completed_length.to_le_bytes());
-        buf.extend_from_slice(&self.upload_length.to_le_bytes());
-        buf.extend_from_slice(&(self.bitfield.len() as u64).to_le_bytes());
-
-        if flags & FLAG_HAS_CHECKSUM != 0 {
-            buf.push(self.checksum_algo);
-            buf.extend_from_slice(&self.checksum_value);
-        }
-
-        if let Some(info_hash) = self.torrent_info_hash {
-            buf.extend_from_slice(&info_hash);
-        }
-
-        if let Some(piece_length) = self.torrent_piece_length {
-            buf.extend_from_slice(&piece_length.to_le_bytes());
-        }
-
-        buf.extend_from_slice(&self.bitfield);
-
-        let tmp_path = self.path.with_extension("aria2.tmp");
-        {
-            tokio::fs::write(&tmp_path, &buf)
-                .await
-                .map_err(|e| Aria2Error::Io(e.to_string()))?;
-            if let Ok(f) = tokio::fs::File::open(&tmp_path).await {
-                let _ = f.sync_all().await;
-            }
-        }
-        tokio::fs::rename(&tmp_path, &self.path)
-            .await
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        Ok(())
+    fn new_with_piece_length(
+        ctrl_path: &Path,
+        total_length: u64,
+        piece_length: u32,
+    ) -> Result<Self> {
+        let actual_num_pieces = piece_count(total_length, piece_length)?;
+        let bitfield_len = actual_num_pieces.div_ceil(8);
+        Ok(Self {
+            path: ctrl_path.to_path_buf(),
+            total_length,
+            completed_length: 0,
+            upload_length: 0,
+            bitfield: vec![0u8; bitfield_len],
+            in_flight_pieces: Vec::new(),
+            num_pieces: actual_num_pieces,
+            checksum_algo: 0,
+            checksum_value: Vec::new(),
+            torrent_checkpoint: false,
+            torrent_info_hash: None,
+            torrent_piece_length: None,
+            native_piece_length: Some(piece_length),
+            native_layout: false,
+        })
     }
 
     pub fn mark_piece_done(&mut self, index: usize) {
@@ -322,22 +211,27 @@ impl ControlFile {
         let bit_index = index % 8;
         if index < self.num_pieces && byte_index < self.bitfield.len() {
             self.bitfield[byte_index] |= 1 << (7 - bit_index);
+            self.in_flight_pieces
+                .retain(|piece| piece.index as usize != index);
             self.completed_length = self.calculate_completed();
         }
     }
 
-    fn normalize_bitfield(&mut self, num_pieces: usize) {
-        self.num_pieces = num_pieces;
-        self.bitfield.resize(num_pieces.div_ceil(8), 0);
+    fn normalize_bitfield(&mut self, num_pieces: usize) -> Result<()> {
+        let piece_length = piece_length_for(self.total_length, num_pieces)?;
+        self.native_piece_length = Some(piece_length);
+        self.num_pieces = piece_count(self.total_length, piece_length)?;
+        self.bitfield.resize(self.num_pieces.div_ceil(8), 0);
 
         if let Some(last_byte) = self.bitfield.last_mut() {
-            let valid_bits = num_pieces % 8;
+            let valid_bits = self.num_pieces % 8;
             if valid_bits != 0 {
                 *last_byte &= u8::MAX << (8 - valid_bits);
             }
         }
 
         self.completed_length = self.calculate_completed();
+        Ok(())
     }
 
     pub fn is_piece_done(&self, index: usize) -> bool {
@@ -358,7 +252,11 @@ impl ControlFile {
         if self.total_length == 0 || self.num_pieces == 0 {
             return 0;
         }
-        let piece_size = self.total_length.div_ceil(self.num_pieces as u64);
+        let piece_size = self
+            .torrent_piece_length
+            .or(self.native_piece_length)
+            .map(u64::from)
+            .unwrap_or_else(|| self.total_length.div_ceil(self.num_pieces as u64));
         (0..self.num_pieces)
             .filter(|&index| self.is_piece_done(index))
             .map(|index| {
@@ -372,232 +270,129 @@ impl ControlFile {
         self.completed_length = length.min(self.total_length);
     }
 
+    fn effective_piece_length(&self) -> Result<u32> {
+        self.torrent_piece_length
+            .or(self.native_piece_length)
+            .or_else(|| piece_length_for(self.total_length, self.num_pieces).ok())
+            .filter(|piece_length| *piece_length != 0)
+            .ok_or_else(|| {
+                Aria2Error::InvalidArgument(
+                    "Control file piece length cannot be represented".to_string(),
+                )
+            })
+    }
+
     pub fn control_path_for(output_path: &Path) -> PathBuf {
-        let mut p = output_path.to_path_buf();
-        p.set_extension("aria2");
-        p
+        // aria2 appends the suffix.  Replacing the extension would turn
+        // `file.tar.gz` into `file.tar.aria2`, while the documented sidecar
+        // is `file.tar.gz.aria2`.  The same rule applies to a multi-file
+        // torrent's top directory (`top-directory.aria2`).
+        if output_path == Path::new(".") || output_path == Path::new("..") {
+            return output_path.join(".aria2");
+        }
+
+        let Some(file_name) = output_path.file_name() else {
+            return output_path.join(".aria2");
+        };
+        let mut control_name = file_name.to_os_string();
+        control_name.push(".aria2");
+        output_path.with_file_name(control_name)
     }
 }
 
-fn u16_from_le(b: &[u8]) -> u16 {
-    u16::from_le_bytes([b[0], b[1]])
+pub(super) fn checksum_length(algo: u8) -> Option<usize> {
+    match algo {
+        1 => Some(16), // MD5
+        2 => Some(20), // SHA-1
+        3 => Some(32), // SHA-256
+        4 => Some(8),  // CRC-64
+        _ => None,
+    }
 }
 
-fn u32_from_le(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+pub(super) fn piece_length_for(total_length: u64, num_pieces: usize) -> Result<u32> {
+    let divisor = num_pieces.max(1) as u64;
+    let piece_length = if total_length == 0 {
+        1
+    } else {
+        total_length.div_ceil(divisor)
+    };
+    u32::try_from(piece_length).map_err(|_| {
+        Aria2Error::InvalidArgument(format!(
+            "Control file piece length exceeds native aria2 limit: {}",
+            piece_length
+        ))
+    })
 }
 
-fn u64_from_le(b: &[u8]) -> u64 {
-    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+pub(super) fn piece_count(total_length: u64, piece_length: u32) -> Result<usize> {
+    if piece_length == 0 {
+        return Err(Aria2Error::InvalidArgument(
+            "Control file piece length must not be 0".to_string(),
+        ));
+    }
+    usize::try_from(total_length.div_ceil(piece_length as u64))
+        .map_err(|_| Aria2Error::InvalidArgument("Control file has too many pieces".to_string()))
+}
+
+pub(super) fn validate_in_flight_pieces(
+    pieces: &[ControlFileInFlightPiece],
+    total_length: u64,
+    piece_length: u32,
+    num_pieces: usize,
+    _completed_bitfield: &[u8],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(pieces.len());
+    for piece in pieces {
+        let index = piece.index as usize;
+        if index >= num_pieces {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight torrent piece index is out of range: {}",
+                piece.index
+            )));
+        }
+        if !seen.insert(piece.index) {
+            return Err(Aria2Error::FileIo(format!(
+                "Duplicate in-flight torrent piece index: {}",
+                piece.index
+            )));
+        }
+        if piece.length == 0 || piece.length > piece_length {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight torrent piece length is out of range: {}",
+                piece.length
+            )));
+        }
+        let block_count = (piece.length as usize).div_ceil(16 * 1024);
+        let expected_bitfield_length = block_count.div_ceil(8);
+        if piece.bitfield.len() != expected_bitfield_length {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight block bitfield length mismatch: expected {}, actual {}",
+                expected_bitfield_length,
+                piece.bitfield.len()
+            )));
+        }
+        let unused_bits = (8 - block_count % 8) % 8;
+        if unused_bits != 0
+            && piece
+                .bitfield
+                .last()
+                .is_some_and(|byte| byte & ((1u8 << unused_bits) - 1) != 0)
+        {
+            return Err(Aria2Error::FileIo(
+                "In-flight block bitfield has set trailing bits".to_string(),
+            ));
+        }
+        let piece_offset = u64::from(piece.index) * u64::from(piece_length);
+        if piece_offset >= total_length {
+            return Err(Aria2Error::FileIo(format!(
+                "In-flight torrent piece offset is out of range: {}",
+                piece.index
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_control_path_uses_aria2_suffix() {
-        assert_eq!(
-            ControlFile::control_path_for(Path::new("payload.bin")),
-            PathBuf::from("payload.aria2")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_control_file_new_and_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.aria2");
-
-        let cf = ControlFile::open_or_create(&path, 10000, 10).await.unwrap();
-        assert_eq!(cf.total_length(), 10000);
-        assert_eq!(cf.completed_length(), 0);
-        assert!(!cf.is_piece_done(0));
-
-        cf.save().await.unwrap();
-
-        assert!(path.exists());
-        let data = tokio::fs::read(&path).await.unwrap();
-        assert_eq!(&data[0..4], b"A2CF");
-    }
-
-    #[tokio::test]
-    async fn test_control_file_mark_and_check_pieces() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.aria2");
-
-        let mut cf = ControlFile::open_or_create(&path, 1000, 8).await.unwrap();
-
-        cf.mark_piece_done(0);
-        cf.mark_piece_done(3);
-        cf.mark_piece_done(7);
-
-        assert!(cf.is_piece_done(0));
-        assert!(!cf.is_piece_done(1));
-        assert!(cf.is_piece_done(3));
-        assert!(!cf.is_piece_done(5));
-        assert!(cf.is_piece_done(7));
-        assert_eq!(cf.completed_pieces(), 3);
-
-        cf.save().await.unwrap();
-
-        let loaded = ControlFile::load(&path).await.unwrap().unwrap();
-        assert_eq!(loaded.completed_pieces(), 3);
-        assert!(loaded.is_piece_done(0));
-        assert!(loaded.is_piece_done(7));
-    }
-
-    #[tokio::test]
-    async fn test_control_file_piece_completion_handles_short_final_piece() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("short_final.aria2");
-
-        let mut cf = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
-        cf.mark_piece_done(0);
-        cf.mark_piece_done(2);
-
-        assert_eq!(cf.completed_length(), 6);
-        assert!(!cf.is_piece_done(3));
-    }
-
-    #[tokio::test]
-    async fn test_control_file_reload_restores_logical_piece_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("reload_piece_count.aria2");
-
-        let mut cf = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
-        cf.mark_piece_done(0);
-        cf.save().await.unwrap();
-
-        let mut loaded = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
-        loaded.mark_piece_done(2);
-
-        assert_eq!(loaded.completed_length(), 6);
-        assert!(!loaded.is_piece_done(3));
-    }
-
-    #[tokio::test]
-    async fn test_control_file_reload_normalizes_legacy_piece_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("normalize_piece_count.aria2");
-
-        let mut old = ControlFile::open_or_create(&path, 10, 5).await.unwrap();
-        old.mark_piece_done(0);
-        old.mark_piece_done(1);
-        old.mark_piece_done(4);
-        old.save().await.unwrap();
-
-        let loaded = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
-
-        assert_eq!(loaded.bitfield(), &[0b1100_0000]);
-        assert_eq!(loaded.completed_pieces(), 2);
-        assert!(loaded.is_piece_done(0));
-        assert!(loaded.is_piece_done(1));
-        assert!(!loaded.is_piece_done(2));
-        assert!(!loaded.is_piece_done(3));
-        assert_eq!(loaded.completed_length(), 8);
-    }
-
-    #[tokio::test]
-    async fn test_control_file_roundtrip_with_checksum() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_hash.aria2");
-
-        let mut cf = ControlFile::open_or_create(&path, 5000, 5).await.unwrap();
-        cf.checksum_algo = 2;
-        cf.checksum_value = vec![0xAB; 20];
-        cf.mark_piece_done(0);
-        cf.mark_piece_done(2);
-        cf.save().await.unwrap();
-
-        let loaded = ControlFile::load(&path).await.unwrap().unwrap();
-        assert_eq!(loaded.total_length(), 5000);
-        assert_eq!(loaded.checksum_algo, 2);
-        assert_eq!(loaded.completed_pieces(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_control_file_atomic_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_atomic.aria2");
-
-        let mut cf = ControlFile::open_or_create(&path, 999, 4).await.unwrap();
-        cf.mark_piece_done(1);
-        cf.save().await.unwrap();
-
-        let tmp_path = path.with_extension("aria2.tmp");
-        assert!(!tmp_path.exists());
-        assert!(path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_control_file_load_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nonexistent.aria2");
-        let result = ControlFile::load(&path).await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_control_file_load_invalid_magic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.aria2");
-        tokio::fs::write(&path, b"NOT_A2CF_DATA").await.unwrap();
-
-        let result = ControlFile::load(&path).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_control_file_load_truncated_header() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("truncated.aria2");
-        for length in [0usize, 7, 8, 38] {
-            let mut data = vec![0u8; length];
-            if length >= 4 {
-                data[..4].copy_from_slice(CONTROL_MAGIC);
-            }
-            tokio::fs::write(&path, &data).await.unwrap();
-            assert!(ControlFile::load(&path).await.is_err(), "length={length}");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_control_file_rejects_invalid_checksum_and_bitfield_lengths() {
-        let dir = tempfile::tempdir().expect("failed to create temporary directory");
-        let path = dir.path().join("malformed.aria2");
-        let mut data = vec![0u8; CONTROL_HEADER_LEN];
-        data[..4].copy_from_slice(CONTROL_MAGIC);
-        data[6] = FLAG_HAS_CHECKSUM;
-        data[31..39].copy_from_slice(&0u64.to_le_bytes());
-        data.push(2);
-        tokio::fs::write(&path, &data).await.unwrap();
-        assert!(ControlFile::load(&path).await.is_err());
-
-        let mut data = vec![0u8; CONTROL_HEADER_LEN];
-        data[..4].copy_from_slice(CONTROL_MAGIC);
-        data[31..39].copy_from_slice(&1u64.to_le_bytes());
-        tokio::fs::write(&path, &data).await.unwrap();
-        assert!(ControlFile::load(&path).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_control_path_for_output() {
-        let out = Path::new("/downloads/file.iso");
-        let ctrl = ControlFile::control_path_for(out);
-        assert_eq!(ctrl.extension().unwrap().to_str().unwrap(), "aria2");
-        assert!(ctrl.to_str().unwrap().ends_with(".aria2"));
-    }
-
-    #[tokio::test]
-    async fn test_control_file_update_completed_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_len.aria2");
-
-        let mut cf = ControlFile::open_or_create(&path, 8000, 8).await.unwrap();
-        cf.update_completed_length(3500);
-        assert_eq!(cf.completed_length(), 3500);
-
-        cf.update_completed_length(9000);
-        assert_eq!(cf.completed_length(), 8000);
-    }
-}
+mod tests;

@@ -6,7 +6,7 @@
 use url::Url;
 
 use crate::http::digest_auth::DigestAuthChallenge;
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 
 /// Maximum redirect count before aborting (matches C++ `Request::MAX_REDIRECT`)
 pub const MAX_REDIRECT_COUNT: u32 = 20;

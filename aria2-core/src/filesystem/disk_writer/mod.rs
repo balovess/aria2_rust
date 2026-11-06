@@ -18,7 +18,7 @@ mod tests;
 pub use atomic::{ByteArrayDiskWriter, DefaultDiskWriter};
 pub use buffered::{CachedDiskWriter, CachedDiskWriterStats};
 
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -47,10 +47,25 @@ pub fn new_sequential_download_writer(
 
 // ── Sequential writer trait ──────────────────────────────────────────────
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
+
+    /// Flush prior writes through the file and namespace durability barriers.
+    /// In-memory writers may implement this as a no-op because they do not
+    /// provide crash-recoverable output.
     async fn flush(&mut self) -> Result<()>;
+
+    /// Synchronize file contents before a checkpoint is persisted.
+    ///
+    /// The output's initial directory entry must also be durable before this
+    /// method returns. Implementations that cannot separate the two barriers
+    /// may use the stronger `flush` operation.
+    async fn sync_data(&mut self) -> Result<()> {
+        self.flush().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
@@ -64,6 +79,10 @@ impl DiskWriter for Box<dyn DiskWriter> {
         self.as_mut().flush().await
     }
 
+    async fn sync_data(&mut self) -> Result<()> {
+        self.as_mut().sync_data().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         self.as_mut().finalize().await
     }
@@ -71,6 +90,7 @@ impl DiskWriter for Box<dyn DiskWriter> {
 
 // ── Positioned (seekable) writer trait ───────────────────────────────────
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 #[allow(clippy::len_without_is_empty)]
 pub trait SeekableDiskWriter: Send + Sync {
@@ -87,6 +107,28 @@ pub trait SeekableDiskWriter: Send + Sync {
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize>;
     async fn truncate(&mut self, length: u64) -> Result<()>;
     async fn flush(&mut self) -> Result<()>;
+
+    /// Synchronize file contents without releasing the writer.
+    ///
+    /// `flush` only makes data visible through the operating-system page
+    /// cache. This method may leave file metadata and its directory entries
+    /// unsynchronized; use `sync_all` before persisting a checkpoint.
+    async fn sync_data(&mut self) -> Result<()> {
+        Err(Aria2Error::Io(
+            "durable data synchronization is unsupported by this writer".into(),
+        ))
+    }
+
+    /// Synchronize file contents and metadata, and use the platform's
+    /// namespace barrier for the path before persisting a checkpoint that
+    /// claims this payload is complete. Implementations that cannot provide
+    /// this guarantee must return an error.
+    async fn sync_all(&mut self) -> Result<()> {
+        Err(Aria2Error::Io(
+            "durable file and namespace synchronization is unsupported by this writer".into(),
+        ))
+    }
+
     async fn len(&self) -> Result<u64>;
     fn path(&self) -> &Path;
 
@@ -118,6 +160,12 @@ impl SeekableDiskWriter for Box<dyn SeekableDiskWriter> {
     }
     async fn flush(&mut self) -> Result<()> {
         self.as_mut().flush().await
+    }
+    async fn sync_data(&mut self) -> Result<()> {
+        self.as_mut().sync_data().await
+    }
+    async fn sync_all(&mut self) -> Result<()> {
+        self.as_mut().sync_all().await
     }
     async fn len(&self) -> Result<u64> {
         self.as_ref().len().await

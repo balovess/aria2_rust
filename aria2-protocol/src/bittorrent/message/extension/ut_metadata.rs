@@ -90,12 +90,14 @@ impl UtMetadataMessage {
         let msg_type = dict
             .get(b"msg_type".as_slice())
             .and_then(|v| v.as_int())
-            .ok_or("Missing 'msg_type' in ut_metadata payload")? as u32;
+            .ok_or("Missing 'msg_type' in ut_metadata payload")?;
 
         let piece = dict
             .get(b"piece".as_slice())
             .and_then(|v| v.as_int())
-            .ok_or("Missing 'piece' in ut_metadata payload")? as u32;
+            .filter(|value| *value >= 0)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("Missing or invalid 'piece' in ut_metadata payload")?;
 
         match msg_type {
             0 => Ok(UtMetadataMessage::Request { piece }),
@@ -103,10 +105,14 @@ impl UtMetadataMessage {
                 let total_size = dict
                     .get(b"total_size".as_slice())
                     .and_then(|v| v.as_int())
-                    .ok_or("Missing 'total_size' in ut_metadata Data message")?
-                    as u32;
+                    .filter(|value| *value >= 0)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or("Missing or invalid 'total_size' in ut_metadata Data message")?;
 
                 // The raw metadata bytes follow the bencoded dict.
+                if consumed == payload.len() {
+                    return Err("Missing data in ut_metadata Data message".to_string());
+                }
                 let data = payload[consumed..].to_vec();
 
                 Ok(UtMetadataMessage::Data {
@@ -157,15 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn test_ut_metadata_data_empty_piece() {
+    fn test_ut_metadata_data_without_payload_is_rejected() {
         let msg = UtMetadataMessage::Data {
             piece: 0,
             total_size: 0,
             data: Vec::new(),
         };
         let payload = msg.to_payload();
-        let parsed = UtMetadataMessage::from_payload(&payload).unwrap();
-        assert_eq!(parsed, msg);
+        let error = UtMetadataMessage::from_payload(&payload).unwrap_err();
+        assert!(error.contains("Missing data"));
     }
 
     #[test]
@@ -219,6 +225,30 @@ mod tests {
         let result = UtMetadataMessage::from_payload(&payload);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown"));
+    }
+
+    #[test]
+    fn test_ut_metadata_negative_piece_is_rejected() {
+        let mut dict = BTreeMap::new();
+        dict.insert(b"msg_type".to_vec(), BencodeValue::Int(0));
+        dict.insert(b"piece".to_vec(), BencodeValue::Int(-1));
+        let payload = BencodeValue::Dict(dict).encode();
+
+        let error = UtMetadataMessage::from_payload(&payload).unwrap_err();
+        assert!(error.contains("piece"));
+    }
+
+    #[test]
+    fn test_ut_metadata_negative_total_size_is_rejected() {
+        let mut dict = BTreeMap::new();
+        dict.insert(b"msg_type".to_vec(), BencodeValue::Int(1));
+        dict.insert(b"piece".to_vec(), BencodeValue::Int(0));
+        dict.insert(b"total_size".to_vec(), BencodeValue::Int(-1));
+        let mut payload = BencodeValue::Dict(dict).encode();
+        payload.push(0);
+
+        let error = UtMetadataMessage::from_payload(&payload).unwrap_err();
+        assert!(error.contains("total_size"));
     }
 
     #[test]

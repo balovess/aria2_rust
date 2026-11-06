@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::header_processor::HttpHeaderProcessor;
-use crate::http::request_response::basic_auth;
+use crate::http::request::basic_auth;
 
 use super::auth;
 use super::connect::HttpProxyTunnel;

@@ -19,7 +19,7 @@ use fixtures::mock_lpd_peer::{
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Duration;
 
-use aria2_core::engine::lpd_manager::{
+use aria2_core::engine::bittorrent::discovery::lpd::{
     DEFAULT_ANNOUNCE_INTERVAL_SECS, LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer,
     parse_lpd_announcement,
 };
@@ -819,7 +819,7 @@ async fn test_lpd_bittorrent_peer_simulation() {
 /// Test LPD peer max limit enforcement
 #[tokio::test]
 async fn test_lpd_peer_max_limit() {
-    use aria2_core::engine::lpd_manager::MAX_PEERS_PER_HASH;
+    use aria2_core::engine::bittorrent::discovery::lpd::MAX_PEERS_PER_HASH;
 
     let manager = LpdManager::default();
     manager

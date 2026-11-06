@@ -27,10 +27,11 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use crate::error::Result;
-use crate::filesystem::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::file_allocation::AllocationStrategy;
 use crate::filesystem::file_allocation_iterator::FileAllocationIterator;
 use crate::filesystem::multi_disk_adaptor::MultiDiskAdaptor;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 /// Multi-file allocation iterator that allocates each file in a torrent
 /// individually.
@@ -60,24 +61,14 @@ pub struct MultiFileAllocationIterator {
     secure_falloc: bool,
 }
 
-/// Per-file iterator that holds a dedicated `DirectDiskAdaptor` and a
+/// Per-file iterator that holds a dedicated `PositionedDiskWriter` and a
 /// `FileAllocationIterator`. This replaces the C++ pattern of creating
 /// a dedicated `DiskWriter` for each file to avoid reopen issues with
 /// `OpenedFileCounter`.
 enum PerFileIter {
-    Adaptive(
-        crate::filesystem::file_allocation_iterator::AdaptiveFileAllocationIterator<
-            DirectDiskAdaptor,
-        >,
-    ),
-    Falloc(
-        crate::filesystem::file_allocation_iterator::FallocFileAllocationIterator<
-            DirectDiskAdaptor,
-        >,
-    ),
-    Trunc(
-        crate::filesystem::file_allocation_iterator::TruncFileAllocationIterator<DirectDiskAdaptor>,
-    ),
+    Adaptive(crate::filesystem::file_allocation_iterator::AdaptiveFileAllocationIterator),
+    Falloc(crate::filesystem::file_allocation_iterator::FallocFileAllocationIterator),
+    Trunc(crate::filesystem::file_allocation_iterator::TruncFileAllocationIterator),
     None,
 }
 
@@ -161,11 +152,11 @@ impl MultiFileAllocationIterator {
                 })?;
             }
 
-            // Open a dedicated DirectDiskAdaptor for this file (mirrors C++
+            // Open a dedicated positioned writer for this file (mirrors C++
             // creating a dedicated DiskWriter per file).
-            // DirectDiskAdaptor::open creates the file if it doesn't exist.
-            let mut adaptor = DirectDiskAdaptor::new();
-            adaptor.open(entry.get_file_path()).await?;
+            // Opening creates the file if it doesn't exist.
+            let mut adaptor = PositionedDiskWriter::new(entry.get_file_path(), None);
+            adaptor.open().await?;
 
             self.inner_iter = Some(self.create_per_file_iter(adaptor, current_size, target_length));
             return Ok(true);
@@ -179,7 +170,7 @@ impl MultiFileAllocationIterator {
     /// strategy.
     fn create_per_file_iter(
         &self,
-        adaptor: DirectDiskAdaptor,
+        adaptor: PositionedDiskWriter,
         offset: u64,
         total_length: u64,
     ) -> PerFileIter {
@@ -255,10 +246,16 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
                             let _ = a.close().await;
                         }
                         PerFileIter::Falloc(mut f) => {
-                            let _ = f.adaptor_mut().close().await;
+                            let _ = f
+                                .writer_mut()
+                                .close_without_sync("multi-file allocation close")
+                                .await;
                         }
                         PerFileIter::Trunc(mut t) => {
-                            let _ = t.adaptor_mut().close().await;
+                            let _ = t
+                                .writer_mut()
+                                .close_without_sync("multi-file allocation close")
+                                .await;
                         }
                         PerFileIter::None => {}
                     }
@@ -336,14 +333,12 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filesystem::disk_adaptor::DirectDiskAdaptor;
     use crate::filesystem::file_allocation_iterator::FileAllocationIterator;
     use crate::filesystem::multi_disk_adaptor::FileEntry;
 
-    /// Direct test: create a file, open with DirectDiskAdaptor, truncate
-    /// to a larger size, verify the file size.
+    /// Open a positioned writer, truncate to a larger size, and verify the file size.
     #[tokio::test]
-    async fn test_direct_disk_adaptor_truncate_extend() {
+    async fn test_positioned_writer_truncate_extend() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_extend.bin");
 
@@ -351,8 +346,8 @@ mod tests {
         tokio::fs::write(&path, vec![0u8; 512]).await.unwrap();
 
         // Open and truncate to 1024
-        let mut adaptor = DirectDiskAdaptor::new();
-        adaptor.open(&path).await.unwrap();
+        let mut adaptor = PositionedDiskWriter::new(&path, None);
+        adaptor.open().await.unwrap();
         adaptor.truncate(1024).await.unwrap();
         adaptor.flush().await.unwrap();
         adaptor.close().await.unwrap();

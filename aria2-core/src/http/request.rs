@@ -97,7 +97,7 @@ impl HttpRequest {
 ///
 /// ```rust
 /// use url::Url;
-/// use aria2_core::http::request_response::{HttpRequestBuilder, HttpMethod};
+/// use aria2_core::http::request::{HttpRequestBuilder, HttpMethod};
 ///
 /// let url = Url::parse("http://example.com/api").unwrap();
 /// let request = HttpRequestBuilder::new(HttpMethod::Get, url)
@@ -504,7 +504,7 @@ impl HttpRequestBuilder {
 /// # Examples
 ///
 /// ```
-/// use aria2_core::http::request_response::basic_auth;
+/// use aria2_core::http::request::basic_auth;
 ///
 /// let auth_header = basic_auth("user", "pass");
 /// assert_eq!(auth_header, "Basic dXNlcjpwYXNz");

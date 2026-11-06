@@ -8,7 +8,6 @@
 //! - **Whole-file checksum** — digest and algorithm for full-file verification
 //! - **Network stats** — per-download speed / byte counters
 //! - **Attributes** — typed extension map (BitTorrent, Ed2k, etc.)
-//! - **Signature** — optional Metalink/PGP signature
 //!
 //! # Design differences from C++ aria2
 //!
@@ -26,7 +25,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-// Re-export all public types to preserve the original public API.
+// Re-export the download-context types.
 pub use context::DownloadContext;
 pub use net_stat::NetStat;
-pub use types::{BtFileMode, ContextAttributeType, Signature, TorrentAttribute};
+pub use types::{BtFileMode, ContextAttributeType, TorrentAttribute};

@@ -1,8 +1,10 @@
 use crate::error::Result;
-use crate::filesystem::disk_adaptor::DiskAdaptor;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 #[cfg(unix)]
 use crate::error::Aria2Error;
+#[cfg(unix)]
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 #[cfg(unix)]
 use super::strategies;
@@ -32,14 +34,14 @@ use super::strategies;
 ///   See the `windows` module for details.
 /// - **Other Unix (BSD, etc.)**: No portable preallocate syscall; uses `set_len`.
 #[cfg_attr(target_os = "linux", allow(unused_variables))]
-pub(crate) async fn fallocate<D: DiskAdaptor>(
-    adaptor: &mut D,
+pub(crate) async fn fallocate(
+    writer: &mut PositionedDiskWriter,
     length: u64,
     secure: bool,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        if let Some(fd) = adaptor.unix_raw_fd() {
+        if let Some(fd) = writer.raw_fd() {
             // Validate length fits in off_t (i64 on 64-bit, i32 on 32-bit).
             if length > i64::MAX as u64 {
                 return Err(Aria2Error::Io(
@@ -55,7 +57,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
             // FALLOC_FL_NONE (0) requests default behavior: allocate space
             // and zero-fill it at the filesystem block level.
             // SAFETY: fd is a valid open file descriptor obtained from
-            // adaptor.unix_raw_fd() (checked above). fallocate(2) is a
+            // writer.raw_fd() (checked above). fallocate(2) is a
             // standard Linux syscall. The mode 0 (FALLOC_FL_NONE) requests
             // default allocate-and-zero-fill behavior. length is cast to
             // off_t which is i64 on 64-bit Linux; u64 fits in i64 for
@@ -105,9 +107,9 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                 );
                 // Preserve an existing partial download and clear only the
                 // newly extended region when falling back to zero-fill.
-                let existing_length = adaptor.size().await?.min(length);
-                adaptor.truncate(length).await?;
-                return strategies::async_zero_fill_from(adaptor, existing_length, length).await;
+                let existing_length = writer.len().await?.min(length);
+                writer.truncate(length).await?;
+                return strategies::async_zero_fill_from(writer, existing_length, length).await;
             }
             // Other errors: return as I/O error
             Err(Aria2Error::Io(
@@ -115,7 +117,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
             ))
         } else {
             // Fall back to set_len if no raw fd available
-            adaptor.truncate(length).await
+            writer.truncate(length).await
         }
     }
 
@@ -126,7 +128,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
         // exposed by the libc crate on macOS targets.
         #[cfg(target_os = "macos")]
         {
-            match adaptor.unix_raw_fd() {
+            match writer.raw_fd() {
                 Some(fd) => {
                     // Validate length fits in off_t
                     if length > i64::MAX as u64 {
@@ -137,8 +139,8 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                     // F_PREALLOCATE does not change the file size; size it first
                     // via ftruncate so the file is correct even if preallocation
                     // is rejected by the filesystem.
-                    let existing_length = adaptor.size().await?.min(length);
-                    adaptor.truncate(length).await?;
+                    let existing_length = writer.len().await?.min(length);
+                    writer.truncate(length).await?;
                     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
                     // Keep the descriptor alive if the allocation future is
@@ -188,7 +190,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                     // allocated blocks. Zero-fill when secure is requested,
                     // otherwise emit a one-time warning about the trade-off.
                     if secure {
-                        strategies::async_zero_fill_from(adaptor, existing_length, length).await
+                        strategies::async_zero_fill_from(writer, existing_length, length).await
                     } else {
                         super::SECURE_FALLOC_WARN_ONCE.call_once(|| {
                             tracing::warn!(
@@ -201,7 +203,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                         Ok(())
                     }
                 }
-                None => adaptor.truncate(length).await,
+                None => writer.truncate(length).await,
             }
         }
 
@@ -209,12 +211,12 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
         {
             // Other Unix (BSD, etc.): no portable preallocate syscall; use
             // ftruncate via set_len which is the standard approach.
-            adaptor.truncate(length).await
+            writer.truncate(length).await
         }
     }
 
     #[cfg(not(unix))]
     {
-        super::windows::fallocate_windows(adaptor, length, secure).await
+        super::windows::fallocate_windows(writer, length, secure).await
     }
 }

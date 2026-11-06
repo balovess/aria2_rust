@@ -1,12 +1,14 @@
 use std::time::Instant;
 
+const BAD_FAILURE_THRESHOLD: u8 = 5;
+
 #[derive(Debug, Clone)]
 pub struct DhtNode {
-    pub id: [u8; 20],
-    pub addr: std::net::SocketAddr,
-    pub last_seen: Instant,
-    pub failed_count: u8,
-    pub token: Option<String>,
+    pub(crate) id: [u8; 20],
+    pub(crate) addr: std::net::SocketAddr,
+    pub(crate) last_seen: Instant,
+    pub(crate) failed_count: u8,
+    pub(crate) verified: bool,
 }
 
 impl DhtNode {
@@ -16,29 +18,59 @@ impl DhtNode {
             addr,
             last_seen: Instant::now(),
             failed_count: 0,
-            token: None,
+            verified: true,
         }
     }
 
+    /// Create a discovered node that has not yet answered a valid query.
+    pub(crate) fn unverified(id: [u8; 20], addr: std::net::SocketAddr) -> Self {
+        Self {
+            id,
+            addr,
+            last_seen: Instant::now(),
+            failed_count: 0,
+            verified: false,
+        }
+    }
+
+    pub fn id(&self) -> &[u8; 20] {
+        &self.id
+    }
+
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
+    pub fn last_seen(&self) -> Instant {
+        self.last_seen
+    }
+
+    pub fn failed_count(&self) -> u8 {
+        self.failed_count
+    }
+
     pub fn is_good(&self) -> bool {
-        self.failed_count < 3 && self.last_seen.elapsed().as_secs() < 900
+        self.verified
+            && self.failed_count < BAD_FAILURE_THRESHOLD
+            && self.last_seen.elapsed().as_secs() < 900
     }
 
     pub fn is_questionable(&self) -> bool {
-        self.last_seen.elapsed().as_secs() >= 900
+        !self.is_bad() && (!self.verified || self.last_seen.elapsed().as_secs() >= 900)
     }
 
     pub fn is_bad(&self) -> bool {
-        self.failed_count >= 3
+        self.failed_count >= BAD_FAILURE_THRESHOLD
     }
 
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
         self.failed_count = 0;
+        self.verified = true;
     }
 
     pub fn record_failure(&mut self) {
-        self.failed_count += 1;
+        self.failed_count = self.failed_count.saturating_add(1);
     }
 
     pub fn distance_to(&self, target: &[u8; 20]) -> usize {
@@ -86,19 +118,58 @@ mod tests {
     }
 
     #[test]
+    fn discovered_node_is_questionable_until_a_valid_response() {
+        let mut node = DhtNode::unverified([5u8; 20], "127.0.0.1:6881".parse().unwrap());
+
+        assert!(!node.is_good());
+        assert!(node.is_questionable());
+
+        node.touch();
+        assert!(node.is_good());
+        assert!(!node.is_questionable());
+    }
+
+    #[test]
     fn test_node_failures() {
         let mut node = DhtNode::new([2u8; 20], "0.0.0.0:0".parse().unwrap());
-        for _ in 0..3 {
+        for _ in 0..BAD_FAILURE_THRESHOLD {
             node.record_failure();
         }
         assert!(node.is_bad());
+        assert!(!node.is_questionable());
 
         let mut good_node = DhtNode::new([3u8; 20], "0.0.0.0:0".parse().unwrap());
-        for _ in 0..3 {
+        for _ in 0..BAD_FAILURE_THRESHOLD {
             good_node.record_failure();
         }
         good_node.touch();
         assert!(good_node.is_good());
+    }
+
+    #[test]
+    fn node_is_bad_after_five_consecutive_failures() {
+        let mut node = DhtNode::new([5u8; 20], "0.0.0.0:0".parse().unwrap());
+
+        for _ in 0..4 {
+            node.record_failure();
+            assert!(!node.is_bad());
+        }
+
+        node.record_failure();
+        assert!(node.is_bad());
+    }
+
+    #[test]
+    fn repeated_failures_saturate_without_reviving_a_bad_node() {
+        let mut node = DhtNode::new([4u8; 20], "0.0.0.0:0".parse().unwrap());
+
+        for _ in 0..=u8::MAX {
+            node.record_failure();
+        }
+
+        assert_eq!(node.failed_count(), u8::MAX);
+        assert!(node.is_bad());
+        assert!(!node.is_good());
     }
 
     #[test]

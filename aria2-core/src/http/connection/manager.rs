@@ -20,7 +20,7 @@ use url::Url;
 use aria2_protocol::http::response::is_redirect_status;
 
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::http::cookie_storage::{CookieJar, CookieStorage};
+use crate::http::cookie::CookieStorage;
 
 use super::active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 use super::types::{HttpConfig, HttpResponse};
@@ -48,8 +48,6 @@ pub struct HttpConnectionManager {
     max_redirects: u32,
     /// Shared canonical cookie storage used by production download paths.
     cookie_storage: Option<std::sync::Arc<CookieStorage>>,
-    /// Legacy URL/API adapter retained for compatibility.
-    cookie_jar: Option<CookieJar>,
 }
 
 impl HttpConnectionManager {
@@ -63,7 +61,6 @@ impl HttpConnectionManager {
             id_counter: AtomicU64::new(1),
             max_redirects: crate::constants::HTTP_DEFAULT_MAX_REDIRECTS as u32,
             cookie_storage: None,
-            cookie_jar: None,
         }
     }
 
@@ -176,11 +173,6 @@ impl HttpConnectionManager {
             conn_id,
             pool_key
         );
-    }
-
-    /// Legacy alias for `put_back()`.
-    pub async fn release(&mut self, conn: ActiveConnection) {
-        self.put_back(conn).await
     }
 
     /// Drop an in-use connection after a network failure.
@@ -437,70 +429,34 @@ impl HttpConnectionManager {
         manager
     }
 
-    /// Set the cookie jar for automatic cookie management.
-    pub fn set_cookie_jar(&mut self, jar: Option<CookieJar>) {
-        self.cookie_jar = jar;
-    }
-
-    /// Get a reference to the current cookie jar.
-    pub fn cookie_jar(&self) -> &Option<CookieJar> {
-        &self.cookie_jar
-    }
-
-    /// Get a mutable reference to the current cookie jar.
-    pub fn cookie_jar_mut(&mut self) -> &mut Option<CookieJar> {
-        &mut self.cookie_jar
-    }
-
-    /// Attach matching cookies from the jar to an HTTP request.
+    /// Attach matching cookies from shared storage to an HTTP request.
     pub fn attach_cookies_to_request(&self, url: &Url) -> Option<String> {
         let is_https = url.scheme() == "https";
-        if let Some(storage) = &self.cookie_storage {
-            let header =
-                storage.to_header_string(url.host_str().unwrap_or_default(), url.path(), is_https);
-            if !header.is_empty() {
-                return Some(header);
-            }
-        }
-        let jar = self.cookie_jar.as_ref()?;
-        jar.cookie_header_for_url(url.as_str(), is_https)
+        let storage = self.cookie_storage.as_ref()?;
+        let header =
+            storage.to_header_string(url.host_str().unwrap_or_default(), url.path(), is_https);
+        (!header.is_empty()).then_some(header)
     }
 
-    /// Extract cookies from response Set-Cookie headers and store in the jar.
+    /// Extract cookies from response Set-Cookie headers into shared storage.
     pub fn extract_cookies_from_response(
         &mut self,
         response_headers: &[(String, String)],
         _request_url: &Url,
     ) -> usize {
-        let mut stored = 0;
-        if let Some(storage) = &self.cookie_storage {
-            for (name, value) in response_headers {
-                if name.eq_ignore_ascii_case("set-cookie")
-                    && storage.parse_and_store(
-                        value,
-                        _request_url.host_str().unwrap_or_default(),
-                        _request_url.path(),
-                    )
-                {
-                    stored += 1;
-                }
-            }
-            return stored;
-        }
-        let jar = match &mut self.cookie_jar {
-            Some(j) => j,
-            None => return 0,
+        let Some(storage) = &self.cookie_storage else {
+            return 0;
         };
+        let mut stored = 0;
         for (name, value) in response_headers {
             if name.eq_ignore_ascii_case("set-cookie")
-                && let Some(cookie) = crate::http::cookie::JarCookie::parse_set_cookie(value)
+                && storage.parse_and_store(
+                    value,
+                    _request_url.host_str().unwrap_or_default(),
+                    _request_url.path(),
+                )
             {
-                jar.store(cookie);
                 stored += 1;
-                tracing::debug!(
-                    "Extracted cookie from Set-Cookie: {}",
-                    &value[..value.len().min(80)]
-                );
             }
         }
         stored
@@ -724,7 +680,6 @@ impl std::fmt::Debug for HttpConnectionManager {
             .field("active_count", &self.active_count)
             .field("pool_size", &self.pool.len())
             .field("cookie_storage_set", &self.cookie_storage.is_some())
-            .field("cookie_jar_set", &self.cookie_jar.is_some())
             .finish()
     }
 }

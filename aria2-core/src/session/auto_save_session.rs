@@ -238,7 +238,7 @@ mod tests {
         auto.execute().await.unwrap();
 
         assert!(
-            man.get_group(gid)
+            man.find_group(gid)
                 .unwrap()
                 .recover()
                 .is_save_control_file_requested()

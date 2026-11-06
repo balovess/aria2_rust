@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { HttpTransport } from '../../src/transport.js';
-import { RpcError, ConnectionError, TimeoutError } from '../../src/errors.js';
+import net from 'node:net';
+import { HttpTransport, WebSocketTransport } from '../../src/transport.js';
+import { RpcError, ConnectionError, TimeoutError, AuthError } from '../../src/errors.js';
 
 describe('HttpTransport', () => {
   let transport: HttpTransport;
@@ -102,7 +103,7 @@ describe('HttpTransport', () => {
     expect(result).toEqual({ version: '0.3.2' });
   });
 
-  it('throws RpcError on error response', async () => {
+  it('throws AuthError on authentication error response', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: () =>
@@ -113,8 +114,22 @@ describe('HttpTransport', () => {
         }),
     });
 
-    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(RpcError);
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(AuthError);
     await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow('Unauthorized');
+  });
+
+  it('throws AuthError for invalid-token RPC errors', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          jsonrpc: '2.0',
+          id: 1,
+          error: { code: -32001, message: 'Invalid token' },
+        }),
+    });
+
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(AuthError);
   });
 
   it('throws RpcError with correct code on error response', async () => {
@@ -151,6 +166,19 @@ describe('HttpTransport', () => {
     );
   });
 
+  it('rejects a non-ok response even when its JSON body has a result', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, result: 'unexpected' }),
+    });
+
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'HTTP 500',
+    );
+  });
+
   it('throws ConnectionError on network failure', async () => {
     mockFetch.mockRejectedValue(new TypeError('fetch failed'));
 
@@ -177,5 +205,81 @@ describe('HttpTransport', () => {
 
   it('close resolves without error', async () => {
     await expect(transport.close()).resolves.toBeUndefined();
+  });
+
+  it('close aborts an in-flight request and prevents reuse', async () => {
+    mockFetch.mockImplementation((_input: RequestInfo, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const request = transport.sendRequest('aria2.getVersion', []);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+    await transport.close();
+
+    await expect(request).rejects.toThrow('Transport closed');
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'Transport closed',
+    );
+  });
+});
+
+describe('WebSocketTransport', () => {
+  it('close rejects an in-flight connection attempt', async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as net.AddressInfo;
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${address.port}`);
+    const request = transport.sendRequest('aria2.getVersion', []);
+    await new Promise<void>((resolve) => server.once('connection', () => resolve()));
+
+    await transport.close();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const boundedRequest = Promise.race([
+      request,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('connection close timed out')), 500);
+      }),
+    ]);
+    await expect(boundedRequest).rejects.toThrow('Transport closed');
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'Transport closed',
+    );
+    if (timeout) clearTimeout(timeout);
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
+
+  it('cleans up when the socket fails before sending', async () => {
+    const transport = new WebSocketTransport('ws://localhost:6800/jsonrpc');
+    const internals = transport as unknown as {
+      ws: {
+        readyState: number;
+        send: () => never;
+        removeAllListeners: () => void;
+        close: () => void;
+      } | null;
+      pending: Map<number, unknown>;
+    };
+    internals.ws = {
+      readyState: 1,
+      send: () => {
+        throw new Error('socket closed');
+      },
+      removeAllListeners: () => {},
+      close: () => {},
+    };
+
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'socket closed',
+    );
+    expect(internals.pending.size).toBe(0);
+
+    await transport.close();
   });
 });

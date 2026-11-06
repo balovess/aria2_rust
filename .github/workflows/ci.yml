@@ -2,6 +2,30 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      job:
+        description: Select one CI job, or all to run the complete workflow.
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - lint
+          - feature-minimal
+          - feature-standard
+          - feature-tui
+          - feature-full
+          - test-x86_64-unknown-linux-gnu
+          - test-aarch64-unknown-linux-gnu
+          - test-x86_64-pc-windows-msvc
+          - test-aarch64-apple-darwin
+          - homebrew-ubuntu-latest
+          - homebrew-macos-15-intel
+          - homebrew-macos-15
+          - scoop
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -9,20 +33,24 @@ env:
 jobs:
   feature-matrix:
     name: Feature build (${{ matrix.name }})
-    if: github.ref != 'refs/heads/master'
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'feature-minimal' ||
+       inputs.job == 'feature-standard' || inputs.job == 'feature-tui' ||
+       inputs.job == 'feature-full')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: minimal
-            features: http
-          - name: standard
-            features: standard
-          - name: tui
-            features: tui
-          - name: full
-            features: full
+        include: >-
+          ${{ fromJSON(
+            inputs.job == 'all' && '[{"name":"minimal","features":"http"},{"name":"standard","features":"standard"},{"name":"tui","features":"tui"},{"name":"full","features":"full"}]' ||
+            inputs.job == 'feature-minimal' && '[{"name":"minimal","features":"http"}]' ||
+            inputs.job == 'feature-standard' && '[{"name":"standard","features":"standard"}]' ||
+            inputs.job == 'feature-tui' && '[{"name":"tui","features":"tui"}]' ||
+            inputs.job == 'feature-full' && '[{"name":"full","features":"full"}]' ||
+            '[]'
+          ) }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -35,7 +63,9 @@ jobs:
   # ── Lint & format (fast, single platform) ─────────────────
   lint:
     name: Lint & Format
-    if: github.ref != 'refs/heads/master'
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'lint')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -51,20 +81,25 @@ jobs:
   # ── Library and integration test verification ─────────────
   test:
     name: Test (${{ matrix.os }})
-    if: github.ref != 'refs/heads/master'
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'test-x86_64-unknown-linux-gnu' ||
+       inputs.job == 'test-aarch64-unknown-linux-gnu' ||
+       inputs.job == 'test-x86_64-pc-windows-msvc' ||
+       inputs.job == 'test-aarch64-apple-darwin')
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - os: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04
-          - os: x86_64-pc-windows-msvc
-            runner: windows-latest
-          - os: aarch64-apple-darwin
-            runner: macos-latest
+        include: >-
+          ${{ fromJSON(
+            inputs.job == 'all' && '[{"os":"x86_64-unknown-linux-gnu","runner":"ubuntu-latest"},{"os":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04"},{"os":"x86_64-pc-windows-msvc","runner":"windows-latest"},{"os":"aarch64-apple-darwin","runner":"macos-latest"}]' ||
+            inputs.job == 'test-x86_64-unknown-linux-gnu' && '[{"os":"x86_64-unknown-linux-gnu","runner":"ubuntu-latest"}]' ||
+            inputs.job == 'test-aarch64-unknown-linux-gnu' && '[{"os":"aarch64-unknown-linux-gnu","runner":"ubuntu-22.04"}]' ||
+            inputs.job == 'test-x86_64-pc-windows-msvc' && '[{"os":"x86_64-pc-windows-msvc","runner":"windows-latest"}]' ||
+            inputs.job == 'test-aarch64-apple-darwin' && '[{"os":"aarch64-apple-darwin","runner":"macos-latest"}]' ||
+            '[]'
+          ) }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -85,6 +120,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.os }}
+      - name: Configure macOS loopback alias for source-binding tests
+        if: matrix.os == 'aarch64-apple-darwin'
+        run: |
+          for suffix in 2 3 4 5; do
+            address="127.0.0.$suffix"
+            if ! ifconfig lo0 | grep -Fq "$address"; then
+              sudo ifconfig lo0 alias "$address"
+            fi
+          done
+          ifconfig lo0 | grep -F '127.0.0.'
+          python3 - <<'PY'
+          import socket
+
+          for suffix in range(2, 6):
+              listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              listener.bind((f"127.0.0.{suffix}", 0))
+              print(f"TCP loopback bind succeeded: {listener.getsockname()}")
+              listener.close()
+          PY
       - name: Run tests
         shell: bash
         run: |
@@ -93,3 +147,110 @@ jobs:
           else
             cargo test --workspace -j 1 --lib --tests -- --test-threads=1
           fi
+
+  # ── Dev package manager verification (manual CI on dev) ────
+  homebrew:
+    name: Homebrew (${{ matrix.os }})
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (inputs.job == 'all' || inputs.job == 'homebrew-ubuntu-latest' ||
+       inputs.job == 'homebrew-macos-15-intel' ||
+       inputs.job == 'homebrew-macos-15')
+    strategy:
+      fail-fast: false
+      matrix:
+        include: >-
+          ${{ fromJSON(
+            inputs.job == 'all' && '[{"os":"ubuntu-latest"},{"os":"macos-15-intel"},{"os":"macos-15"}]' ||
+            inputs.job == 'homebrew-ubuntu-latest' && '[{"os":"ubuntu-latest"}]' ||
+            inputs.job == 'homebrew-macos-15-intel' && '[{"os":"macos-15-intel"}]' ||
+            inputs.job == 'homebrew-macos-15' && '[{"os":"macos-15"}]' ||
+            '[]'
+          ) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+      - name: Install Homebrew on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew --version
+      - name: Clone the dev tap source
+        shell: bash
+        env:
+          TAP_SOURCE: ${{ runner.temp }}/aria2-rust-tap
+        run: |
+          set -euo pipefail
+          git clone --branch "$GITHUB_REF_NAME" --depth 1 \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$TAP_SOURCE"
+      - name: Install and upgrade formula from the dev tap
+        shell: bash
+        env:
+          TAP_SOURCE: ${{ runner.temp }}/aria2-rust-tap
+        run: |
+          set -euo pipefail
+          brew tap balovess/aria2_rust "file://$TAP_SOURCE"
+          if brew list --formula aria2 >/dev/null 2>&1; then
+            brew unlink aria2
+          fi
+          brew install --build-from-source balovess/aria2_rust/aria2-rust
+          brew test aria2-rust
+          brew update
+          brew upgrade aria2-rust
+          VERSION_OUTPUT="$(aria2c --version)"
+          echo "$VERSION_OUTPUT"
+          EXPECTED_VERSION="$(sed -n 's#.*tags/v\([0-9.]*\)\.tar.gz.*#\1#p' "$TAP_SOURCE/Formula/aria2-rust.rb")"
+          echo "$VERSION_OUTPUT" | grep -F "$EXPECTED_VERSION"
+
+  scoop:
+    name: Scoop (Windows x64)
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (inputs.job == 'all' || inputs.job == 'scoop')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\scoop\shims"
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop --version
+      - name: Clone the dev bucket source
+        shell: pwsh
+        env:
+          BUCKET_SOURCE: ${{ runner.temp }}\aria2-rust-bucket
+        run: |
+          git clone --branch $env:GITHUB_REF_NAME --depth 1 `
+            "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git" "$env:BUCKET_SOURCE"
+          $sourceUrl = "file:///$($env:BUCKET_SOURCE -replace '\\', '/')"
+          git config --global "url.$sourceUrl.insteadOf" "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git"
+      - name: Install and update app from the dev bucket
+        shell: pwsh
+        env:
+          BUCKET_REPOSITORY: https://github.com/${{ github.repository }}.git
+          BUCKET_SOURCE: ${{ runner.temp }}\aria2-rust-bucket
+        run: |
+          scoop bucket add aria2 $env:BUCKET_REPOSITORY
+          scoop install aria2/aria2-rust
+          scoop update
+          scoop update aria2-rust
+          $manifest = Get-Content -Raw "$env:BUCKET_SOURCE\bucket\aria2-rust.json" | ConvertFrom-Json
+          $versionOutput = (& aria2c --version | Out-String)
+          if ($versionOutput -notmatch [regex]::Escape($manifest.version)) {
+            throw "Scoop installation version does not match $($manifest.version): $versionOutput"
+          }
+          Write-Host $versionOutput

@@ -3,8 +3,6 @@ pub mod mock_bt_peer;
 #[cfg(feature = "bittorrent")]
 pub mod mock_bt_seeder;
 #[cfg(feature = "bittorrent")]
-pub mod mock_dht_node;
-#[cfg(feature = "bittorrent")]
 pub mod mock_dht_server;
 pub mod mock_ftp_server;
 #[cfg(feature = "bittorrent")]

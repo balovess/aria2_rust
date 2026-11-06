@@ -52,8 +52,9 @@ pub fn parse_unix_list_line(line: &str) -> Option<ListingEntry> {
         return None;
     }
 
-    // Parse permissions field (first 10 characters)
-    let perms = &line[..10];
+    // Parse the ASCII permissions field without slicing through a UTF-8 code
+    // point in malformed server output.
+    let perms = std::str::from_utf8(line.as_bytes().get(..10)?).ok()?;
     if !is_valid_unix_permissions(perms) {
         return None;
     }
@@ -74,7 +75,7 @@ pub fn parse_unix_list_line(line: &str) -> Option<ListingEntry> {
     }
 
     // Size is at index 3 (0-indexed from fields after permissions)
-    let size: u64 = fields[3].parse().unwrap_or(0);
+    let size: u64 = fields[3].parse().ok()?;
 
     // Parse date/time (simplified - we don't need full precision)
     // Format: "Jan 01 00:00" or "Jan 01 2023"
@@ -202,7 +203,7 @@ fn detect_listing_format(lines: &[&str]) -> ListingFormat {
         let trimmed = line.trim();
 
         // Unix format starts with permission string like "-rw-r--r--" or "drwxr-xr-x"
-        if trimmed.len() >= 10 && is_valid_unix_permissions(&trimmed[..10]) {
+        if is_valid_unix_permissions(trimmed) {
             return ListingFormat::Unix;
         }
 
@@ -278,9 +279,13 @@ fn validate_msdos_time(time: &str) -> bool {
     if time.len() < 6 {
         return false;
     }
+    if !time.is_ascii() {
+        return false;
+    }
 
     // Must end with AM or PM (case insensitive)
-    if !time.ends_with("AM") && !time.ends_with("PM") {
+    let suffix = &time[time.len() - 2..];
+    if !suffix.eq_ignore_ascii_case("AM") && !suffix.eq_ignore_ascii_case("PM") {
         return false;
     }
 
@@ -367,6 +372,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_unix_invalid_size() {
+        let line = "-rw-r--r--  1 user group  nope Jan 01 00:00 file.txt";
+        assert!(parse_unix_list_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_unix_malformed_utf8_prefix_does_not_panic() {
+        let line = "😀😀😀😀😀 file.txt";
+        assert!(parse_unix_list_line(line).is_none());
+    }
+
+    #[test]
     fn test_parse_msdos_regular_file() {
         let line = "01-15-24  02:30PM       12345 filename.txt";
         let entry = parse_msdos_list_line(line).expect("Should parse successfully");
@@ -389,6 +406,15 @@ mod tests {
     #[test]
     fn test_parse_msdos_am_time() {
         let line = "06-01-24  09:15AM         500 morning.log";
+        let entry = parse_msdos_list_line(line).expect("Should parse successfully");
+
+        assert_eq!(entry.name, "morning.log");
+        assert_eq!(entry.size, 500);
+    }
+
+    #[test]
+    fn test_parse_msdos_lowercase_time_suffix() {
+        let line = "06-01-24  09:15am         500 morning.log";
         let entry = parse_msdos_list_line(line).expect("Should parse successfully");
 
         assert_eq!(entry.name, "morning.log");

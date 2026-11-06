@@ -11,11 +11,12 @@ mod fixtures;
 
 use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
+use aria2_core::engine::retry_policy::RetryPolicy;
 use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
 use aria2_core::http::connection::{HttpConfig, HttpConnectionManager};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
-use aria2_core::retry::{RetryExecutor, RetryPolicy, RetryStats};
+use aria2_core::retry::{RetryExecutor, RetryStats};
 use e2e_helpers::mock_http_server::{
     MockHttpServer, Response, StatusCode, full_body, partial_body,
 };
@@ -139,7 +140,7 @@ async fn test_connection_timeout_slow_server() {
     match result {
         Ok(conn) => {
             // Connection succeeded, but read might timeout
-            manager.release(conn).await;
+            manager.put_back(conn).await;
         }
         Err(Aria2Error::Recoverable(RecoverableError::Timeout)) => {
             // Expected: timeout occurred
@@ -504,8 +505,8 @@ async fn test_max_connections_limit_error() {
     }
 
     // Cleanup
-    manager.release(conn1).await;
-    manager.release(conn2).await;
+    manager.put_back(conn1).await;
+    manager.put_back(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -544,7 +545,7 @@ async fn test_connection_cleanup_on_error() {
         }
         Ok(conn) => {
             // If connection somehow succeeded, release it
-            manager.release(conn).await;
+            manager.put_back(conn).await;
         }
     }
 

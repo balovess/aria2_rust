@@ -67,7 +67,7 @@ async fn test_connection_pool_reuse() {
     assert_eq!(manager.active_count(), 1);
 
     // Return the connection (move ownership)
-    manager.release(conn1).await;
+    manager.put_back(conn1).await;
 
     // Second connection acquisition (should succeed)
     let conn2 = manager
@@ -77,7 +77,7 @@ async fn test_connection_pool_reuse() {
     assert!(manager.active_count() >= 1); // Connection count should be >= 1
 
     // Cleanup
-    manager.release(conn2).await;
+    manager.put_back(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -105,7 +105,7 @@ async fn test_evict_peer_removes_matching_idle_direct_connection() {
     let url = Url::parse(&format!("http://{}", addr)).unwrap();
     let conn = manager.acquire(&url, None).await.unwrap();
     let context = conn.connection_context().clone();
-    manager.release(conn).await;
+    manager.put_back(conn).await;
     assert_eq!(manager.pool_size(), 1);
 
     let evicted = manager.evict_peer(&context).await;
@@ -206,7 +206,7 @@ async fn test_max_connections_limit() {
     }
 
     // After returning one connection, should be able to acquire again (if pool reuse works)
-    manager.release(conn1).await;
+    manager.put_back(conn1).await;
     // Note: since the connection may still be counted in the pool, we only verify no panic
     match manager.acquire(&url, None).await {
         Ok(conn3) => {
@@ -214,7 +214,7 @@ async fn test_max_connections_limit() {
                 "Successfully acquired new connection after release: id={}",
                 conn3.id
             );
-            manager.release(conn3).await;
+            manager.put_back(conn3).await;
         }
         Err(e) => {
             println!(
@@ -225,7 +225,7 @@ async fn test_max_connections_limit() {
         }
     }
 
-    manager.release(conn2).await;
+    manager.put_back(conn2).await;
     manager.cleanup().await;
 }
 
@@ -354,7 +354,7 @@ async fn test_check_timeout_evicts_expired() {
 }
 
 #[tokio::test]
-async fn test_put_back_is_alias_for_release() {
+async fn test_put_back_returns_connection_to_pool() {
     let config = HttpConfig {
         max_connections: 4,
         connect_timeout: Duration::from_millis(500),
@@ -380,7 +380,7 @@ async fn test_put_back_is_alias_for_release() {
     let conn_id = conn.id;
 
     // release and put_back should behave identically
-    manager.release(conn).await;
+    manager.put_back(conn).await;
     assert_eq!(manager.pool_size(), 1);
 
     // Re-acquire (should reuse from pool)

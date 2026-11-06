@@ -184,6 +184,7 @@ fn test_dns_cache_creation() {
     assert!(cache.is_empty());
     assert_eq!(cache.default_ttl(), Duration::from_secs(300));
     assert_eq!(cache.negative_ttl(), Duration::from_secs(60));
+    assert_eq!(cache.dns_timeout(), Duration::from_secs(30));
 }
 
 #[test]
@@ -191,6 +192,13 @@ fn test_dns_cache_with_custom_ttl() {
     let cache = DnsCache::with_ttl(600, 30);
     assert_eq!(cache.default_ttl(), Duration::from_secs(600));
     assert_eq!(cache.negative_ttl(), Duration::from_secs(30));
+    assert_eq!(cache.dns_timeout(), Duration::from_secs(30));
+}
+
+#[test]
+fn test_dns_cache_with_custom_timeout() {
+    let cache = DnsCache::with_dns_timeout(Duration::from_secs(7));
+    assert_eq!(cache.dns_timeout(), Duration::from_secs(7));
 }
 
 #[test]
@@ -283,6 +291,73 @@ async fn test_resolve_with_refresh_replaces_exhausted_candidates() {
             .expect("the refreshed entry should be cached"),
         refreshed
     );
+}
+
+#[tokio::test]
+async fn test_explicit_dns_server_is_used_for_resolution() {
+    use tokio::net::UdpSocket;
+
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("DNS fixture must bind a UDP socket");
+    let server_address = socket
+        .local_addr()
+        .expect("DNS fixture must expose its local address");
+    let server = tokio::spawn(async move {
+        let mut request = [0u8; 512];
+        for _ in 0..4 {
+            let (length, peer) = socket
+                .recv_from(&mut request)
+                .await
+                .expect("DNS fixture must receive a query");
+            assert!(length >= 17, "DNS query must contain a question");
+
+            let mut question_end = 12;
+            loop {
+                let label_length = request[question_end] as usize;
+                question_end += 1;
+                if label_length == 0 {
+                    question_end += 4;
+                    break;
+                }
+                question_end += label_length;
+            }
+            let qtype = u16::from_be_bytes([request[question_end - 4], request[question_end - 3]]);
+            let mut response = Vec::with_capacity(question_end + 32);
+            response.extend_from_slice(&request[..2]);
+            response.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+            response.extend_from_slice(&request[12..question_end]);
+            response.extend_from_slice(&[0xc0, 0x0c]);
+            if qtype == 28 {
+                response.extend_from_slice(&[0, 28, 0, 1, 0, 0, 0, 60, 0, 16]);
+                response.extend_from_slice(&[0; 15]);
+                response.push(1);
+            } else {
+                response.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+            }
+            socket
+                .send_to(&response, peer)
+                .await
+                .expect("DNS fixture must send a response");
+            if qtype == 1 {
+                break;
+            }
+        }
+    });
+
+    let mut cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
+    let resolved = cache
+        .resolve("custom.test", 80)
+        .await
+        .expect("the configured DNS server should resolve custom.test");
+    assert!(
+        resolved.iter().any(|address| address.ip().is_loopback()),
+        "configured DNS response must reach the resolver: {resolved:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("DNS fixture must finish promptly")
+        .expect("DNS fixture task must not fail");
 }
 
 /// Test J3.4 #2: Failed lookup blocks retry for negative_ttl duration.

@@ -91,23 +91,21 @@ impl MockDhtServer {
                     && let Some(exp) = exp_map.get("ping")
                 {
                     if let Some(ref resp) = exp.response {
-                        return resp.encode().ok();
+                        return Some(resp.encode());
                     }
-                    return Self::pong_response(&msg.t).encode().ok();
+                    return Some(Self::pong_response(&msg.t).encode());
                 }
 
                 if method == DhtQueryMethod::GET_PEERS
                     && let Some(exp) = exp_map.get("get_peers")
                 {
-                    return Self::get_peers_response(&msg.t, &exp.peers, &exp.nodes)
-                        .encode()
-                        .ok();
+                    return Some(Self::get_peers_response(&msg.t, &exp.peers, &exp.nodes).encode());
                 }
 
                 if method == DhtQueryMethod::FIND_NODE
                     && let Some(exp) = exp_map.get("find_node")
                 {
-                    return Self::find_node_response(&msg.t, &exp.nodes).encode().ok();
+                    return Some(Self::find_node_response(&msg.t, &exp.nodes).encode());
                 }
 
                 if method == DhtQueryMethod::ANNOUNCE_PEER {
@@ -294,7 +292,7 @@ mod tests {
         use aria2_protocol::bittorrent::dht::socket::DhtSocket;
         let client = DhtSocket::bind(0).await.unwrap();
         let ping_msg = DhtMessageBuilder::ping(1, &[1u8; 20]);
-        let encoded = ping_msg.encode().unwrap();
+        let encoded = ping_msg.encode();
 
         client.send_to(server.addr(), &encoded).await.unwrap();
 
@@ -320,7 +318,7 @@ mod tests {
         use aria2_protocol::bittorrent::dht::socket::DhtSocket;
         let client = DhtSocket::bind(0).await.unwrap();
         let query = DhtMessageBuilder::get_peers(1, &[1u8; 20], &[0xABu8; 20]);
-        let encoded = query.encode().unwrap();
+        let encoded = query.encode();
 
         client.send_to(server.addr(), &encoded).await.unwrap();
 
@@ -333,7 +331,7 @@ mod tests {
         assert!(resp.is_response());
 
         let extracted =
-            aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&resp);
+            aria2_protocol::bittorrent::dht::compact::extract_compact_peers_from_response(&resp);
         assert_eq!(extracted.len(), 1);
 
         server.shutdown().await;
@@ -347,7 +345,7 @@ mod tests {
         use aria2_protocol::bittorrent::dht::socket::DhtSocket;
         let client = DhtSocket::bind(0).await.unwrap();
         let ping_msg = DhtMessageBuilder::ping(99, &[2u8; 20]);
-        let encoded = ping_msg.encode().unwrap();
+        let encoded = ping_msg.encode();
         client.send_to(server.addr(), &encoded).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -130,6 +130,10 @@ impl CachedDiskWriter {
         }
     }
 
+    pub(crate) fn cache_handle(&self) -> Option<Arc<WrDiskCache>> {
+        self.cache.as_ref().map(Arc::clone)
+    }
+
     fn record_direct_write(&mut self, bytes: usize) {
         self.direct_write_count += 1;
         self.direct_write_bytes += bytes as u64;
@@ -228,6 +232,16 @@ impl SeekableDiskWriter for CachedDiskWriter {
     async fn flush(&mut self) -> Result<()> {
         self.flush_cache().await?;
         self.writer.flush().await
+    }
+
+    async fn sync_data(&mut self) -> Result<()> {
+        self.flush_cache().await?;
+        self.writer.sync_data().await
+    }
+
+    async fn sync_all(&mut self) -> Result<()> {
+        self.flush_cache().await?;
+        self.writer.sync_all().await
     }
 
     async fn len(&self) -> Result<u64> {

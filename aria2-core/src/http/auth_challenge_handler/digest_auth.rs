@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
 use crate::http::digest_auth::DigestAuthResponse;
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 use crate::http::skip_response::HttpAuthChallenge;
 
 use super::types::AuthChallengeResult;

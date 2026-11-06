@@ -8,7 +8,7 @@ use url::Url;
 
 use crate::error::{Aria2Error, RecoverableError};
 use crate::http::digest_auth::DigestAuthChallenge;
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 use crate::http::stream_filter::{AutoFilterSelector, NullSinkFilter, process_filters};
 
 use super::types::{

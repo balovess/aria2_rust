@@ -523,6 +523,16 @@ fn e7_test_proxy_url_default_port() {
     assert_eq!(https_parsed.port, 443, "HTTPS default port is 443");
 }
 
+#[test]
+fn e7_test_proxy_url_parses_bracketed_ipv6_host() {
+    let parsed = ProxyUrl::parse("http://[2001:db8::7]:3128")
+        .expect("bracketed IPv6 proxy URL should parse");
+
+    assert_eq!(parsed.protocol, ProxyProtocol::Http);
+    assert_eq!(parsed.host, "2001:db8::7");
+    assert_eq!(parsed.port, 3128);
+}
+
 // Test 6e: Invalid protocol returns error
 #[test]
 fn e7_test_proxy_url_invalid_protocol() {

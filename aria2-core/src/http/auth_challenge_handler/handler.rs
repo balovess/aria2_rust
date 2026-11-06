@@ -22,7 +22,7 @@
 use tracing::warn;
 
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions, request_directory};
-use crate::http::request_response::HttpMethod;
+use crate::http::request::HttpMethod;
 use crate::http::skip_response::{AuthScheme, HttpAuthChallenge};
 
 use super::basic_auth::handle_basic_challenge;

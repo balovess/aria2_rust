@@ -32,6 +32,19 @@ async fn test_default_disk_writer_resume_writes_at_offset() {
 }
 
 #[tokio::test]
+async fn test_default_disk_writer_sync_data_persists_payload_and_path_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checkpoint-payload.bin");
+
+    let mut writer = DefaultDiskWriter::new(&path);
+    writer.write(b"durable prefix").await.unwrap();
+    writer.sync_data().await.unwrap();
+
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"durable prefix");
+    writer.finalize().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_byte_array_disk_writer() {
     let mut writer = ByteArrayDiskWriter::with_capacity(10);
     writer.write(b"abc").await.unwrap();
@@ -131,6 +144,21 @@ async fn test_cached_writer_with_cache() {
         let start = i * 64;
         assert_eq!(content[start], i as u8, "mismatch at byte {}", start);
     }
+}
+
+#[tokio::test]
+async fn test_cached_writer_sync_data_drains_write_back_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_cached_sync.bin");
+    let mut writer = CachedDiskWriter::new(&path, None, Some(1));
+
+    writer.write_at(0, b"durable payload").await.unwrap();
+    assert!(tokio::fs::read(&path).await.unwrap().is_empty());
+
+    writer.sync_data().await.unwrap();
+
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"durable payload");
+    assert!(writer.stats().cache.flush_write_count > 0);
 }
 
 #[tokio::test]

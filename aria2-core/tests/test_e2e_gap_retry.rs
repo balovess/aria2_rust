@@ -1,6 +1,6 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::test_server::TestServer;
@@ -128,7 +128,7 @@ async fn test_e2e_http_404_is_not_retried() {
 
 #[tokio::test]
 async fn test_merge_ranges_preserves_progress() {
-    use aria2_core::engine::sequential_download::SequentialDownloader;
+    use aria2_core::engine::http::sequential_download::SequentialDownloader;
 
     let overlapping_ranges = &[(0, 100), (50, 150), (200, 50), (180, 70)];
     let merged = SequentialDownloader::merge_ranges(overlapping_ranges);
@@ -141,7 +141,7 @@ async fn test_merge_ranges_preserves_progress() {
 
 #[tokio::test]
 async fn test_find_all_gaps_with_overlapping_ranges() {
-    use aria2_core::engine::sequential_download::SequentialDownloader;
+    use aria2_core::engine::http::sequential_download::SequentialDownloader;
 
     let ranges = &[(0, 200), (100, 150), (300, 50)];
     let gaps = SequentialDownloader::find_all_gaps(ranges, 500);
@@ -151,7 +151,7 @@ async fn test_find_all_gaps_with_overlapping_ranges() {
 
 #[tokio::test]
 async fn test_gap_download_result_partial_completion() {
-    use aria2_core::engine::sequential_download::SequentialDownloader;
+    use aria2_core::engine::http::sequential_download::SequentialDownloader;
 
     let completed_ranges = &[(0, 50)];
     let gaps = SequentialDownloader::find_all_gaps(completed_ranges, 300);
@@ -167,7 +167,7 @@ async fn test_gap_download_result_partial_completion() {
 
 #[tokio::test]
 async fn test_gap_retry_partial_completion_logic() {
-    use aria2_core::engine::sequential_download::SequentialDownloader;
+    use aria2_core::engine::http::sequential_download::SequentialDownloader;
 
     let initial_completed = &[(0, 50)];
     let gaps = SequentialDownloader::find_all_gaps(initial_completed, 251);
@@ -194,7 +194,7 @@ async fn test_gap_retry_partial_completion_logic() {
 
 #[tokio::test]
 async fn test_e2e_gap_retry_skips_first_gap_after_partial_success() {
-    use aria2_core::engine::sequential_download::SequentialDownloader;
+    use aria2_core::engine::http::sequential_download::SequentialDownloader;
 
     let ranges = &[(0, 100)];
     let gaps = SequentialDownloader::find_all_gaps(ranges, 300);
@@ -210,7 +210,7 @@ async fn test_e2e_gap_retry_skips_first_gap_after_partial_success() {
 
 #[tokio::test]
 async fn test_gap_download_result_returns_partial_completed_gaps() {
-    use aria2_core::engine::sequential_download::{GapDownloadResult, SequentialDownloader};
+    use aria2_core::engine::http::sequential_download::{GapDownloadResult, SequentialDownloader};
 
     let completed = &[(0, 100)];
     let gaps = SequentialDownloader::find_all_gaps(completed, 300);
@@ -380,7 +380,7 @@ async fn test_e2e_gap_pause_interrupts_stalled_body_read() {
 
 #[tokio::test]
 async fn test_gap_download_result_no_error_means_complete() {
-    use aria2_core::engine::sequential_download::{GapDownloadResult, SequentialDownloader};
+    use aria2_core::engine::http::sequential_download::{GapDownloadResult, SequentialDownloader};
 
     let completed = &[(0, 100), (100, 100)];
     let merged = SequentialDownloader::merge_ranges(completed);
@@ -400,7 +400,7 @@ async fn test_gap_download_result_no_error_means_complete() {
 
 #[tokio::test]
 async fn test_gap_download_result_accumulates_across_retries() {
-    use aria2_core::engine::sequential_download::SequentialDownloader;
+    use aria2_core::engine::http::sequential_download::SequentialDownloader;
 
     let mut accumulated = vec![(0, 50)];
     let gaps1 = SequentialDownloader::find_all_gaps(&accumulated, 300);

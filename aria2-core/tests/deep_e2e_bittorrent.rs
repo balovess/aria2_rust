@@ -17,7 +17,10 @@ use fixtures::mock_bt_seeder::{MockBtSeeder, SeederConfig};
 use fixtures::mock_tracker::MockTrackerServer;
 use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 
-use aria2_core::engine::bt_progress_info_file::{
+use aria2_core::engine::bittorrent::discovery::lpd::{
+    LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
+};
+use aria2_core::engine::bittorrent::persistence::progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
 use aria2_core::engine::command::Command;
@@ -25,9 +28,6 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
-};
-use aria2_core::engine::lpd_manager::{
-    LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
 };
 use aria2_core::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
@@ -79,7 +79,7 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
     };
     options.dir = Some(dir.path().display().to_string());
 
-    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+    let mut command = aria2_core::engine::http::download_command::DownloadCommand::new(
         GroupId::new(0x700),
         &url,
         &options,
@@ -178,7 +178,7 @@ async fn follow_torrent_mem_http_uses_source_uri_extension() {
     };
     options.dir = Some(dir.path().display().to_string());
 
-    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+    let mut command = aria2_core::engine::http::download_command::DownloadCommand::new(
         GroupId::new(0x702),
         &url,
         &options,
@@ -263,7 +263,7 @@ async fn follow_torrent_mem_http_retries_gateway_timeout() {
     };
     options.dir = Some(dir.path().display().to_string());
 
-    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+    let mut command = aria2_core::engine::http::download_command::DownloadCommand::new(
         GroupId::new(0x704),
         &url,
         &options,
@@ -345,6 +345,9 @@ async fn follow_torrent_mem_http_engine_downloads_web_seed_child() {
 
     let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
+    let shutdown_tx = engine
+        .take_shutdown_sender()
+        .expect("engine should expose its shutdown signal before run");
     let engine_task = tokio::spawn(engine.run());
 
     let child_gid = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -362,9 +365,52 @@ async fn follow_torrent_mem_http_engine_downloads_web_seed_child() {
         .expect("followed torrent child should remain managed while downloading");
     assert_eq!(child.recover().bt_metadata_data(), Some(torrent.clone()));
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), engine_task)
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if parent.recover().status() == DownloadStatus::Complete
+                && child.recover().status() == DownloadStatus::Complete
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let child_group = child.recover();
+        let output_path = dir.path().join("payload.bin");
+        let output_length = std::fs::metadata(&output_path).ok().map(|metadata| metadata.len());
+        let file_uris = child_group
+            .get_download_context()
+            .map(|context| {
+                context
+                    .get_file_entries()
+                    .iter()
+                    .map(|entry| entry.uris())
+                    .collect::<Vec<_>>()
+            });
+        let web_seed_requests = server
+            .take_request_log()
+            .into_iter()
+            .filter(|request| request.path == "/payload.bin")
+            .collect::<Vec<_>>();
+        panic!(
+            "followed torrent did not complete: parent={:?}, child={:?}, completed={}/{}, bitfield={:?}, output_length={:?}, file_uris={:?}, web_seed_requests={:?}",
+            parent.recover().status(),
+            child_group.status(),
+            child_group.completed_length(),
+            child_group.total_length(),
+            child_group.get_bt_bitfield(),
+            output_length,
+            file_uris,
+            web_seed_requests,
+        )
+    });
+
+    let _ = shutdown_tx.send(());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), engine_task)
         .await
-        .expect("followed torrent engine task timed out")
+        .expect("followed torrent engine did not stop after shutdown")
         .expect("followed torrent engine task panicked");
     result.expect("followed torrent engine should complete successfully");
 

@@ -19,6 +19,8 @@
 
 use std::io;
 
+use crate::network::OutboundNetworkPolicy;
+
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
@@ -74,6 +76,27 @@ pub async fn try_splice_download(
     file: &std::fs::File,
     file_offset: u64,
 ) -> io::Result<u64> {
+    try_splice_download_with_policy(
+        url,
+        offset,
+        length,
+        file,
+        file_offset,
+        &OutboundNetworkPolicy::direct(),
+    )
+    .await
+}
+
+/// Attempt a zero-copy splice download using the shared outbound policy.
+#[cfg(target_os = "linux")]
+pub async fn try_splice_download_with_policy(
+    url: &str,
+    offset: u64,
+    length: u64,
+    file: &std::fs::File,
+    file_offset: u64,
+    outbound_network_policy: &OutboundNetworkPolicy,
+) -> io::Result<u64> {
     if length == 0 {
         return Ok(0);
     }
@@ -101,27 +124,20 @@ pub async fn try_splice_download(
     let query = parsed.query().map(|q| format!("?{q}")).unwrap_or_default();
     let path_query = format!("{path}{query}");
 
-    // 2. DNS resolution via tokio's async resolver.
-    let addr = tokio::net::lookup_host((host, port))
+    // 2. Resolve and connect through the shared policy. It handles address
+    // family compatibility and tries all resolved addresses when necessary.
+    debug!(host, port, "splice_download: connecting");
+
+    // 3. TCP connect.
+    let mut stream = outbound_network_policy
+        .connect_host(host, port)
         .await
         .map_err(|e| {
             io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                format!("DNS resolution failed: {e}"),
+                io::ErrorKind::ConnectionRefused,
+                format!("TCP connect failed: {e}"),
             )
-        })?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved"))?;
-
-    debug!(host, port, %addr, "splice_download: connecting");
-
-    // 3. TCP connect.
-    let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::ConnectionRefused,
-            format!("TCP connect failed: {e}"),
-        )
-    })?;
+        })?;
     // Disable Nagle's algorithm — we send the full request at once and want
     // the response without delay.
     let _ = stream.set_nodelay(true);
@@ -286,6 +302,22 @@ pub async fn try_splice_download(
     _length: u64,
     _file: &std::fs::File,
     _file_offset: u64,
+) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "splice not available on this platform",
+    ))
+}
+
+/// Non-Linux stub — always returns `Err(Unsupported)`.
+#[cfg(not(target_os = "linux"))]
+pub async fn try_splice_download_with_policy(
+    _url: &str,
+    _offset: u64,
+    _length: u64,
+    _file: &std::fs::File,
+    _file_offset: u64,
+    _outbound_network_policy: &OutboundNetworkPolicy,
 ) -> io::Result<u64> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

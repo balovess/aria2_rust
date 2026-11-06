@@ -1,4 +1,4 @@
-//! Attribute map, timing, Metalink, BT info hash, signature, owner, and network stats.
+//! Attribute map, timing, Metalink, BT info hash, owner, and network stats.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use tracing::trace;
 
 use crate::download::download_context::DownloadContext;
 use crate::download::download_context::net_stat::NetStat;
-use crate::download::download_context::types::{ContextAttributeType, Signature, TorrentAttribute};
+use crate::download::download_context::types::{ContextAttributeType, TorrentAttribute};
 
 impl DownloadContext {
     // -----------------------------------------------------------------------
@@ -28,20 +28,6 @@ impl DownloadContext {
     /// Set the BT info hash from a hex string.
     pub fn set_info_hash(&mut self, hash: String) {
         self.info_hash = hash;
-    }
-
-    // -----------------------------------------------------------------------
-    // Signature
-    // -----------------------------------------------------------------------
-
-    /// Return a reference to the optional signature.
-    pub fn get_signature(&self) -> Option<&Signature> {
-        self.signature.as_ref()
-    }
-
-    /// Set the signature, replacing any existing one.
-    pub fn set_signature(&mut self, signature: Signature) {
-        self.signature = Some(signature);
     }
 
     // -----------------------------------------------------------------------

@@ -232,6 +232,17 @@ pub fn download_result_to_entry(result: &DownloadResult) -> Option<SessionEntry>
         })
         .unwrap_or_default();
 
+    #[cfg(feature = "bittorrent")]
+    let options = {
+        let mut options = options;
+        if let Some(data) = result.bt_metadata_data()
+            && let Ok(encoded) = encode_descriptor(&data)
+        {
+            options.insert("aria2-rust-bt-metadata-data".to_string(), encoded);
+        }
+        options
+    };
+
     let bitfield = if result.bitfield.is_empty() {
         None
     } else {

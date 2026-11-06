@@ -10,8 +10,12 @@ pub struct InfoHash {
 
 impl InfoHash {
     pub fn from_info_value(info: &BencodeValue) -> Self {
-        let info_bytes = info.encode();
-        let hash = Sha1::digest(&info_bytes);
+        Self::from_info_bytes(&info.encode())
+    }
+
+    /// Compute the v1 info-hash from canonical bencoded `info` bytes.
+    pub fn from_info_bytes(info_bytes: &[u8]) -> Self {
+        let hash = Sha1::digest(info_bytes);
         let mut bytes = [0u8; 20];
         bytes.copy_from_slice(&hash);
         Self { bytes }
@@ -19,7 +23,12 @@ impl InfoHash {
 
     /// Compute the BEP 52 SHA-256 hash of the canonical info dictionary.
     pub fn from_info_value_v2(info: &BencodeValue) -> [u8; 32] {
-        Sha256::digest(info.encode()).into()
+        Self::from_info_bytes_v2(&info.encode())
+    }
+
+    /// Compute the BEP 52 info-hash from canonical bencoded `info` bytes.
+    pub fn from_info_bytes_v2(info_bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(info_bytes).into()
     }
 
     pub fn from_bytes(bytes: [u8; 20]) -> Self {

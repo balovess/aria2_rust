@@ -1,8 +1,14 @@
 name: Release
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
+      release_artifact_run_id:
+        description: Create the release using artifacts from a completed Release run without rebuilding
+        required: false
+        type: string
       retry_package_managers:
         description: Recheck Homebrew and Scoop for an existing release
         required: false
@@ -19,10 +25,6 @@ on:
           - Homebrew macOS Intel
           - Homebrew macOS ARM
           - Scoop Windows x64
-  pull_request:
-    branches: [master]
-    types: [closed]
-
 permissions:
   contents: write
 
@@ -34,22 +36,31 @@ jobs:
   prepare:
     name: Prepare binary release
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'master')
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' &&
+        (github.ref == 'refs/heads/master' || inputs.release_artifact_run_id != ''))
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
       retry_package_managers: ${{ steps.release.outputs.retry_package_managers }}
+      package_manager_matrix: ${{ steps.release.outputs.package_manager_matrix }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
+      sha: ${{ steps.release.outputs.sha }}
+      release_artifact_run_id: ${{ steps.release.outputs.release_artifact_run_id }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - id: release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ARTIFACT_RUN_ID: ${{ inputs.release_artifact_run_id || '' }}
         run: |
           set -euo pipefail
           bash scripts/sync-version.sh
@@ -61,8 +72,81 @@ jobs:
 
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "retry_package_managers=${{ github.event_name == 'workflow_dispatch' && inputs.retry_package_managers || false }}" >> "$GITHUB_OUTPUT"
+           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+           echo "retry_package_managers=${{ github.event_name == 'workflow_dispatch' && inputs.retry_package_managers || false }}" >> "$GITHUB_OUTPUT"
+           TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.package_manager_target || 'All' }}"
+           case "$TARGET" in
+             "Homebrew Linux") MATRIX='{"include":[{"name":"Homebrew Linux","os":"ubuntu-latest"}]}' ;;
+             "Homebrew macOS Intel") MATRIX='{"include":[{"name":"Homebrew macOS Intel","os":"macos-15-intel"}]}' ;;
+             "Homebrew macOS ARM") MATRIX='{"include":[{"name":"Homebrew macOS ARM","os":"macos-15"}]}' ;;
+             "Scoop Windows x64") MATRIX='{"include":[{"name":"Scoop Windows x64","os":"windows-latest"}]}' ;;
+             *) MATRIX='{"include":[{"name":"Homebrew Linux","os":"ubuntu-latest"},{"name":"Homebrew macOS Intel","os":"macos-15-intel"},{"name":"Homebrew macOS ARM","os":"macos-15"},{"name":"Scoop Windows x64","os":"windows-latest"}]}' ;;
+           esac
+           echo "package_manager_matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+          SOURCE_SHA="$GITHUB_SHA"
+          if [[ -n "$RELEASE_ARTIFACT_RUN_ID" ]]; then
+            if [[ ! "$RELEASE_ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "release_artifact_run_id must be a numeric workflow run ID" >&2
+              exit 1
+            fi
+
+            RUN_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_ARTIFACT_RUN_ID")
+            if ! jq -e '
+              .head_branch == "master" and
+              .event == "push" and
+              .status == "completed" and
+              .conclusion == "failure" and
+              .path == ".github/workflows/release.yml" and
+              (.head_sha | test("^[0-9a-f]{40}$"))
+            ' <<< "$RUN_JSON" >/dev/null; then
+              echo "The source must be a completed Release workflow run on master." >&2
+              exit 1
+            fi
+
+            SOURCE_SHA=$(jq -r '.head_sha' <<< "$RUN_JSON")
+            SOURCE_VERSION=$(git show "$SOURCE_SHA:aria2/Cargo.toml" | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -n 1)
+            if [[ "$SOURCE_VERSION" != "$VERSION" ]]; then
+              echo "Source artifact version $SOURCE_VERSION does not match release version $VERSION." >&2
+              exit 1
+            fi
+
+            JOBS_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_ARTIFACT_RUN_ID/jobs")
+            if ! jq -e '
+              [.jobs[] | select(.name == "Prepare binary release")] as $prepare |
+              [.jobs[] | select(.conclusion == "failure")] as $failures |
+              [.jobs[] | select(.name | startswith("Build ("))] as $builds |
+              [.jobs[] | select(
+                .name == "Publish Docker image" or
+                .name == "Publish Node.js SDK" or
+                .name == "Publish Python SDK" or
+                .name == "Publish crates.io packages"
+              )] as $publishers |
+              ($prepare | length) == 1 and all($prepare[]; .conclusion == "success") and
+              ($failures | length) == 1 and $failures[0].name == "Create GitHub Release" and
+              ($builds | length) == 5 and all($builds[]; .conclusion == "success") and
+              ($publishers | length) == 4 and all($publishers[]; .conclusion == "success")
+            ' <<< "$JOBS_JSON" >/dev/null; then
+              echo "The source run must have all five builds and all package publishers successful." >&2
+              exit 1
+            fi
+
+            ARTIFACTS_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_ARTIFACT_RUN_ID/artifacts")
+            EXPECTED_ARTIFACTS='["aria2-x86_64-linux","aria2-aarch64-linux","aria2-x86_64-windows","aria2-aarch64-macos","aria2-x86_64-macos"]'
+            if ! jq -e --argjson expected "$EXPECTED_ARTIFACTS" '
+              [.artifacts[] | select(.name | startswith("aria2-"))] as $matches |
+              ([$matches[].name] | sort) == ($expected | sort) and
+              all($matches[]; .expired == false)
+            ' <<< "$ARTIFACTS_JSON" >/dev/null; then
+              echo "The source run must have all five unexpired platform artifacts." >&2
+              exit 1
+            fi
+
+            echo "Validated reusable artifacts from run $RELEASE_ARTIFACT_RUN_ID at $SOURCE_SHA."
+          fi
+
+          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "release_artifact_run_id=$RELEASE_ARTIFACT_RUN_ID" >> "$GITHUB_OUTPUT"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -74,7 +158,9 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: prepare
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -214,7 +300,9 @@ jobs:
   publish-crates:
     name: Publish crates.io packages
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -309,13 +397,15 @@ jobs:
           publish_if_missing aria2-rpc
 
   publish-python:
-    name: Publish Python SDK (optional)
+    name: Publish Python SDK
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ubuntu-latest
-    continue-on-error: true
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v5
@@ -324,24 +414,66 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.9'
+      - name: Align SDK version with the binary release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python - "$RELEASE_VERSION" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version = sys.argv[1]
+          path = Path("bindings/python/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Unable to update Python SDK version")
+          path.write_text(updated, encoding="utf-8")
+          PY
       - name: Build Python SDK
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf bindings/python/dist
           cd bindings/python
           python -m pip install --upgrade build
           python -m build
+      - name: Verify Python package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_dir="$RUNNER_TEMP/aria2-python-sdk-smoke"
+          python -m pip install --target "$smoke_dir" bindings/python/dist/*.whl
+          PYTHONPATH="$smoke_dir" python -c "from aria2_rust_client import Aria2Client; print(Aria2Client.__name__)"
       - name: Check PyPI version
         id: pypi-version
         shell: bash
         run: |
+          set -euo pipefail
+          PACKAGE_NAME=$(sed -n 's/^name = "\([^"]*\)"/\1/p' bindings/python/pyproject.toml | head -n 1)
           VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' bindings/python/pyproject.toml | head -n 1)
-          if curl --fail --silent --show-error --location "https://pypi.org/pypi/Aria2_rust/$VERSION/json" >/dev/null; then
+          STATUS=$(curl --silent --show-error --location --output /dev/null --write-out '%{http_code}' "https://pypi.org/pypi/${PACKAGE_NAME}/${VERSION}/json")
+          case "$STATUS" in
+            200)
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Aria2_rust@$VERSION is already published; skipping."
-          else
+            echo "$PACKAGE_NAME@$VERSION is already published; skipping."
+            ;;
+            404)
             echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+            ;;
+            *)
+            echo "Unexpected PyPI response while checking $PACKAGE_NAME@$VERSION: HTTP $STATUS" >&2
+            exit 1
+            ;;
+          esac
       - name: Publish to PyPI
         if: steps.pypi-version.outputs.exists != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -349,11 +481,12 @@ jobs:
           packages-dir: bindings/python/dist
 
   publish-nodejs:
-    name: Publish Node.js SDK (optional)
+    name: Publish Node.js SDK
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      needs.prepare.outputs.release_artifact_run_id == ''
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       contents: read
       id-token: write
@@ -365,18 +498,67 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Align SDK version with the binary release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          node - "$RELEASE_VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const version = process.argv[2];
+          for (const file of ['bindings/nodejs/package.json', 'bindings/nodejs/package-lock.json']) {
+            const path = file;
+            const packageJson = JSON.parse(fs.readFileSync(path, 'utf8'));
+            packageJson.version = version;
+            if (packageJson.packages?.['']) {
+              packageJson.packages[''].version = version;
+            }
+            fs.writeFileSync(path, `${JSON.stringify(packageJson, null, 2)}\n`);
+          }
+          NODE
       - name: Build and publish Node.js SDK
         shell: bash
         run: |
           set -euo pipefail
           cd bindings/nodejs
           npm ci
+          npm run typecheck
+          npm run test:unit
+          npm run test:integration
           npm run build
-          if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-            echo "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version") is already published; skipping."
-          else
-            npm publish --access public --provenance
-          fi
+          npm pack --dry-run --json > "$RUNNER_TEMP/aria2-nodejs-sdk-pack.json"
+          node - "$RUNNER_TEMP/aria2-nodejs-sdk-pack.json" <<'NODE'
+          const fs = require('node:fs');
+          const parsed = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const report = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
+          if (!report || !Array.isArray(report.files)) {
+            throw new Error('npm pack did not return a package file report');
+          }
+          const required = new Set(['dist/index.js', 'dist/index.mjs', 'dist/index.d.ts']);
+          const files = new Set(report.files.map(({ path }) => path));
+          for (const file of required) {
+            if (!files.has(file)) throw new Error(`npm package is missing ${file}`);
+          }
+          NODE
+          PACKAGE_SPEC="$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          ENCODED_PACKAGE_NAME="$(node -p "encodeURIComponent(process.argv[1])" "$PACKAGE_NAME")"
+          STATUS=$(curl --silent --show-error --location --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/${ENCODED_PACKAGE_NAME}/${VERSION}")
+          case "$STATUS" in
+            200)
+            echo "$PACKAGE_SPEC is already published; skipping."
+            ;;
+            404)
+            npm publish
+            ;;
+            *)
+            echo "Unexpected npm registry response while checking $PACKAGE_SPEC: HTTP $STATUS" >&2
+            exit 1
+            ;;
+          esac
 
   docker:
     name: Publish Docker image
@@ -417,10 +599,23 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    # Only platform builds and crate publication gate the binary release.
-    needs: [prepare, build, publish-crates]
-    if: needs.prepare.outputs.should_release == 'true'
+    # Reused artifacts are validated in prepare; new artifacts require all publishers.
+    needs: [prepare, build, publish-crates, publish-python, publish-nodejs]
+    if: >-
+      always() && needs.prepare.outputs.should_release == 'true' &&
+      (
+        needs.prepare.outputs.release_artifact_run_id != '' ||
+        (
+          needs.build.result == 'success' &&
+          needs.publish-crates.result == 'success' &&
+          needs.publish-python.result == 'success' &&
+          needs.publish-nodejs.result == 'success'
+        )
+      )
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -444,7 +639,11 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v5
         with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.prepare.outputs.release_artifact_run_id || github.run_id }}
           path: artifacts
+          pattern: aria2-*
       - name: Generate release download table
         shell: bash
         env:
@@ -544,16 +743,7 @@ jobs:
       )
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: Homebrew Linux
-            os: ubuntu-latest
-          - name: Homebrew macOS Intel
-            os: macos-15-intel
-          - name: Homebrew macOS ARM
-            os: macos-15
-          - name: Scoop Windows x64
-            os: windows-latest
+      matrix: ${{ fromJSON(needs.prepare.outputs.package_manager_matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

@@ -25,13 +25,42 @@ impl ConcurrentSegmentManager {
         &mut self,
         excluded_mirrors: &[usize],
     ) -> Option<(usize, (u32, u64, u64))> {
-        // Find a pending segment first
-        let pending_seg = self
+        let max_lengths = vec![u64::MAX; self.mirrors.len()];
+        self.select_mirror_for_next_range_excluding(excluded_mirrors, &max_lengths)
+    }
+
+    /// Select a mirror and claim the next subrange of a pending durable parent.
+    pub fn select_mirror_for_next_range_excluding(
+        &mut self,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, (u32, u64, u64))> {
+        let seg_index = self
             .segments
             .iter()
-            .find(|s| s.status == SegmentStatus::Pending)?;
+            .find(|segment| segment.status == SegmentStatus::Pending)?
+            .index;
+        self.select_mirror_for_segment_range_excluding(seg_index, excluded_mirrors, max_lengths)
+    }
 
-        let seg_index = pending_seg.index;
+    /// Select a mirror and claim the next subrange of a specific pending
+    /// durable parent. The engine work scheduler supplies the parent ID.
+    pub fn select_mirror_for_segment_range_excluding(
+        &mut self,
+        seg_index: u32,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, (u32, u64, u64))> {
+        let pending_seg = self.segments.get(seg_index as usize)?;
+        if pending_seg.index != seg_index || pending_seg.status != SegmentStatus::Pending {
+            return None;
+        }
+        let completed = *self.completed_lengths.get(seg_index as usize)?;
+        let remaining = pending_seg.length.saturating_sub(completed);
+        if remaining == 0 {
+            return None;
+        }
+        let range_offset = pending_seg.offset.saturating_add(completed);
 
         // Use UriSelector if available
         if let Some(ref selector) = self.uri_selector {
@@ -63,12 +92,20 @@ impl ConcurrentSegmentManager {
                 {
                     // Assign segment to this mirror
                     if let Some(seg) = self.segments.get_mut(seg_index as usize) {
+                        let max_length = max_lengths
+                            .get(mirror_idx)
+                            .copied()
+                            .unwrap_or(u64::MAX)
+                            .max(1);
                         seg.status = SegmentStatus::Downloading;
                         seg.assigned_mirror = Some(mirror_idx);
                         if let Some(m) = self.mirrors.get_mut(mirror_idx) {
                             m.active_segments += 1;
                         }
-                        return Some((mirror_idx, (seg.index, seg.offset, seg.length)));
+                        return Some((
+                            mirror_idx,
+                            (seg_index, range_offset, remaining.min(max_length)),
+                        ));
                     }
                 }
             }
@@ -80,10 +117,18 @@ impl ConcurrentSegmentManager {
                 && self.mirrors[mirror_idx].can_accept_more()
                 && let Some(seg) = self.segments.get_mut(seg_index as usize)
             {
+                let max_length = max_lengths
+                    .get(mirror_idx)
+                    .copied()
+                    .unwrap_or(u64::MAX)
+                    .max(1);
                 seg.status = SegmentStatus::Downloading;
                 seg.assigned_mirror = Some(mirror_idx);
                 self.mirrors[mirror_idx].active_segments += 1;
-                return Some((mirror_idx, (seg.index, seg.offset, seg.length)));
+                return Some((
+                    mirror_idx,
+                    (seg_index, range_offset, remaining.min(max_length)),
+                ));
             }
         }
 
@@ -113,6 +158,19 @@ impl ConcurrentSegmentManager {
         bytes_per_sec: u64,
         is_multi_connection: bool,
     ) -> bool {
+        self.report_segment_range_complete(seg_idx, len as u64, bytes_per_sec, is_multi_connection)
+            == Some(true)
+    }
+
+    /// Report a completed dynamic subrange. Returns whether the durable parent
+    /// piece became complete; `None` indicates a stale or invalid completion.
+    pub fn report_segment_range_complete(
+        &mut self,
+        seg_idx: u32,
+        len: u64,
+        bytes_per_sec: u64,
+        is_multi_connection: bool,
+    ) -> Option<bool> {
         // Get the mirror index before completing
         let mirror_idx = self
             .segments
@@ -120,10 +178,10 @@ impl ConcurrentSegmentManager {
             .and_then(|s| s.assigned_mirror);
 
         // Complete the segment
-        let success = self.complete_segment(seg_idx, len);
+        let success = self.complete_range(seg_idx, len);
 
         // Update server stats if available
-        if success {
+        if success.is_some() {
             if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
                 && let Some(url) = self.mirror_urls.get(idx)
                 && let Some((host, protocol)) = extract_host_and_protocol(url)

@@ -18,6 +18,16 @@ pub struct ResumeState {
     pub is_complete: bool,
 }
 
+/// Whether this checkpoint came from a sequential download whose completed
+/// length represents a contiguous file prefix.
+pub(crate) fn is_sequential_checkpoint(cf: &ControlFile, total_length: u64) -> bool {
+    cf.total_length() == total_length
+        && !cf.is_torrent_checkpoint()
+        && cf
+            .piece_length()
+            .is_some_and(|piece_length| u64::from(piece_length) >= total_length)
+}
+
 impl ResumeHelper {
     pub fn new(output_path: &Path, continue_opt: bool) -> Self {
         let control_path = ControlFile::control_path_for(output_path);
@@ -93,7 +103,23 @@ impl ResumeHelper {
             // (file size on disk) is unreliable for preallocated files which
             // have total_length bytes on disk regardless of actual progress.
             (Some(cf), _) => {
-                let offset = cf.completed_length();
+                // For split checkpoints, completed_length is the sum of all
+                // finished pieces and may include gaps. A sequential request
+                // can resume only from the unbroken completed prefix.
+                let offset = match cf.piece_length().map(u64::from) {
+                    Some(piece_length)
+                        if !is_sequential_checkpoint(cf, cf.total_length())
+                            && cf.completed_pieces() > 0 =>
+                    {
+                        let leading_pieces =
+                            (0..).take_while(|&index| cf.is_piece_done(index)).count() as u64;
+                        leading_pieces
+                            .saturating_mul(piece_length)
+                            .min(cf.total_length())
+                            .min(cf.completed_length())
+                    }
+                    _ => cf.completed_length(),
+                };
                 let complete =
                     cf.completed_length() >= total_length && cf.total_length() == total_length;
                 let should_resume = cf.completed_pieces() > 0 || offset > 0;
@@ -208,6 +234,56 @@ mod tests {
         assert!(state.control_file.is_some());
         assert_eq!(state.start_offset, 300);
         assert!(!state.is_complete);
+    }
+
+    #[tokio::test]
+    async fn split_checkpoint_resumes_from_only_the_contiguous_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("split-gap.bin");
+        let control_path = ControlFile::control_path_for(&out_path);
+        let total_length = 1000;
+        let piece_length = 100;
+
+        tokio::fs::write(&out_path, vec![0xCD; total_length as usize])
+            .await
+            .unwrap();
+        let mut control = ControlFile::open_or_create_with_piece_length(
+            &control_path,
+            total_length,
+            piece_length,
+        )
+        .await
+        .unwrap();
+        control.mark_piece_done(0);
+        control.mark_piece_done(2);
+        control.save().await.unwrap();
+
+        // The remote length may not be known yet on the request-first HTTP
+        // path, so detect must use the checkpoint's own geometry.
+        let state = ResumeHelper::new(&out_path, true).detect(0).await.unwrap();
+
+        assert!(state.should_resume);
+        assert_eq!(state.start_offset, piece_length as u64);
+        assert_eq!(
+            ResumeHelper::build_range_header(&state).as_deref(),
+            Some("bytes=100-")
+        );
+    }
+
+    #[tokio::test]
+    async fn recognizes_single_piece_checkpoint_as_a_sequential_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let control_path = dir.path().join("sequential.aria2");
+        let total_length = 1000;
+        let control = ControlFile::open_or_create_with_piece_length(
+            &control_path,
+            total_length,
+            total_length as u32,
+        )
+        .await
+        .unwrap();
+
+        assert!(is_sequential_checkpoint(&control, total_length));
     }
 
     #[tokio::test]

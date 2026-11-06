@@ -81,7 +81,7 @@ async fn test_connection_pool_reuse() {
     println!("First connection acquired: id={}", conn1.id);
 
     // Release connection (return connection to the manager)
-    manager.release(conn1).await;
+    manager.put_back(conn1).await;
     // After release, the connection may or may not be reusable depending on
     // server-side connection state. We only verify that release doesn't panic
     // and that the manager remains in a consistent state.
@@ -96,7 +96,7 @@ async fn test_connection_pool_reuse() {
     println!("Connection pool reuse test: conn2 id={}", conn2.id);
 
     // Cleanup
-    manager.release(conn2).await;
+    manager.put_back(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 
@@ -299,7 +299,7 @@ async fn test_timeout_on_slow_server() {
                     "Local connection succeeded (expected behavior), verifying timeout config..."
                 );
                 assert_eq!(manager.max_connections(), 2);
-                manager.release(conn).await;
+                manager.put_back(conn).await;
             } else {
                 // If failed, verify it is a timeout error
                 println!(
@@ -404,13 +404,13 @@ async fn test_max_connections_limit() {
 
     // After releasing one connection, should be able to acquire again
     // (may create new connection since the released one may have been closed)
-    manager.release(conn1).await;
+    manager.put_back(conn1).await;
     println!("Released connection 1, trying to acquire again...");
 
     match manager.acquire(&url, None).await {
         Ok(conn3) => {
             println!("New connection acquired after release: id={}", conn3.id);
-            manager.release(conn3).await;
+            manager.put_back(conn3).await;
         }
         Err(e) => {
             // This is acceptable — the released connection may have been closed
@@ -420,7 +420,7 @@ async fn test_max_connections_limit() {
     }
 
     // Cleanup
-    manager.release(conn2).await;
+    manager.put_back(conn2).await;
     manager.cleanup().await;
 
     println!("Test passed: Max connections limit enforced correctly");
@@ -459,7 +459,7 @@ async fn test_lru_eviction_strategy() {
         let conn = manager.acquire(&url, None).await.unwrap();
         println!("Created connection {}: id={}", i + 1, conn.id);
         conn_ids.push(conn.id);
-        manager.release(conn).await;
+        manager.put_back(conn).await;
     }
 
     // After releasing, connections may or may not still be in the pool
@@ -481,7 +481,7 @@ async fn test_lru_eviction_strategy() {
     // Verify the manager is still in a healthy state
     assert!(manager.active_count() >= 1);
 
-    manager.release(new_conn).await;
+    manager.put_back(new_conn).await;
     manager.cleanup().await;
 
     println!("Test passed: LRU eviction strategy basically works");
@@ -522,7 +522,7 @@ async fn test_concurrent_connection_access() {
                 Ok(conn) => {
                     println!("Task {} acquired connection: id={}", i, conn.id);
                     sleep(Duration::from_millis(50)).await;
-                    m.release(conn).await;
+                    m.put_back(conn).await;
                     Ok(i)
                 }
                 Err(e) => {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aria2_core::engine::command::Command;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::ftp::download_command::FtpDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};

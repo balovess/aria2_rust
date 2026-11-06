@@ -7,14 +7,12 @@ use crate::error::{Aria2Error, RecoverableError};
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     /// Maximum total attempts. `0` means unlimited, matching aria2's
-    /// `--max-tries` contract. The field name is retained for source
-    /// compatibility with existing internal callers.
+    /// `--max-tries` contract.
     pub max_retries: u32,
     pub base_wait_ms: u64,
     pub max_wait_ms: u64,
     pub backoff_factor: f64,
     pub retryable_http_codes: HashSet<u16>,
-    pub max_retries_per_server: u32,
 }
 
 impl Default for RetryPolicy {
@@ -26,7 +24,6 @@ impl Default for RetryPolicy {
             max_wait_ms: 30000,
             backoff_factor: 2.0,
             retryable_http_codes: codes,
-            max_retries_per_server: u32::MAX,
         }
     }
 }
@@ -42,11 +39,6 @@ impl RetryPolicy {
 
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
-        self
-    }
-
-    pub fn with_max_per_server(mut self, n: u32) -> Self {
-        self.max_retries_per_server = n;
         self
     }
 
@@ -118,23 +110,6 @@ impl RetryPolicy {
         }
     }
 
-    pub fn should_retry_error(&self, error_str: &str) -> bool {
-        let lower = error_str.to_lowercase();
-        lower.contains("timeout")
-            || lower.contains("connection reset")
-            || lower.contains("connection refused")
-            || lower.contains("broken pipe")
-            || lower.contains("timed out")
-            || lower.contains("eof")
-            || lower.contains("network")
-            || lower.contains("dns")
-            || lower.contains("socket")
-            || lower.contains("unreachable")
-            || lower.contains("reset by peer")
-            || lower.contains("temporary")
-            || lower.contains("try again")
-    }
-
     /// Return whether `attempts` completed attempts have exhausted the limit.
     /// Unlimited policies are never exhausted.
     pub fn is_exhausted(&self, attempts: u32) -> bool {
@@ -166,31 +141,6 @@ pub struct RetryPolicyStats {
     pub max_retries: u32,
     pub retryable_codes_count: usize,
     pub estimated_max_total_wait_sec: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AttemptRecord {
-    pub attempt_number: u32,
-    pub started_at: std::time::Instant,
-    pub error: Option<String>,
-    pub duration: Duration,
-}
-
-impl AttemptRecord {
-    pub fn new(attempt_number: u32) -> Self {
-        Self {
-            attempt_number,
-            started_at: std::time::Instant::now(),
-            error: None,
-            duration: Duration::ZERO,
-        }
-    }
-
-    pub fn finish(mut self, error: Option<String>) -> Self {
-        self.duration = self.started_at.elapsed();
-        self.error = error;
-        self
-    }
 }
 
 #[cfg(test)]
@@ -290,25 +240,6 @@ mod tests {
             !p.should_retry_http(400),
             "Bad Request should NOT be retryable"
         );
-    }
-
-    #[test]
-    fn test_should_retry_network_error_true() {
-        let p = RetryPolicy::default();
-        assert!(p.should_retry_error("connection reset by peer"));
-        assert!(p.should_retry_error("operation timed out"));
-        assert!(p.should_retry_error("DNS resolution failed"));
-        assert!(p.should_retry_error("broken pipe"));
-        assert!(p.should_retry_error("network is unreachable"));
-    }
-
-    #[test]
-    fn test_should_retry_non_network_false() {
-        let p = RetryPolicy::default();
-        assert!(!p.should_retry_error("file not found"));
-        assert!(!p.should_retry_error("permission denied"));
-        assert!(!p.should_retry_error("invalid URL"));
-        assert!(!p.should_retry_error("HTTP 404 Not Found"));
     }
 
     #[test]
@@ -453,18 +384,5 @@ mod tests {
 
         assert!(!p.is_exhausted(9));
         assert!(p.is_exhausted(11));
-    }
-
-    #[test]
-    fn test_attempt_record_lifecycle() {
-        let rec = AttemptRecord::new(2);
-        assert_eq!(rec.attempt_number, 2);
-        assert!(rec.error.is_none());
-        assert_eq!(rec.duration, Duration::ZERO);
-
-        let finished = rec.finish(Some("timeout".to_string()));
-        assert_eq!(finished.error.as_deref().unwrap(), "timeout");
-        // Just verify duration field exists (u128 is always >= 0)
-        let _ = finished.duration;
     }
 }

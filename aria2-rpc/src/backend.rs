@@ -12,7 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::types::{
-    DhtStatus, FileInfo, GlobalStat, PeerInfo, ServerInfoIndex, StatusInfo, TrackerInfo, UriEntry,
+    DhtStatus, FileInfo, GlobalStat, PeerDetails, PeerInfo, PeerStats, ServerInfoIndex, StatusInfo,
+    TrackerInfo, UriEntry,
 };
 
 /// Metadata advertised by a backend through `system.listMethods` and
@@ -51,8 +52,12 @@ impl BackendMetadata {
             [
                 "aria2.addTorrent",
                 "aria2.getPeers",
+                "aria2.getPeerStats",
+                "aria2.getPeerDetails",
                 "aria2.getTrackers",
                 "aria2.getDhtStatus",
+                "aria2.saveDhtState",
+                "aria2.evictDhtNodes",
             ]
             .map(str::to_string),
         );
@@ -63,7 +68,13 @@ impl BackendMetadata {
 
     /// Add Metalink capability while preserving aria2's catalog order.
     pub fn with_metalink(mut self) -> Self {
-        self.enabled_features.insert(5, "Metalink".to_string());
+        let insert_at = self
+            .enabled_features
+            .iter()
+            .position(|feature| feature == "XML-RPC")
+            .unwrap_or(self.enabled_features.len());
+        self.enabled_features
+            .insert(insert_at, "Metalink".to_string());
         let insert_at = self
             .methods
             .iter()
@@ -107,6 +118,7 @@ fn base_method_names() -> Vec<String> {
         "aria2.changeGlobalOption",
         "aria2.purgeDownloadResult",
         "aria2.removeDownloadResult",
+        "aria2.removeDownloadFiles",
         "aria2.getVersion",
         "aria2.getSessionInfo",
         "aria2.shutdown",
@@ -209,6 +221,9 @@ pub enum BackendRequest {
     RemoveDownloadResult {
         gid: String,
     },
+    RemoveDownloadFiles {
+        gid: String,
+    },
     GetGlobalOption,
     ChangeGlobalOption {
         options: HashMap<String, serde_json::Value>,
@@ -223,10 +238,18 @@ pub enum BackendRequest {
     GetPeers {
         gid: String,
     },
+    GetPeerStats {
+        gid: String,
+    },
+    GetPeerDetails {
+        gid: String,
+    },
     GetTrackers {
         gid: String,
     },
     GetDhtStatus,
+    SaveDhtState,
+    EvictDhtNodes,
     PauseAll,
     ForcePauseAll,
     UnpauseAll,
@@ -306,6 +329,8 @@ pub enum BackendResponse {
     Files(Vec<FileInfo>),
     Servers(Vec<ServerInfoIndex>),
     Peers(Vec<PeerInfo>),
+    PeerStats(PeerStats),
+    PeerDetails(Vec<PeerDetails>),
     Trackers(Vec<TrackerInfo>),
     DhtStatus(DhtStatus),
     Options(HashMap<String, serde_json::Value>),
@@ -327,6 +352,8 @@ impl BackendResponse {
             Self::Files(files) => serde_json::to_value(files),
             Self::Servers(servers) => serde_json::to_value(servers),
             Self::Peers(peers) => serde_json::to_value(peers),
+            Self::PeerStats(stats) => serde_json::to_value(stats),
+            Self::PeerDetails(peers) => serde_json::to_value(peers),
             Self::Trackers(trackers) => serde_json::to_value(trackers),
             Self::DhtStatus(status) => serde_json::to_value(status),
             Self::Options(options) => serde_json::to_value(options),

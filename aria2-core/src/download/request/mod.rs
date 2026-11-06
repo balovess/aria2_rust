@@ -29,7 +29,7 @@ pub mod request_impl;
 mod tests;
 
 // ---------------------------------------------------------------------------
-// Re-exports — preserve the original public API
+// Public request helpers
 // ---------------------------------------------------------------------------
 
 pub use peer_stat::PeerStat;

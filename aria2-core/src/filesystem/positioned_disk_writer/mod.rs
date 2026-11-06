@@ -8,7 +8,8 @@
 //! # Concurrency model
 //!
 //! The underlying file handle is shared through `Arc`, while each potentially
-//! blocking `pwrite`/`seek_write` call runs on Tokio's blocking pool. This is
+//! blocking `pwrite`/`seek_write` call runs on the shared bounded disk I/O
+//! worker pool. This is
 //! fundamentally different from the legacy `Arc<tokio::sync::Mutex<...>>`
 //! design which held the lock across async await points and serialized writes.
 //!
@@ -19,7 +20,7 @@
 //! because `pwrite` is atomic and offset-based — it does not mutate the
 //! shared file cursor.
 
-mod platform_io;
+pub(crate) mod platform_io;
 mod writer;
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]

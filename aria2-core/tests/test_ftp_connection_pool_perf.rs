@@ -204,7 +204,7 @@ fn test_memory_overhead() {
     // Estimate memory overhead per connection
     // - ConnectionKey: ~100 bytes (strings)
     // - PooledConnection metadata: ~100 bytes (timestamps, counters)
-    // - FtpClient: ~1-2 KB (buffers, streams)
+    // - FTP control stream: ~1-2 KB (buffers, stream state)
     let overhead_per_connection = 2_200; // ~2.2 KB
 
     let max_connections = 16;

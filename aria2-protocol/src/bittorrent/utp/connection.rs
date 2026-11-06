@@ -1,13 +1,18 @@
 //! uTP Connection implementation
 //!
-//! Implements the connection state machine for uTP protocol (BEP 29).
-//! Manages individual connection state, sequencing, and data transfer.
+//! Implements the BEP 29 uTP connection state machine, sequencing, and data transfer.
 
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use super::congestion::LedbatController;
+use super::metrics::RttEstimator;
 use super::packet::{PacketType, UtpPacket, UtpPacketError};
+
+mod receive;
+mod send;
 
 /// Connection state in the uTP state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,19 +67,26 @@ pub enum ConnectionError {
     Aborted,
 }
 
-/// Maximum number of retries for connection establishment
-/// TODO: will be used once connection retry logic is implemented
-#[allow(dead_code)]
-const MAX_CONNECT_RETRIES: u32 = 3;
-
-/// Default initial congestion window
-const INITIAL_CWND: u32 = 2;
-
 /// Maximum receive buffer size per connection
 const RECV_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Maximum send buffer size per connection
 const SEND_BUFFER_SIZE: usize = 64 * 1024;
+
+struct SentPacket {
+    packet: UtpPacket,
+    sent_at: Instant,
+    retransmitted: bool,
+    selectively_acked: bool,
+    selectively_acked_after: u16,
+    fast_retransmitted: bool,
+}
+
+pub(crate) struct PacketHandling {
+    pub response_packets: Vec<UtpPacket>,
+    pub acknowledged: Vec<u16>,
+    pub fast_retransmit: Vec<u16>,
+}
 
 /// uTP Connection implementing the BEP 29 state machine
 ///
@@ -84,10 +96,10 @@ pub struct UtpConnection {
     /// Current connection state
     state: ConnectionState,
 
-    /// Local connection ID
+    /// Connection ID expected on incoming packets.
     local_conn_id: u16,
 
-    /// Remote connection ID
+    /// Connection ID used for outgoing packets after SYN.
     remote_conn_id: u16,
 
     /// Next sequence number to send
@@ -96,87 +108,101 @@ pub struct UtpConnection {
     /// Next expected acknowledgment number
     ack_nr: u16,
 
+    timestamp_origin: Instant,
+    reply_micro: u32,
+
     /// Sequence number of the last SYN
     syn_seq_nr: u16,
+    syn_sent_at: Option<Instant>,
+    syn_retransmitted: bool,
 
     /// Remote socket address
     remote_addr: Option<SocketAddr>,
 
-    /// Congestion window size (in packets)
-    congestion_window: u32,
+    /// Congestion window size in bytes.
+    congestion: LedbatController,
 
-    /// Current round-trip time estimate
-    srtt: Duration,
-
-    /// Round-trip time variation
-    // TODO: will be used for RTT variance calculation in RTO update (RFC 6298)
-    #[allow(dead_code)]
-    rtt_var: Duration,
-
-    /// Retransmission timeout
-    rto: Duration,
+    rtt_estimator: Option<RttEstimator>,
 
     /// Receive buffer for incoming data
     recv_buffer: Vec<u8>,
 
     /// Send buffer for outgoing data not yet acknowledged
-    send_buffer: Vec<u8>,
+    send_buffer: VecDeque<SentPacket>,
+    pending_receive: HashMap<u16, UtpPacket>,
+    pending_receive_bytes: usize,
+    accepted_syn_seq: Option<u16>,
+    peer_window: u32,
+    last_peer_ack_nr: Option<u16>,
+    duplicate_ack_count: u8,
+    local_fin_acked: bool,
+    remote_fin_received: bool,
 
     /// Last activity timestamp
     last_activity: Instant,
 
-    /// Number of connection retries
-    // TODO: will be used once connection retry logic is implemented
-    #[allow(dead_code)]
-    connect_retries: u32,
-
     /// Receive window size
     recv_window: u32,
-
-    /// Bytes in flight (sent but not acknowledged)
-    bytes_in_flight: u32,
 }
 
 impl UtpConnection {
     /// Create a new uTP connection in Closed state
     pub fn new() -> Self {
+        let now = Instant::now();
         Self {
             state: ConnectionState::Closed,
             local_conn_id: 0,
             remote_conn_id: 0,
             seq_nr: 1,
             ack_nr: 0,
+            timestamp_origin: now,
+            reply_micro: 0,
             syn_seq_nr: 0,
+            syn_sent_at: None,
+            syn_retransmitted: false,
             remote_addr: None,
-            congestion_window: INITIAL_CWND,
-            srtt: Duration::from_millis(100),
-            rtt_var: Duration::from_millis(50),
-            rto: Duration::from_secs(1),
+            congestion: LedbatController::with_mss(1400),
+            rtt_estimator: None,
             recv_buffer: Vec::with_capacity(RECV_BUFFER_SIZE),
-            send_buffer: Vec::with_capacity(SEND_BUFFER_SIZE),
-            last_activity: Instant::now(),
-            connect_retries: 0,
+            send_buffer: VecDeque::new(),
+            pending_receive: HashMap::new(),
+            pending_receive_bytes: 0,
+            accepted_syn_seq: None,
+            peer_window: 0,
+            last_peer_ack_nr: None,
+            duplicate_ack_count: 0,
+            local_fin_acked: false,
+            remote_fin_received: false,
+            last_activity: now,
             recv_window: RECV_BUFFER_SIZE as u32,
-            bytes_in_flight: 0,
         }
     }
 
-    /// Initiate a connection (client-side) - creates SYN packet
-    pub fn connect(&mut self, remote_addr: SocketAddr) -> Result<UtpPacket, ConnectionError> {
-        if self.state != ConnectionState::Closed {
-            return Err(ConnectionError::AlreadyExists);
-        }
+    fn timestamp_now_microseconds(&self) -> u32 {
+        self.timestamp_origin.elapsed().as_micros() as u32
+    }
 
-        self.remote_addr = Some(remote_addr);
-        self.local_conn_id = rand_connection_id();
-        self.seq_nr = rand_connection_id();
-        self.syn_seq_nr = self.seq_nr;
-        self.state = ConnectionState::SynSent;
+    fn stamp_packet(&self, packet: &mut UtpPacket) {
+        packet.timestamp_microseconds = self.timestamp_now_microseconds();
+        packet.timestamp_difference_microseconds = self.reply_micro;
+    }
 
-        let syn = UtpPacket::syn(self.local_conn_id, self.seq_nr, 0, self.recv_window);
-        self.seq_nr = self.seq_nr.wrapping_add(1);
+    fn update_reply_delay(&mut self, packet: &UtpPacket) {
+        self.reply_micro = self
+            .timestamp_now_microseconds()
+            .wrapping_sub(packet.timestamp_microseconds);
+    }
 
-        Ok(syn)
+    pub(crate) fn state_packet(&self) -> UtpPacket {
+        let mut packet = UtpPacket::ack(
+            self.remote_conn_id,
+            self.ack_nr,
+            self.seq_nr,
+            self.recv_window,
+        );
+        self.stamp_packet(&mut packet);
+        self.add_selective_ack(&mut packet);
+        packet
     }
 
     /// Accept an incoming connection (server-side) - creates SYN-ACK packet
@@ -189,86 +215,65 @@ impl UtpConnection {
             return Err(ConnectionError::AlreadyExists);
         }
 
+        if syn_packet.packet_type()? != PacketType::StSyn {
+            return Err(ConnectionError::InvalidPacket("Expected SYN".to_string()));
+        }
         self.remote_addr = Some(remote_addr);
         self.remote_conn_id = syn_packet.connection_id;
+        self.accepted_syn_seq = Some(syn_packet.seq_nr);
+        self.peer_window = syn_packet.wnd_size;
         self.ack_nr = syn_packet.seq_nr;
-        self.local_conn_id = rand_connection_id();
+        self.local_conn_id = syn_packet.connection_id.wrapping_add(1);
+        self.update_reply_delay(syn_packet);
         self.seq_nr = rand_connection_id();
         self.syn_seq_nr = self.seq_nr;
         self.state = ConnectionState::Established;
 
-        let syn_ack = UtpPacket::syn_ack(
-            self.local_conn_id,
+        let mut syn_ack = UtpPacket::syn_ack(
+            self.remote_conn_id,
             self.seq_nr,
             self.ack_nr,
             self.recv_window,
         );
+        self.stamp_packet(&mut syn_ack);
         self.seq_nr = self.seq_nr.wrapping_add(1);
 
         Ok(syn_ack)
     }
 
-    /// Close the connection gracefully - creates FIN packet
-    pub fn close(&mut self) -> Result<UtpPacket, ConnectionError> {
-        if self.state != ConnectionState::Established {
-            return Err(ConnectionError::NotConnected);
+    /// Repeat the original STATE response when an accepted SYN is retried.
+    pub(crate) fn syn_response(&mut self, syn: &UtpPacket) -> Option<UtpPacket> {
+        let matches = self.remote_conn_id == syn.connection_id
+            && self.accepted_syn_seq == Some(syn.seq_nr)
+            && self.local_conn_id == syn.connection_id.wrapping_add(1);
+        if !matches {
+            return None;
         }
-
-        let fin = UtpPacket::fin(
-            self.local_conn_id,
-            self.seq_nr,
-            self.ack_nr,
+        self.update_reply_delay(syn);
+        let mut response = UtpPacket::syn_ack(
+            self.remote_conn_id,
+            self.syn_seq_nr,
+            syn.seq_nr,
             self.recv_window,
         );
-        self.seq_nr = self.seq_nr.wrapping_add(1);
-        self.state = ConnectionState::FinWait;
-
-        Ok(fin)
-    }
-
-    /// Send data on an established connection - creates DATA packets
-    pub fn send_data(&mut self, data: &[u8]) -> Result<Vec<UtpPacket>, ConnectionError> {
-        if self.state != ConnectionState::Established {
-            return Err(ConnectionError::NotConnected);
-        }
-
-        let mut packets = Vec::new();
-        let mut offset = 0;
-
-        while offset < data.len() {
-            let remaining = self.congestion_window as usize;
-            if remaining == 0 {
-                break;
-            }
-
-            let chunk_size = std::cmp::min(remaining, data.len() - offset);
-            let chunk_size = std::cmp::min(chunk_size, 1400); // MTU limit
-
-            let packet = UtpPacket::data(
-                self.local_conn_id,
-                self.seq_nr,
-                self.ack_nr,
-                self.recv_window,
-                data[offset..offset + chunk_size].to_vec(),
-            );
-
-            self.send_buffer
-                .extend_from_slice(&data[offset..offset + chunk_size]);
-            self.bytes_in_flight += chunk_size as u32;
-            self.seq_nr = self.seq_nr.wrapping_add(1);
-            offset += chunk_size;
-
-            packets.push(packet);
-        }
-
-        Ok(packets)
+        self.stamp_packet(&mut response);
+        Some(response)
     }
 
     /// Receive data from the connection buffer
     pub fn recv_data(&mut self) -> Vec<u8> {
-        let data = self.recv_buffer.clone();
-        self.recv_buffer.clear();
+        let data = std::mem::take(&mut self.recv_buffer);
+        self.update_receive_window();
         data
+    }
+
+    /// Read up to the caller's buffer capacity without discarding unread data.
+    pub(crate) fn recv_into(&mut self, buffer: &mut [u8]) -> usize {
+        let length = buffer.len().min(self.recv_buffer.len());
+        buffer[..length].copy_from_slice(&self.recv_buffer[..length]);
+        self.recv_buffer.drain(..length);
+        self.update_receive_window();
+        length
     }
 
     /// Handle an incoming packet - returns response packets to send
@@ -276,22 +281,25 @@ impl UtpConnection {
         &mut self,
         packet: &UtpPacket,
     ) -> Result<Vec<UtpPacket>, ConnectionError> {
-        self.last_activity = Instant::now();
+        self.on_packet_received_with_acknowledgements(packet)
+            .map(|handling| handling.response_packets)
+    }
 
-        match packet.packet_type()? {
-            PacketType::StSyn => {
-                // In BEP 29, the server's SYN-ACK is also a StSyn-type packet.
-                // When in SynSent state, receiving a SYN-ACK is the expected
-                // response that completes the handshake.
-                if self.state == ConnectionState::SynSent {
-                    self.remote_conn_id = packet.connection_id;
-                    self.ack_nr = packet.seq_nr;
-                    self.state = ConnectionState::Established;
-                    Ok(vec![])
-                } else {
-                    Err(ConnectionError::InvalidPacket("Unexpected SYN".to_string()))
-                }
-            }
+    pub(crate) fn on_packet_received_with_acknowledgements(
+        &mut self,
+        packet: &UtpPacket,
+    ) -> Result<PacketHandling, ConnectionError> {
+        if packet.connection_id != self.local_conn_id {
+            return Err(ConnectionError::InvalidPacket(
+                "Unexpected connection ID".to_string(),
+            ));
+        }
+        self.last_activity = Instant::now();
+        let packet_type = packet.packet_type()?;
+        self.update_reply_delay(packet);
+
+        match packet_type {
+            PacketType::StSyn => Err(ConnectionError::InvalidPacket("Unexpected SYN".to_string())),
             PacketType::StData => self.handle_data_packet(packet),
             PacketType::StAck => self.handle_ack_packet(packet),
             PacketType::StFin => self.handle_fin_packet(packet),
@@ -300,83 +308,6 @@ impl UtpConnection {
                 Err(ConnectionError::Reset)
             }
         }
-    }
-
-    /// Handle incoming DATA packet
-    fn handle_data_packet(
-        &mut self,
-        packet: &UtpPacket,
-    ) -> Result<Vec<UtpPacket>, ConnectionError> {
-        if self.state != ConnectionState::Established {
-            return Err(ConnectionError::NotConnected);
-        }
-
-        // Store received data
-        self.recv_buffer.extend_from_slice(&packet.payload);
-
-        // Update acknowledgment
-        self.ack_nr = packet.seq_nr;
-
-        // Send ACK
-        let ack = UtpPacket::ack(
-            self.remote_conn_id,
-            self.ack_nr,
-            self.seq_nr,
-            self.recv_window,
-        );
-
-        Ok(vec![ack])
-    }
-
-    /// Handle incoming ACK packet
-    fn handle_ack_packet(&mut self, packet: &UtpPacket) -> Result<Vec<UtpPacket>, ConnectionError> {
-        // Update RTT estimates
-        let acked_bytes = std::cmp::min(
-            self.bytes_in_flight,
-            packet.ack_nr.wrapping_sub(self.ack_nr) as u32 * 1400,
-        );
-        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
-
-        // Remove acknowledged data from send buffer
-        if acked_bytes as usize <= self.send_buffer.len() {
-            self.send_buffer.drain(..acked_bytes as usize);
-        }
-
-        // Transition from SynSent to Established on first ACK
-        if self.state == ConnectionState::SynSent {
-            self.remote_conn_id = packet.connection_id;
-            self.ack_nr = packet.seq_nr;
-            self.state = ConnectionState::Established;
-        } else if self.state == ConnectionState::Established {
-            self.ack_nr = packet.ack_nr;
-        }
-
-        Ok(vec![])
-    }
-
-    /// Handle incoming FIN packet
-    fn handle_fin_packet(&mut self, packet: &UtpPacket) -> Result<Vec<UtpPacket>, ConnectionError> {
-        self.ack_nr = packet.seq_nr;
-
-        let response = if self.state == ConnectionState::FinWait {
-            // Both sides closing - go to Closed
-            self.state = ConnectionState::Closed;
-            vec![]
-        } else if self.state == ConnectionState::Established {
-            // Remote initiated close - ACK the FIN
-            let ack = UtpPacket::ack(
-                self.remote_conn_id,
-                self.ack_nr,
-                self.seq_nr,
-                self.recv_window,
-            );
-            self.state = ConnectionState::Closing;
-            vec![ack]
-        } else {
-            vec![]
-        };
-
-        Ok(response)
     }
 
     /// Check if connection has timed out
@@ -390,21 +321,21 @@ impl UtpConnection {
 
     /// Get packets that need to be retransmitted
     pub fn get_sendable_packets(&mut self) -> Vec<UtpPacket> {
-        if self.send_buffer.is_empty() {
-            return vec![];
+        let mut packets = self
+            .send_buffer
+            .iter()
+            .filter(|sent| !sent.selectively_acked)
+            .map(|sent| {
+                let mut packet = sent.packet.clone();
+                packet.ack_nr = self.ack_nr;
+                packet.wnd_size = self.recv_window;
+                packet
+            })
+            .collect::<Vec<_>>();
+        for packet in &mut packets {
+            self.stamp_packet(packet);
         }
-
-        // Simple retransmit: resend first unacked data
-        let data = self.send_buffer.clone();
-        let packet = UtpPacket::data(
-            self.local_conn_id,
-            self.syn_seq_nr.wrapping_add(1),
-            self.ack_nr,
-            self.recv_window,
-            data,
-        );
-
-        vec![packet]
+        packets
     }
 
     // --- Accessors ---
@@ -419,12 +350,12 @@ impl UtpConnection {
         self.state == ConnectionState::Established
     }
 
-    /// Get local connection ID
+    /// Get the connection ID expected on incoming packets.
     pub fn local_connection_id(&self) -> u16 {
         self.local_conn_id
     }
 
-    /// Get remote connection ID
+    /// Get the connection ID used for outgoing packets after SYN.
     pub fn remote_connection_id(&self) -> u16 {
         self.remote_conn_id
     }
@@ -446,17 +377,23 @@ impl UtpConnection {
 
     /// Get current RTO
     pub fn rto(&self) -> Duration {
-        self.rto
+        self.rtt_estimator
+            .as_ref()
+            .map_or(Duration::from_secs(1), |estimator| {
+                estimator.rto().max(Duration::from_millis(500))
+            })
     }
 
     /// Get smoothed RTT
     pub fn rtt(&self) -> Duration {
-        self.srtt
+        self.rtt_estimator
+            .as_ref()
+            .map_or(Duration::from_millis(100), RttEstimator::srtt)
     }
 
     /// Get congestion window size
     pub fn congestion_window(&self) -> u32 {
-        self.congestion_window
+        self.congestion.get_window_size()
     }
 
     /// Get receive window size
@@ -466,7 +403,7 @@ impl UtpConnection {
 
     /// Get bytes in flight
     pub fn bytes_in_flight(&self) -> u32 {
-        self.bytes_in_flight
+        self.congestion.get_bytes_in_flight()
     }
 
     /// Get idle time since last activity
@@ -483,94 +420,8 @@ impl Default for UtpConnection {
 
 /// Generate a random connection ID
 fn rand_connection_id() -> u16 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    (now.subsec_nanos() >> 16) as u16 ^ (now.as_secs() as u16)
+    rand::random()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    fn test_addr() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
-    }
-
-    #[test]
-    fn test_connection_new() {
-        let conn = UtpConnection::new();
-        assert_eq!(conn.state(), ConnectionState::Closed);
-        assert!(!conn.is_established());
-        assert!(conn.remote_addr().is_none());
-    }
-
-    #[test]
-    fn test_connection_connect() {
-        let mut conn = UtpConnection::new();
-        let result = conn.connect(test_addr());
-        assert!(result.is_ok());
-        assert_eq!(conn.state(), ConnectionState::SynSent);
-        assert_eq!(conn.remote_addr(), Some(test_addr()));
-    }
-
-    #[test]
-    fn test_connection_connect_already_connected() {
-        let mut conn = UtpConnection::new();
-        conn.connect(test_addr()).unwrap();
-        let result = conn.connect(test_addr());
-        assert!(matches!(result, Err(ConnectionError::AlreadyExists)));
-    }
-
-    #[test]
-    fn test_connection_close_not_connected() {
-        let mut conn = UtpConnection::new();
-        let result = conn.close();
-        assert!(matches!(result, Err(ConnectionError::NotConnected)));
-    }
-
-    #[test]
-    fn test_connection_send_data_not_connected() {
-        let mut conn = UtpConnection::new();
-        let result = conn.send_data(&[1, 2, 3]);
-        assert!(matches!(result, Err(ConnectionError::NotConnected)));
-    }
-
-    #[test]
-    fn test_connection_default() {
-        let conn = UtpConnection::default();
-        assert_eq!(conn.state(), ConnectionState::Closed);
-    }
-
-    #[test]
-    fn test_connection_idle_time() {
-        let conn = UtpConnection::new();
-        let idle = conn.idle_time();
-        assert!(idle.as_nanos() > 0 || idle.is_zero());
-    }
-
-    #[test]
-    fn test_connection_recv_data_empty() {
-        let mut conn = UtpConnection::new();
-        let data = conn.recv_data();
-        assert!(data.is_empty());
-    }
-
-    #[test]
-    fn test_connection_timeout() {
-        let mut conn = UtpConnection::new();
-        // Very short timeout should trigger for newly created connection
-        let result = conn.check_timeout(Duration::ZERO);
-        assert!(result);
-        assert_eq!(conn.state(), ConnectionState::Closed);
-    }
-
-    #[test]
-    fn test_connection_no_timeout() {
-        let mut conn = UtpConnection::new();
-        let result = conn.check_timeout(Duration::from_secs(3600));
-        assert!(!result);
-    }
-}
+mod tests;

@@ -1,7 +1,6 @@
-//! Core DHT task implementations: PingTask, BucketRefreshTask, NodeLookupTask.
+//! Core DHT task implementations: PingTask, BucketRefreshTask, and bootstrap refresh.
 //!
-//! See `task_peer.rs` for peer-related tasks (PeerLookupTask,
-//! ReplaceNodeTask, PeerAnnounceTask) and the DhtTaskFactory.
+//! See `task_peer.rs` for peer-related tasks (PeerLookupTask and ReplaceNodeTask).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +14,7 @@ use super::message::DhtMessageBuilder;
 use super::node::DhtNode;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
-use super::task::DhtTask;
+use super::task::{DEFAULT_NUM_CONCURRENT, DhtTask};
 use super::tracker::{QueryType, TransactionTracker};
 
 const BUCKET_REFRESH_CONCURRENCY: usize = 3;
@@ -33,15 +32,53 @@ const BUCKET_REFRESH_CONCURRENCY: usize = 3;
 #[derive(Clone)]
 pub struct DhtTaskContext {
     /// Local node ID.
-    pub self_id: [u8; 20],
+    pub(crate) self_id: [u8; 20],
     /// Routing table (shared with the DHT engine).
-    pub routing_table: Arc<RwLock<RoutingTable>>,
+    pub(crate) routing_table: Arc<RwLock<RoutingTable>>,
     /// UDP socket for sending messages.
-    pub socket: DhtSocket,
+    pub(crate) socket: DhtSocket,
     /// Transaction tracker for matching queries to responses.
-    pub tracker: Arc<TransactionTracker>,
+    pub(crate) tracker: Arc<TransactionTracker>,
     /// Per-query timeout (C++ `DHT_MESSAGE_TIMEOUT = 10s`).
-    pub query_timeout: Duration,
+    pub(crate) query_timeout: Duration,
+}
+
+impl DhtTaskContext {
+    pub fn new(
+        self_id: [u8; 20],
+        routing_table: Arc<RwLock<RoutingTable>>,
+        socket: DhtSocket,
+        tracker: Arc<TransactionTracker>,
+        query_timeout: Duration,
+    ) -> Self {
+        Self {
+            self_id,
+            routing_table,
+            socket,
+            tracker,
+            query_timeout,
+        }
+    }
+
+    pub fn self_id(&self) -> &[u8; 20] {
+        &self.self_id
+    }
+
+    pub fn routing_table(&self) -> &Arc<RwLock<RoutingTable>> {
+        &self.routing_table
+    }
+
+    pub fn socket(&self) -> &DhtSocket {
+        &self.socket
+    }
+
+    pub fn tracker(&self) -> &Arc<TransactionTracker> {
+        &self.tracker
+    }
+
+    pub fn query_timeout(&self) -> Duration {
+        self.query_timeout
+    }
 }
 
 impl std::fmt::Debug for DhtTaskContext {
@@ -60,8 +97,7 @@ impl std::fmt::Debug for DhtTaskContext {
 /// Send a ping to a remote node and wait for a response.
 ///
 /// Equivalent to C++ `DHTPingTask`. If the node responds, it is marked
-/// good in the routing table. If it times out after `max_retry` attempts,
-/// it is marked as failed.
+/// good in the routing table. Each unanswered attempt is recorded once.
 #[derive(Debug)]
 pub struct PingTask {
     ctx: DhtTaskContext,
@@ -71,35 +107,24 @@ pub struct PingTask {
     max_retry: u32,
     /// Per-attempt timeout.
     timeout: Duration,
-    /// Optional result channel used when adding an unknown bootstrap node.
+    /// Optional result channel used when discovering a node ID.
     result_tx: Option<tokio::sync::oneshot::Sender<Option<DhtNode>>>,
 }
 
 impl PingTask {
-    /// Create a new ping task.
-    pub fn new(ctx: DhtTaskContext, remote_node: DhtNode, max_retry: u32) -> Self {
-        Self {
-            timeout: ctx.query_timeout,
-            ctx,
-            remote_node,
-            max_retry,
-            result_tx: None,
-        }
-    }
-
-    /// Create a ping task that returns the node ID from a successful reply.
-    pub fn with_result(
+    /// Create a ping task, optionally returning the discovered node.
+    pub fn new(
         ctx: DhtTaskContext,
         remote_node: DhtNode,
         max_retry: u32,
-        result_tx: tokio::sync::oneshot::Sender<Option<DhtNode>>,
+        result_tx: Option<tokio::sync::oneshot::Sender<Option<DhtNode>>>,
     ) -> Self {
         Self {
             timeout: ctx.query_timeout,
             ctx,
             remote_node,
             max_retry,
-            result_tx: Some(result_tx),
+            result_tx,
         }
     }
 }
@@ -121,24 +146,12 @@ impl DhtTask for PingTask {
                 );
             }
 
-            let (transaction_id, response_wait) = self.ctx.tracker.allocate_wait(
-                QueryType::Ping,
-                addr,
-                Some(node_id),
-                None,
-                self.timeout,
-            );
+            let (transaction_id, response_wait) =
+                self.ctx
+                    .tracker
+                    .allocate_wait(QueryType::Ping, addr, self.timeout);
             let msg = DhtMessageBuilder::ping(transaction_id, &self.ctx.self_id);
-            let encoded = match msg.encode() {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("PingTask: encode error for {}: {}", hex::encode(node_id), e);
-                    if let Some(tx) = result_tx.take() {
-                        let _ = tx.send(None);
-                    }
-                    return;
-                }
-            };
+            let encoded = msg.encode();
 
             if let Err(e) = self.ctx.socket.send_to(addr, &encoded).await {
                 debug!("PingTask: send error to {}: {}", hex::encode(node_id), e);
@@ -148,11 +161,10 @@ impl DhtTask for PingTask {
                 return;
             }
 
-            if let Some(response) = response_wait.wait(self.timeout).await
+            if let Some(response) = response_wait.wait().await
                 && response.from == addr
-                && (response.message.is_response() || response.message.is_error())
+                && response.message.is_response()
             {
-                trace!("PingTask: node {} responded", hex::encode(node_id));
                 let response_node = response
                     .message
                     .r
@@ -165,28 +177,40 @@ impl DhtTask for PingTask {
                         response_id.copy_from_slice(id);
                         DhtNode::new(response_id, addr)
                     });
-                let mut rt = self.ctx.routing_table.write().await;
-                if node_id != [0u8; 20] {
-                    rt.mark_good(&node_id);
-                }
-                if let Some(response_node) = &response_node {
+
+                if let Some(response_node) = response_node {
+                    trace!(
+                        "PingTask: node {} responded",
+                        hex::encode(response_node.id())
+                    );
+                    let mut rt = self.ctx.routing_table.write().await;
+                    if node_id != [0u8; 20] && node_id != *response_node.id() {
+                        rt.remove(&node_id);
+                    } else if node_id != [0u8; 20] {
+                        rt.mark_good(&node_id);
+                    }
                     rt.insert(response_node.clone());
+                    if let Some(tx) = result_tx.take() {
+                        let _ = tx.send(Some(response_node));
+                    }
+                    return;
                 }
-                if let Some(tx) = result_tx.take() {
-                    let _ = tx.send(response_node);
-                }
-                return;
             }
+
+            // The query owner accounts for this attempt. The engine timeout
+            // loop only expires transactions and wakes us; it must not also
+            // increment the same node's failure counter.
+            let mut routing_table = self.ctx.routing_table.write().await;
+            routing_table.mark_bad(&node_id);
+            routing_table.evict_bad_nodes();
         }
 
-        // All attempts exhausted — mark as failed.
+        // All attempts exhausted without a valid response.
         debug!(
             "PingTask: node {} timed out after {} attempts",
             hex::encode(node_id),
             self.max_retry + 1
         );
-        let mut rt = self.ctx.routing_table.write().await;
-        rt.mark_bad(&node_id);
         if let Some(tx) = result_tx {
             let _ = tx.send(None);
         }
@@ -277,79 +301,56 @@ impl DhtTask for BucketRefreshTask {
 
 /// Run the initial forced refresh with an explicit bootstrap deadline.
 #[derive(Debug)]
-pub struct BootstrapRefreshTask {
+pub(super) struct BootstrapRefreshTask {
     ctx: DhtTaskContext,
     timeout: Duration,
+    bootstrap_nodes: Vec<DhtNode>,
 }
 
 impl BootstrapRefreshTask {
-    pub fn new(ctx: DhtTaskContext, timeout: Duration) -> Self {
-        Self { ctx, timeout }
+    pub(super) fn new(
+        ctx: DhtTaskContext,
+        timeout: Duration,
+        bootstrap_nodes: Vec<DhtNode>,
+    ) -> Self {
+        Self {
+            ctx,
+            timeout,
+            bootstrap_nodes,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl DhtTask for BootstrapRefreshTask {
     async fn run(self: Box<Self>) {
-        let refresh = Box::new(BucketRefreshTask::new(self.ctx, true));
-        if tokio::time::timeout(self.timeout, refresh.run())
-            .await
-            .is_err()
-        {
+        const BOOTSTRAP_PING_MAX_RETRIES: u32 = 9;
+
+        let ctx = self.ctx;
+        let bootstrap_nodes = self.bootstrap_nodes;
+        let refresh = async move {
+            futures::stream::iter(bootstrap_nodes.into_iter().map(|node| {
+                let ctx = ctx.clone();
+                async move {
+                    Box::new(PingTask::new(ctx, node, BOOTSTRAP_PING_MAX_RETRIES, None))
+                        .run()
+                        .await;
+                }
+            }))
+            .buffer_unordered(DEFAULT_NUM_CONCURRENT)
+            .for_each(|_| async {})
+            .await;
+
+            Box::new(BucketRefreshTask::new(ctx, true)).run().await;
+        };
+
+        if tokio::time::timeout(self.timeout, refresh).await.is_err() {
             warn!(timeout = ?self.timeout, "DHT bootstrap refresh timed out");
         }
     }
 
     fn name(&self) -> &'static str {
         "BootstrapRefreshTask"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// NodeLookupTask
-// ---------------------------------------------------------------------------
-
-/// Perform an iterative `find_node` lookup for a target node ID.
-///
-/// Equivalent to C++ `DHTNodeLookupTask`. Used for bucket refresh
-/// and general routing table population.
-#[derive(Debug)]
-pub struct NodeLookupTask {
-    ctx: DhtTaskContext,
-    /// Target node ID to find.
-    target_id: [u8; 20],
-}
-
-impl NodeLookupTask {
-    /// Create a new node lookup task.
-    pub fn new(ctx: DhtTaskContext, target_id: [u8; 20]) -> Self {
-        Self { ctx, target_id }
-    }
-}
-
-#[async_trait::async_trait]
-impl DhtTask for NodeLookupTask {
-    async fn run(self: Box<Self>) {
-        let result = iterative_find_node(
-            &self.target_id,
-            &self.ctx.self_id,
-            &self.ctx.routing_table,
-            &self.ctx.socket,
-            &self.ctx.tracker,
-            self.ctx.query_timeout,
-        )
-        .await;
-
-        debug!(
-            target = %hex::encode(self.target_id),
-            closest = result.closest_nodes.len(),
-            contacted = result.nodes_contacted,
-            "NodeLookupTask completed"
-        );
-    }
-
-    fn name(&self) -> &'static str {
-        "NodeLookupTask"
     }
 }
 
@@ -363,33 +364,14 @@ mod tests {
 
     #[test]
     fn test_task_context_creation() {
-        let ctx = DhtTaskContext {
-            self_id: [0u8; 20],
-            routing_table: Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
-            socket: DhtSocket::new_test(),
-            tracker: Arc::new(TransactionTracker::new()),
-            query_timeout: Duration::from_secs(10),
-        };
-        assert_eq!(ctx.self_id, [0u8; 20]);
-    }
-
-    #[tokio::test]
-    async fn test_node_lookup_does_not_reacquire_shared_table() {
-        let routing_table = Arc::new(RwLock::new(RoutingTable::new([0u8; 20])));
-        let ctx = DhtTaskContext {
-            self_id: [0u8; 20],
-            routing_table,
-            socket: DhtSocket::bind(0).await.expect("test socket should bind"),
-            tracker: Arc::new(TransactionTracker::new()),
-            query_timeout: Duration::from_millis(20),
-        };
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            Box::new(NodeLookupTask::new(ctx, [1u8; 20])).run(),
-        )
-        .await;
-
-        assert!(result.is_ok(), "lookup task should not deadlock");
+        let ctx = DhtTaskContext::new(
+            [0u8; 20],
+            Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
+            DhtSocket::new_test(),
+            Arc::new(TransactionTracker::new()),
+            Duration::from_secs(10),
+        );
+        assert_eq!(ctx.self_id(), &[0u8; 20]);
+        assert_eq!(ctx.query_timeout(), Duration::from_secs(10));
     }
 }

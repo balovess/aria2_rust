@@ -41,7 +41,7 @@ Every archive has a matching `.sha256` file. Verify the digest before extracting
 ## CI and release triggers
 
 - Dev CI is manual-only (`workflow_dispatch`); pushes and pull requests do not start it automatically.
-- Release runs automatically only after a pull request is merged into `master`; a direct push to `master` does not publish binaries.
+- The Release workflow runs on every push to `master` and can also be dispatched manually from `master`. It creates a new binary release only when the version-derived tag does not already exist; manual dispatch can retry package-manager updates for an existing release.
 - The Release page automatically includes a four-tier artifact selection table and checksum files for every platform.
 
 ## Build from source

@@ -43,6 +43,21 @@ impl FileEntry {
         referer: &str,
         method: &str,
     ) -> Option<Arc<Request>> {
+        // Runtime changeUri edits can remove a URI while its old request is
+        // idle in the pool. Discard those requests before reusing the pool.
+        let uri_state_lock = &self.uri_state;
+        let uri_state = uri_state_lock
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.request_pool.retain(|request| {
+            uri_state
+                .remaining
+                .iter()
+                .chain(uri_state.spent.iter())
+                .any(|uri| uri == request.uri())
+        });
+        drop(uri_state);
+
         // Sort pool by speed (fastest first) before selecting.
         self.sort_pool_by_speed();
 
@@ -250,7 +265,8 @@ impl FileEntry {
         // Collect fast candidates from first NUM_URI_SCAN remaining URIs.
         let mut fast_cands: Vec<(u64, String)> = Vec::new(); // (speed, uri)
 
-        for uri in self.remaining_uris.iter().take(NUM_URI_SCAN) {
+        let remaining = self.remaining_uris();
+        for uri in remaining.iter().take(NUM_URI_SCAN) {
             let (host, protocol) = match extract_host_and_protocol(uri) {
                 Some(pair) => pair,
                 None => continue,
@@ -311,16 +327,21 @@ impl FileEntry {
         req.set_referer(base.referer());
         req.set_method(method);
 
-        // Remove URI from remaining_uris and add to spent_uris.
-        if let Some(pos) = self.remaining_uris.iter().position(|u| *u == uri) {
-            self.remaining_uris.remove(pos);
-        }
+        // Remove only if the URI is still available: changeUri may have
+        // updated the shared queue while the candidate was being evaluated.
+        let mut uri_state = self.write_uri_state();
+        let pos = uri_state
+            .remaining
+            .iter()
+            .position(|candidate| candidate == &uri)?;
+        uri_state.remaining.remove(pos);
         // A URI can be reused after a retry cycle. Keep spent URIs as a set
         // represented by the existing deque; repeated attempts must not grow
         // this history without bound.
-        if !self.spent_uris.iter().any(|spent| spent == &uri) {
-            self.spent_uris.push_back(uri);
+        if !uri_state.spent.iter().any(|spent| spent == &uri) {
+            uri_state.spent.push_back(uri);
         }
+        drop(uri_state);
 
         let req = Arc::new(req);
         self.in_flight_requests.push(Arc::clone(&req));
@@ -401,19 +422,23 @@ impl FileEntry {
         for pass in 0..2 {
             let mut pending: Vec<String> = Vec::new();
             let mut ignore_host: Vec<String> = Vec::new();
+            let uri_state_lock = &self.uri_state;
+            let mut uri_state = uri_state_lock
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             // Try to select a URI.
-            while !self.remaining_uris.is_empty() {
+            while !uri_state.remaining.is_empty() {
                 let idx = selector.select(
-                    &self.remaining_uris.iter().cloned().collect::<Vec<_>>(),
+                    &uri_state.remaining.iter().cloned().collect::<Vec<_>>(),
                     used_hosts,
                 );
 
                 let uri = match idx {
-                    Some(i) if i < self.remaining_uris.len() => {
+                    Some(i) if i < uri_state.remaining.len() => {
                         // VecDeque::remove returns Option<String>; unwrap is safe
                         // because we just checked i < len.
-                        self.remaining_uris.remove(i).unwrap()
+                        uri_state.remaining.remove(i).unwrap()
                     }
                     _ => break,
                 };
@@ -442,7 +467,7 @@ impl FileEntry {
                 new_req.set_method(method);
 
                 // Move URI to spent and add request to in-flight.
-                self.spent_uris.push_back(uri);
+                uri_state.spent.push_back(uri);
                 let req_arc = Arc::new(new_req);
                 self.in_flight_requests.push(Arc::clone(&req_arc));
                 req = Some(req_arc);
@@ -451,15 +476,18 @@ impl FileEntry {
 
             // Put pending URIs back at the front of remaining_uris.
             for uri in pending.into_iter().rev() {
-                self.remaining_uris.push_front(uri);
+                uri_state.remaining.push_front(uri);
             }
+
+            let no_remaining_uris = uri_state.remaining.is_empty();
+            drop(uri_state);
 
             // On first pass: if uri_reuse is enabled and no request was found
             // and all remaining URIs are at max connections, try reusing.
             if pass == 0 && uri_reuse && req.is_none() {
                 // Check if all remaining URIs were just at max connection limit.
                 // If remaining_uris is empty or all are pending, reuse.
-                if self.remaining_uris.is_empty() {
+                if no_remaining_uris {
                     self.reuse_uri(&ignore_host);
                     continue;
                 }

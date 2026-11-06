@@ -988,16 +988,31 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         include_str!("../fixtures/compatibility_option_inventory.txt");
     const EXPECTED_RUST_EXTENSIONS: &[&str] = &[
         "bt-enable-web-seed",
+        "bt-max-upload-slots",
+        "bt-optimistic-unchoke-interval",
         "bt-peer-blocklist",
+        "bt-snubbed-timeout",
         "bt-tracker-source",
         "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
+        "dht-bootstrap-timeout",
+        "dht-cleanup-interval",
+        "dht-max-concurrent-lookups",
+        "dht-node-contact-interval",
+        "dht-persistence-max-age",
+        "dht-refresh-check-interval",
+        "dht-save-interval",
+        "dht-token-rotation-interval",
         "enable-public-trackers",
         "enable-utp",
         "log-backup-count",
         "log-max-files",
         "log-max-size",
         "lpd-listen-port",
+        "max-http2-sessions-per-server",
+        "max-http2-streams-per-session",
+        "min-http-range-size",
+        "http-version",
         "mmap-threshold",
         "on-bt-download-error",
         "pid-file",
@@ -1031,7 +1046,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        233,
+        248,
         "all-features registry inventory changed"
     );
     assert_eq!(
@@ -1450,6 +1465,36 @@ fn regression_max_connection_range_validation() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--max-connection-per-server=8"]);
     assert_eq!(parser.get_i64("max-connection-per-server").unwrap(), 8);
+}
+
+#[test]
+fn regression_max_http2_sessions_per_server_range_validation() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-sessions-per-server=12"]);
+    assert_eq!(parser.get_i64("max-http2-sessions-per-server").unwrap(), 12);
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-sessions-per-server=17"]);
+    assert!(parser.has_errors());
+}
+
+#[test]
+fn regression_http_protocol_and_h2_stream_options_validate() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--http-version=2"]);
+    assert_eq!(parser.get_str("http-version"), Some("2"));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--http-version=1.0"]);
+    assert!(parser.has_errors());
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-streams-per-session=8"]);
+    assert_eq!(parser.get_i64("max-http2-streams-per-session"), Some(8));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-streams-per-session=257"]);
+    assert!(parser.has_errors());
 }
 
 /// Test: timeout minimum value validation.

@@ -104,8 +104,8 @@ impl super::RequestGroup {
 
         let mut result = DownloadResult::new(gid, status, code);
         result.message = message;
-        result.fill_from_group(self);
         result.set_option_snapshot(self.effective_option_snapshot());
+        result.fill_from_group(self);
 
         // Fill parent-child relationships from RequestGroup fields.
         // Mirrors C++ `DownloadResult::followedBy` / `following`.
