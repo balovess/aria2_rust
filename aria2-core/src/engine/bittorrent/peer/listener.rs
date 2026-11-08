@@ -364,7 +364,7 @@ async fn bind_ports(
     ports: impl IntoIterator<Item = u16>,
 ) -> io::Result<TcpListener> {
     let mut ports = ports.into_iter().collect::<Vec<_>>();
-    ports.shuffle(&mut rand::thread_rng());
+    ports.shuffle(&mut rand::rng());
     let mut last_error = None;
     for port in ports {
         match TcpListener::bind(SocketAddr::new(bind_ip, port)).await {

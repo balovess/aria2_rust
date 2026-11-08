@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 use super::{
     CRYPTO_BITFIELD_LENGTH, INITIATOR_SYNC_LIMIT, MAX_PAD_LENGTH, MseCryptoMethod, MseHandshake,
@@ -18,8 +18,8 @@ impl MseHandshake {
         buf.extend_from_slice(&keys.req1);
         buf.extend_from_slice(&keys.req2_xor_req3());
 
-        let mut rng = rand::thread_rng();
-        let pad_c_length: u16 = rng.gen_range(0..=MAX_PAD_LENGTH as u16);
+        let mut rng = rand::rng();
+        let pad_c_length: u16 = rng.random_range(0..=MAX_PAD_LENGTH as u16);
         let mut encrypted =
             Vec::with_capacity(VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + pad_c_length as usize + 2);
         encrypted.extend_from_slice(&[0u8; VC_LENGTH]);

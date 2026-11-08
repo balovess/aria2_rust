@@ -161,7 +161,7 @@ fn md5_hex(input: impl AsRef<[u8]>) -> String {
     use md5::Digest;
     let mut hasher = md5::Md5::new();
     hasher.update(input.as_ref());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 #[derive(Debug, Clone)]

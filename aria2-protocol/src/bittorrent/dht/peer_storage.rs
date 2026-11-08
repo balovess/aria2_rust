@@ -182,7 +182,7 @@ impl DhtPeerStorage {
     /// BEP 51 needs both values. Reservoir sampling keeps temporary storage
     /// proportional to the response sample size instead of all stored swarms.
     pub(crate) fn sample_info_hashes_with_count(&self, limit: usize) -> (usize, Vec<[u8; 20]>) {
-        use rand::Rng;
+        use rand::RngExt;
 
         let mut store = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
         store.remove_expired(Instant::now());
@@ -192,13 +192,13 @@ impl DhtPeerStorage {
             return (count, Vec::new());
         }
         let mut sample = Vec::with_capacity(sample_size);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for (index, info_hash) in store.swarms.keys().copied().enumerate() {
             if index < sample_size {
                 sample.push(info_hash);
             } else {
-                let selected = rng.gen_range(0..=index);
+                let selected = rng.random_range(0..=index);
                 if selected < sample_size {
                     sample[selected] = info_hash;
                 }

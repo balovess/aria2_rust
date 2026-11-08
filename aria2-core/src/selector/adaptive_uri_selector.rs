@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::RngExt;
 use tracing::trace;
 
 use crate::selector::server_stat_man::ServerStatMan;
@@ -361,8 +361,8 @@ impl AdaptiveUriSelector {
 
     /// Randomly select a URI index from a list.
     fn select_random_uri(&self, indices: &[usize]) -> usize {
-        let mut rng = rand::thread_rng();
-        let pos = rng.gen_range(0..indices.len());
+        let mut rng = rand::rng();
+        let pos = rng.random_range(0..indices.len());
         indices[pos]
     }
 

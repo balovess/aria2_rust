@@ -110,9 +110,9 @@ impl TokenTracker {
     }
 
     fn random_secret() -> [u8; SECRET_SIZE] {
-        use rand::RngCore;
+        use rand::Rng;
         let mut s = [0u8; SECRET_SIZE];
-        rand::thread_rng().fill_bytes(&mut s);
+        rand::rng().fill_bytes(&mut s);
         s
     }
 }

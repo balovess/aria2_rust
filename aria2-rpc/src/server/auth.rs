@@ -2,8 +2,8 @@
 
 use crate::json_rpc::JsonRpcError;
 use base64::Engine;
-use hmac::{Hmac, Mac};
-use rand::RngCore;
+use hmac::{Hmac, KeyInit, Mac};
+use rand::Rng;
 use sha2::Sha256;
 
 #[derive(Debug, Clone, Default)]
@@ -155,7 +155,7 @@ impl RpcAuthMiddleware {
             (None, None)
         } else {
             let mut key = vec![0u8; 32];
-            rand::thread_rng().fill_bytes(&mut key);
+            rand::rng().fill_bytes(&mut key);
             let mut mac =
                 RpcHmac::new_from_slice(&key).expect("HMAC-SHA256 accepts keys of every length");
             mac.update(secret.as_bytes());

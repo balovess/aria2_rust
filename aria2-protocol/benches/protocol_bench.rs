@@ -156,7 +156,7 @@ fn bench_dht_sample_infohashes(c: &mut Criterion) {
             let mut hashes = storage.info_hashes();
             hashes.sort_unstable();
             hashes.dedup();
-            hashes.shuffle(&mut rand::thread_rng());
+            hashes.shuffle(&mut rand::rng());
             hashes.truncate(SAMPLE_LIMIT);
             black_box(hashes)
         })

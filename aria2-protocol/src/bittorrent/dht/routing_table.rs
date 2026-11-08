@@ -243,8 +243,8 @@ impl RoutingTable {
 
     /// Get a random node from the routing table for bucket refresh.
     pub fn get_random_node(&self) -> Option<&DhtNode> {
-        use rand::Rng;
-        use rand::seq::SliceRandom;
+        use rand::RngExt;
+        use rand::seq::IndexedRandom;
         let buckets = self.get_all_buckets();
 
         let non_empty: Vec<_> = buckets.iter().filter(|b| b.count_node() > 0).collect();
@@ -252,14 +252,14 @@ impl RoutingTable {
             return None;
         }
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let bucket = non_empty.choose(&mut rng)?;
         let nodes = bucket.nodes();
         if nodes.is_empty() {
             return None;
         }
 
-        let idx = rng.gen_range(0..nodes.len());
+        let idx = rng.random_range(0..nodes.len());
         Some(&nodes[idx])
     }
 

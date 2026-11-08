@@ -62,7 +62,7 @@ pub(crate) fn capacity_backoff(step: u32) -> Duration {
     let base = CAPACITY_BACKOFF_BASE
         .saturating_mul(1 << step.saturating_sub(1).min(5))
         .min(CAPACITY_BACKOFF_MAX);
-    base.mul_f64(rand::Rng::gen_range(&mut rand::thread_rng(), 0.5..1.5))
+    base.mul_f64(rand::rng().random_range(0.5..1.5))
 }
 
 impl HttpAdaptiveConcurrency {

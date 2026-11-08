@@ -418,9 +418,9 @@ impl Bucket {
     ///
     /// Equivalent to C++ `DHTBucket::getRandomNodeID()`.
     pub fn get_random_node_id(&self) -> [u8; 20] {
-        use rand::Rng;
+        use rand::RngExt;
         let mut id = [0u8; 20];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         if self.prefix_length == 0 {
             // Full range — generate completely random.

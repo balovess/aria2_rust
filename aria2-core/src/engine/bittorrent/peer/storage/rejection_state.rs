@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::RngExt;
 
 use super::constants::{
     TEMP_PEER_CLEANUP_INTERVAL_SECS, TEMP_REJECT_TIMEOUT_MIN_SECS, TEMP_REJECT_TIMEOUT_RANGE_SECS,
@@ -54,7 +54,7 @@ impl PeerRejectionState {
             self.rejected.retain(|_, timeout| *timeout > now);
             self.last_cleanup = now;
         }
-        let extra = rand::thread_rng().gen_range(0..TEMP_REJECT_TIMEOUT_RANGE_SECS);
+        let extra = rand::rng().random_range(0..TEMP_REJECT_TIMEOUT_RANGE_SECS);
         self.rejected.insert(
             ipaddr.to_owned().into_boxed_str(),
             now + Duration::from_secs(TEMP_REJECT_TIMEOUT_MIN_SECS + extra),

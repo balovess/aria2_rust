@@ -349,10 +349,10 @@ impl AnnounceList {
     /// Shuffle all URLs in each tier randomly (matching C++ shuffle).
     pub fn shuffle(&mut self) {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        let mut rng = rand::rng();
         for tier in &mut self.tiers {
             let mut urls: Vec<String> = tier.urls.drain(..).collect();
-            urls.shuffle(&mut thread_rng());
+            urls.shuffle(&mut rng);
             tier.urls = urls.into_iter().collect();
         }
     }

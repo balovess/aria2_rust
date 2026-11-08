@@ -2,7 +2,7 @@
 
 use super::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::constants;
-use rand::Rng;
+use rand::RngExt;
 use rand::seq::SliceRandom;
 use std::cmp::Reverse;
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 ///    uninterested, matching aria2's leecher selector.
 /// 5. Return only the actions that changed state
 pub(super) fn rotate_choke_by_identity(algo: &mut ChokingAlgorithm) -> Vec<IdentityChokeAction> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     rotate_choke_by_identity_with_rng(algo, &mut rng)
 }
 

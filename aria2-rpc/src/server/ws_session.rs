@@ -44,7 +44,7 @@ pub async fn handle_ws_socket(
                     Ok((_event_type, event)) => {
                         if let Ok(json_str) = event.to_json()
                             && socket
-                                .send(axum::extract::ws::Message::Text(json_str))
+                                .send(axum::extract::ws::Message::Text(json_str.into()))
                                 .await
                                 .is_err()
                             {
@@ -172,7 +172,7 @@ async fn process_ws_jsonrpc(
         match batch.to_string() {
             Ok(json_str) => {
                 if socket
-                    .send(axum::extract::ws::Message::Text(json_str))
+                    .send(axum::extract::ws::Message::Text(json_str.into()))
                     .await
                     .is_err()
                 {
@@ -194,7 +194,7 @@ async fn send_ws_response(
     match resp.to_string() {
         Ok(json_str) => {
             if socket
-                .send(axum::extract::ws::Message::Text(json_str))
+                .send(axum::extract::ws::Message::Text(json_str.into()))
                 .await
                 .is_err()
             {

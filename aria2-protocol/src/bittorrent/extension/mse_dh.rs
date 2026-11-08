@@ -119,9 +119,9 @@ impl DhKeyPair {
         //   privateKey_ = n(buf, pbytes);
         let private_bytes = PRIVATE_KEY_BITS.div_ceil(8); // 20 bytes
         let private_big = {
-            use rand::RngCore;
+            use rand::Rng;
             let mut buf = vec![0u8; private_bytes];
-            rand::thread_rng().fill_bytes(&mut buf);
+            rand::rng().fill_bytes(&mut buf);
             BigUint::from_bytes_be(&buf)
         };
 

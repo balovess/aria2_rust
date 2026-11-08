@@ -426,11 +426,14 @@ pub(super) async fn handle_xmlrpc(
 /// requests at that same path retain its legacy JSONP behavior.
 pub(super) async fn handle_jsonrpc_or_ws(
     axum::extract::State(state): axum::extract::State<RpcState>,
-    ws: Option<axum::extract::ws::WebSocketUpgrade>,
+    ws: Result<
+        axum::extract::ws::WebSocketUpgrade,
+        axum::extract::ws::rejection::WebSocketUpgradeRejection,
+    >,
     query: axum::extract::RawQuery,
 ) -> impl axum::response::IntoResponse {
     match ws {
-        Some(upgrade) => {
+        Ok(upgrade) => {
             // WebSocket upgrade request from Aria2 Explorer or other clients.
             // An oversized RPC document receives a JSON-RPC parse error rather
             // than a transport-level disconnect.
@@ -439,7 +442,7 @@ pub(super) async fn handle_jsonrpc_or_ws(
                 handle_ws_socket(socket, state.engine.clone(), max_request_size)
             })
         }
-        None => {
+        Err(_) => {
             let parsed = parse_json_get_query(query.0.as_deref().unwrap_or_default());
             let response = dispatch_jsonrpc_body(&state.engine, &parsed.body).await;
             let content_type = if parsed.callback.is_some() {

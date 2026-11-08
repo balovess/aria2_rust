@@ -235,9 +235,9 @@ impl ChokeAlgorithm {
             return None;
         }
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let candidate = rng.gen_range(0..choked_interested.len());
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let candidate = rng.random_range(0..choked_interested.len());
         Some(choked_interested[candidate])
     }
 }

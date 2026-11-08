@@ -411,9 +411,20 @@ impl XmlRpcResponse {
 }
 
 fn xml_tag(e: &quick_xml::events::BytesStart<'_>) -> Result<String, XmlRpcError> {
-    std::str::from_utf8(e.local_name().as_ref())
-        .map(str::to_owned)
-        .map_err(|e| XmlRpcError::ParseError(e.to_string()))
+    Ok(e.local_name().as_ref().to_owned())
+}
+
+fn read_xml_text(
+    reader: &mut quick_xml::Reader<&[u8]>,
+    end: quick_xml::name::QName<'_>,
+) -> Result<String, XmlRpcError> {
+    let text = reader
+        .read_text(end)
+        .map_err(|error| XmlRpcError::ParseError(error.to_string()))?;
+    let decoded = text.xml10_content();
+    quick_xml::escape::unescape(&decoded)
+        .map(std::borrow::Cow::into_owned)
+        .map_err(|error| XmlRpcError::ParseError(error.to_string()))
 }
 
 fn read_scalar(
@@ -421,10 +432,7 @@ fn read_scalar(
     e: &quick_xml::events::BytesStart<'_>,
     tag: &str,
 ) -> Result<Option<XmlRpcValue>, XmlRpcError> {
-    let text = reader
-        .read_text(e.name())
-        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
-        .into_owned();
+    let text = read_xml_text(reader, e.name())?;
     let numeric_text = text.trim();
     match tag {
         // aria2_original stores XML-RPC int/i4 as its 32-bit Integer value.
@@ -518,13 +526,13 @@ fn parse_xml_value(
                 }
             }
             Event::Text(text) => {
-                let text = text
-                    .unescape()
-                    .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                let decoded = text.xml10_content();
+                let text = quick_xml::escape::unescape(&decoded)
+                    .map_err(|error| XmlRpcError::ParseError(error.to_string()))?;
                 implicit_text.push_str(&text);
             }
             Event::CData(text) => {
-                implicit_text.push_str(&String::from_utf8_lossy(text.as_ref()));
+                implicit_text.push_str(&text.xml10_content());
             }
             Event::End(e) if e.name() == value_start.name() => {
                 return Ok((!implicit_text.is_empty()).then(|| XmlRpcValue::string(implicit_text)));
@@ -580,12 +588,7 @@ fn parse_xml_struct(
                         .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
                     {
                         Event::Start(e) if xml_tag(&e)? == "name" => {
-                            name = Some(
-                                reader
-                                    .read_text(e.name())
-                                    .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
-                                    .into_owned(),
-                            );
+                            name = Some(read_xml_text(reader, e.name())?);
                         }
                         Event::Start(e) if xml_tag(&e)? == "value" => {
                             value = parse_xml_value(reader, &e)?
@@ -628,12 +631,7 @@ pub fn parse_request(data: &[u8]) -> Result<XmlRpcRequest, XmlRpcError> {
             .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
         {
             Event::Start(e) if xml_tag(&e)? == "methodName" => {
-                method_name = Some(
-                    reader
-                        .read_text(e.name())
-                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
-                        .into_owned(),
-                );
+                method_name = Some(read_xml_text(&mut reader, e.name())?);
             }
             Event::Start(e) if xml_tag(&e)? == "param" => loop {
                 match reader

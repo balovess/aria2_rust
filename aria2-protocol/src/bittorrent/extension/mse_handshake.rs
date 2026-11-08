@@ -17,7 +17,7 @@ use super::mse_dh::{
     CRYPTO_BITFIELD_LENGTH, INFO_HASH_LENGTH, KEY_LENGTH, MAX_PAD_LENGTH, MseDhKeyExchange,
     SHA1_LENGTH, VC_LENGTH,
 };
-use rand::Rng;
+use rand::RngExt;
 
 /// Synchronization limit for the initiator: 616 bytes max before finding VC marker.
 const INITIATOR_SYNC_LIMIT: usize = 616;
@@ -132,8 +132,8 @@ impl MseHandshake {
 
     /// Build the DH public-key payload with MSE padding.
     pub fn build_step1(&self) -> Vec<u8> {
-        let mut rng = rand::thread_rng();
-        let pad_length: usize = rng.gen_range(0..=MAX_PAD_LENGTH);
+        let mut rng = rand::rng();
+        let pad_length: usize = rng.random_range(0..=MAX_PAD_LENGTH);
         let mut buffer = Vec::with_capacity(KEY_LENGTH + pad_length);
         buffer.extend_from_slice(&self.dh.generate_public_key());
         let mut padding = vec![0u8; pad_length];

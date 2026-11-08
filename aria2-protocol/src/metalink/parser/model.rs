@@ -385,7 +385,7 @@ impl MetalinkFile {
     /// priority values are tried first.
     pub fn reorder_resources_by_priority(&mut self) {
         use rand::seq::SliceRandom;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         self.urls.shuffle(&mut rng);
         self.urls.sort_by_key(|u| u.priority);
     }

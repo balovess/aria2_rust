@@ -93,9 +93,8 @@ impl DhtEngine {
             persisted_data.as_ref().expect("checked above").self_id
         } else if config.self_id == [0u8; 20] {
             let mut id = [0u8; 20];
-            use rand::{RngCore, SeedableRng};
-            // Use StdRng instead of ThreadRng to satisfy Send across async boundaries.
-            rand::rngs::StdRng::from_entropy().fill_bytes(&mut id);
+            use rand::Rng;
+            rand::rng().fill_bytes(&mut id);
             id
         } else {
             config.self_id

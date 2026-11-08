@@ -27,7 +27,7 @@ use std::any::Any;
 use std::path::Path;
 
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt;
 use tracing::{debug, trace, warn};
 
 use crate::error::{Aria2Error, Result};
@@ -364,7 +364,7 @@ impl MultiDiskAdaptor {
     pub async fn try_close_file(&mut self, num_close: usize) -> usize {
         let mut left = num_close;
         while !self.opened_entries.is_empty() && left > 0 {
-            let index = rand::thread_rng().gen_range(0..self.opened_entries.len());
+            let index = rand::rng().random_range(0..self.opened_entries.len());
             let entry_idx = self.opened_entries[index];
             self.disk_writer_entries[entry_idx].close_file().await;
             // Swap-remove to maintain valid indices.
@@ -489,7 +489,7 @@ impl MultiDiskAdaptor {
         // Cache miss — ensure we're under the file descriptor limit.
         if self.opened_entries.len() >= self.max_open_files {
             // Evict one entry randomly.
-            let evict_idx = rand::thread_rng().gen_range(0..self.opened_entries.len());
+            let evict_idx = rand::rng().random_range(0..self.opened_entries.len());
             let evict_entry = self.opened_entries[evict_idx];
             self.disk_writer_entries[evict_entry].close_file().await;
             self.opened_entries.swap_remove(evict_idx);
