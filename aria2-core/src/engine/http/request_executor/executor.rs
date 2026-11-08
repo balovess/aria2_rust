@@ -8,7 +8,7 @@ use crate::engine::http::segment_downloader::HttpSegmentDownloader;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
 use super::admission::{ExecutorState, RunningTask};
-use super::{HttpSegmentRequest, HttpSegmentRequestResult, MAX_SERVER_CONCURRENCY};
+use super::{HttpSegmentRequest, HttpSegmentRequestResult};
 /// Dynamic executor for admitted HTTP Range requests.
 ///
 /// `total_limit` is the per-download `split` budget. Each authority also has
@@ -40,7 +40,7 @@ impl HttpSegmentRequestExecutor {
         netrc_path: Option<String>,
         total_limit: usize,
         authority_keys: &[String],
-        server_hard_limit: usize,
+        http1_connection_limit: usize,
     ) -> Self {
         Self::new_with_clients(
             client,
@@ -51,7 +51,7 @@ impl HttpSegmentRequestExecutor {
             netrc_path,
             total_limit,
             authority_keys,
-            server_hard_limit,
+            http1_connection_limit,
         )
     }
 
@@ -65,13 +65,11 @@ impl HttpSegmentRequestExecutor {
         netrc_path: Option<String>,
         total_limit: usize,
         authority_keys: &[String],
-        server_hard_limit: usize,
+        http1_connection_limit: usize,
     ) -> Self {
         let total_limit = total_limit.max(1);
         let (result_tx, result_rx) = mpsc::channel(total_limit);
-        let session_limit = server_hard_limit
-            .clamp(1, MAX_SERVER_CONCURRENCY)
-            .min(range_clients.len().max(1));
+        let session_limit = range_clients.len().max(1);
         let clients = if range_clients.is_empty() {
             vec![client.clone()]
         } else {
@@ -80,7 +78,7 @@ impl HttpSegmentRequestExecutor {
         let state = Arc::new(ExecutorState::new(
             authority_keys,
             total_limit,
-            server_hard_limit,
+            http1_connection_limit,
             clients.len(),
         ));
 

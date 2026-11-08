@@ -235,8 +235,12 @@ pub(super) fn apply_rpc_option(
         }
         "max-http2-sessions-per-server" => {
             let value = rpc_option_u16(value, key)?;
-            if value == 0 {
-                return Err(format!("Option '{}' must be greater than zero", key));
+            if !(1..=crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16).contains(&value) {
+                return Err(format!(
+                    "Option '{}' must be between 1 and {}",
+                    key,
+                    crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER
+                ));
             }
             opts.max_http2_sessions_per_server = Some(value);
             Ok(true)

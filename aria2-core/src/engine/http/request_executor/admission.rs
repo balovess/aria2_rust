@@ -10,7 +10,7 @@ use super::MAX_SERVER_CONCURRENCY;
 pub(super) struct AuthorityState {
     /// Per-download logical Range budget (`split`).
     pub(super) hard_limit: usize,
-    /// Per-download physical connection ceiling (`max-connection-per-server`).
+    /// Per-download HTTP/1.1 connection ceiling (`max-connection-per-server`).
     pub(super) connection_limit: usize,
     pub(super) target: AtomicUsize,
     pub(super) in_flight: AtomicUsize,
@@ -66,11 +66,11 @@ impl ExecutorState {
     pub(super) fn new(
         authority_keys: &[String],
         total_limit: usize,
-        server_hard_limit: usize,
+        http1_connection_limit: usize,
         session_count: usize,
     ) -> Self {
         let hard_limit = total_limit.max(1);
-        let connection_limit = server_hard_limit.clamp(1, MAX_SERVER_CONCURRENCY);
+        let connection_limit = http1_connection_limit.clamp(1, MAX_SERVER_CONCURRENCY);
         let session_count = session_count.max(1);
         let http1_client_slot_limit = hard_limit.div_ceil(session_count).max(1);
         let authorities = DashMap::new();

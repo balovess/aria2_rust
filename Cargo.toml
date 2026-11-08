@@ -17,19 +17,19 @@ keywords = ["download", "bittorrent", "http", "ftp", "rpc"]
 categories = ["command-line-utilities", "network-programming", "web-programming::http-client"]
 
 [workspace.dependencies]
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 tokio-util = "0.7"
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
-thiserror = "1.0"
+toml = "1.2"
+thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-bytes = "1.5"
+bytes = "1.12"
 async-trait = "0.1"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # These ranges describe compatible library APIs. They are not a shared
 # release-version source; each workspace member owns its package version.
 aria2-protocol = { path = "aria2-protocol", version = "0.3" }
@@ -38,17 +38,17 @@ aria2-rpc = { path = "aria2-rpc", version = "0.3" }
 
 # Cross-crate: unify to workspace-level
 reqwest = { version = "0.13", default-features = false }
-tokio-tungstenite = "0.21"
-base64 = "0.21"
+tokio-tungstenite = "0.30"
+base64 = "0.23"
 hex = "0.4"
-hmac = "0.12"
-sha2 = "0.10"
-aes-gcm = "0.10"
-pbkdf2 = "0.12"
-rand = "0.8"
-tempfile = "3.8"
+hmac = "0.13"
+sha2 = "0.11"
+aes-gcm = "0.11"
+pbkdf2 = "0.13"
+rand = "0.10"
+tempfile = "3.27"
 rustls = { version = "0.23", default-features = false }
-rustls-pemfile = "2.1"
+rustls-pemfile = "2.2"
 p12_q3 = "0.8"
 
 [workspace.metadata.release]

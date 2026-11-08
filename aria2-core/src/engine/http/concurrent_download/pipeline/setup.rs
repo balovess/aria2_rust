@@ -49,11 +49,12 @@ pub(super) async fn prepare(
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        .clamp(1, 16) as usize;
+        .clamp(1, constants::MAX_CONNECTION_PER_SERVER as u16) as usize;
     let requested_session_limit = options
         .max_http2_sessions_per_server
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
-        .clamp(1, max_conn as u16) as usize;
+        .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
+        as usize;
     let session_limit = requested_session_limit.min(dl.range_clients.len().max(1));
 
     let mirror_config = crate::engine::mirror_coordinator::MirrorConfig {

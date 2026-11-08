@@ -11,6 +11,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 pub(crate) struct ConnectionState {
     stream_connections: std::sync::atomic::AtomicU32,
     bt_connections: std::sync::atomic::AtomicU32,
+    http_version: std::sync::atomic::AtomicU8,
     activity_signal: std::sync::OnceLock<Arc<ActivitySignal>>,
 }
 
@@ -19,6 +20,7 @@ impl ConnectionState {
         Self {
             stream_connections: std::sync::atomic::AtomicU32::new(0),
             bt_connections: std::sync::atomic::AtomicU32::new(0),
+            http_version: std::sync::atomic::AtomicU8::new(0),
             activity_signal: std::sync::OnceLock::new(),
         }
     }
@@ -33,6 +35,29 @@ impl ConnectionState {
         self.stream_connections
             .store(count.min(u32::MAX as usize) as u32, Ordering::Release);
         self.notify_activity();
+    }
+
+    fn observe_http_version(&self, version: u8) {
+        let _ = self.http_version.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| match current {
+                0 => Some(version),
+                3 => None,
+                current if current == version => None,
+                _ => Some(3),
+            },
+        );
+        self.notify_activity();
+    }
+
+    fn http_version(&self) -> Option<&'static str> {
+        match self.http_version.load(Ordering::Acquire) {
+            1 => Some("HTTP/1.x"),
+            2 => Some("HTTP/2"),
+            3 => Some("mixed"),
+            _ => None,
+        }
     }
 
     pub(crate) fn set_bt(&self, count: usize) {
@@ -61,6 +86,18 @@ impl RequestGroup {
     /// Publish the current stream-protocol connection count.
     pub fn set_stream_connection_count(&self, count: usize) {
         self.connection_state.set_stream(count);
+    }
+
+    /// Record the HTTP protocol version observed from a successful response.
+    /// Different versions seen during one task are reported as mixed.
+    pub fn observe_http_version(&self, http2: bool) {
+        self.connection_state
+            .observe_http_version(if http2 { 2 } else { 1 });
+    }
+
+    /// Return the negotiated HTTP version observed so far for this task.
+    pub fn negotiated_http_version(&self) -> Option<&'static str> {
+        self.connection_state.http_version()
     }
 
     /// Publish the current BitTorrent peer connection count.

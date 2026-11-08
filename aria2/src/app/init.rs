@@ -27,7 +27,7 @@ impl Default for InitPerformance {
         Self {
             disk_cache: "256M".to_string(),
             split: 16,
-            max_connection_per_server: 16,
+            max_connection_per_server: 1,
             max_concurrent_downloads: 5,
         }
     }
@@ -318,7 +318,7 @@ mod tests {
         assert!(config.contains("continue=true"));
         assert!(config.contains("disk-cache=256M"));
         assert!(config.contains("split=16"));
-        assert!(config.contains("max-connection-per-server=16"));
+        assert!(config.contains("max-connection-per-server=1"));
         assert!(config.contains("max-http2-sessions-per-server=4"));
         assert!(config.contains("max-concurrent-downloads=5"));
         assert!(!config.contains("save-session="));

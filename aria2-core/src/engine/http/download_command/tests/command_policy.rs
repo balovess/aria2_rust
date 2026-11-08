@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
+fn http2_session_pool_count_uses_its_own_limit() {
     let options = DownloadOptions {
         http_version: crate::http::HttpVersion::Http2,
         max_http2_sessions_per_server: Some(16),
@@ -10,7 +10,7 @@ fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
     };
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&options),
-        1
+        crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER
     );
 
     let options = DownloadOptions {
@@ -26,27 +26,33 @@ fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
 
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&DownloadOptions::default()),
-        crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+        crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER
     );
 }
 
 #[test]
-fn http11_and_auto_pools_allow_the_configured_connection_ceiling() {
-    for http_version in [
-        crate::http::HttpVersion::Http11,
-        crate::http::HttpVersion::Auto,
-    ] {
-        let options = DownloadOptions {
-            http_version,
-            max_connection_per_server: Some(7),
-            max_http2_sessions_per_server: Some(2),
-            ..DownloadOptions::default()
-        };
-        assert_eq!(
-            crate::engine::http::client_config::range_client_pool_count(&options),
-            7
-        );
-    }
+fn http11_and_auto_pools_cover_their_protocol_limits() {
+    let http11 = DownloadOptions {
+        http_version: crate::http::HttpVersion::Http11,
+        max_connection_per_server: Some(7),
+        max_http2_sessions_per_server: Some(2),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&http11),
+        7
+    );
+
+    let auto = DownloadOptions {
+        http_version: crate::http::HttpVersion::Auto,
+        max_connection_per_server: Some(1),
+        max_http2_sessions_per_server: Some(4),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&auto),
+        4
+    );
 }
 
 #[test]

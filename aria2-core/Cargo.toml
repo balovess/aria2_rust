@@ -40,35 +40,35 @@ tracing-appender = "0.2"
 bytes.workspace = true
 memmap2 = "0.9"
 async-trait.workspace = true
-colored = "2.0"
+colored = "3.1"
 atty = "0.2"
-crossterm = "0.27"
-md-5 = "0.10"
-sha1 = "0.10"
-sha2 = "0.10"
+crossterm = "0.29"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
 aes-gcm.workspace = true
 pbkdf2.workspace = true
 adler32 = "1.2"
-digest = "0.10"
+digest = "0.11"
 aria2-protocol = { workspace = true }
 # Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
 # The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
 # automatically use ring as the crypto provider.
 reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
 # Kept at 0.24: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
 # feature is enabled (we don't use it).
-hickory-resolver = { version = "0.24", features = ["tokio-runtime"], default-features = false }
+hickory-resolver = { version = "0.26", features = ["tokio"], default-features = false }
 rand.workspace = true
 regex = "1"
 url = "2.5"
 base64.workspace = true
-flate2 = "1.0"
+flate2 = "1.1"
 bzip2-rs = "0.1"
-zeroize = "1.8"
+zeroize = "1.9"
 hex.workspace = true
 ring = "0.17"
 # rustls with ring provider; required for installing the crypto provider when
@@ -84,28 +84,28 @@ rustls-pemfile = { workspace = true }
 p12_q3 = { workspace = true }
 # p12_q3 does not decrypt PBES2 AES-128/AES-192 archives. Keep this adapter
 # focused on the PBES2 algorithms required by the existing client contract.
-pkcs5 = { version = "0.7.1", default-features = false, features = ["alloc", "pbes2", "sha1-insecure"] }
-yasna = { version = "0.5", features = ["std"] }
+pkcs5 = { version = "0.8.1", default-features = false, features = ["alloc", "pbes2", "sha1-insecure"] }
+yasna = { version = "0.6", features = ["std"] }
 rc4 = { version = "0.2", optional = true }
-once_cell = "1.19"
-dashmap = "5.5"
+once_cell = "1.21"
+dashmap = "6.2"
 # Firefox/Chromium cookie import reads `cookies.sqlite` / `Cookies` directly
 # (C++ `Sqlite3CookieParser`). `bundled` statically compiles SQLite into the
 # binary, so there is no system libsqlite3 requirement on any platform and no
 # version skew between what we test against and what a user happens to have
 # installed. `default-features = false` drops extras we never touch — the
 # parser only ever opens a database read-only and runs a single SELECT.
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # tokio-uring is available only on Linux and is enabled through the `io_uring` feature.
-tokio-uring = { version = "0.4", optional = true }
+tokio-uring = { version = "0.5", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
@@ -123,13 +123,13 @@ base64.workspace = true
 aria2-protocol.workspace = true
 # Local SFTP E2E fixture. Reuses the production lockfile version and stays
 # test-only so it does not expand the engine's runtime dependency surface.
-russh = { version = "0.61", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
 getrandom = "0.4"
 # sysinfo is used by the memory-footprint regression test (Phase F6) to sample
 # the process RSS while writing a file via PositionedDiskWriter. Pinned to 0.30
 # where `Process::memory()` returns bytes (in newer versions the API was split
 # into `memory()` / `virtual_memory()` with the same byte semantics).
-sysinfo = "0.30"
+sysinfo = "0.40"
 
 [[bench]]
 name = "config_bench"

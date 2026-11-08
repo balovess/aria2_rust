@@ -100,12 +100,15 @@ pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
 pub const DEFAULT_SECURE_FALLOC: bool = false;
 pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
-/// Hard per-download, per-authority ceiling for physical HTTP TCP connections.
-/// The adaptive scheduler changes active Range request/stream concurrency,
-/// while HTTP/2 may multiplex several Range requests over one TCP session.
-pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
+/// Default HTTP/1.1 per-download, per-authority connection ceiling, matching
+/// aria2's default.
+pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 1;
+/// Maximum accepted HTTP/1.1 per-download, per-authority connection ceiling.
+pub const MAX_CONNECTION_PER_SERVER: usize = 16;
 /// Default count of independent HTTP/2 client pools for concurrent Range traffic.
 pub const DEFAULT_HTTP2_SESSIONS_PER_SERVER: usize = 4;
+/// Maximum configured HTTP/2 sessions per server for one download.
+pub const MAX_HTTP2_SESSIONS_PER_SERVER: usize = 16;
 /// Default simultaneous HTTP/2 Range streams allowed on each physical session.
 pub const DEFAULT_HTTP2_STREAMS_PER_SESSION: usize = 4;
 /// Default durable HTTP parent piece length.

@@ -431,7 +431,7 @@ pub async fn execute(
                     Ok(total_written) => {
                         ranges_succeeded += 1;
                         last_range_finished = std::time::Instant::now();
-                        adaptive.record_success(executor.is_http2(&authority_key));
+                        adaptive.record_success();
                         if let Some((_, _, started_at, _)) = active_segment {
                             slow_range_recovery.record_success(
                                 &authority_key,

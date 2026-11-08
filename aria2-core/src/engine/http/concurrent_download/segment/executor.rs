@@ -69,12 +69,13 @@ pub(super) fn update_capacity(
     let is_http2 = executor.is_http2(authority_key);
     if executor.in_flight_for(authority_key) == 0 && !download_complete {
         let update = adaptive.finish_round(is_http2);
-        if let Some(connections) = update.connection_target {
+        if let Some(ranges) = update.range_target {
             tracing::info!(
-                target_connections = connections,
+                target_ranges = ranges,
+                target_sessions = adaptive.connection_target(is_http2),
                 range_target = adaptive.range_target(is_http2),
                 split_budget = split,
-                "HTTP adaptive physical connection count changed"
+                "HTTP adaptive Range concurrency target decreased"
             );
         }
     }

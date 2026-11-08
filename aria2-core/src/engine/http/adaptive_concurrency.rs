@@ -1,41 +1,35 @@
 //! Capacity-only concurrency control for HTTP segmented downloads.
 //!
-//! Each protocol starts at its configured ceiling. Successful requests never
-//! change that target. An explicit server-capacity rejection stops new
-//! admissions until the active round drains, then lowers the effective target
-//! by one and retries the rejected range. The configured connection/session
-//! limits remain hard ceilings and are never rewritten.
+//! Each protocol starts at the highest Range concurrency allowed by its
+//! configured limits. An explicit server-capacity rejection stops new
+//! admissions until the active round drains, then lowers the target and retries
+//! the rejected range. Successful requests clear backoff state but do not raise
+//! the target. Configured connection, session, stream, and split limits remain
+//! hard ceilings and are never rewritten.
 //!
 //! A single-source download instead treats a 429/503 as a rate limit: the
-//! target drops at once to the ranges the server is still serving, new
-//! ranges pause for Retry-After (or an exponential backoff), and a run of
-//! successes raises the target again, up to the ceiling.
+//! target drops at once to the ranges the server is still serving, and new
+//! ranges pause for Retry-After (or an exponential backoff).
 
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AdaptiveUpdate {
-    pub connection_target: Option<usize>,
+    pub range_target: Option<usize>,
 }
 
 #[derive(Debug)]
 struct ProtocolTarget {
     target: usize,
-    /// The configured limit; `target` never exceeds it.
-    ceiling: usize,
-    /// Successful ranges since the target last changed.
-    successes: usize,
     capacity_rejected: bool,
     accepting_new_work: bool,
     cooldown_until: Option<Instant>,
 }
 
 impl ProtocolTarget {
-    fn new(target: usize) -> Self {
+    fn new(ceiling: usize) -> Self {
         Self {
-            target: target.max(1),
-            ceiling: target.max(1),
-            successes: 0,
+            target: ceiling.max(1),
             capacity_rejected: false,
             accepting_new_work: true,
             cooldown_until: None,
@@ -43,9 +37,10 @@ impl ProtocolTarget {
     }
 }
 
-/// Capacity controller for one HTTP source. HTTP/1.1 targets physical
-/// connections; HTTP/2 targets sessions, with a fixed stream allowance per
-/// session.
+/// Adaptive Range concurrency for one HTTP source. HTTP/1.1 Range concurrency
+/// is bounded by physical connections. HTTP/2 Range concurrency is bounded by
+/// the split budget and the configured session/stream product; the controller
+/// derives the number of sessions needed for its current Range target.
 #[derive(Debug)]
 pub(crate) struct HttpAdaptiveConcurrency {
     split_budget: usize,
@@ -80,8 +75,14 @@ impl HttpAdaptiveConcurrency {
     ) -> Self {
         Self {
             split_budget: split_budget.max(1),
-            http1: ProtocolTarget::new(http1_connection_limit),
-            http2: ProtocolTarget::new(http2_session_limit),
+            http1: ProtocolTarget::new(http1_connection_limit.min(split_budget.max(1))),
+            http2: ProtocolTarget::new(
+                split_budget.max(1).min(
+                    http2_session_limit
+                        .max(1)
+                        .saturating_mul(http2_streams_per_session.max(1)),
+                ),
+            ),
             http2_streams_per_session: http2_streams_per_session.max(1),
             retry_wait: Duration::from_secs(retry_wait_secs),
             backoff_steps: 0,
@@ -89,17 +90,19 @@ impl HttpAdaptiveConcurrency {
     }
 
     pub(crate) fn connection_target(&self, is_http2: bool) -> usize {
-        self.protocol_target(is_http2).target
+        let target = self.protocol_target(is_http2).target;
+        if is_http2 {
+            target.div_ceil(self.http2_streams_per_session)
+        } else {
+            target
+        }
     }
 
     pub(crate) fn range_target(&self, is_http2: bool) -> usize {
-        let target = if is_http2 {
-            self.connection_target(true)
-                .saturating_mul(self.http2_streams_per_session)
-        } else {
-            self.connection_target(false)
-        };
-        target.min(self.split_budget).max(1)
+        self.protocol_target(is_http2)
+            .target
+            .min(self.split_budget)
+            .max(1)
     }
 
     /// Whether another range can start within the current protocol target.
@@ -146,7 +149,6 @@ impl HttpAdaptiveConcurrency {
             protocol.target.saturating_sub(1)
         };
         protocol.target = lowered.min(accepted).max(1);
-        protocol.successes = 0;
         // One backoff step per episode: the other ranges of the same burst
         // are rejected inside the cooldown it started.
         if !in_cooldown {
@@ -159,19 +161,10 @@ impl HttpAdaptiveConcurrency {
         wait
     }
 
-    /// A range succeeded: the backoff starts over, and after a run of
-    /// successes the target goes back up by one (a rate limit may have
-    /// passed), never above the configured ceiling.
-    pub(crate) fn record_success(&mut self, is_http2: bool) {
+    /// A successful range clears backoff history. The target remains at the
+    /// reduced value for this download; new downloads begin at their ceiling.
+    pub(crate) fn record_success(&mut self) {
         self.backoff_steps = 0;
-        let protocol = self.protocol_target_mut(is_http2);
-        protocol.successes = protocol.successes.saturating_add(1);
-        if protocol.target < protocol.ceiling
-            && protocol.successes >= protocol.target.saturating_mul(4)
-        {
-            protocol.target += 1;
-            protocol.successes = 0;
-        }
     }
 
     /// Backoff episodes since the last successful range.
@@ -180,13 +173,13 @@ impl HttpAdaptiveConcurrency {
     }
 
     /// Capacity rejections can be retried without consuming ordinary retry
-    /// budget while there is still a lower configured target to try.
+    /// budget while there is still a lower Range target to try.
     pub(crate) fn preserve_retry_budget(&self, is_http2: bool) -> bool {
-        self.connection_target(is_http2) > 1
+        self.range_target(is_http2) > 1
     }
 
-    /// Close the current round after all requests have drained. A successful
-    /// round is stable at its current target; only capacity rejection lowers it.
+    /// Close the current round after all requests have drained. Capacity
+    /// rejection lowers the Range target by one and returns the new target.
     pub(crate) fn finish_round(&mut self, is_http2: bool) -> AdaptiveUpdate {
         let retry_wait = self.retry_wait;
         let protocol = self.protocol_target_mut(is_http2);
@@ -202,7 +195,7 @@ impl HttpAdaptiveConcurrency {
         protocol.capacity_rejected = false;
         protocol.accepting_new_work = true;
         AdaptiveUpdate {
-            connection_target: changed,
+            range_target: changed,
         }
     }
 
@@ -237,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_at_each_configured_ceiling_and_success_keeps_it() {
+    fn starts_at_each_effective_ceiling_and_success_does_not_raise_it() {
         let mut controller = controller();
         assert_eq!(controller.connection_target(false), 16);
         assert_eq!(controller.range_target(false), 16);
@@ -259,40 +252,35 @@ mod tests {
         let mut controller = controller();
         controller.record_capacity_failure(false);
         assert!(!controller.can_start(0, false));
-        assert_eq!(controller.finish_round(false).connection_target, Some(15));
+        assert_eq!(controller.finish_round(false).range_target, Some(15));
         assert_eq!(controller.connection_target(false), 15);
         assert_eq!(controller.connection_target(true), 4);
 
         controller.record_capacity_failure(true);
-        assert_eq!(controller.finish_round(true).connection_target, Some(3));
-        assert_eq!(controller.range_target(true), 12);
+        assert_eq!(controller.finish_round(true).range_target, Some(15));
+        assert_eq!(controller.range_target(true), 15);
     }
 
     #[test]
-    fn retry_budget_is_preserved_until_single_connection_or_session() {
+    fn retry_budget_is_preserved_until_single_range() {
         let mut controller = controller();
         assert!(controller.preserve_retry_budget(false));
         assert!(controller.preserve_retry_budget(true));
 
         for expected in (1..=15).rev() {
             controller.record_capacity_failure(false);
-            assert_eq!(
-                controller.finish_round(false).connection_target,
-                Some(expected)
-            );
+            assert_eq!(controller.finish_round(false).range_target, Some(expected));
         }
         assert_eq!(controller.connection_target(false), 1);
         assert!(!controller.preserve_retry_budget(false));
 
-        for expected in [3, 2, 1] {
+        for expected in (1..=15).rev() {
             controller.record_capacity_failure(true);
-            assert_eq!(
-                controller.finish_round(true).connection_target,
-                Some(expected)
-            );
+            controller.finish_round(true);
+            assert_eq!(controller.range_target(true), expected);
         }
         assert_eq!(controller.connection_target(true), 1);
-        assert_eq!(controller.range_target(true), 4);
+        assert_eq!(controller.range_target(true), 1);
         assert!(!controller.preserve_retry_budget(true));
     }
 
@@ -324,34 +312,19 @@ mod tests {
     }
 
     #[test]
-    fn successes_reset_the_backoff_and_raise_the_target_to_the_ceiling() {
+    fn successes_reset_the_backoff_without_raising_the_reduced_target() {
         let mut controller = HttpAdaptiveConcurrency::new(16, 3, 4, 4, 0);
         controller.record_capacity_rejection(false, 0, Some(Duration::ZERO));
         assert_eq!(controller.connection_target(false), 1);
         assert_eq!(controller.backoff_steps(), 1);
 
-        controller.record_success(false);
+        controller.record_success();
         assert_eq!(controller.backoff_steps(), 0);
         for _ in 0..3 {
-            controller.record_success(false);
+            controller.record_success();
         }
-        assert_eq!(
-            controller.connection_target(false),
-            2,
-            "4 x target successes"
-        );
-        for _ in 0..8 {
-            controller.record_success(false);
-        }
-        assert_eq!(controller.connection_target(false), 3);
-        for _ in 0..24 {
-            controller.record_success(false);
-        }
-        assert_eq!(
-            controller.connection_target(false),
-            3,
-            "never above the ceiling"
-        );
+        assert_eq!(controller.connection_target(false), 1);
+        assert_eq!(controller.range_target(false), 1);
     }
 
     #[test]
@@ -373,7 +346,7 @@ mod tests {
         assert_eq!(controller.range_target(true), 3);
         assert!(!controller.can_start(3, false));
         assert!(!controller.can_start(3, true));
-        assert_eq!(controller.connection_target(false), 16);
-        assert_eq!(controller.connection_target(true), 4);
+        assert_eq!(controller.connection_target(false), 3);
+        assert_eq!(controller.connection_target(true), 1);
     }
 }

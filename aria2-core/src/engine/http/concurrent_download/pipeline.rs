@@ -155,13 +155,14 @@ pub async fn execute_with_coordinator(
             let is_http2 = executor.is_http2(key);
             if executor.in_flight_for(key) == 0 {
                 let update = controller.finish_round(is_http2);
-                if let Some(connections) = update.connection_target {
+                if let Some(ranges) = update.range_target {
                     tracing::info!(
                         server = key,
-                        target_connections = connections,
+                        target_ranges = ranges,
+                        target_sessions = controller.connection_target(is_http2),
                         range_target = controller.range_target(is_http2),
                         split_budget = split,
-                        "HTTP adaptive physical connection count changed"
+                        "HTTP adaptive Range concurrency target decreased"
                     );
                 }
             }
@@ -357,7 +358,7 @@ pub async fn execute_with_coordinator(
                 match pool_result.result {
                     Ok(bytes_downloaded) => {
                         if let Some(controller) = adaptive.get_mut(&result_authority_key) {
-                            controller.record_success(executor.is_http2(&result_authority_key));
+                            controller.record_success();
                         }
                         // The request result is sent only after its writer chunks
                         // have entered the channel. Commit them before the

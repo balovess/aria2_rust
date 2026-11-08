@@ -37,7 +37,7 @@ pub(super) fn create(
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        .clamp(1, 16) as usize;
+        .clamp(1, constants::MAX_CONNECTION_PER_SERVER as u16) as usize;
     let retry_policy = RetryPolicy::new(
         max_retries_per_segment,
         options.retry_wait.saturating_mul(1000),
@@ -46,7 +46,8 @@ pub(super) fn create(
     let session_limit = (options
         .max_http2_sessions_per_server
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
-        .clamp(1, max_conn as u16) as usize)
+        .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
+        as usize)
         .min(dl.range_clients.len().max(1));
     let adaptive = HttpAdaptiveConcurrency::new(
         split,

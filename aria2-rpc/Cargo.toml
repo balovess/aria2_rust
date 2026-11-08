@@ -23,10 +23,10 @@ tracing.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 
-axum = { version = "0.7", features = ["ws"] }
-tower-http = { version = "0.5", features = ["cors"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.7", features = ["cors"] }
 base64.workspace = true
-quick-xml = "0.31"
+quick-xml = "0.42"
 url = "2.5"
 rand.workspace = true
 hmac.workspace = true
@@ -50,7 +50,7 @@ tempfile.workspace = true
 criterion.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 default = []

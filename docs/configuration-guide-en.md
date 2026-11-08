@@ -190,8 +190,8 @@ preserved on resume. This implementation currently defaults `split` to `16`;
 original aria2 defaults to `5`.
 
 `max-connection-per-server` (`-x`) limits concurrent access to one server for
-one download. It remains restricted to `1..=16`. This implementation currently
-defaults to `16`; original aria2 defaults to `1`. For HTTP/1.1, `-x=1` permits
+one download. It remains restricted to `1..=16` and defaults to `1`, matching
+original aria2. For HTTP/1.1, `-x=1` permits
 only one active Range request even if `split` is larger. HTTP/2 applies this
 limit to independent client session pools while allowing multiplexed streams
 within a session.

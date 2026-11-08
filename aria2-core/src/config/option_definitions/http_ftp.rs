@@ -230,10 +230,12 @@ impl crate::config::OptionRegistry {
             name: "max-connection-per-server".into(),
             opt_type: OptionType::Integer,
             short_name: Some('x'),
-            default_value: OptionValue::Int(16),
+            default_value: OptionValue::Int(
+                crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as i64,
+            ),
             min: Some(1),
-            max: Some(16),
-            description: "Max TCP connections per HTTP server for one download; HTTP/2 may multiplex requests".into(),
+            max: Some(crate::constants::MAX_CONNECTION_PER_SERVER as u64),
+            description: "Maximum concurrent HTTP/1.1 connections per server for one download; HTTP/2 session and stream limits use their dedicated options".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });
@@ -244,8 +246,8 @@ impl crate::config::OptionRegistry {
                 crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as i64,
             ),
             min: Some(1),
-            max: Some(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u64),
-            description: "Maximum separate HTTP/2 client pools used for concurrent Range traffic to one server; effective sessions are capped by available pools and max-connection-per-server".into(),
+            max: Some(crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER as u64),
+            description: "Maximum separate HTTP/2 sessions used for concurrent Range traffic to one server; independent of max-connection-per-server".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

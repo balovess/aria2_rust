@@ -33,6 +33,10 @@ impl CoreRpcBackend {
             .with_dir(group.options().dir.clone().unwrap_or_default())
             .with_files(build_file_infos(group, snapshot.completed_length));
 
+        if let Some(http_version) = group.negotiated_http_version() {
+            info = info.with_http_version(http_version);
+        }
+
         if let Some(context) = group.get_download_context() {
             info = info
                 .with_piece_length(context.get_piece_length() as u64)

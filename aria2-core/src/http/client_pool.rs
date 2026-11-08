@@ -116,7 +116,7 @@ pub(crate) fn get_bound_download_clients_with_version(
     session_count: usize,
     http_version: HttpVersion,
 ) -> Arc<Vec<Client>> {
-    let session_count = session_count.clamp(1, crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER);
+    let session_count = session_count.clamp(1, crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER);
     let key = (local_address, accept_gzip, session_count, http_version);
     if let Some(clients) = BOUND_DOWNLOAD_CLIENTS.get(&key) {
         return Arc::clone(clients.value());

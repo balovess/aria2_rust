@@ -12,14 +12,17 @@ behavior. An unlisted behavior has not been audited here.
   aria2. `piece-length` defaults to `1M` and defines durable HTTP parent-piece
   boundaries for new downloads. A compatible control-file layout wins on
   resume.
-- **Known difference:** `max-connection-per-server` remains a per-download,
-  per-authority ceiling with the aria2-compatible range `1..=16`, but this
-  implementation currently defaults to `16`; original aria2 defaults to `1`.
-  `split` also has no registry ceiling but currently defaults to `16`, while
-  original aria2 defaults to `5`.
+- **Known difference:** `max-connection-per-server` defaults to `1`, matching
+  original aria2, and remains the per-download, per-authority HTTP/1.1
+  connection ceiling with the aria2-compatible range `1..=16`. `split` also
+  has no registry ceiling but defaults to `16`, while original aria2 defaults
+  to `5`.
   With `-x=1`, an HTTP/1.1 source permits one active Range request even when
-  `split` is larger. HTTP/2 applies the cap to client session pools, not
-  directly to individual multiplexed Range streams.
+  `split` is larger. HTTP/2 session pools and multiplexed Range streams use
+  their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
+  HTTP Range concurrency starts at the configured effective ceiling and backs
+  off on explicit server capacity feedback; a reduced target does not ramp back
+  up during that task.
 - **Verification:** focused tests cover values above the old `split=128`
   ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
   reuse of the control-file piece layout ahead of a new configuration.

@@ -118,6 +118,7 @@ fn serialize_status(
     add_number!("downloadSpeed", &status.download_speed);
     add_number!("uploadSpeed", &status.upload_speed);
     add_number!("connections", &status.connections);
+    add_optional!("httpVersion", &status.http_version);
     add_number!("errorCode", &status.error_code);
     add_optional!("errorMessage", &status.error_message);
     add!("status", status.status.as_str());

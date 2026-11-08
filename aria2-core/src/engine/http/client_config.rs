@@ -27,16 +27,18 @@ pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
     let max_connections = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        .clamp(1, constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        as usize;
+        .clamp(1, constants::MAX_CONNECTION_PER_SERVER as u16) as usize;
     let requested_sessions = options
         .max_http2_sessions_per_server
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
-        .clamp(1, constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
         as usize;
+    // Auto must provision both possibilities before ALPN reveals the protocol.
+    // The executor enforces the selected protocol's independent concurrency cap.
     match options.http_version {
-        crate::http::HttpVersion::Http2 => requested_sessions.min(max_connections),
-        crate::http::HttpVersion::Auto | crate::http::HttpVersion::Http11 => max_connections,
+        crate::http::HttpVersion::Http2 => requested_sessions,
+        crate::http::HttpVersion::Auto => max_connections.max(requested_sessions),
+        crate::http::HttpVersion::Http11 => max_connections,
     }
 }
 

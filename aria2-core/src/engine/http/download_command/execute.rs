@@ -59,6 +59,11 @@ impl DownloadCommand {
             .as_ref()
             .or(head_resp.as_ref())
             .map(|prepared| &prepared.response);
+        if let Some(response) = response_for_metadata {
+            self.group
+                .recover()
+                .observe_http_version(response.version() == reqwest::Version::HTTP_2);
+        }
         let mut effective_uri = prepared_get
             .as_ref()
             .or(head_resp.as_ref())
@@ -206,6 +211,11 @@ impl DownloadCommand {
                 "HTTP range capability probe completed"
             );
             probed_http_version = probe.version;
+            if let Some(version) = probe.version {
+                self.group
+                    .recover()
+                    .observe_http_version(version == reqwest::Version::HTTP_2);
+            }
         }
 
         let original_path = self.output_path.clone();

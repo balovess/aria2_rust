@@ -175,6 +175,9 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub connections: Option<u32>,
+    /// HTTP protocol version observed from the task's responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<String>,
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
@@ -273,6 +276,7 @@ impl Default for StatusInfo {
             download_speed: None,
             upload_speed: None,
             connections: None,
+            http_version: None,
             error_code: None,
             error_message: None,
             status: DownloadStatus::Active,
@@ -346,6 +350,10 @@ impl StatusInfo {
     }
     pub fn with_connections(mut self, c: u32) -> Self {
         self.connections = Some(c);
+        self
+    }
+    pub fn with_http_version(mut self, version: impl Into<String>) -> Self {
+        self.http_version = Some(version.into());
         self
     }
     pub fn with_upload_length(mut self, v: u64) -> Self {
