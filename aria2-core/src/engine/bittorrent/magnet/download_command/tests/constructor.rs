@@ -37,6 +37,13 @@ fn constructor_records_output_name_and_resolved_path_on_group() {
                 .as_ref()
         )
     );
+
+    let mut result = crate::request::request_group::DownloadResult::error(
+        crate::request::request_group::DownloadResultCode::TimeOut,
+        "metadata timed out",
+    );
+    result.fill_from_group(&group);
+    assert_eq!(result.files[0].path, group.resolved_output_path().unwrap());
 }
 
 #[test]

@@ -181,8 +181,9 @@ impl HttpAdaptiveConcurrency {
     pub(crate) fn record_success(&mut self, is_http2: bool) {
         self.backoff_steps = 0;
         let protocol = self.protocol_target_mut(is_http2);
-        protocol.successful_ranges_since_adjustment =
-            protocol.successful_ranges_since_adjustment.saturating_add(1);
+        protocol.successful_ranges_since_adjustment = protocol
+            .successful_ranges_since_adjustment
+            .saturating_add(1);
     }
 
     /// Reset the recovery window after any failed Range request.

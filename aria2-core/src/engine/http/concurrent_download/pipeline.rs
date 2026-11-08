@@ -162,7 +162,11 @@ pub async fn execute_with_coordinator(
                         target_sessions = controller.connection_target(is_http2),
                         range_target = controller.range_target(is_http2),
                         split_budget = split,
-                        direction = if update.increased { "probe-up" } else { "backoff" },
+                        direction = if update.increased {
+                            "probe-up"
+                        } else {
+                            "backoff"
+                        },
                         "HTTP adaptive Range concurrency target adjusted"
                     );
                 }
