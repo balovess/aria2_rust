@@ -651,7 +651,7 @@ async fn test_stress_request_group_man_concurrent() {
 fn get_memory_usage() -> usize {
     use std::cell::RefCell;
     thread_local! {
-        static SYS: RefCell<System> = RefCell::new(System::new());
+        static SYS: RefCell<System> = RefCell::new(System::new().expect("initialize sysinfo"));
     }
 
     // On Linux, release glibc's cached free-list memory back to the OS
@@ -664,7 +664,7 @@ fn get_memory_usage() -> usize {
     let pid = Pid::from_u32(std::process::id());
     let rss = SYS.with(|cell| {
         let mut sys = cell.borrow_mut();
-        if !sys.refresh_process(pid) {
+        if sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true) == 0 {
             return 0;
         }
         sys.process(pid).map(|p| p.memory()).unwrap_or(0)

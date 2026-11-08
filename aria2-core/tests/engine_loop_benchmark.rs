@@ -14,7 +14,7 @@ use e2e_helpers::mock_http_server::MockHttpServer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tempfile::TempDir;
 
 const FILE_SIZE: usize = 512 * 1024;
@@ -45,7 +45,7 @@ struct LockWaitSamples {
 }
 
 fn sample_process(sys: &mut System, pid: Pid, samples: &mut ProcessSamples) {
-    if !sys.refresh_process(pid) {
+    if sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true) == 0 {
         return;
     }
     let Some(process) = sys.process(pid) else {
@@ -63,7 +63,7 @@ fn sample_process(sys: &mut System, pid: Pid, samples: &mut ProcessSamples) {
 
 async fn sample_process_until_stopped(stop: Arc<AtomicBool>, samples: Arc<Mutex<ProcessSamples>>) {
     let pid = Pid::from_u32(std::process::id());
-    let mut sys = System::new();
+    let mut sys = System::new().expect("initialize sysinfo");
     while !stop.load(Ordering::Relaxed) {
         if let Ok(mut samples) = samples.lock() {
             sample_process(&mut sys, pid, &mut samples);
@@ -150,9 +150,9 @@ async fn rust_engine_loop_high_concurrency_baseline() {
     }
 
     let process_samples = Arc::new(Mutex::new(ProcessSamples::default()));
-    let mut process_sys = System::new();
+    let mut process_sys = System::new().expect("initialize sysinfo");
     let process_pid = Pid::from_u32(std::process::id());
-    if process_sys.refresh_process(process_pid)
+    if process_sys.refresh_processes(ProcessesToUpdate::Some(&[process_pid]), true) > 0
         && let Some(process) = process_sys.process(process_pid)
         && let Ok(mut samples) = process_samples.lock()
     {

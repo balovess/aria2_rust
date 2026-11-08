@@ -976,7 +976,7 @@ async fn e2e_ws_jsonrpc_get_version() {
         "params": [],
         "id": 1
     });
-    tx.send(Message::Text(request.to_string()))
+    tx.send(Message::Text(request.to_string().into()))
         .await
         .expect("send failed");
 
@@ -1024,7 +1024,7 @@ async fn e2e_ws_binary_jsonrpc_request_matches_original_non_control_frame_behavi
         "params": [],
         "id": "binary-frame",
     });
-    tx.send(Message::Binary(request.to_string().into_bytes()))
+    tx.send(Message::Binary(request.to_string().into_bytes().into()))
         .await
         .expect("send binary JSON-RPC request failed");
 
@@ -1071,7 +1071,7 @@ async fn e2e_ws_oversized_request_returns_parse_error_and_keeps_connection() {
     })
     .to_string();
     assert!(oversized.len() > 1024);
-    tx.send(Message::Text(oversized))
+    tx.send(Message::Text(oversized.into()))
         .await
         .expect("send oversized request failed");
 
@@ -1098,7 +1098,8 @@ async fn e2e_ws_oversized_request_returns_parse_error_and_keeps_connection() {
             "params": [],
             "id": "after-error",
         })
-        .to_string(),
+        .to_string()
+        .into(),
     ))
     .await
     .expect("connection must remain writable after parse error");
@@ -1135,7 +1136,7 @@ async fn e2e_ws_jsonrpc_batch_request() {
         {"jsonrpc": "2.0", "method": "aria2.getVersion", "params": [], "id": "b1"},
         {"jsonrpc": "2.0", "method": "aria2.getGlobalStat", "params": [], "id": "b2"},
     ]);
-    tx.send(Message::Text(batch.to_string()))
+    tx.send(Message::Text(batch.to_string().into()))
         .await
         .expect("send failed");
 
@@ -1218,7 +1219,7 @@ async fn e2e_ws_jsonrpc_with_events() {
         "params": [],
         "id": "ev-test"
     });
-    tx.send(Message::Text(request.to_string()))
+    tx.send(Message::Text(request.to_string().into()))
         .await
         .expect("send failed");
 

@@ -20,9 +20,9 @@ behavior. An unlisted behavior has not been audited here.
   With `-x=1`, an HTTP/1.1 source permits one active Range request even when
   `split` is larger. HTTP/2 session pools and multiplexed Range streams use
   their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
-  HTTP Range concurrency starts at the configured effective ceiling and backs
-  off on explicit server capacity feedback; a reduced target does not ramp back
-  up during that task.
+  HTTP Range concurrency starts at the configured effective ceiling, backs off
+  on explicit server capacity feedback, then probes upward by one Range after
+  a 5-second cooldown and 8 successful ranges without an intervening failure.
 - **Verification:** focused tests cover values above the old `split=128`
   ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
   reuse of the control-file piece layout ahead of a new configuration.

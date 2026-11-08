@@ -162,7 +162,8 @@ pub async fn execute_with_coordinator(
                         target_sessions = controller.connection_target(is_http2),
                         range_target = controller.range_target(is_http2),
                         split_budget = split,
-                        "HTTP adaptive Range concurrency target decreased"
+                        direction = if update.increased { "probe-up" } else { "backoff" },
+                        "HTTP adaptive Range concurrency target adjusted"
                     );
                 }
             }
@@ -358,7 +359,7 @@ pub async fn execute_with_coordinator(
                 match pool_result.result {
                     Ok(bytes_downloaded) => {
                         if let Some(controller) = adaptive.get_mut(&result_authority_key) {
-                            controller.record_success();
+                            controller.record_success(executor.is_http2(&result_authority_key));
                         }
                         // The request result is sent only after its writer chunks
                         // have entered the channel. Commit them before the
@@ -529,10 +530,12 @@ pub async fn execute_with_coordinator(
                         let error_code = super::server_stat_error_code(&e);
                         let is_capacity_limited = super::is_capacity_limited_error(&e);
                         let is_http2 = executor.is_http2(&result_authority_key);
-                        if let Some(controller) = adaptive.get_mut(&result_authority_key)
-                            && is_capacity_limited
-                        {
-                            controller.record_capacity_failure(is_http2);
+                        if let Some(controller) = adaptive.get_mut(&result_authority_key) {
+                            if is_capacity_limited {
+                                controller.record_capacity_failure(is_http2);
+                            } else {
+                                controller.record_failure(is_http2);
+                            }
                         }
                         let is_416 = matches!(
                             &e,

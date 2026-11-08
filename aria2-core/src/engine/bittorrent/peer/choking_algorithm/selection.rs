@@ -2,8 +2,8 @@
 
 use super::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::constants;
-use rand::RngExt;
 use rand::seq::SliceRandom;
+use rand::{Rng, RngExt};
 use std::cmp::Reverse;
 use std::time::{Duration, Instant};
 

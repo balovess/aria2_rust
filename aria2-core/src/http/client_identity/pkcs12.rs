@@ -334,7 +334,7 @@ pub(super) fn decrypt_pkcs12_aes_gcm(
     if key_len == 16 && tag_len == 12 {
         let cipher =
             aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12, U12>::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::aead::generic_array::GenericArray::<u8, U12>::from_slice(tag);
+        let tag = aes_gcm::Tag::<U12>::from_slice(tag);
         let mut plaintext = message.to_vec();
         cipher
             .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
@@ -343,7 +343,7 @@ pub(super) fn decrypt_pkcs12_aes_gcm(
     } else if key_len == 32 && tag_len == 12 {
         let cipher =
             aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12, U12>::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::aead::generic_array::GenericArray::<u8, U12>::from_slice(tag);
+        let tag = aes_gcm::Tag::<U12>::from_slice(tag);
         let mut plaintext = message.to_vec();
         cipher
             .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)

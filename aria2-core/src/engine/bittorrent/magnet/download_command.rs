@@ -118,6 +118,12 @@ impl MagnetDownloadCommand {
             .unwrap_or_else(|| "magnet_download".to_string());
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
+        {
+            let group = group.recover();
+            group.set_output_name(filename.clone());
+            group.set_resolved_output_path(path.to_string_lossy().into_owned());
+        }
+
         info!(
             "MagnetDownloadCommand created (shared group): {} -> {} (hash={})",
             filename,

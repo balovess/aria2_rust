@@ -101,7 +101,8 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
                 "params": [format!("token:{secret}")],
                 "id": "version",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("WebSocket client must send getVersion");
@@ -124,7 +125,8 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
                 ],
                 "id": "add",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("WebSocket client must send addUri");
@@ -179,7 +181,8 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
                 "params": [format!("token:{secret}"), gid],
                 "id": "remove",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("WebSocket client must send remove");
@@ -223,7 +226,8 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
                 "params": [format!("token:{secret}")],
                 "id": "shutdown",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("WebSocket client must send shutdown");
@@ -270,7 +274,7 @@ async fn e2e_websocket_oversized_request_returns_parse_error_without_disconnect(
         "fixture must exceed the configured rpc-max-request-size"
     );
     socket
-        .send(Message::Text(oversized_request))
+        .send(Message::Text(oversized_request.into()))
         .await
         .expect("WebSocket client must send oversized request");
 
@@ -286,7 +290,8 @@ async fn e2e_websocket_oversized_request_returns_parse_error_without_disconnect(
                 "params": [],
                 "id": "after-parse-error",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("WebSocket client must remain writable after parse error");
@@ -304,7 +309,8 @@ async fn e2e_websocket_oversized_request_returns_parse_error_without_disconnect(
                 "params": [],
                 "id": "shutdown",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("WebSocket client must send shutdown");
@@ -337,7 +343,8 @@ async fn e2e_websocket_reconnect_receives_lifecycle_notifications() {
                 "params": [],
                 "id": "first-connection",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("first WebSocket client must send getVersion");
@@ -360,7 +367,8 @@ async fn e2e_websocket_reconnect_receives_lifecycle_notifications() {
                 "params": [["http://127.0.0.1:1/websocket-reconnect.bin"]],
                 "id": "add-after-reconnect",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("reconnected WebSocket client must send addUri");
@@ -398,7 +406,8 @@ async fn e2e_websocket_reconnect_receives_lifecycle_notifications() {
                 "params": [],
                 "id": "shutdown",
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .expect("reconnected WebSocket client must send shutdown");

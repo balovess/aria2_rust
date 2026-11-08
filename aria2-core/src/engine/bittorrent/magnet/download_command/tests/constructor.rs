@@ -17,6 +17,29 @@ fn default_directory_is_valid_for_a_safe_magnet_name() {
 }
 
 #[test]
+fn constructor_records_output_name_and_resolved_path_on_group() {
+    let command = MagnetDownloadCommand::new(
+        GroupId::new(7),
+        "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&dn=test_file",
+        &DownloadOptions::default(),
+        Some("downloads"),
+    )
+    .expect("valid magnet link");
+
+    let group = command.group();
+    assert_eq!(group.output_name().as_deref(), Some("test_file"));
+    assert_eq!(
+        group.resolved_output_path().as_deref(),
+        Some(
+            std::path::PathBuf::from("downloads")
+                .join("test_file")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+}
+
+#[test]
 fn directory_output_name_is_rejected_before_io() {
     let options = DownloadOptions {
         out: Some(".".to_string()),

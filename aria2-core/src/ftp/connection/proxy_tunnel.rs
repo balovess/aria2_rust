@@ -550,7 +550,7 @@ fn md5_hex(input: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
-    format!("{:x}", result)
+    hex::encode(result)
 }
 
 #[cfg(test)]

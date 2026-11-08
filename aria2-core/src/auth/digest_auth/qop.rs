@@ -178,7 +178,7 @@ impl DigestAuthProvider {
                 let mut hasher = md5::Md5::new();
                 hasher.update(input);
                 let digest = hasher.finalize();
-                format!("{:x}", digest)
+                hex::encode(digest)
             }
             DigestAlgorithm::Sha256 => {
                 use sha2::{Digest as _, Sha256};

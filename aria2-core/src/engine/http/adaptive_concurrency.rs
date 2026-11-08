@@ -3,36 +3,48 @@
 //! Each protocol starts at the highest Range concurrency allowed by its
 //! configured limits. An explicit server-capacity rejection stops new
 //! admissions until the active round drains, then lowers the target and retries
-//! the rejected range. Successful requests clear backoff state but do not raise
-//! the target. Configured connection, session, stream, and split limits remain
-//! hard ceilings and are never rewritten.
+//! the rejected range. After a cooldown and a stable window of successful
+//! requests, the controller probes upward by one Range. Configured connection,
+//! session, stream, and split limits remain hard ceilings and are never rewritten.
 //!
 //! A single-source download instead treats a 429/503 as a rate limit: the
 //! target drops at once to the ranges the server is still serving, and new
 //! ranges pause for Retry-After (or an exponential backoff).
 
+use rand::RngExt;
 use std::time::{Duration, Instant};
+
+const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const RECOVERY_PROBE_SUCCESS_THRESHOLD: usize = 8;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AdaptiveUpdate {
     pub range_target: Option<usize>,
+    pub increased: bool,
 }
 
 #[derive(Debug)]
 struct ProtocolTarget {
+    ceiling: usize,
     target: usize,
     capacity_rejected: bool,
     accepting_new_work: bool,
     cooldown_until: Option<Instant>,
+    successful_ranges_since_adjustment: usize,
+    last_target_adjustment: Instant,
 }
 
 impl ProtocolTarget {
     fn new(ceiling: usize) -> Self {
+        let now = Instant::now();
         Self {
+            ceiling: ceiling.max(1),
             target: ceiling.max(1),
             capacity_rejected: false,
             accepting_new_work: true,
             cooldown_until: None,
+            successful_ranges_since_adjustment: 0,
+            last_target_adjustment: now,
         }
     }
 }
@@ -126,6 +138,7 @@ impl HttpAdaptiveConcurrency {
         let protocol = self.protocol_target_mut(is_http2);
         protocol.capacity_rejected = true;
         protocol.accepting_new_work = false;
+        protocol.successful_ranges_since_adjustment = 0;
     }
 
     /// A 429/503 while `accepted` other ranges are being served: the server
@@ -149,6 +162,8 @@ impl HttpAdaptiveConcurrency {
             protocol.target.saturating_sub(1)
         };
         protocol.target = lowered.min(accepted).max(1);
+        protocol.successful_ranges_since_adjustment = 0;
+        protocol.last_target_adjustment = now;
         // One backoff step per episode: the other ranges of the same burst
         // are rejected inside the cooldown it started.
         if !in_cooldown {
@@ -163,8 +178,17 @@ impl HttpAdaptiveConcurrency {
 
     /// A successful range clears backoff history. The target remains at the
     /// reduced value for this download; new downloads begin at their ceiling.
-    pub(crate) fn record_success(&mut self) {
+    pub(crate) fn record_success(&mut self, is_http2: bool) {
         self.backoff_steps = 0;
+        let protocol = self.protocol_target_mut(is_http2);
+        protocol.successful_ranges_since_adjustment =
+            protocol.successful_ranges_since_adjustment.saturating_add(1);
+    }
+
+    /// Reset the recovery window after any failed Range request.
+    pub(crate) fn record_failure(&mut self, is_http2: bool) {
+        self.protocol_target_mut(is_http2)
+            .successful_ranges_since_adjustment = 0;
     }
 
     /// Backoff episodes since the last successful range.
@@ -183,19 +207,37 @@ impl HttpAdaptiveConcurrency {
     pub(crate) fn finish_round(&mut self, is_http2: bool) -> AdaptiveUpdate {
         let retry_wait = self.retry_wait;
         let protocol = self.protocol_target_mut(is_http2);
-        let changed = if protocol.capacity_rejected && protocol.target > 1 {
-            protocol.target -= 1;
+        let now = Instant::now();
+        let (changed, increased) = if protocol.capacity_rejected {
+            let changed = if protocol.target > 1 {
+                protocol.target -= 1;
+                Some(protocol.target)
+            } else {
+                None
+            };
+            protocol.last_target_adjustment = now;
+            protocol.successful_ranges_since_adjustment = 0;
             if !retry_wait.is_zero() {
-                protocol.cooldown_until = Some(Instant::now() + retry_wait);
+                protocol.cooldown_until = Some(now + retry_wait);
             }
-            Some(protocol.target)
+            (changed, false)
+        } else if protocol.target < protocol.ceiling
+            && protocol.successful_ranges_since_adjustment >= RECOVERY_PROBE_SUCCESS_THRESHOLD
+            && protocol.cooldown_until.is_none_or(|until| now >= until)
+            && now.duration_since(protocol.last_target_adjustment) >= RECOVERY_PROBE_INTERVAL
+        {
+            protocol.target += 1;
+            protocol.successful_ranges_since_adjustment = 0;
+            protocol.last_target_adjustment = now;
+            (Some(protocol.target), true)
         } else {
-            None
+            (None, false)
         };
         protocol.capacity_rejected = false;
         protocol.accepting_new_work = true;
         AdaptiveUpdate {
             range_target: changed,
+            increased,
         }
     }
 
@@ -318,13 +360,42 @@ mod tests {
         assert_eq!(controller.connection_target(false), 1);
         assert_eq!(controller.backoff_steps(), 1);
 
-        controller.record_success();
+        controller.record_success(false);
         assert_eq!(controller.backoff_steps(), 0);
         for _ in 0..3 {
-            controller.record_success();
+            controller.record_success(false);
         }
         assert_eq!(controller.connection_target(false), 1);
         assert_eq!(controller.range_target(false), 1);
+    }
+
+    #[test]
+    fn recovery_probe_waits_for_stability_and_cooldown_then_adds_one_range() {
+        let mut controller = controller();
+        controller.record_capacity_failure(false);
+        assert_eq!(controller.finish_round(false).range_target, Some(15));
+        controller.http1.last_target_adjustment =
+            Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);
+        controller.http1.cooldown_until = Some(Instant::now() + Duration::from_secs(1));
+
+        for _ in 0..RECOVERY_PROBE_SUCCESS_THRESHOLD {
+            controller.record_success(false);
+        }
+        assert_eq!(controller.finish_round(false), AdaptiveUpdate::default());
+        assert_eq!(controller.range_target(false), 15);
+
+        controller.record_failure(false);
+        controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+        controller.http1.last_target_adjustment =
+            Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);
+        for _ in 0..RECOVERY_PROBE_SUCCESS_THRESHOLD {
+            controller.record_success(false);
+        }
+
+        let update = controller.finish_round(false);
+        assert_eq!(update.range_target, Some(16));
+        assert!(update.increased);
+        assert_eq!(controller.range_target(false), 16);
     }
 
     #[test]

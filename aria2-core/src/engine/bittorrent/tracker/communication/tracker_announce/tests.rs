@@ -331,7 +331,8 @@ async fn websocket_tracker_announces_started_and_stopped_events() {
                         "incomplete": 3,
                         "peers": [{"ip": "192.0.2.20", "port": 6881}]
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ))
                 .await
                 .expect("send tracker response");

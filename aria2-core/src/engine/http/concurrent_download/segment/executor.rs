@@ -75,7 +75,8 @@ pub(super) fn update_capacity(
                 target_sessions = adaptive.connection_target(is_http2),
                 range_target = adaptive.range_target(is_http2),
                 split_budget = split,
-                "HTTP adaptive Range concurrency target decreased"
+                direction = if update.increased { "probe-up" } else { "backoff" },
+                "HTTP adaptive Range concurrency target adjusted"
             );
         }
     }

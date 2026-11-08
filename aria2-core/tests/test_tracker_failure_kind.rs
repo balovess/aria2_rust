@@ -179,7 +179,7 @@ async fn websocket_failure_from_response(response: &'static str) -> TrackerFailu
             .expect("complete WebSocket handshake");
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
         websocket
-            .send(Message::Text(response.to_string()))
+            .send(Message::Text(response.to_string().into()))
             .await
             .expect("send tracker response");
     });
@@ -353,7 +353,7 @@ async fn concurrent_tracker_failures_remain_attached_to_their_urls() {
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
         websocket
             .send(Message::Text(
-                r#"{"failure reason":"not authorized"}"#.to_string(),
+                r#"{"failure reason":"not authorized"}"#.to_string().into(),
             ))
             .await
             .expect("send tracker rejection");

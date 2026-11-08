@@ -4,8 +4,11 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use hickory_resolver::TokioAsyncResolver;
-use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{
+    ConnectionConfig, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts,
+};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 
 use super::entry::DnsEntry;
 use crate::error::Aria2Error;
@@ -40,7 +43,7 @@ pub struct DnsCache {
     /// Fully-async hickory DNS resolver. When `None` (or on lookup error) resolution
     /// falls back to `tokio::net::lookup_host`. `TokioAsyncResolver` is `Arc`-backed
     /// internally, so cloning is cheap and no outer `Arc` is required.
-    resolver: Option<TokioAsyncResolver>,
+    resolver: Option<TokioResolver>,
 }
 
 impl DnsCache {
@@ -121,7 +124,7 @@ impl DnsCache {
     ///
     /// This replaces the default resolver built during construction. The TTL settings and
     /// IPv4 preference are preserved.
-    pub fn with_resolver(mut self, resolver: TokioAsyncResolver) -> Self {
+    pub fn with_resolver(mut self, resolver: TokioResolver) -> Self {
         self.resolver = Some(resolver);
         self
     }
@@ -480,26 +483,30 @@ impl DnsCache {
 /// `localhost`) are answered immediately without any network I/O — mirroring the behavior of
 /// `getaddrinfo` used by `tokio::net::lookup_host`.
 ///
-/// `TokioAsyncResolver::tokio` returns a ready handle (it does not spawn a background task at
+/// `TokioResolver` construction returns a ready handle (it does not spawn a background task at
 /// construction time and captures no runtime handle), so this is safe to call outside of an
 /// async context. The returned value is wrapped in `Some`; callers fall back to
 /// `tokio::net::lookup_host` whenever the resolver is `None`.
-fn build_resolver(
-    dns_timeout: Duration,
-    servers: Option<&[SocketAddr]>,
-) -> Option<TokioAsyncResolver> {
+fn build_resolver(dns_timeout: Duration, servers: Option<&[SocketAddr]>) -> Option<TokioResolver> {
     let mut opts = ResolverOpts::default();
-    opts.use_hosts_file = true;
+    opts.use_hosts_file = ResolveHosts::Always;
     opts.timeout = dns_timeout;
     let config = servers.map_or_else(ResolverConfig::default, |servers| {
         let nameservers = servers
             .iter()
             .copied()
-            .map(|address| NameServerConfig::new(address, Protocol::Udp))
+            .map(|address| {
+                let mut config = NameServerConfig::udp(address.ip());
+                config.connections[0].port = address.port();
+                config
+            })
             .collect::<Vec<_>>();
         ResolverConfig::from_parts(None, Vec::new(), nameservers)
     });
-    Some(TokioAsyncResolver::tokio(config, opts))
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .ok()
 }
 
 impl Default for DnsCache {

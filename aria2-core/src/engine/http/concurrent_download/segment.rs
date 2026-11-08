@@ -431,7 +431,7 @@ pub async fn execute(
                     Ok(total_written) => {
                         ranges_succeeded += 1;
                         last_range_finished = std::time::Instant::now();
-                        adaptive.record_success();
+                        adaptive.record_success(executor.is_http2(&authority_key));
                         if let Some((_, _, started_at, _)) = active_segment {
                             slow_range_recovery.record_success(
                                 &authority_key,
@@ -524,6 +524,11 @@ pub async fn execute(
                             e
                         };
                         tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                        let is_http2 = executor.is_http2(&authority_key);
+                        let is_capacity_limited = super::is_capacity_limited_error(&e);
+                        if !is_capacity_limited {
+                            adaptive.record_failure(is_http2);
+                        }
                         let current_limit_rejected = explicit_range_size_rejection
                             && rejected_range_size_limit >= range_size_limit;
                         let rejection_is_from_an_older_limit =
@@ -564,7 +569,6 @@ pub async fn execute(
                                 .map_err(|error| work_scheduler_error("retry a smaller range", error))?;
                             consecutive_416_count = 0;
                         } else {
-                        let is_http2 = executor.is_http2(&authority_key);
                         let is_file_not_found = matches!(
                             &e,
                             Aria2Error::Recoverable(
@@ -592,7 +596,7 @@ pub async fn execute(
                             .await?;
                             return Err(e);
                         }
-                        if super::is_capacity_limited_error(&e) {
+                        if is_capacity_limited {
                             // 429/503: the server wants fewer connections or a
                             // pause, not a failed download. The ranges it is
                             // serving go on; drop to their count, back off, and

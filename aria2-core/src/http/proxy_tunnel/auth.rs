@@ -16,7 +16,7 @@ pub(crate) fn md5_hex(input: &str) -> String {
     use md5::{Digest, Md5};
     let mut hasher = Md5::new();
     hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------

@@ -146,20 +146,23 @@ pub(crate) async fn announce_with_policy(
     {
         message["event"] = Value::String(event.to_string());
     }
-    tokio::time::timeout(timeout, websocket.send(Message::Text(message.to_string())))
-        .await
-        .map_err(|_| {
-            AnnounceError::new(
-                TrackerFailureKind::Timeout,
-                "WebSocket tracker announce timed out while sending",
-            )
-        })?
-        .map_err(|error| {
-            AnnounceError::new(
-                TrackerFailureKind::Network,
-                format!("WebSocket tracker announce send failed: {error}"),
-            )
-        })?;
+    tokio::time::timeout(
+        timeout,
+        websocket.send(Message::Text(message.to_string().into())),
+    )
+    .await
+    .map_err(|_| {
+        AnnounceError::new(
+            TrackerFailureKind::Timeout,
+            "WebSocket tracker announce timed out while sending",
+        )
+    })?
+    .map_err(|error| {
+        AnnounceError::new(
+            TrackerFailureKind::Network,
+            format!("WebSocket tracker announce send failed: {error}"),
+        )
+    })?;
 
     let response = tokio::time::timeout(timeout, async {
         let mut response = None;
@@ -491,7 +494,8 @@ mod tests {
                     serde_json::json!({
                         "peers": [{"ip": "192.0.2.10", "port": 6881}]
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ))
                 .await
                 .unwrap();

@@ -10,8 +10,8 @@
 //! `System::new_all()` enumerates every process on the machine and stores
 //! their metadata, which can itself consume tens of MiB — polluting a test
 //! whose very purpose is to measure RSS. `System::new()` starts empty and
-//! `refresh_process(pid)` is documented (sysinfo 0.30) to ADD the process if
-//! it is not yet listed, so we sample only the current process cheaply.
+//! `refresh_processes(ProcessesToUpdate::Some(...))` samples only the current
+//! process.
 //!
 //! # sysinfo 0.30 memory semantics
 //!
@@ -21,7 +21,7 @@
 use aria2_core::filesystem::disk_writer::SeekableDiskWriter;
 use aria2_core::filesystem::positioned_disk_writer::PositionedDiskWriter;
 use bytes::Bytes;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tempfile::TempDir;
 
 /// Refresh only `pid` in `sys` and update `peak_rss` if the current RSS is
@@ -31,9 +31,7 @@ use tempfile::TempDir;
 /// the duration of each call, leaving it freely readable between calls and
 /// after the loop — avoiding closure-capture borrow conflicts.
 fn sample_rss(sys: &mut System, pid: Pid, peak_rss: &mut u64) -> u64 {
-    // `refresh_process` adds the process if not yet listed (sysinfo 0.30) and
-    // returns false only if the process no longer exists.
-    if !sys.refresh_process(pid) {
+    if sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true) == 0 {
         return 0;
     }
     let rss = sys.process(pid).map(|p| p.memory()).unwrap_or(0); // bytes (RSS)
@@ -64,7 +62,7 @@ async fn test_memory_footprint_10mb_write() {
 
     // Lightweight System: starts empty; `sample_rss` adds only the current
     // process via `refresh_process`.
-    let mut sys = System::new();
+    let mut sys = System::new().expect("initialize sysinfo");
     // `Pid::from_u32` is the cross-platform constructor (on Windows Pid wraps
     // usize, on Linux i32 — `from_u32` works everywhere).
     let pid = Pid::from_u32(std::process::id());
