@@ -10,6 +10,9 @@ use crate::util::rwlock_ext::RwLockRecover;
 /// FTP, SFTP, or web-seed requests) plus active BitTorrent peer connections.
 pub(crate) struct ConnectionState {
     stream_connections: std::sync::atomic::AtomicU32,
+    http1_connections: std::sync::atomic::AtomicU32,
+    http2_sessions: std::sync::atomic::AtomicU32,
+    http2_streams: std::sync::atomic::AtomicU32,
     bt_connections: std::sync::atomic::AtomicU32,
     http_version: std::sync::atomic::AtomicU8,
     activity_signal: std::sync::OnceLock<Arc<ActivitySignal>>,
@@ -19,6 +22,9 @@ impl ConnectionState {
     pub(crate) fn new() -> Self {
         Self {
             stream_connections: std::sync::atomic::AtomicU32::new(0),
+            http1_connections: std::sync::atomic::AtomicU32::new(0),
+            http2_sessions: std::sync::atomic::AtomicU32::new(0),
+            http2_streams: std::sync::atomic::AtomicU32::new(0),
             bt_connections: std::sync::atomic::AtomicU32::new(0),
             http_version: std::sync::atomic::AtomicU8::new(0),
             activity_signal: std::sync::OnceLock::new(),
@@ -37,17 +43,48 @@ impl ConnectionState {
         self.notify_activity();
     }
 
-    fn observe_http_version(&self, version: u8) {
-        let _ = self.http_version.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| match current {
-                0 => Some(version),
-                3 => None,
-                current if current == version => None,
-                _ => Some(3),
-            },
+    fn set_http_counts(
+        &self,
+        http1_connections: usize,
+        http2_sessions: usize,
+        http2_streams: usize,
+    ) {
+        self.http1_connections.store(
+            http1_connections.min(u32::MAX as usize) as u32,
+            Ordering::Release,
         );
+        self.http2_sessions.store(
+            http2_sessions.min(u32::MAX as usize) as u32,
+            Ordering::Release,
+        );
+        self.http2_streams.store(
+            http2_streams.min(u32::MAX as usize) as u32,
+            Ordering::Release,
+        );
+        self.notify_activity();
+    }
+
+    fn http_counts(&self) -> (u32, u32, u32) {
+        (
+            self.http1_connections.load(Ordering::Acquire),
+            self.http2_sessions.load(Ordering::Acquire),
+            self.http2_streams.load(Ordering::Acquire),
+        )
+    }
+
+    fn observe_http_version(&self, version: u8) {
+        let _ = self
+            .http_version
+            .fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |current| match current {
+                    0 => Some(version),
+                    3 => None,
+                    current if current == version => None,
+                    _ => Some(3),
+                },
+            );
         self.notify_activity();
     }
 
@@ -88,6 +125,20 @@ impl RequestGroup {
         self.connection_state.set_stream(count);
     }
 
+    pub(crate) fn set_http_connection_counts(
+        &self,
+        http1_connections: usize,
+        http2_sessions: usize,
+        http2_streams: usize,
+    ) {
+        self.connection_state
+            .set_http_counts(http1_connections, http2_sessions, http2_streams);
+    }
+
+    pub(crate) fn http_connection_counts(&self) -> (u32, u32, u32) {
+        self.connection_state.http_counts()
+    }
+
     /// Record the HTTP protocol version observed from a successful response.
     /// Different versions seen during one task are reported as mixed.
     pub fn observe_http_version(&self, http2: bool) {
@@ -123,18 +174,35 @@ pub(crate) struct ActiveConnectionGuard {
 
 impl ActiveConnectionGuard {
     pub(crate) fn new(group: Arc<RwLock<RequestGroup>>) -> Self {
-        group.recover().set_stream_connection_count(0);
+        let group_guard = group.recover();
+        group_guard.set_stream_connection_count(0);
+        group_guard.set_http_connection_counts(0, 0, 0);
+        drop(group_guard);
         Self { group }
     }
 
     pub(crate) fn set(&self, count: usize) {
         self.group.recover().set_stream_connection_count(count);
     }
+
+    pub(crate) fn set_http_counts(
+        &self,
+        http1_connections: usize,
+        http2_sessions: usize,
+        http2_streams: usize,
+    ) {
+        self.group.recover().set_http_connection_counts(
+            http1_connections,
+            http2_sessions,
+            http2_streams,
+        );
+    }
 }
 
 impl Drop for ActiveConnectionGuard {
     fn drop(&mut self) {
         self.group.recover().set_stream_connection_count(0);
+        self.group.recover().set_http_connection_counts(0, 0, 0);
     }
 }
 

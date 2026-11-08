@@ -175,6 +175,30 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub connections: Option<u32>,
+    /// Active HTTP/1.1 request connections.
+    #[serde(
+        default,
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub http1_connections: Option<u32>,
+    /// HTTP/2 client sessions currently carrying active streams.
+    #[serde(
+        default,
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub http2_sessions: Option<u32>,
+    /// Active HTTP/2 Range streams.
+    #[serde(
+        default,
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub http2_streams: Option<u32>,
     /// HTTP protocol version observed from the task's responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
@@ -276,6 +300,9 @@ impl Default for StatusInfo {
             download_speed: None,
             upload_speed: None,
             connections: None,
+            http1_connections: None,
+            http2_sessions: None,
+            http2_streams: None,
             http_version: None,
             error_code: None,
             error_message: None,
@@ -350,6 +377,17 @@ impl StatusInfo {
     }
     pub fn with_connections(mut self, c: u32) -> Self {
         self.connections = Some(c);
+        self
+    }
+    pub fn with_http_connection_counts(
+        mut self,
+        http1_connections: u32,
+        http2_sessions: u32,
+        http2_streams: u32,
+    ) -> Self {
+        self.http1_connections = Some(http1_connections);
+        self.http2_sessions = Some(http2_sessions);
+        self.http2_streams = Some(http2_streams);
         self
     }
     pub fn with_http_version(mut self, version: impl Into<String>) -> Self {

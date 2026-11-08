@@ -122,6 +122,13 @@ impl SequentialDownloader {
                 }
             };
 
+            let is_http2 = response.version() == reqwest::Version::HTTP_2;
+            connection_guard.set_http_counts(
+                usize::from(!is_http2),
+                usize::from(is_http2),
+                usize::from(is_http2),
+            );
+
             let status = response.status();
             if status.as_u16() != 206 {
                 tracing::warn!(

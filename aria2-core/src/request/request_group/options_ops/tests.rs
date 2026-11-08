@@ -9,6 +9,47 @@ fn runtime_split_update_keeps_values_above_u16() {
 }
 
 #[test]
+fn http2_limits_can_be_updated_through_task_rpc_options() {
+    let mut options = DownloadOptions::default();
+    assert!(
+        apply_rpc_option(
+            &mut options,
+            "max-http2-sessions-per-server",
+            &serde_json::json!("4")
+        )
+        .unwrap()
+    );
+    assert!(
+        apply_rpc_option(
+            &mut options,
+            "max-http2-streams-per-session",
+            &serde_json::json!("32")
+        )
+        .unwrap()
+    );
+
+    assert_eq!(options.max_http2_sessions_per_server, Some(4));
+    assert_eq!(options.max_http2_streams_per_session, Some(32));
+
+    assert!(
+        apply_rpc_option(
+            &mut options,
+            "max-http2-sessions-per-server",
+            &serde_json::json!("0")
+        )
+        .is_err()
+    );
+    assert!(
+        apply_rpc_option(
+            &mut options,
+            "max-http2-streams-per-session",
+            &serde_json::json!("257")
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn string_options_reach_their_typed_fields() {
     let cases = [
         ("bt-peer-blocklist", serde_json::json!("blocklist.txt")),

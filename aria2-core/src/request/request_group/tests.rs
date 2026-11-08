@@ -59,6 +59,7 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     group.set_download_speed_cached(128);
     group.set_upload_speed_cached(32);
     group.set_stream_connection_count(1);
+    group.set_http_connection_counts(1, 2, 7);
     group.set_bt_connection_count(1);
     group.set_bt_metadata(2, 512, "01234567890123456789".to_string());
     group.set_bt_bitfield(Some(vec![0xC0]));
@@ -101,6 +102,9 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     assert_eq!(snapshot.upload_length, 64);
     assert_eq!(snapshot.download_speed, 128);
     assert_eq!(snapshot.connections, 2);
+    assert_eq!(snapshot.http1_connections, 1);
+    assert_eq!(snapshot.http2_sessions, 2);
+    assert_eq!(snapshot.http2_streams, 7);
     assert_eq!(bt.peer_count(), 2);
     assert_eq!(bt.seeder_count(), 1);
     assert_eq!(bt.num_pieces, 2);

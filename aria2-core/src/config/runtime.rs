@@ -610,6 +610,23 @@ mod tests {
         assert!(is_global_option_changeable("dir"));
         assert!(is_global_option_changeable("save-session"));
         assert!(is_global_option_changeable("min-http-range-size"));
+        assert!(is_global_option_changeable("max-http2-sessions-per-server"));
+        assert!(is_global_option_changeable("max-http2-streams-per-session"));
+        for name in [
+            "max-http2-sessions-per-server",
+            "max-http2-streams-per-session",
+        ] {
+            assert_eq!(
+                is_option_changeable(name, false),
+                ChangeableKind::Immediate,
+                "reserved task RPC should accept {name} immediately"
+            );
+            assert_eq!(
+                is_option_changeable(name, true),
+                ChangeableKind::Pending,
+                "active task RPC should store {name} for restart"
+            );
+        }
         #[cfg(feature = "bittorrent")]
         assert!(is_global_option_changeable("bt-force-encryption"));
         #[cfg(not(feature = "bittorrent"))]

@@ -20,6 +20,12 @@ pub struct DownloadStatusSnapshot {
     pub upload_speed: u64,
     /// Number of currently active protocol connections.
     pub connections: u32,
+    /// Active HTTP/1.1 request connections.
+    pub http1_connections: u32,
+    /// HTTP/2 client pool sessions currently carrying active streams.
+    pub http2_sessions: u32,
+    /// Active HTTP/2 Range streams.
+    pub http2_streams: u32,
     pub elapsed: Option<Duration>,
     pub bt: Option<BtStatusSnapshot>,
 }
@@ -94,6 +100,8 @@ impl super::RequestGroup {
             )
         };
 
+        let (http1_connections, http2_sessions, http2_streams) = self.http_connection_counts();
+
         DownloadStatusSnapshot {
             status,
             total_length: self.get_total_length_atomic(),
@@ -102,6 +110,9 @@ impl super::RequestGroup {
             download_speed,
             upload_speed,
             connections: self.active_connection_count(),
+            http1_connections,
+            http2_sessions,
+            http2_streams,
             elapsed: self.elapsed_time(),
             bt,
         }

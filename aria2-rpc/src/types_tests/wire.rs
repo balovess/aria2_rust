@@ -11,7 +11,8 @@ fn test_status_info_numeric_fields_are_strings() {
         .with_upload_length(0)
         .with_download_speed(1024000)
         .with_upload_speed(0)
-        .with_connections(5);
+        .with_connections(5)
+        .with_http_connection_counts(2, 1, 4);
 
     let json = serde_json::to_value(&info).unwrap();
 
@@ -52,6 +53,9 @@ fn test_status_info_numeric_fields_are_strings() {
         "connections must be a string: got {:?}",
         json["connections"]
     );
+    assert_eq!(json["http1Connections"].as_str(), Some("2"));
+    assert_eq!(json["http2Sessions"].as_str(), Some("1"));
+    assert_eq!(json["http2Streams"].as_str(), Some("4"));
 }
 
 #[test]

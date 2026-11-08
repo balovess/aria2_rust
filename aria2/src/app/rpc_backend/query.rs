@@ -30,6 +30,11 @@ impl CoreRpcBackend {
             .with_download_speed(snapshot.download_speed)
             .with_upload_speed(snapshot.upload_speed)
             .with_connections(snapshot.connections)
+            .with_http_connection_counts(
+                snapshot.http1_connections,
+                snapshot.http2_sessions,
+                snapshot.http2_streams,
+            )
             .with_dir(group.options().dir.clone().unwrap_or_default())
             .with_files(build_file_infos(group, snapshot.completed_length));
 
@@ -1082,3 +1087,7 @@ fn build_file_infos_from_result(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "query_tests.rs"]
+mod tests;

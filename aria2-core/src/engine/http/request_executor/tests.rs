@@ -93,6 +93,51 @@ fn h1_spreads_active_requests_across_session_pools() {
 }
 
 #[test]
+fn live_connection_counts_separate_h1_connections_from_h2_sessions_and_streams() {
+    crate::http::client_pool::ensure_rustls_provider();
+    let state = Arc::new(ExecutorState::new(
+        &["http://h1.test:80".into(), "https://h2.test:443".into()],
+        16,
+        16,
+        4,
+    ));
+    let h1 = state.authority("http://h1.test:80").unwrap();
+    h1.protocol.store(1, Ordering::Release);
+    h1.in_flight.store(2, Ordering::Release);
+
+    let h2 = state.authority("https://h2.test:443").unwrap();
+    h2.protocol.store(2, Ordering::Release);
+    h2.active_h2_sessions.store(3, Ordering::Release);
+    h2.in_flight.store(5, Ordering::Release);
+    h2.client_in_flight[0].store(3, Ordering::Release);
+    h2.client_in_flight[2].store(2, Ordering::Release);
+
+    let (result_tx, result_rx) = mpsc::channel(1);
+    let executor = HttpSegmentRequestExecutor {
+        result_rx,
+        result_tx,
+        clients: vec![reqwest::Client::new()],
+        request_policy: HttpRequestPolicy::default(),
+        cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
+        auth_options: AuthResolveOptions::default(),
+        netrc_path: None,
+        state,
+        total_limit: 16,
+        tasks: Vec::new(),
+        next_task_id: 1,
+    };
+
+    assert_eq!(
+        executor.active_connection_counts(),
+        HttpConnectionCounts {
+            http1_connections: 2,
+            http2_sessions: 2,
+            http2_streams: 5,
+        }
+    );
+}
+
+#[test]
 fn split_budget_is_distinct_from_connection_ceiling_for_http2() {
     let state = Arc::new(ExecutorState::new(
         &["https://single-session.test:443".into()],

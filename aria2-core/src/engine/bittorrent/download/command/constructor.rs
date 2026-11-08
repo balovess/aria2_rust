@@ -142,6 +142,20 @@ impl BtDownloadCommand {
         command.progress = command.group.recover().progress.clone();
         command.total_uploaded = command.group.recover().get_uploaded_length();
         command.apply_context_paths()?;
+        let resolved_output_path =
+            command
+                .group
+                .recover()
+                .get_download_context()
+                .and_then(|context| {
+                    context
+                        .get_file_entries()
+                        .first()
+                        .map(|file| file.path().to_owned())
+                });
+        if let Some(path) = resolved_output_path {
+            command.group.recover().set_resolved_output_path(path);
+        }
         Ok(command)
     }
 
@@ -463,6 +477,51 @@ impl BtDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::{BtDownloadCommand, DownloadOptions, GroupId};
+    use crate::util::rwlock_ext::RwLockRecover;
+
+    #[test]
+    fn shared_group_resolved_path_tracks_metadata_file_path() {
+        let torrent = crate::engine::bittorrent::download::command_tests::build_test_torrent();
+        let options = DownloadOptions::default();
+        let group = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::request::request_group::RequestGroup::new(
+                GroupId::new(903),
+                vec!["magnet:?xt=urn:btih:test".to_string()],
+                options.clone(),
+            ),
+        ));
+        group
+            .recover()
+            .set_resolved_output_path("downloads/magnet_download");
+
+        let _command = BtDownloadCommand::new_with_group(
+            std::sync::Arc::clone(&group),
+            &torrent,
+            &options,
+            Some("downloads"),
+        )
+        .expect("metadata-backed command should construct");
+
+        let group = group.recover();
+        let expected_path = group
+            .get_download_context()
+            .expect("metadata should install a download context")
+            .get_file_entries()[0]
+            .path()
+            .to_owned();
+        assert_eq!(
+            group.resolved_output_path().as_deref(),
+            Some(expected_path.as_str())
+        );
+        assert_ne!(expected_path, "downloads/magnet_download");
+
+        let mut result = crate::request::request_group::DownloadResult::error(
+            crate::request::request_group::DownloadResultCode::TimeOut,
+            "payload download failed",
+        );
+        result.fill_from_group(&group);
+        assert_eq!(result.files[0].path, expected_path);
+    }
 
     #[test]
     fn with_policy_constructor_installs_the_policy_for_peer_connections() {

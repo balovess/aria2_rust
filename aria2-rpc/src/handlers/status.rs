@@ -118,6 +118,9 @@ fn serialize_status(
     add_number!("downloadSpeed", &status.download_speed);
     add_number!("uploadSpeed", &status.upload_speed);
     add_number!("connections", &status.connections);
+    add_number!("http1Connections", &status.http1_connections);
+    add_number!("http2Sessions", &status.http2_sessions);
+    add_number!("http2Streams", &status.http2_streams);
     add_optional!("httpVersion", &status.http_version);
     add_number!("errorCode", &status.error_code);
     add_optional!("errorMessage", &status.error_message);
@@ -234,5 +237,24 @@ mod tests {
         assert_eq!(value["numPieces"], "10");
         assert_eq!(value["completedPieces"], "9");
         assert_eq!(value["missingPieces"], "1");
+    }
+
+    #[test]
+    fn status_projection_includes_http_transport_counts() {
+        let status = StatusInfo::new("gid-http").with_http_connection_counts(2, 1, 8);
+
+        let value = serialize_status_response(
+            BackendResponse::Status(status),
+            &[
+                "http1Connections".into(),
+                "http2Sessions".into(),
+                "http2Streams".into(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(value["http1Connections"], "2");
+        assert_eq!(value["http2Sessions"], "1");
+        assert_eq!(value["http2Streams"], "8");
     }
 }

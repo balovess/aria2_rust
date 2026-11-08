@@ -241,6 +241,7 @@ impl SequentialDownloader {
                         .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
 
                 connection_guard.set(1);
+                connection_guard.set_http_counts(0, 0, 0);
                 let response = tokio::select! {
                     result = request.send() => result.map_err(|e| {
                         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -253,6 +254,13 @@ impl SequentialDownloader {
                 };
                 (response, conditional_request, authentication_used)
             };
+
+            let is_http2 = response.version() == reqwest::Version::HTTP_2;
+            connection_guard.set_http_counts(
+                usize::from(!is_http2),
+                usize::from(is_http2),
+                usize::from(is_http2),
+            );
 
             let url_parsed = reqwest::Url::parse(&current_uri).ok();
             self.publish_connection_context(&current_uri, response.remote_addr());

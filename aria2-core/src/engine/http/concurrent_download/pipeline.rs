@@ -241,6 +241,12 @@ pub async fn execute_with_coordinator(
             };
 
             connection_guard.set(executor.in_flight());
+            let counts = executor.active_connection_counts();
+            connection_guard.set_http_counts(
+                counts.http1_connections,
+                counts.http2_sessions,
+                counts.http2_streams,
+            );
             active.insert(
                 seg_idx,
                 scheduler::ActiveRangeWork {
@@ -339,6 +345,12 @@ pub async fn execute_with_coordinator(
             Some(pool_result) = executor.next_result() => {
                 executor.reap_task(pool_result.task_id).await;
                 connection_guard.set(executor.in_flight());
+                let counts = executor.active_connection_counts();
+                connection_guard.set_http_counts(
+                    counts.http1_connections,
+                    counts.http2_sessions,
+                    counts.http2_streams,
+                );
                 let seg_idx = pool_result.segment_index;
                 let Some(active_task_id) = active.get(&seg_idx).map(|work| work.task_id) else {
                     continue;
@@ -684,6 +696,12 @@ pub async fn execute_with_coordinator(
                     && executor.abort_segment(seg_idx).await
                 {
                     connection_guard.set(executor.in_flight());
+                    let counts = executor.active_connection_counts();
+                    connection_guard.set_http_counts(
+                        counts.http1_connections,
+                        counts.http2_sessions,
+                        counts.http2_streams,
+                    );
                     let Some(active_work) = active.remove(&seg_idx) else {
                         continue;
                     };
@@ -729,6 +747,12 @@ pub async fn execute_with_coordinator(
                         && executor.abort_segment(seg_idx).await
                     {
                         connection_guard.set(executor.in_flight());
+                        let counts = executor.active_connection_counts();
+                        connection_guard.set_http_counts(
+                            counts.http1_connections,
+                            counts.http2_sessions,
+                            counts.http2_streams,
+                        );
                         let Some(active_work) = active.remove(&seg_idx) else {
                             continue;
                         };

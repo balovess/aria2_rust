@@ -8,7 +8,7 @@ use crate::engine::http::segment_downloader::HttpSegmentDownloader;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
 use super::admission::{ExecutorState, RunningTask};
-use super::{HttpSegmentRequest, HttpSegmentRequestResult};
+use super::{HttpConnectionCounts, HttpSegmentRequest, HttpSegmentRequestResult};
 /// Dynamic executor for admitted HTTP Range requests.
 ///
 /// `total_limit` is the per-download `split` budget. Each authority also has
@@ -348,6 +348,32 @@ impl HttpSegmentRequestExecutor {
             .authority(authority_key)
             .map(|authority| authority.in_flight.load(Ordering::Acquire))
             .unwrap_or(0)
+    }
+
+    /// Count active requests and H2 sessions currently carrying those
+    /// requests. Each request uses an independent HTTP/1.1 connection; H2
+    /// session activity is the number of client pool slots with active streams.
+    pub(crate) fn active_connection_counts(&self) -> HttpConnectionCounts {
+        let mut counts = HttpConnectionCounts::default();
+        for authority in self.state.authorities.iter() {
+            let authority = authority.value();
+            let in_flight = authority.in_flight.load(Ordering::Acquire);
+            match authority.protocol.load(Ordering::Acquire) {
+                1 => counts.http1_connections = counts.http1_connections.saturating_add(in_flight),
+                2 => {
+                    counts.http2_streams = counts.http2_streams.saturating_add(in_flight);
+                    counts.http2_sessions = counts.http2_sessions.saturating_add(
+                        authority
+                            .client_in_flight
+                            .iter()
+                            .filter(|in_flight| in_flight.load(Ordering::Acquire) > 0)
+                            .count(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        counts
     }
 
     pub fn finished_tasks(&self) -> Vec<(u64, u32)> {

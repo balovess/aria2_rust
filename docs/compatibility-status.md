@@ -27,6 +27,16 @@ behavior. An unlisted behavior has not been audited here.
   ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
   reuse of the control-file piece layout ahead of a new configuration.
 
+## HTTP live connection status
+
+- **Extension:** task status retains aria2-compatible `connections` and adds
+  `http1Connections`, `http2Sessions`, and `http2Streams`. H2 session counts
+  represent active client-pool session slots carrying streams; idle pooled
+  sessions are excluded. `http2Streams` counts active Range requests.
+- **Verification:** RPC status serialization and projection tests cover all
+  three extension fields. Runtime H2 pool-slot accounting is covered by the
+  HTTP request executor tests.
+
 ## HTTP(S) multi-mirror range resume
 
 - **Upstream format:** aria2 documents `.aria2` in-flight piece records as an

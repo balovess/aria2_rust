@@ -236,6 +236,12 @@ pub async fn execute(
                     }
                     active_work.insert(seg_idx, lease);
                     connection_guard.set(executor.in_flight());
+                    let counts = executor.active_connection_counts();
+                    connection_guard.set_http_counts(
+                        counts.http1_connections,
+                        counts.http2_sessions,
+                        counts.http2_streams,
+                    );
                     tracing::debug!(
                         seg_idx = seg_idx,
                         task_id,
@@ -361,6 +367,12 @@ pub async fn execute(
             Some(pool_result) = executor.next_result() => {
                 executor.reap_task(pool_result.task_id).await;
                 connection_guard.set(executor.in_flight());
+                let counts = executor.active_connection_counts();
+                connection_guard.set_http_counts(
+                    counts.http1_connections,
+                    counts.http2_sessions,
+                    counts.http2_streams,
+                );
                 let seg_idx = pool_result.segment_index;
                 let Some((_, _, _segment_started_at, active_task_id)) =
                     active_segs.get(&seg_idx).copied()
@@ -766,6 +778,12 @@ pub async fn execute(
                     && executor.abort_segment(seg_idx).await
                 {
                     connection_guard.set(executor.in_flight());
+                    let counts = executor.active_connection_counts();
+                    connection_guard.set_http_counts(
+                        counts.http1_connections,
+                        counts.http2_sessions,
+                        counts.http2_streams,
+                    );
                     active_segs.remove(&seg_idx);
                     let lease = active_work.remove(&seg_idx).ok_or_else(|| {
                         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -811,6 +829,12 @@ pub async fn execute(
                         && executor.abort_segment(seg_idx).await
                     {
                         connection_guard.set(executor.in_flight());
+                        let counts = executor.active_connection_counts();
+                        connection_guard.set_http_counts(
+                            counts.http1_connections,
+                            counts.http2_sessions,
+                            counts.http2_streams,
+                        );
                         active_segs.remove(&seg_idx);
                         let lease = active_work.remove(&seg_idx).ok_or_else(|| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
