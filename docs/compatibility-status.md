@@ -47,10 +47,10 @@ behavior. An unlisted behavior has not been audited here.
 - **Implementation:** `RequestGroup::resume()` chooses between these states
   using the in-flight command count. A regression test covers unpause before a
   slow HTTP task stops.
-- **Verification:** The new slow HTTP race test and the initial-paused-download
-  resume test pass on Windows. The existing sequential pause/resume test fails
-  before reaching unpause while waiting for its control file to be persisted;
-  that persistence failure remains to be investigated.
+- **Verification:** The slow HTTP unpause-race test, the initial-paused-download
+  resume test, and the sequential pause/resume control-file test pass on
+  Windows. Tests that atomically replace files must use a writable temporary
+  directory; the sandbox system temp path denies `MoveFileExW` replacement.
 
 ## DNS resolver defaults
 
