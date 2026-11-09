@@ -25,7 +25,7 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::e2e_helpers::mock_http_server::{
     Body, Incoming, MockHttpServer, Request, Response, StatusCode, empty_body, full_body,
@@ -1591,6 +1591,179 @@ async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
     assert!(
         !control_path.exists(),
         "successful completion must remove the control file"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_engine_resumed_ranges_exhaust_capacity_retries_instead_of_stalling() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 8 * 1024 * 1024;
+    let data = Arc::new(generate_test_data(file_size, 67));
+    let reject_ranges = Arc::new(AtomicBool::new(false));
+    let resumed_range_served = Arc::new(AtomicBool::new(false));
+    let rejected_requests = Arc::new(AtomicUsize::new(0));
+    let handler_data = Arc::clone(&data);
+    let handler_reject_ranges = Arc::clone(&reject_ranges);
+    let handler_resumed_range_served = Arc::clone(&resumed_range_served);
+    let handler_rejected_requests = Arc::clone(&rejected_requests);
+    server.on_get("/resume-capacity-limit", move |request| {
+        if request.method() == hyper::Method::HEAD {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", handler_data.len())
+                .body(empty_body())
+                .unwrap();
+        }
+
+        let Some(range) = request
+            .headers()
+            .get("Range")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("bytes="))
+            .and_then(|value| value.split_once('-'))
+            .and_then(|(start, end)| {
+                let start = start.parse::<usize>().ok()?;
+                let end = end.parse::<usize>().ok()?.min(handler_data.len() - 1);
+                (start <= end).then_some((start, end))
+            })
+        else {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("Content-Range", format!("bytes=*/{}", handler_data.len()))
+                .body(empty_body())
+                .unwrap();
+        };
+
+        // Keep the one-byte capability probe available after resume so this
+        // test exercises the concurrent segment retry path.
+        let reject_this_range = handler_reject_ranges.load(Ordering::Acquire)
+            && range.1 > range.0
+            && handler_resumed_range_served.swap(true, Ordering::AcqRel);
+        if reject_this_range {
+            handler_rejected_requests.fetch_add(1, Ordering::Relaxed);
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("Content-Length", 0)
+                .body(empty_body())
+                .unwrap();
+        }
+
+        let chunks = handler_data[range.0..=range.1]
+            .chunks(64 * 1024)
+            .map(Bytes::copy_from_slice)
+            .collect::<Vec<_>>();
+        let stream = futures::StreamExt::then(futures::stream::iter(chunks), |chunk| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok::<_, Infallible>(Frame::data(chunk))
+        });
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Accept-Ranges", "bytes")
+            .header(
+                "Content-Range",
+                format!("bytes={}-{}/{}", range.0, range.1, handler_data.len()),
+            )
+            .header("Content-Length", range.1 - range.0 + 1)
+            .body(StreamBody::new(stream).boxed())
+            .unwrap()
+    });
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "resume-capacity-limit.bin";
+    let url = make_url(&server.base_url(), "/resume-capacity-limit");
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.continue_download = true;
+    options.allow_overwrite = true;
+    options.max_retries = 1;
+
+    let gid = GroupId::new(413);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
+    let mut engine = DownloadEngine::new();
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("engine command channel should be open");
+    let mut engine_task = tokio::spawn(engine.run());
+
+    wait_for_group_status(&group, DownloadStatus::Active).await;
+    wait_for_control_file(&ControlFile::control_path_for(
+        &dir.path().join(output_name),
+    ))
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while group.read().unwrap().get_completed_length() < 6 * 1024 * 1024 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("download did not make enough progress before pause");
+    command_tx
+        .send(EngineCommand::Pause { gid })
+        .expect("pause command should be accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if group.read().unwrap().status() == DownloadStatus::Paused
+                && group.read().unwrap().num_commands() == 0
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("paused range command did not stop");
+
+    resumed_range_served.store(false, Ordering::Release);
+    reject_ranges.store(true, Ordering::Release);
+    command_tx
+        .send(EngineCommand::Unpause { gid })
+        .expect("unpause command should be accepted");
+    let engine_result =
+        tokio::time::timeout(std::time::Duration::from_secs(20), &mut engine_task).await;
+    if engine_result.is_err() {
+        let status = group.read().unwrap().status();
+        let num_commands = group.read().unwrap().num_commands();
+        let completed_length = group.read().unwrap().get_completed_length();
+        let rejected = rejected_requests.load(Ordering::Relaxed);
+        engine_task.abort();
+        let _ = engine_task.await;
+        panic!(
+            "rate-limited resumed download stayed active: status={status:?}, \
+             num_commands={num_commands}, completed_length={completed_length}, \
+             rejected_requests={rejected}"
+        );
+    }
+    engine_result
+        .expect("engine result should be available")
+        .expect("download engine task panicked")
+        .expect("download engine failed");
+
+    assert!(
+        matches!(group.read().unwrap().status(), DownloadStatus::Error(_)),
+        "persistent 429 responses should exhaust retries, got {:?}",
+        group.read().unwrap().status()
+    );
+    assert!(
+        rejected_requests.load(Ordering::Relaxed) >= 2,
+        "resumed download should retry the rejected range"
     );
     server.shutdown().await;
 }

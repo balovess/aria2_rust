@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const RECOVERY_PROBE_SUCCESS_THRESHOLD: usize = 8;
+// Require two maximum-backoff windows without another 429 before clearing the
+// failure streak; one successful Range does not prove the server recovered.
+const CAPACITY_BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AdaptiveUpdate {
@@ -60,8 +63,9 @@ pub(crate) struct HttpAdaptiveConcurrency {
     http2: ProtocolTarget,
     http2_streams_per_session: usize,
     retry_wait: Duration,
-    /// Backoff episodes since the last successful range.
+    /// Backoff episodes since the last sustained 429-free interval.
     backoff_steps: u32,
+    last_capacity_rejection: Option<Instant>,
 }
 
 const CAPACITY_BACKOFF_BASE: Duration = Duration::from_secs(1);
@@ -69,12 +73,13 @@ const CAPACITY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// Wait before the `step`th retry (from 1) after a 429/503 without
 /// Retry-After: 1 s doubling to 30 s, with +-50% jitter so parallel
-/// downloads do not retry in lockstep.
+/// downloads do not retry in lockstep. Jitter never exceeds the 30 s cap.
 pub(crate) fn capacity_backoff(step: u32) -> Duration {
     let base = CAPACITY_BACKOFF_BASE
         .saturating_mul(1 << step.saturating_sub(1).min(5))
         .min(CAPACITY_BACKOFF_MAX);
     base.mul_f64(rand::rng().random_range(0.5..1.5))
+        .min(CAPACITY_BACKOFF_MAX)
 }
 
 impl HttpAdaptiveConcurrency {
@@ -98,6 +103,7 @@ impl HttpAdaptiveConcurrency {
             http2_streams_per_session: http2_streams_per_session.max(1),
             retry_wait: Duration::from_secs(retry_wait_secs),
             backoff_steps: 0,
+            last_capacity_rejection: None,
         }
     }
 
@@ -152,6 +158,13 @@ impl HttpAdaptiveConcurrency {
         retry_after: Option<Duration>,
     ) -> Duration {
         let now = Instant::now();
+        if self
+            .last_capacity_rejection
+            .is_some_and(|last| now.duration_since(last) >= CAPACITY_BACKOFF_RESET_AFTER)
+        {
+            self.backoff_steps = 0;
+        }
+        self.last_capacity_rejection = Some(now);
         let protocol = self.protocol_target_mut(is_http2);
         let in_cooldown = protocol.cooldown_until.is_some_and(|until| now < until);
         // A new episode lowers by at least one; the rest of its burst only
@@ -176,10 +189,9 @@ impl HttpAdaptiveConcurrency {
         wait
     }
 
-    /// A successful range clears backoff history. The target remains at the
-    /// reduced value for this download; new downloads begin at their ceiling.
+    /// Record a successful range for concurrency recovery. A single successful
+    /// range does not clear capacity backoff history.
     pub(crate) fn record_success(&mut self, is_http2: bool) {
-        self.backoff_steps = 0;
         let protocol = self.protocol_target_mut(is_http2);
         protocol.successful_ranges_since_adjustment = protocol
             .successful_ranges_since_adjustment
@@ -192,7 +204,7 @@ impl HttpAdaptiveConcurrency {
             .successful_ranges_since_adjustment = 0;
     }
 
-    /// Backoff episodes since the last successful range.
+    /// Backoff episodes since the last sustained 429-free interval.
     pub(crate) fn backoff_steps(&self) -> u32 {
         self.backoff_steps
     }
@@ -355,17 +367,35 @@ mod tests {
     }
 
     #[test]
-    fn successes_reset_the_backoff_without_raising_the_reduced_target() {
+    fn backoff_persists_across_successes_and_resets_after_a_quiet_window() {
         let mut controller = HttpAdaptiveConcurrency::new(16, 3, 4, 4, 0);
-        controller.record_capacity_rejection(false, 0, Some(Duration::ZERO));
+        let first_wait = controller.record_capacity_rejection(false, 0, None);
         assert_eq!(controller.connection_target(false), 1);
         assert_eq!(controller.backoff_steps(), 1);
+        assert!(first_wait >= Duration::from_millis(500));
+        assert!(first_wait <= Duration::from_millis(1500));
 
-        controller.record_success(false);
-        assert_eq!(controller.backoff_steps(), 0);
-        for _ in 0..3 {
+        // Model one successful Range between every capacity rejection. These
+        // successes must not restart the retry delay at step one.
+        for step in 2..=6 {
             controller.record_success(false);
+            controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+            let wait = controller.record_capacity_rejection(false, 0, None);
+            assert_eq!(controller.backoff_steps(), step);
+            let base = Duration::from_secs(1 << (step - 1));
+            assert!(wait >= base.mul_f64(0.5), "step {step}: {wait:?}");
+            assert!(
+                wait <= base.mul_f64(1.5).min(CAPACITY_BACKOFF_MAX),
+                "step {step}: {wait:?}"
+            );
         }
+
+        controller.last_capacity_rejection =
+            Some(Instant::now() - CAPACITY_BACKOFF_RESET_AFTER - Duration::from_millis(1));
+        controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+        let wait = controller.record_capacity_rejection(false, 0, None);
+        assert_eq!(controller.backoff_steps(), 1);
+        assert!(wait >= Duration::from_millis(500) && wait <= Duration::from_millis(1500));
         assert_eq!(controller.connection_target(false), 1);
         assert_eq!(controller.range_target(false), 1);
     }
@@ -408,6 +438,7 @@ mod tests {
                 wait >= base.mul_f64(0.5) && wait <= base.mul_f64(1.5),
                 "step {step}: {wait:?}"
             );
+            assert!(wait <= CAPACITY_BACKOFF_MAX, "step {step}: {wait:?}");
         }
     }
 

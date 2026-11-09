@@ -147,7 +147,6 @@ pub async fn execute(
     let mut slow_range_recovery = SlowRangeRecovery::new();
     let mut completed_bytes = initial_completed;
     // For giving up on a server that keeps answering 429/503.
-    let mut ranges_succeeded = 0usize;
     let mut last_range_finished = std::time::Instant::now();
     let segment_stall_timeout =
         Duration::from_secs(constants::HTTP_DEFAULT_SEGMENT_STALL_TIMEOUT_SECS);
@@ -441,7 +440,6 @@ pub async fn execute(
 
                 match result {
                     Ok(total_written) => {
-                        ranges_succeeded += 1;
                         last_range_finished = std::time::Instant::now();
                         adaptive.record_success(executor.is_http2(&authority_key));
                         if let Some((_, _, started_at, _)) = active_segment {
@@ -625,9 +623,11 @@ pub async fn execute(
                                 wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
                                 "Server limited HTTP Range requests; backing off"
                             );
+                            // Enforce max-retries for consecutive capacity
+                            // rejection episodes even when earlier ranges in
+                            // this resumed attempt already completed.
                             let gave_up = last_range_finished.elapsed() >= CAPACITY_GIVE_UP
-                                || (ranges_succeeded == 0
-                                    && options.max_retries != 0
+                                || (options.max_retries != 0
                                     && adaptive.backoff_steps() > options.max_retries);
                             if gave_up {
                                 fail_work(&mut work_queue, work_lease, None)?;

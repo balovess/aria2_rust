@@ -27,6 +27,18 @@ behavior. An unlisted behavior has not been audited here.
   ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
   reuse of the control-file piece layout ahead of a new configuration.
 
+## HTTP Range capacity retries
+
+- **Engine policy:** HTTP 429/503 responses back off exponentially up to
+  30 seconds, honoring `Retry-After` when present. Consecutive capacity
+  rejection episodes are bounded by `max-retries` even if other ranges in the
+  resumed attempt have completed. Successful ranges do not clear the backoff
+  streak; it resets after 60 seconds without a 429. A five-minute no-progress
+  limit remains as a final bound when retries are unlimited.
+- **Verification:** an engine-level pause/resume test lets a resumed range
+  complete, then rate-limits subsequent ranges and verifies the command exits
+  with an error instead of remaining active.
+
 ## HTTP live connection status
 
 - **Extension:** task status retains aria2-compatible `connections` and adds
