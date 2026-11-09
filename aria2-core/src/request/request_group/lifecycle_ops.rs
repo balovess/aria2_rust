@@ -87,12 +87,17 @@ impl super::RequestGroup {
         Ok(())
     }
 
-    /// Resume a paused download. Clears pause flags and transitions to Waiting.
+    /// Resume a paused download. Running commands remain Active; stopped groups
+    /// transition to Waiting so the request group manager can schedule them.
     pub fn resume(&mut self) -> Result<()> {
         let mut status = self.status.recover_mut();
 
         if matches!(*status, DownloadStatus::Paused) {
-            *status = DownloadStatus::Waiting;
+            *status = if self.num_commands() > 0 {
+                DownloadStatus::Active
+            } else {
+                DownloadStatus::Waiting
+            };
             self.clear_command_failure();
             self.clear_pause();
             self.control_flags.clear_halt();

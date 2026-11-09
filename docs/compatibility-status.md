@@ -37,6 +37,20 @@ behavior. An unlisted behavior has not been audited here.
   three extension fields. Runtime H2 pool-slot accounting is covered by the
   HTTP request executor tests.
 
+## Pause and unpause lifecycle status
+
+- **Compatibility:** `active` means the download is currently running;
+  `waiting` means it is queued and has not started. Unpausing a group with an
+  in-flight command must therefore restore `active`; when its command has
+  already stopped, unpause restores `waiting` so the engine can schedule it.
+  This follows the [aria2 status definitions and `unpause` behavior](https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface).
+- **Implementation:** `RequestGroup::resume()` chooses between these states
+  using the in-flight command count. A regression test covers unpause before a
+  slow HTTP task stops.
+- **Verification gap:** The regression test has not yet run successfully in
+  this environment; the Windows `ring` dependency build failed because its
+  source package was missing `third_party/fiat/curve25519_64_msvc.h`.
+
 ## DNS resolver defaults
 
 - **Supported scope:** unless `--async-dns-server` is configured, asynchronous
