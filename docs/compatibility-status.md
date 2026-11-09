@@ -37,6 +37,21 @@ behavior. An unlisted behavior has not been audited here.
   three extension fields. Runtime H2 pool-slot accounting is covered by the
   HTTP request executor tests.
 
+## DNS resolver defaults
+
+- **Supported scope:** unless `--async-dns-server` is configured, asynchronous
+  DNS uses the operating system's resolver configuration and hosts file.
+  Explicit DNS server settings continue to take precedence.
+- **Compatibility:** this matches the original aria2 `AsyncNameResolver`,
+  which initializes c-ares without overriding its system-configured servers.
+- **Fallback:** if Hickory cannot read the system resolver configuration or
+  build its resolver, lookup falls back to Tokio's system name lookup. Each
+  Hickory request has a 5-second timeout; Hickory and the fallback share the
+  configured 30-second default total lookup deadline.
+- **Verification gap:** the crate compiles with system-config support, but
+  runtime resolution against a configured local DNS server has not yet been
+  manually checked on Windows.
+
 ## HTTP(S) multi-mirror range resume
 
 - **Upstream format:** aria2 documents `.aria2` in-flight piece records as an

@@ -77,6 +77,7 @@ impl ProtocolAdapterRegistry {
     ) -> Self {
         // Keep the always-available adapters in priority order; optional
         // formats are inserted ahead of their URI-scheme fallbacks below.
+        #[allow(unused_mut)]
         let mut adapters: Vec<Box<dyn ProtocolCommandAdapter>> = vec![
             Box::new(crate::engine::ftp::command_adapter::FtpCommandAdapter),
             Box::new(crate::engine::http::command_adapter::HttpCommandAdapter),

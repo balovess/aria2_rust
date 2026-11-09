@@ -5,9 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{
-    ConnectionConfig, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts,
-};
+use hickory_resolver::config::{NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 
 use super::entry::DnsEntry;
@@ -36,7 +34,7 @@ pub struct DnsCache {
     pub(crate) negative_entries: HashMap<EndpointKey, Instant>,
     /// Whether to prefer IPv4 addresses when sorting results
     ipv4_preference: bool,
-    /// Maximum time allowed for one DNS lookup.
+    /// Maximum time allowed for the complete DNS lookup, including fallback.
     dns_timeout: Duration,
     /// Explicit DNS servers, or an empty list when system defaults are used.
     dns_server_addresses: Vec<SocketAddr>,
@@ -178,6 +176,7 @@ impl DnsCache {
         }
 
         // 3. Try the hickory async resolver first; fall back to tokio::net::lookup_host on failure.
+        let lookup_started = Instant::now();
         if let Some(resolver) = self.resolver.as_ref() {
             match tokio::time::timeout(self.dns_timeout, resolver.lookup_ip(hostname)).await {
                 Err(error) => {
@@ -245,7 +244,8 @@ impl DnsCache {
         // 4. Fallback: OS-level resolution via tokio (blocking getaddrinfo on a thread pool).
         //    Used when the hickory resolver is unavailable, returns no addresses, or errors.
         let addr_str = format!("{}:{}", hostname, port);
-        let fallback = tokio::time::timeout(self.dns_timeout, tokio::net::lookup_host(&addr_str))
+        let remaining_timeout = self.dns_timeout.saturating_sub(lookup_started.elapsed());
+        let fallback = tokio::time::timeout(remaining_timeout, tokio::net::lookup_host(&addr_str))
             .await
             .map_err(|error| {
                 std::io::Error::new(
@@ -478,31 +478,36 @@ impl DnsCache {
 
 /// Build the default hickory async resolver.
 ///
-/// Uses the default upstream configuration (Google Public DNS via `ResolverConfig::default()`)
-/// and enables `use_hosts_file` so that names present in the system hosts file (e.g.
-/// `localhost`) are answered immediately without any network I/O — mirroring the behavior of
-/// `getaddrinfo` used by `tokio::net::lookup_host`.
+/// Uses the operating system's DNS configuration unless explicit servers are provided, and
+/// enables `use_hosts_file` so that names present in the system hosts file (e.g. `localhost`)
+/// are answered immediately without network I/O.
 ///
 /// `TokioResolver` construction returns a ready handle (it does not spawn a background task at
 /// construction time and captures no runtime handle), so this is safe to call outside of an
 /// async context. The returned value is wrapped in `Some`; callers fall back to
 /// `tokio::net::lookup_host` whenever the resolver is `None`.
 fn build_resolver(dns_timeout: Duration, servers: Option<&[SocketAddr]>) -> Option<TokioResolver> {
-    let mut opts = ResolverOpts::default();
+    let (config, mut opts) = match servers {
+        Some(servers) => {
+            let nameservers = servers
+                .iter()
+                .copied()
+                .map(|address| {
+                    let mut config = NameServerConfig::udp(address.ip());
+                    config.connections[0].port = address.port();
+                    config
+                })
+                .collect::<Vec<_>>();
+            (
+                ResolverConfig::from_parts(None, Vec::new(), nameservers),
+                ResolverOpts::default(),
+            )
+        }
+        None => hickory_resolver::system_conf::read_system_conf().ok()?,
+    };
     opts.use_hosts_file = ResolveHosts::Always;
-    opts.timeout = dns_timeout;
-    let config = servers.map_or_else(ResolverConfig::default, |servers| {
-        let nameservers = servers
-            .iter()
-            .copied()
-            .map(|address| {
-                let mut config = NameServerConfig::udp(address.ip());
-                config.connections[0].port = address.port();
-                config
-            })
-            .collect::<Vec<_>>();
-        ResolverConfig::from_parts(None, Vec::new(), nameservers)
-    });
+    // Bound an individual Hickory request while preserving the overall lookup deadline below.
+    opts.timeout = dns_timeout.min(Duration::from_secs(5));
     TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
         .build()

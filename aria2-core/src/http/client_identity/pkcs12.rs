@@ -330,39 +330,40 @@ pub(super) fn decrypt_pkcs12_aes_gcm(
 
     let (message, tag) = ciphertext.split_at_checked(ciphertext.len().checked_sub(tag_len)?)?;
     use aes_gcm::aead::consts::U12;
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use aes_gcm::aead::{AeadInOut, KeyInit};
+    let nonce = aes_gcm::Nonce::try_from(nonce.as_slice()).ok()?;
     if key_len == 16 && tag_len == 12 {
         let cipher =
             aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12, U12>::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::Tag::<U12>::from_slice(tag);
+        let tag = aes_gcm::Tag::<U12>::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     } else if key_len == 32 && tag_len == 12 {
         let cipher =
             aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12, U12>::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::Tag::<U12>::from_slice(tag);
+        let tag = aes_gcm::Tag::<U12>::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     } else if key_len == 16 {
         let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::Tag::from_slice(tag);
+        let tag = aes_gcm::Tag::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     } else {
         let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::Tag::from_slice(tag);
+        let tag = aes_gcm::Tag::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     }

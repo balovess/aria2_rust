@@ -75,7 +75,7 @@ impl ConnectionState {
     fn observe_http_version(&self, version: u8) {
         let _ = self
             .http_version
-            .fetch_update(
+            .try_update(
                 Ordering::AcqRel,
                 Ordering::Acquire,
                 |current| match current {

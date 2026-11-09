@@ -57,11 +57,10 @@ aria2-protocol = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
-# `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
-# TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
-# Kept at 0.24: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
+# `tokio` enables the async resolver; `system-config` loads the operating system's DNS settings.
+# Uses 0.26: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
 # feature is enabled (we don't use it).
-hickory-resolver = { version = "0.26", features = ["tokio"], default-features = false }
+hickory-resolver = { version = "0.26", features = ["tokio", "system-config"], default-features = false }
 rand.workspace = true
 regex = "1"
 url = "2.5"
