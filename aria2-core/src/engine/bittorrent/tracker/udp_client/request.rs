@@ -16,6 +16,8 @@ pub struct UdpAnnounceParams<'a> {
     pub uploaded: i64,
     pub event: UdpEvent,
     pub num_want: i32,
+    /// BitTorrent TCP listening port announced to the tracker.
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,6 +2,8 @@ use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct TrackerResponse {
+    /// Announce interval in seconds, or zero when the tracker omitted an
+    /// interval or supplied a non-positive value.
     pub interval: u32,
     pub min_interval: Option<u32>,
     /// Tracker swarm seeders, when the response included `complete`.
@@ -45,10 +47,13 @@ impl TrackerResponse {
     pub fn parse(data: &[u8]) -> Result<Self, String> {
         use crate::bittorrent::bencode::codec::BencodeValue;
         let (root, _) = BencodeValue::decode(data)?;
+        if !root.is_dict() {
+            return Err("Tracker response must be a bencoded dictionary".to_string());
+        }
 
         let failure_reason = root.dict_get_str("failure reason").map(|s| s.to_string());
 
-        if failure_reason.is_some() && root.dict_get(b"interval").is_none() {
+        if failure_reason.is_some() {
             return Ok(Self {
                 interval: 300,
                 min_interval: None,
@@ -64,10 +69,23 @@ impl TrackerResponse {
             });
         }
 
-        let interval = root.dict_get_int("interval").unwrap_or(1800) as u32;
-        let min_interval = root.dict_get_int("min interval").map(|n| n as u32);
-        let seeders = root.dict_get_int("complete").map(|n| n as u32);
-        let leechers = root.dict_get_int("incomplete").map(|n| n as u32);
+        let interval = root
+            .dict_get_int("interval")
+            .filter(|seconds| *seconds > 0)
+            .map(saturating_u32)
+            .unwrap_or(0);
+        let min_interval = root
+            .dict_get_int("min interval")
+            .filter(|seconds| *seconds > 0)
+            .map(saturating_u32);
+        let seeders = root
+            .dict_get_int("complete")
+            .filter(|count| *count >= 0)
+            .map(saturating_u32);
+        let leechers = root
+            .dict_get_int("incomplete")
+            .filter(|count| *count >= 0)
+            .map(saturating_u32);
         let downloaded = root
             .dict_get_int("downloaded")
             .and_then(|value| u64::try_from(value).ok());
@@ -261,6 +279,10 @@ impl TrackerResponse {
     }
 }
 
+fn saturating_u32(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +326,60 @@ mod tests {
         let resp = TrackerResponse::parse(&root.encode()).unwrap();
         assert!(resp.is_failure());
         assert_eq!(resp.failure_reason.as_deref(), Some("tracker offline"));
+    }
+
+    #[test]
+    fn test_parse_rejects_non_dictionary_root() {
+        let error = TrackerResponse::parse(b"i1e").unwrap_err();
+
+        assert!(error.contains("must be a bencoded dictionary"));
+    }
+
+    #[test]
+    fn test_parse_tracker_values_without_integer_wraparound() {
+        let mut d = BTreeMap::new();
+        d.insert(b"interval".to_vec(), BencodeValue::Int(i64::MAX));
+        d.insert(b"min interval".to_vec(), BencodeValue::Int(-1));
+        d.insert(b"complete".to_vec(), BencodeValue::Int(-1));
+        d.insert(b"incomplete".to_vec(), BencodeValue::Int(i64::MAX));
+        d.insert(b"downloaded".to_vec(), BencodeValue::Int(-1));
+
+        let response = TrackerResponse::parse(&BencodeValue::Dict(d).encode()).unwrap();
+
+        assert_eq!(response.interval, u32::MAX);
+        assert_eq!(response.min_interval, None);
+        assert_eq!(response.seeders, None);
+        assert_eq!(response.leechers, Some(u32::MAX));
+        assert_eq!(response.downloaded, None);
+    }
+
+    #[test]
+    fn test_parse_non_positive_interval_as_unspecified() {
+        let mut d = BTreeMap::new();
+        d.insert(b"interval".to_vec(), BencodeValue::Int(-1));
+
+        let response = TrackerResponse::parse(&BencodeValue::Dict(d).encode()).unwrap();
+
+        assert_eq!(response.interval, 0);
+    }
+
+    #[test]
+    fn test_failure_reason_remains_failure_when_interval_is_present() {
+        let mut d = BTreeMap::new();
+        d.insert(
+            b"failure reason".to_vec(),
+            BencodeValue::Bytes(b"temporarily unavailable".to_vec()),
+        );
+        d.insert(b"interval".to_vec(), BencodeValue::Int(60));
+
+        let response = TrackerResponse::parse(&BencodeValue::Dict(d).encode()).unwrap();
+
+        assert!(response.is_failure());
+        assert_eq!(
+            response.failure_reason.as_deref(),
+            Some("temporarily unavailable")
+        );
+        assert!(response.peers.is_empty());
     }
 
     #[test]

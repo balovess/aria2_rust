@@ -18,11 +18,6 @@ impl UdpTrackerClient {
         params: UdpAnnounceParams<'_>,
         timeout: Duration,
     ) -> Result<AnnounceResponse, UdpError> {
-        let port = self
-            .socket
-            .local_addr()
-            .map_err(|_| UdpError::Network)?
-            .port();
         self.add_announce(
             &params.tracker_addr,
             params.info_hash,
@@ -32,7 +27,7 @@ impl UdpTrackerClient {
             params.uploaded,
             params.event,
             params.num_want,
-            port,
+            params.port,
         );
 
         loop {

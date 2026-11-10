@@ -17,7 +17,6 @@ mod tracker_url;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use tracker_url::urlencode_bytes;
 pub use tracker_url::{is_udp_tracker, urlencode_infohash};
 
 use super::announce_list::AnnounceList;
@@ -257,56 +256,26 @@ impl BtAnnounce {
         key: Option<&[u8]>,
     ) -> Option<String> {
         let base_url = self.announce_list.get_announce()?;
-        let separator = if base_url.contains('?') { "&" } else { "?" };
-
-        // Use last 8 bytes of peer ID as key if not explicitly provided
-        let key_bytes = key.unwrap_or(&peer_id[12..20]);
-
-        let numwant = self.numwant();
-
-        let mut url = format!(
-            "{}{}info_hash={}&peer_id={}&uploaded={}&downloaded={}&left={}&compact=1&key={}&numwant={}&no_peer_id=1",
-            base_url,
-            separator,
-            urlencode_infohash(info_hash),
-            urlencode_infohash(peer_id),
-            uploaded,
-            downloaded,
-            left,
-            urlencode_bytes(key_bytes),
-            numwant,
-        );
-
-        if self.tcp_port != 0 {
-            url.push_str(&format!("&port={}", self.tcp_port));
-        }
-
         let event_str = self.announce_list.get_event_string();
-        if !event_str.is_empty() {
-            url.push_str("&event=");
-            url.push_str(event_str);
-        }
-
-        if !self.tracker_id.is_empty() {
-            url.push_str("&trackerid=");
-            url.push_str(&urlencode_bytes(self.tracker_id.as_bytes()));
-        }
-
-        // C++: if(PREF_BT_FORCE_ENCRYPTION || PREF_BT_REQUIRE_CRYPTO)
-        //   append "&requirecrypto=1", else append "&supportcrypto=1"
-        if self.force_encryption {
-            url.push_str("&requirecrypto=1");
-        } else {
-            url.push_str("&supportcrypto=1");
-        }
-
-        // C++: if(PREF_BT_EXTERNAL_IP is set) append "&ip=<addr>"
-        if let Some(ref ip) = self.external_ip {
-            url.push_str("&ip=");
-            url.push_str(ip);
-        }
-
-        Some(url)
+        Some(
+            aria2_protocol::bittorrent::tracker::http_tracker_protocol::build_announce_url(
+                &aria2_protocol::bittorrent::tracker::http_tracker_protocol::HttpAnnounceRequest {
+                    base_url,
+                    info_hash,
+                    peer_id,
+                    uploaded,
+                    downloaded,
+                    left,
+                    key,
+                    num_want: self.numwant(),
+                    port: self.tcp_port,
+                    event: Some(event_str),
+                    tracker_id: Some(&self.tracker_id),
+                    require_crypto: self.force_encryption,
+                    external_ip: self.external_ip.as_deref(),
+                },
+            ),
+        )
     }
 
     pub fn numwant(&self) -> u32 {

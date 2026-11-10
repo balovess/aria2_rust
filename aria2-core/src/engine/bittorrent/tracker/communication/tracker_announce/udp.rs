@@ -75,6 +75,7 @@ impl TrackerAnnouncer {
                     uploaded: uploaded as i64,
                     event: udp_event,
                     num_want: self.announce.numwant() as i32,
+                    port: self.announce.tcp_port(),
                 },
                 Duration::from_secs(self.tracker_timeout_secs),
             )

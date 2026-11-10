@@ -1,8 +1,7 @@
 //! URL detection and encoding helpers for BitTorrent tracker URLs.
 //!
-//! Provides [`is_udp_tracker`] for protocol detection, and URL-encoding
-//! functions [`urlencode_infohash`] and [`urlencode_bytes`] required by
-//! the BitTorrent tracker announce URL specification.
+//! Provides [`is_udp_tracker`] for engine routing and re-exports the public
+//! [`urlencode_infohash`] helper from the protocol crate.
 
 // ======================================================================
 // URL Detection Helpers
@@ -26,15 +25,4 @@ pub fn is_udp_tracker(url: &str) -> bool {
 // URL Encoding Helpers
 // ======================================================================
 
-/// URL-encodes a 20-byte info hash or peer ID for use in tracker URLs.
-///
-/// Each byte is encoded as `%XX` where XX is the uppercase hex representation.
-/// This is required by the BitTorrent tracker protocol specification.
-pub fn urlencode_infohash(hash: &[u8; 20]) -> String {
-    hash.iter().map(|b| format!("%{:02X}", b)).collect()
-}
-
-/// URL-encodes an arbitrary byte slice for use in tracker URLs.
-pub(crate) fn urlencode_bytes(data: &[u8]) -> String {
-    data.iter().map(|b| format!("%{:02X}", b)).collect()
-}
+pub use aria2_protocol::bittorrent::tracker::http_tracker_protocol::urlencode_infohash;

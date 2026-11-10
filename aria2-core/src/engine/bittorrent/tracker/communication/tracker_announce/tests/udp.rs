@@ -33,6 +33,7 @@ async fn local_udp_tracker_fixture_supports_bep15_announce() {
         assert!(length >= 98);
         assert_eq!(&request[0..8], &connection_id.to_be_bytes());
         assert_eq!(&request[8..12], &1i32.to_be_bytes());
+        assert_eq!(&request[96..98], &51413u16.to_be_bytes());
         let transaction = u32::from_be_bytes(request[12..16].try_into().unwrap());
         let mut announce_response = Vec::with_capacity(26);
         announce_response.extend_from_slice(&1i32.to_be_bytes());
@@ -48,6 +49,7 @@ async fn local_udp_tracker_fixture_supports_bep15_announce() {
     });
 
     let mut announcer = TrackerAnnouncer::new(&[vec![format!("udp://{address}/announce")]], &None);
+    announcer.set_tcp_port(51413);
     announcer.set_timeouts(Duration::from_secs(2), Duration::from_secs(2));
     let result = announcer
         .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)

@@ -11,7 +11,7 @@ fn test_urlencode_infohash() {
 
 #[test]
 fn test_urlencode_bytes() {
-    use super::super::bt_announce::urlencode_bytes;
+    use aria2_protocol::bittorrent::tracker::http_tracker_protocol::urlencode_bytes;
     assert_eq!(urlencode_bytes(&[0x01, 0x02, 0xFF, 0x00]), "%01%02%FF%00");
 }
 
