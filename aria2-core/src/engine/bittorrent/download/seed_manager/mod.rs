@@ -79,9 +79,8 @@ pub(crate) struct SeedPeerDiscovery {
 }
 
 pub(super) struct SeedPeerConnectionAttempt {
-    pub(super) task: tokio::task::JoinHandle<
-        crate::error::Result<crate::engine::bittorrent::peer::interaction::PeerConnectionResult>,
-    >,
+    pub(super) task:
+        tokio::task::JoinHandle<crate::engine::bittorrent::peer::interaction::PeerConnectionResult>,
     pub(super) checked_out: Vec<crate::engine::bittorrent::peer::storage::PeerEntry>,
 }
 

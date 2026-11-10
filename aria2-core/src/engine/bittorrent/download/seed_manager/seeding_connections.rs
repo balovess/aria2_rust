@@ -210,10 +210,7 @@ impl BtSeedManager {
 
     pub(super) fn finish_peer_connection_attempt(
         &mut self,
-        result: std::result::Result<
-            crate::error::Result<PeerConnectionResult>,
-            tokio::task::JoinError,
-        >,
+        result: std::result::Result<PeerConnectionResult, tokio::task::JoinError>,
     ) {
         let Some(attempt) = self.pending_peer_connection.take() else {
             return;
@@ -224,12 +221,7 @@ impl BtSeedManager {
             .map(|peer| ((peer.ip.to_string(), peer.port), peer))
             .collect::<HashMap<_, _>>();
         let connection_result = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                warn!(%error, "Seeding peer connection batch failed");
-                self.return_checked_out(checked_out.into_values());
-                return;
-            }
+            Ok(result) => result,
             Err(error) => {
                 warn!(%error, "Seeding peer connection task failed");
                 self.return_checked_out(checked_out.into_values());

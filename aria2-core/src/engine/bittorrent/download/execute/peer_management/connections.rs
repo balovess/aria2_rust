@@ -212,13 +212,6 @@ impl BtDownloadCommand {
                 }
             }
         };
-        let conn_result = match conn_result {
-            Ok(result) => result,
-            Err(error) => {
-                self.return_checked_out_peers(&checked_out);
-                return Err(error);
-            }
-        };
 
         let source_by_address: HashMap<SocketAddr, BtPeerSource> = checked_out
             .iter()

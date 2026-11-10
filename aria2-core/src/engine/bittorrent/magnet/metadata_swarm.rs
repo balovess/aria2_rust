@@ -140,8 +140,7 @@ impl MetadataPeerSwarm {
             None,
             &outbound_network_policy,
         )
-        .await
-        .map_err(|error| MetadataExchangeError::IoError(error.to_string()))?;
+        .await;
 
         let source_by_endpoint = candidates.into_iter().collect::<HashMap<_, _>>();
         let mut accepted_peer_ids = HashSet::new();

@@ -20,7 +20,7 @@ enum SeedWaitEvent {
             tokio::task::JoinError,
         >,
     ),
-    PeerConnections(Result<crate::error::Result<PeerConnectionResult>, tokio::task::JoinError>),
+    PeerConnections(Result<PeerConnectionResult, tokio::task::JoinError>),
     Wake,
 }
 

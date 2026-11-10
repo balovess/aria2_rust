@@ -66,7 +66,7 @@ impl BtPeerInteraction {
         connection_options: &BtPeerConnectionOptions,
         utp_transport: Option<UtpTransportHandle>,
         policy: &OutboundNetworkPolicy,
-    ) -> Result<PeerConnectionResult> {
+    ) -> PeerConnectionResult {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
         // A peer can legitimately delay Unchoke while the tracker has already
@@ -128,10 +128,10 @@ impl BtPeerInteraction {
 
         info!("[BT] Active connections: {}", active_connections.len());
 
-        Ok(PeerConnectionResult {
+        PeerConnectionResult {
             connections: active_connections,
             failed_count,
-        })
+        }
     }
 
     /// Establish and initialize one peer using the same crypto and protocol path
@@ -344,8 +344,7 @@ mod tests {
             ),
         )
         .await
-        .expect("the ready peer should be returned before the slow peer times out")
-        .unwrap();
+        .expect("the ready peer should be returned before the slow peer times out");
 
         assert_eq!(result.connections.len(), 1);
         drop(result);
@@ -433,8 +432,7 @@ mod tests {
             ),
         )
         .await
-        .expect("a later success must not renew the first peer's settle deadline")
-        .unwrap();
+        .expect("a later success must not renew the first peer's settle deadline");
 
         assert_eq!(result.connections.len(), 2);
         drop(result);
