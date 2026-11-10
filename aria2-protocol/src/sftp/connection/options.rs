@@ -48,6 +48,8 @@ pub struct SshOptions {
     pub host_key_mode: HostKeyCheckingMode,
     /// Expected fingerprint in `hashType=digest` form.
     pub host_key_fingerprint: Option<String>,
+    /// OpenSSH-format known-hosts file. Defaults to `~/.ssh/known_hosts`.
+    pub known_hosts_path: Option<PathBuf>,
     /// Compression setting (not all servers support this)
     pub compression: bool,
     /// Keep-alive interval (None to disable)
@@ -69,6 +71,7 @@ impl Default for SshOptions {
             read_timeout: Duration::from_secs(crate::DEFAULT_SFTP_READ_TIMEOUT_SECS),
             host_key_mode: HostKeyCheckingMode::default(),
             host_key_fingerprint: None,
+            known_hosts_path: None,
             compression: false,
             keepalive_interval: Some(Duration::from_secs(
                 crate::DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS,
@@ -122,6 +125,12 @@ impl SshOptions {
     /// Set the host key checking mode
     pub fn with_host_key_mode(mut self, mode: HostKeyCheckingMode) -> Self {
         self.host_key_mode = mode;
+        self
+    }
+
+    /// Set the OpenSSH-format known-hosts file used for host-key verification.
+    pub fn with_known_hosts_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.known_hosts_path = Some(path.into());
         self
     }
 

@@ -96,6 +96,17 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** focused CLI, RPC option validation, and protocol option
   construction tests cover the propagation path. Original aria2 has no matching
   SFTP-specific timeout options; these are Rust extensions.
+- **Host-key verification:** the protocol library now enforces the documented
+  `Strict`, `AcceptNew`, and `Disable` modes using OpenSSH-format
+  `~/.ssh/known_hosts` by default; library callers can supply another file.
+  The engine uses `AcceptNew` when `ssh-host-key-md` is absent and pins the
+  configured fingerprint when present. Newly accepted engine host keys are
+  persisted, and changed keys are rejected. This strengthens the prior
+  implementation, which accepted every key without checking or recording it.
+- **Verification:** protocol tests cover unknown-key rejection, first-use
+  recording, known-key acceptance, and changed-key rejection. End-to-end
+  SFTP interoperability is validated separately; SSH trust behavior is not
+  claimed compatible with original aria2 beyond explicit fingerprint checks.
 
 ## FTP control-session layering
 

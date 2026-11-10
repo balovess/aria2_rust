@@ -35,10 +35,14 @@ fn command_for(
         server.addr().port(),
         remote_path
     );
+    let mut options = options.clone();
+    if options.ssh_host_key_md.is_none() {
+        options.ssh_host_key_md = Some(server.sha1_fingerprint().to_string());
+    }
     SftpDownloadCommand::new(
         GroupId::new(gid),
         &uri,
-        options,
+        &options,
         output_dir.to_str(),
         Some(output_name),
     )
@@ -142,7 +146,10 @@ async fn e2e_sftp_interface_uses_the_real_configured_source_address() {
     let mut command = SftpDownloadCommand::new(
         GroupId::new(899),
         &uri,
-        &DownloadOptions::default(),
+        &DownloadOptions {
+            ssh_host_key_md: Some(server.sha1_fingerprint().to_string()),
+            ..DownloadOptions::default()
+        },
         output_dir.path().to_str(),
         Some("interface.bin"),
     )
@@ -594,6 +601,7 @@ async fn e2e_engine_sftp_pause_unpause_preserves_control_file() {
     let options = DownloadOptions {
         continue_download: true,
         allow_overwrite: true,
+        ssh_host_key_md: Some(server.sha1_fingerprint().to_string()),
         dir: Some(output_dir.path().to_string_lossy().into_owned()),
         out: Some(output_name.to_string()),
         ..DownloadOptions::default()
@@ -719,6 +727,7 @@ async fn e2e_engine_sftp_remove_preserves_partial_control_file() {
     let options = DownloadOptions {
         continue_download: true,
         allow_overwrite: true,
+        ssh_host_key_md: Some(server.sha1_fingerprint().to_string()),
         dir: Some(output_dir.path().to_string_lossy().into_owned()),
         out: Some(output_name.to_string()),
         ..DownloadOptions::default()
@@ -776,6 +785,7 @@ async fn e2e_engine_sftp_force_remove_preserves_partial_control_file() {
     let options = DownloadOptions {
         continue_download: true,
         allow_overwrite: true,
+        ssh_host_key_md: Some(server.sha1_fingerprint().to_string()),
         dir: Some(output_dir.path().to_string_lossy().into_owned()),
         out: Some(output_name.to_string()),
         ..DownloadOptions::default()
@@ -837,6 +847,7 @@ async fn e2e_engine_sftp_shutdown_halt_preserves_resume_state() {
     let options = DownloadOptions {
         continue_download: true,
         allow_overwrite: true,
+        ssh_host_key_md: Some(server.sha1_fingerprint().to_string()),
         dir: Some(output_dir.path().to_string_lossy().into_owned()),
         out: Some(output_name.to_string()),
         ..DownloadOptions::default()
@@ -908,6 +919,7 @@ async fn e2e_engine_sftp_force_halt_preserves_resume_state() {
     let options = DownloadOptions {
         continue_download: true,
         allow_overwrite: true,
+        ssh_host_key_md: Some(server.sha1_fingerprint().to_string()),
         dir: Some(output_dir.path().to_string_lossy().into_owned()),
         out: Some(output_name.to_string()),
         ..DownloadOptions::default()

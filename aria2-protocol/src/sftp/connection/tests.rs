@@ -217,6 +217,49 @@ fn test_host_key_fingerprint_formats() {
 }
 
 #[test]
+fn strict_host_key_mode_rejects_unknown_keys_and_accepts_recorded_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let known_hosts = directory.path().join("known_hosts");
+    let key = keys::parse_public_key_base64(
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
+    )
+    .unwrap();
+    let options = SshOptions::new("sftp.example", "user");
+
+    assert!(matches!(
+        verify_server_key(&options, &key, &known_hosts),
+        Err(SshError::Handshake { message }) if message.contains("not present")
+    ));
+
+    russh::keys::known_hosts::learn_known_hosts_path("sftp.example", 22, &key, &known_hosts)
+        .unwrap();
+    assert!(verify_server_key(&options, &key, &known_hosts).unwrap());
+}
+
+#[test]
+fn accept_new_host_key_persists_first_key_and_rejects_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let known_hosts = directory.path().join("nested").join("known_hosts");
+    let first_key = keys::parse_public_key_base64(
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
+    )
+    .unwrap();
+    let replacement_key = keys::parse_public_key_base64(
+        "AAAAC3NzaC1lZDI1NTE5AAAAIK2pr+Bfus1hvPof4Wb/plZCzSbqadHH0u+/f4ODtKnE",
+    )
+    .unwrap();
+    let options =
+        SshOptions::new("sftp.example", "user").with_host_key_mode(HostKeyCheckingMode::AcceptNew);
+
+    assert!(verify_server_key(&options, &first_key, &known_hosts).unwrap());
+    assert!(verify_server_key(&options, &first_key, &known_hosts).unwrap());
+    assert!(matches!(
+        verify_server_key(&options, &replacement_key, &known_hosts),
+        Err(SshError::Handshake { message }) if message.contains("host key changed")
+    ));
+}
+
+#[test]
 fn test_sftp_packet_constants_accessible() {
     // Verify that packet constants are accessible from this module
     assert_eq!(SSH_FXP_INIT, 1);

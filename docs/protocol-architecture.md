@@ -213,9 +213,11 @@ boundaries; the standalone client is not an adapter around the engine command.
    builds SSH options including the configured host-key fingerprint policy.
 3. The engine asks `OutboundNetworkPolicy` to create the target TCP stream and
    passes that stream to `SshConnection::connect_with_stream`. The protocol
-   module owns the SSH handshake, host-key check, authentication, and
-   subsystem channel. Its separate `SshConnection::connect` entry point is for
-   standalone direct TCP use.
+   module owns the SSH handshake, host-key check against the configured
+   fingerprint or OpenSSH-format `known_hosts`, authentication, and subsystem
+   channel. `AcceptNew` records only previously unseen host keys and rejects
+   later changes; `Strict` rejects unknown keys. Its separate
+   `SshConnection::connect` entry point is for standalone direct TCP use.
 4. `SftpSession::open` sends INIT, negotiates the server version, and owns packet
    reads/writes, request IDs, serialized request/response exchanges, response-ID
    validation, operation counts, and timeouts. It reports typed

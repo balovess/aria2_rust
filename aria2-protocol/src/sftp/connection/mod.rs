@@ -19,6 +19,7 @@ use russh::{cipher, compression};
 use sha1::Digest as Sha1Digest;
 use sha1::Sha1;
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -63,6 +64,84 @@ fn matches_fingerprint(key: &russh::keys::ssh_key::PublicKey, expected: &str) ->
     }
 }
 
+fn verify_server_key(
+    options: &SshOptions,
+    server_key: &russh::keys::ssh_key::PublicKey,
+    known_hosts_path: &Path,
+) -> Result<bool, SshError> {
+    if let Some(expected) = options.host_key_fingerprint.as_deref() {
+        return if matches_fingerprint(server_key, expected) {
+            Ok(true)
+        } else {
+            Err(SshError::Handshake {
+                message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
+            })
+        };
+    }
+
+    if options.host_key_mode == HostKeyCheckingMode::Disable {
+        tracing::warn!("[SFTP] Host key checking DISABLED - connection may be insecure");
+        return Ok(true);
+    }
+
+    let recorded_keys = russh::keys::known_hosts::known_host_keys_path(
+        &options.host,
+        options.port,
+        known_hosts_path,
+    )
+    .map_err(|error| SshError::Handshake {
+        message: format!("SSH known-hosts verification failed: {error}"),
+    })?;
+
+    if recorded_keys
+        .iter()
+        .any(|(_, recorded_key)| recorded_key == server_key)
+    {
+        return Ok(true);
+    }
+
+    if !recorded_keys.is_empty() {
+        return Err(SshError::Handshake {
+            message: format!("SSH host key changed for {}", options.target()),
+        });
+    }
+
+    match options.host_key_mode {
+        HostKeyCheckingMode::Strict => Err(SshError::Handshake {
+            message: format!(
+                "SSH host key for {} is not present in {}",
+                options.target(),
+                known_hosts_path.display()
+            ),
+        }),
+        HostKeyCheckingMode::AcceptNew => {
+            russh::keys::known_hosts::learn_known_hosts_path(
+                &options.host,
+                options.port,
+                server_key,
+                known_hosts_path,
+            )
+            .map_err(|error| SshError::Handshake {
+                message: format!("Failed to record SSH host key: {error}"),
+            })?;
+            Ok(true)
+        }
+        HostKeyCheckingMode::Disable => unreachable!("handled before known-hosts lookup"),
+    }
+}
+
+fn resolve_known_hosts_path(options: &SshOptions) -> Result<PathBuf, SshError> {
+    if let Some(path) = options.known_hosts_path.as_ref() {
+        return Ok(path.clone());
+    }
+
+    dirs::home_dir()
+        .map(|home| home.join(".ssh").join("known_hosts"))
+        .ok_or_else(|| SshError::Handshake {
+            message: "Cannot locate the home directory for SSH known-hosts verification".into(),
+        })
+}
+
 // Russh Client Handler
 // =============================================================================
 
@@ -89,36 +168,21 @@ impl client::Handler for SshClientHandler {
         &mut self,
         _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        let mode = self.options.host_key_mode.clone();
-        let expected = self.options.host_key_fingerprint.clone();
+        let options = Arc::clone(&self.options);
         let server_key = _server_public_key.public_key();
         async move {
-            debug!("[SFTP] Checking server key (mode={})", mode);
-            if let Some(expected) = expected {
-                if !matches_fingerprint(&server_key, &expected) {
-                    return Err(SshError::Handshake {
-                        message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
-                    });
-                }
-                return Ok(true);
-            }
-
-            match mode {
-                HostKeyCheckingMode::Strict => {
-                    debug!("[SFTP] Strict host key checking - accepting key");
-                    Ok(true)
-                }
-                HostKeyCheckingMode::AcceptNew => {
-                    info!("[SFTP] Accept-new mode - accepting server key");
-                    Ok(true)
-                }
-                HostKeyCheckingMode::Disable => {
-                    tracing::warn!(
-                        "[SFTP] Host key checking DISABLED - connection may be insecure"
-                    );
-                    Ok(true)
-                }
-            }
+            debug!(
+                "[SFTP] Checking server key (mode={})",
+                options.host_key_mode
+            );
+            let path = if options.host_key_fingerprint.is_some()
+                || options.host_key_mode == HostKeyCheckingMode::Disable
+            {
+                PathBuf::new()
+            } else {
+                resolve_known_hosts_path(&options)?
+            };
+            verify_server_key(&options, &server_key, &path)
         }
     }
 }
