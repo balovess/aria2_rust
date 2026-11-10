@@ -369,6 +369,20 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-tracker-source-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE_TIMEOUT
+                    .as_secs() as i64,
+            ),
+            min: Some(1),
+            max: Some(600),
+            description: "Timeout for each public tracker source download in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "enable-public-trackers".into(),
             opt_type: OptionType::Boolean,
             default_value: OptionValue::Bool(true),
@@ -634,6 +648,48 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
+        self.register(OptionDef {
+            name: "bt-utp-max-connections".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::utp::DEFAULT_MAX_CONNECTIONS as i64,
+            ),
+            min: Some(1),
+            max: Some(u64::from(u16::MAX) + 1),
+            description: "Maximum simultaneous uTP connections per local endpoint".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: true,
+            ..Default::default()
+        });
+        for (name, default, description) in [
+            (
+                "bt-utp-connect-timeout",
+                aria2_protocol::bittorrent::utp::DEFAULT_CONNECT_TIMEOUT,
+                "uTP connection establishment timeout in seconds",
+            ),
+            (
+                "bt-utp-idle-timeout",
+                aria2_protocol::bittorrent::utp::DEFAULT_IDLE_TIMEOUT,
+                "uTP inactive connection timeout in seconds",
+            ),
+            (
+                "bt-utp-keepalive-interval",
+                aria2_protocol::bittorrent::utp::DEFAULT_KEEPALIVE_INTERVAL,
+                "uTP keepalive interval in seconds",
+            ),
+        ] {
+            self.register(OptionDef {
+                name: name.into(),
+                opt_type: OptionType::Integer,
+                default_value: OptionValue::Int(default.as_secs() as i64),
+                min: Some(1),
+                max: Some(600),
+                description: description.into(),
+                category: OptionCategory::BitTorrent,
+                expose_in_aria2_rpc: true,
+                ..Default::default()
+            });
+        }
 
         // --- DHT Entry Points (Fine-Grained) ---
         self.register(OptionDef {

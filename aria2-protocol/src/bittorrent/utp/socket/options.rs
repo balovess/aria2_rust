@@ -3,6 +3,10 @@ use std::time::Duration;
 /// Maximum number of distinct local connection IDs representable on a uTP
 /// socket. Connection ID zero is valid, so the full `u16` space is usable.
 const MAX_CONNECTIONS: usize = u16::MAX as usize + 1;
+pub const DEFAULT_MAX_CONNECTIONS: usize = 100;
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Configuration for one uTP socket.
 ///
@@ -75,10 +79,10 @@ impl UtpSocketOptions {
 impl Default for UtpSocketOptions {
     fn default() -> Self {
         Self {
-            max_connections: 100,
-            connect_timeout: Duration::from_secs(10),
-            idle_timeout: Duration::from_secs(30),
-            keepalive_interval: Duration::from_secs(15),
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            keepalive_interval: DEFAULT_KEEPALIVE_INTERVAL,
         }
     }
 }

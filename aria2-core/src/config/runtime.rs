@@ -142,11 +142,21 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     #[cfg(feature = "bittorrent")]
     "bt-incoming-peer-handshake-timeout",
     #[cfg(feature = "bittorrent")]
+    "bt-utp-max-connections",
+    #[cfg(feature = "bittorrent")]
+    "bt-utp-connect-timeout",
+    #[cfg(feature = "bittorrent")]
+    "bt-utp-idle-timeout",
+    #[cfg(feature = "bittorrent")]
+    "bt-utp-keepalive-interval",
+    #[cfg(feature = "bittorrent")]
     "enable-public-trackers",
     #[cfg(feature = "bittorrent")]
     "bt-tracker-source",
     #[cfg(feature = "bittorrent")]
     "bt-tracker-update-interval",
+    #[cfg(feature = "bittorrent")]
+    "bt-tracker-source-timeout",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
@@ -673,6 +683,15 @@ mod tests {
         assert!(is_global_option_changeable(
             "bt-incoming-peer-handshake-timeout"
         ));
+        #[cfg(feature = "bittorrent")]
+        for name in [
+            "bt-utp-max-connections",
+            "bt-utp-connect-timeout",
+            "bt-utp-idle-timeout",
+            "bt-utp-keepalive-interval",
+        ] {
+            assert!(is_global_option_changeable(name));
+        }
         for name in [
             "max-http2-sessions-per-server",
             "max-http2-streams-per-session",

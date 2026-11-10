@@ -461,6 +461,10 @@ pub enum EngineCommand {
     #[cfg(feature = "bittorrent")]
     SetPublicTrackerUpdateInterval { seconds: u64 },
 
+    /// Change the complete-request timeout for public tracker source downloads.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackerSourceTimeout { seconds: u64 },
+
     /// Enable or disable the process-wide public tracker catalog.
     #[cfg(feature = "bittorrent")]
     SetPublicTrackersEnabled { enabled: bool },
@@ -468,6 +472,12 @@ pub enum EngineCommand {
     /// Change the process-wide timeout applied to reads in incoming BT peer handshakes.
     #[cfg(feature = "bittorrent")]
     SetIncomingPeerHandshakeTimeout { seconds: u64 },
+
+    /// Change uTP options for transport endpoints created after this command.
+    #[cfg(feature = "bittorrent")]
+    SetUtpSocketOptions {
+        options: aria2_protocol::bittorrent::utp::UtpSocketOptions,
+    },
 }
 
 impl EngineCommand {
@@ -509,8 +519,10 @@ impl EngineCommand {
                 self,
                 Self::SetPublicTrackerSources { .. }
                     | Self::SetPublicTrackerUpdateInterval { .. }
+                    | Self::SetPublicTrackerSourceTimeout { .. }
                     | Self::SetPublicTrackersEnabled { .. }
                     | Self::SetIncomingPeerHandshakeTimeout { .. }
+                    | Self::SetUtpSocketOptions { .. }
             );
         common
     }

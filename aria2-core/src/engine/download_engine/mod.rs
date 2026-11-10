@@ -295,6 +295,16 @@ impl DownloadEngine {
         self.bt_listener.set_incoming_handshake_timeout(timeout);
     }
 
+    /// Configure uTP socket settings for transport endpoints created later.
+    /// Existing endpoints remain active with their current settings.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_utp_socket_options(
+        &mut self,
+        options: aria2_protocol::bittorrent::utp::UtpSocketOptions,
+    ) {
+        self.bt_listener.set_utp_socket_options(options);
+    }
+
     /// Configure the process-wide DNS timeout and optional explicit nameservers.
     pub fn set_dns_config(
         &mut self,
@@ -344,6 +354,13 @@ impl DownloadEngine {
     #[cfg(feature = "bittorrent")]
     pub fn set_public_tracker_config(&mut self, config: TrackerCatalogConfig) {
         self.public_tracker_catalog.set_config_now(config);
+    }
+
+    /// Configure the complete-request timeout for remote tracker list sources.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_public_tracker_source_timeout(&mut self, timeout: Duration) {
+        self.public_tracker_catalog
+            .set_source_request_timeout_now(timeout);
     }
 
     /// Configure the process-wide Local Peer Discovery manager before `run()`.

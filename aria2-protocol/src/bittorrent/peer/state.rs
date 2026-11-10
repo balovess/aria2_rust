@@ -1,3 +1,10 @@
+//! Connection-level peer state and a lightweight standalone choking helper.
+//!
+//! [`PeerConnection`](super::connection::PeerConnection) owns this state for a
+//! protocol session. The core download engine uses its own configurable choke
+//! policy; [`ChokeAlgorithm`] is only a fixed-default convenience for callers
+//! that build on the lower-level protocol API directly.
+
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -188,11 +195,18 @@ impl PeerState {
     }
 }
 
+/// A lightweight standalone choking policy for low-level protocol consumers.
+///
+/// This helper uses a fixed default of four unchoked leecher slots and is not
+/// used by the aria2 download engine, whose policy is configured through the
+/// engine's BitTorrent options.
 pub struct ChokeAlgorithm;
 
 impl ChokeAlgorithm {
     const MAX_UNCHOKED_LEECHERS: usize = 4;
 
+    /// Rank peers by their current download speed and return the selected
+    /// indices after applying the helper's fixed slot limit.
     pub fn evaluate_choke(peers: &mut [&mut PeerState], is_seeder: bool) -> Vec<usize> {
         let mut unchoke_indices: Vec<usize> = (0..peers.len()).collect();
 

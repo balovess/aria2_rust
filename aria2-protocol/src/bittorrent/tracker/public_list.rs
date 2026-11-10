@@ -12,10 +12,10 @@ use crate::http::client::ensure_ring_provider;
 
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
 pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(604_800);
+pub const DEFAULT_TRACKER_SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound source downloads so a large user-provided source list cannot create
 /// an unbounded burst of outbound HTTP requests.
 pub const MAX_TRACKER_SOURCE_CONCURRENCY: usize = 4;
-const TRACKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BACKOFF: Duration = Duration::from_secs(3_600);
 const REMOTE_TEMPORARY_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -192,6 +192,7 @@ pub struct PublicTrackerList {
     source_entries: tokio::sync::RwLock<HashMap<String, Vec<TrackerEntry>>>,
     http_client: reqwest::Client,
     config: tokio::sync::RwLock<TrackerCatalogConfig>,
+    source_request_timeout: tokio::sync::RwLock<Duration>,
     health: Mutex<HashMap<String, TrackerHealth>>,
     last_updated: tokio::sync::RwLock<Option<Instant>>,
     last_refresh_error: tokio::sync::RwLock<Option<String>>,
@@ -217,7 +218,6 @@ impl PublicTrackerList {
         let (updates, _) = watch::channel(0);
         ensure_ring_provider();
         let http_client = reqwest::Client::builder()
-            .timeout(TRACKER_REQUEST_TIMEOUT)
             .build()
             .expect("public tracker HTTP client should be constructible");
         Self {
@@ -225,6 +225,7 @@ impl PublicTrackerList {
             source_entries: tokio::sync::RwLock::new(HashMap::new()),
             http_client,
             config: tokio::sync::RwLock::new(config),
+            source_request_timeout: tokio::sync::RwLock::new(DEFAULT_TRACKER_SOURCE_TIMEOUT),
             health: Mutex::new(HashMap::new()),
             last_updated: tokio::sync::RwLock::new(Some(Instant::now())),
             last_refresh_error: tokio::sync::RwLock::new(None),
@@ -268,6 +269,40 @@ impl PublicTrackerList {
 
     pub async fn config(&self) -> TrackerCatalogConfig {
         self.config.read().await.clone()
+    }
+
+    /// Return the timeout applied to each complete tracker-source HTTP fetch.
+    pub async fn source_request_timeout(&self) -> Duration {
+        *self.source_request_timeout.read().await
+    }
+
+    /// Set the timeout for future tracker-source fetches.
+    ///
+    /// An in-progress fetch keeps the timeout captured when it started. A
+    /// zero duration restores the library default.
+    pub async fn set_source_request_timeout(&self, timeout: Duration) {
+        *self.source_request_timeout.write().await = if timeout.is_zero() {
+            DEFAULT_TRACKER_SOURCE_TIMEOUT
+        } else {
+            timeout
+        };
+        self.notify_updated();
+        self.config_changed.notify_one();
+    }
+
+    /// Set the source-fetch timeout synchronously before the update loop starts.
+    pub fn set_source_request_timeout_now(&self, timeout: Duration) {
+        *self
+            .source_request_timeout
+            .try_write()
+            .expect("tracker source timeout must not be held during engine setup") =
+            if timeout.is_zero() {
+                DEFAULT_TRACKER_SOURCE_TIMEOUT
+            } else {
+                timeout
+            };
+        self.notify_updated();
+        self.config_changed.notify_one();
     }
 
     pub async fn set_config(&self, mut config: TrackerCatalogConfig) {
@@ -353,7 +388,8 @@ impl PublicTrackerList {
     }
 
     pub async fn fetch_and_update(&self, url: &str) -> Result<usize, String> {
-        let entries = fetch_tracker_source(&self.http_client, url).await?;
+        let timeout = self.source_request_timeout().await;
+        let entries = fetch_tracker_source(&self.http_client, url, timeout).await?;
         self.source_entries
             .write()
             .await
@@ -405,10 +441,11 @@ impl PublicTrackerList {
         }
 
         let client = self.http_client.clone();
+        let request_timeout = self.source_request_timeout().await;
         let results = stream::iter(sources.iter().cloned().map(|source| {
             let client = client.clone();
             async move {
-                let result = fetch_tracker_source(&client, &source).await;
+                let result = fetch_tracker_source(&client, &source, request_timeout).await;
                 (source, result)
             }
         }))
@@ -569,20 +606,30 @@ impl PublicTrackerList {
 async fn fetch_tracker_source(
     client: &reqwest::Client,
     source: &str,
+    request_timeout: Duration,
 ) -> Result<Vec<TrackerEntry>, String> {
     debug!("Fetching public tracker list from {}", source);
-    let response = client
-        .get(source)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP GET failed: {}", e))?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP error: {}", response.status()));
-    }
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Read body failed: {}", e))?;
+    let body = tokio::time::timeout(request_timeout, async {
+        let response = client
+            .get(source)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP GET failed: {}", e))?;
+        if !response.status().is_success() {
+            return Err(format!("HTTP error: {}", response.status()));
+        }
+        response
+            .text()
+            .await
+            .map_err(|e| format!("Read body failed: {}", e))
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "Tracker source request timed out after {} seconds",
+            request_timeout.as_secs_f64()
+        )
+    })??;
     let entries = PublicTrackerList::parse(&body);
     if entries.is_empty() {
         return Err("Parsed 0 entries from response".to_string());
@@ -663,6 +710,48 @@ fn parse_single_tracker_url(url: &str) -> Option<TrackerEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn source_request_timeout_covers_the_complete_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nhttp://slow.test/announce\n",
+                )
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let catalog = PublicTrackerList::new();
+        assert_eq!(
+            catalog.source_request_timeout().await,
+            DEFAULT_TRACKER_SOURCE_TIMEOUT
+        );
+        catalog
+            .set_source_request_timeout(Duration::from_millis(40))
+            .await;
+        let error = catalog
+            .fetch_and_update(&format!("http://{address}/trackers.txt"))
+            .await
+            .expect_err("an incomplete response body should time out");
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        server.await.unwrap();
+
+        catalog.set_source_request_timeout(Duration::ZERO).await;
+        assert_eq!(
+            catalog.source_request_timeout().await,
+            DEFAULT_TRACKER_SOURCE_TIMEOUT
+        );
+    }
 
     #[test]
     fn tracker_failure_kind_names_are_stable() {

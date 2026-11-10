@@ -423,7 +423,12 @@ impl OptionRegistry {
             | "log-max-files"
             | "lpd-listen-port"
             | "bt-lpd-interface"
-            | "bt-incoming-peer-handshake-timeout" => Some(OptionOwner::ProcessEngine),
+            | "bt-incoming-peer-handshake-timeout"
+            | "bt-tracker-source-timeout"
+            | "bt-utp-max-connections"
+            | "bt-utp-connect-timeout"
+            | "bt-utp-idle-timeout"
+            | "bt-utp-keepalive-interval" => Some(OptionOwner::ProcessEngine),
 
             "async-dns" | "enable-async-dns6" | "startup-idle-time" => {
                 Some(OptionOwner::DownloadTask)
@@ -560,6 +565,11 @@ mod tests {
                 "bt-incoming-peer-handshake-timeout",
                 OptionOwner::ProcessEngine,
             ),
+            ("bt-utp-max-connections", OptionOwner::ProcessEngine),
+            ("bt-utp-connect-timeout", OptionOwner::ProcessEngine),
+            ("bt-utp-idle-timeout", OptionOwner::ProcessEngine),
+            ("bt-utp-keepalive-interval", OptionOwner::ProcessEngine),
+            ("bt-tracker-source-timeout", OptionOwner::ProcessEngine),
         ];
 
         for (name, expected_owner) in cases {

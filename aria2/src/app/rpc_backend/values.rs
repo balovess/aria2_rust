@@ -96,6 +96,20 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
+        let tracker_source_timeout = changes
+            .get("bt-tracker-source-timeout")
+            .map(|value| {
+                let seconds = parse_u64(value, "bt-tracker-source-timeout")?;
+                if seconds == 0 {
+                    return Err(Self::execution(
+                        "Option 'bt-tracker-source-timeout' must be greater than zero",
+                    ));
+                }
+                Ok(seconds)
+            })
+            .transpose()?;
+
+        #[cfg(feature = "bittorrent")]
         let public_trackers_enabled = parsed
             .iter()
             .find(|(key, _)| key == "enable-public-trackers")
@@ -123,6 +137,16 @@ impl CoreRpcBackend {
                 })
             })
             .transpose()?;
+
+        #[cfg(feature = "bittorrent")]
+        let utp_options_changed = [
+            "bt-utp-max-connections",
+            "bt-utp-connect-timeout",
+            "bt-utp-idle-timeout",
+            "bt-utp-keepalive-interval",
+        ]
+        .iter()
+        .any(|name| changes.contains_key(*name));
 
         {
             let mut config = self.config.write().await;
@@ -152,11 +176,25 @@ impl CoreRpcBackend {
             if let Some(seconds) = tracker_update_interval {
                 self.send(EngineCommand::SetPublicTrackerUpdateInterval { seconds })?;
             }
+            if let Some(seconds) = tracker_source_timeout {
+                self.send(EngineCommand::SetPublicTrackerSourceTimeout { seconds })?;
+            }
             if let Some(enabled) = public_trackers_enabled {
                 self.send(EngineCommand::SetPublicTrackersEnabled { enabled })?;
             }
             if let Some(seconds) = incoming_peer_handshake_timeout {
                 self.send(EngineCommand::SetIncomingPeerHandshakeTimeout { seconds })?;
+            }
+            if utp_options_changed {
+                let config = self.config.read().await;
+                let options = aria2_core::config::utp_socket_options_from_values(
+                    config.get_global_i64("bt-utp-max-connections").await,
+                    config.get_global_i64("bt-utp-connect-timeout").await,
+                    config.get_global_i64("bt-utp-idle-timeout").await,
+                    config.get_global_i64("bt-utp-keepalive-interval").await,
+                );
+                drop(config);
+                self.send(EngineCommand::SetUtpSocketOptions { options })?;
             }
         }
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
@@ -298,5 +336,86 @@ mod tests {
             Some(30)
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn global_utp_options_update_config_and_shared_listener_policy() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([
+                ("bt-utp-max-connections".to_string(), serde_json::json!(73)),
+                ("bt-utp-connect-timeout".to_string(), serde_json::json!(14)),
+                ("bt-utp-idle-timeout".to_string(), serde_json::json!(46)),
+                (
+                    "bt-utp-keepalive-interval".to_string(),
+                    serde_json::json!(19),
+                ),
+            ]))
+            .await
+            .unwrap();
+
+        let expected = aria2_protocol::bittorrent::utp::UtpSocketOptions::default()
+            .with_max_connections(73)
+            .with_connect_timeout(std::time::Duration::from_secs(14))
+            .with_idle_timeout(std::time::Duration::from_secs(46))
+            .with_keepalive_interval(std::time::Duration::from_secs(19));
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetUtpSocketOptions { options } if options == expected
+        ));
+        for (name, expected) in [
+            ("bt-utp-max-connections", 73),
+            ("bt-utp-connect-timeout", 14),
+            ("bt-utp-idle-timeout", 46),
+            ("bt-utp-keepalive-interval", 19),
+        ] {
+            assert_eq!(
+                config.read().await.get_global_i64(name).await,
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn global_tracker_source_timeout_updates_config_and_engine_command() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "bt-tracker-source-timeout".to_string(),
+                serde_json::json!(47),
+            )]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("bt-tracker-source-timeout")
+                .await,
+            Some(47)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetPublicTrackerSourceTimeout { seconds: 47 }
+        ));
     }
 }

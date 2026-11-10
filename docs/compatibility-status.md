@@ -87,6 +87,41 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol tests cover choke/interest transitions and request
   completion; core peer-connection tests and choking-policy tests pass.
 
+## BitTorrent uTP socket options
+
+- **Settings:** `bt-utp-max-connections` (default 100, range 1–65,536),
+  `bt-utp-connect-timeout` (10 seconds), `bt-utp-idle-timeout` (30 seconds),
+  and `bt-utp-keepalive-interval` (15 seconds) configure each process-owned
+  uTP socket endpoint. Timeout values accept 1–600 seconds.
+- **Propagation:** the options are available through CLI, config, C API, and
+  `changeGlobalOption`. They apply to newly created uTP endpoints; existing
+  endpoints are shared by torrent routes and retain their current socket
+  settings.
+- **Compatibility impact:** these are Rust extensions; original aria2 does
+  not expose the corresponding process-level settings. Defaults match the
+  protocol library's existing socket defaults.
+- **Verification:** a core test confirms the configured connection cap is
+  enforced by the shared transport socket; CLI parsing and RPC option-to-engine
+  command propagation have focused tests. C API paths are compile-checked.
+
+## Public BitTorrent tracker source timeout
+
+- **Setting:** `bt-tracker-source-timeout` bounds the complete HTTP fetch for
+  each remote public tracker list, including response-body reading. It defaults
+  to 15 seconds and accepts 1 through 600 seconds. This is separate from
+  `bt-tracker-timeout`, which bounds tracker announces.
+- **Propagation:** CLI/config, C API, and `changeGlobalOption` pass the value to
+  `PublicTrackerList`. Runtime updates apply to future fetches; an in-progress
+  fetch keeps the timeout captured when it started. The public
+  `TrackerCatalogConfig` layout remains source-compatible; the protocol library
+  exposes separate timeout accessors.
+- **Compatibility impact:** this is a Rust extension; original aria2 does not
+  provide a public tracker-list source timeout option. The default preserves
+  the previous 15-second limit.
+- **Verification:** protocol tests delay an HTTP response body and assert the
+  configured deadline aborts the complete fetch; CLI and RPC propagation have
+  focused tests. C API paths are compile-checked.
+
 ## BitTorrent DHT outbound source binding
 
 - **Policy:** when an explicit outbound interface/source address is configured,

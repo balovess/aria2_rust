@@ -115,6 +115,7 @@ async fn peer_actor_downloads_a_block_over_utp_after_handshake_handoff() {
     let client_transport_actor =
         crate::engine::bittorrent::peer::utp_transport::UtpTransportActor::bind(
             "127.0.0.1:0".parse().unwrap(),
+            aria2_protocol::bittorrent::utp::UtpSocketOptions::default(),
             incoming_tx,
             shutdown.clone(),
         )

@@ -369,6 +369,15 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
             }
 
             #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackerSourceTimeout { seconds } => {
+                ctx.public_tracker_catalog
+                    .set_source_request_timeout(Duration::from_secs(seconds.max(1)))
+                    .await;
+                mark_session_dirty(ctx);
+                info!(seconds, "Public tracker source timeout changed at runtime");
+            }
+
+            #[cfg(feature = "bittorrent")]
             EngineCommand::SetPublicTrackersEnabled { enabled } => {
                 let mut config = ctx.public_tracker_catalog.config().await;
                 config.enabled = enabled;
@@ -388,6 +397,12 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
                     seconds,
                     "Incoming BitTorrent peer handshake timeout updated"
                 );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetUtpSocketOptions { options } => {
+                ctx.bt_listener.set_utp_socket_options(options);
+                info!("uTP socket options updated for future transport endpoints");
             }
         }
     }

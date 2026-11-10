@@ -30,6 +30,13 @@ impl Aria2RustSession {
         let mut engine = DownloadEngine::new();
         #[cfg(feature = "bittorrent")]
         {
+            let utp_options = crate::config::utp_socket_options_from_values(
+                runtime.block_on(config.get_global_i64("bt-utp-max-connections")),
+                runtime.block_on(config.get_global_i64("bt-utp-connect-timeout")),
+                runtime.block_on(config.get_global_i64("bt-utp-idle-timeout")),
+                runtime.block_on(config.get_global_i64("bt-utp-keepalive-interval")),
+            );
+            engine.set_utp_socket_options(utp_options);
             if let Some(incoming_handshake_timeout) = runtime
                 .block_on(config.get_global_i64("bt-incoming-peer-handshake-timeout"))
                 .and_then(|seconds| u64::try_from(seconds).ok())
@@ -66,6 +73,15 @@ impl Aria2RustSession {
                     update_interval,
                 },
             );
+            let source_timeout = runtime
+                .block_on(config.get_global_i64("bt-tracker-source-timeout"))
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .filter(|seconds| *seconds > 0)
+                .map(Duration::from_secs)
+                .unwrap_or(
+                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE_TIMEOUT,
+                );
+            engine.set_public_tracker_source_timeout(source_timeout);
         }
         engine.set_request_group_man(Arc::clone(&request_man));
         // The C API keeps the event loop alive between synchronous `run` calls,
@@ -393,9 +409,13 @@ impl Aria2RustSession {
         #[cfg(feature = "bittorrent")]
         let mut public_tracker_update_interval = None;
         #[cfg(feature = "bittorrent")]
+        let mut public_tracker_source_timeout = None;
+        #[cfg(feature = "bittorrent")]
         let mut public_trackers_enabled = None;
         #[cfg(feature = "bittorrent")]
         let mut incoming_peer_handshake_timeout = None;
+        #[cfg(feature = "bittorrent")]
+        let mut utp_options_changed = false;
         for (name, value) in options {
             if name == "keep-running" {
                 match parse_bool(&value) {
@@ -435,11 +455,18 @@ impl Aria2RustSession {
                 #[cfg(feature = "bittorrent")]
                 "bt-tracker-update-interval" => public_tracker_update_interval = parsed.as_i64(),
                 #[cfg(feature = "bittorrent")]
+                "bt-tracker-source-timeout" => public_tracker_source_timeout = parsed.as_i64(),
+                #[cfg(feature = "bittorrent")]
                 "enable-public-trackers" => public_trackers_enabled = parsed.as_bool(),
                 #[cfg(feature = "bittorrent")]
                 "bt-incoming-peer-handshake-timeout" => {
                     incoming_peer_handshake_timeout = parsed.as_i64()
                 }
+                #[cfg(feature = "bittorrent")]
+                "bt-utp-max-connections"
+                | "bt-utp-connect-timeout"
+                | "bt-utp-idle-timeout"
+                | "bt-utp-keepalive-interval" => utp_options_changed = true,
                 _ => {}
             }
         }
@@ -477,6 +504,13 @@ impl Aria2RustSession {
                         seconds: seconds as u64,
                     });
             }
+            if let Some(seconds) = public_tracker_source_timeout.filter(|seconds| *seconds > 0) {
+                let _ = self
+                    .command_tx
+                    .send(EngineCommand::SetPublicTrackerSourceTimeout {
+                        seconds: seconds as u64,
+                    });
+            }
             if let Some(enabled) = public_trackers_enabled {
                 let _ = self
                     .command_tx
@@ -488,6 +522,21 @@ impl Aria2RustSession {
                     .send(EngineCommand::SetIncomingPeerHandshakeTimeout {
                         seconds: seconds as u64,
                     });
+            }
+            if utp_options_changed {
+                let options = crate::config::utp_socket_options_from_values(
+                    self.runtime
+                        .block_on(self.config.get_global_i64("bt-utp-max-connections")),
+                    self.runtime
+                        .block_on(self.config.get_global_i64("bt-utp-connect-timeout")),
+                    self.runtime
+                        .block_on(self.config.get_global_i64("bt-utp-idle-timeout")),
+                    self.runtime
+                        .block_on(self.config.get_global_i64("bt-utp-keepalive-interval")),
+                );
+                let _ = self
+                    .command_tx
+                    .send(EngineCommand::SetUtpSocketOptions { options });
             }
         }
         0

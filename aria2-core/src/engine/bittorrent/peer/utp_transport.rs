@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocket};
+use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocket, UtpSocketOptions};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -78,10 +78,12 @@ struct ActorConnection {
 impl UtpTransportActor {
     pub(crate) fn bind(
         address: SocketAddr,
+        options: UtpSocketOptions,
         incoming_tx: mpsc::Sender<IncomingUtpConnection>,
         shutdown: CancellationToken,
     ) -> std::io::Result<Self> {
-        let socket = UtpSocket::bind_addr(address).map_err(std::io::Error::other)?;
+        let socket =
+            UtpSocket::bind_addr_with_options(address, options).map_err(std::io::Error::other)?;
         let readiness = socket.readiness_socket().map_err(std::io::Error::other)?;
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let close_notify = Arc::new(Notify::new());

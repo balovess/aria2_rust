@@ -139,10 +139,25 @@ impl App {
                 .unwrap_or(
                     aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL,
                 );
+            let source_timeout = config
+                .get_global_i64("bt-tracker-source-timeout")
+                .await
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .filter(|seconds| *seconds > 0)
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(
+                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE_TIMEOUT,
+                );
             let enabled = config
                 .get_global_bool("enable-public-trackers")
                 .await
                 .unwrap_or(true);
+            let utp_options = aria2_core::config::utp_socket_options_from_values(
+                config.get_global_i64("bt-utp-max-connections").await,
+                config.get_global_i64("bt-utp-connect-timeout").await,
+                config.get_global_i64("bt-utp-idle-timeout").await,
+                config.get_global_i64("bt-utp-keepalive-interval").await,
+            );
             let lpd_port = config
                 .get_global_i64("lpd-listen-port")
                 .await
@@ -189,11 +204,13 @@ impl App {
             };
 
             let mut engine = DownloadEngine::with_lpd_manager(lpd_manager);
+            engine.set_utp_socket_options(utp_options);
             engine.set_public_tracker_config(TrackerCatalogConfig {
                 enabled,
                 sources,
                 update_interval,
             });
+            engine.set_public_tracker_source_timeout(source_timeout);
             engine
         };
 

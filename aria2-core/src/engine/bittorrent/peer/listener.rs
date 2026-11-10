@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+use aria2_protocol::bittorrent::utp::UtpSocketOptions;
 use rand::seq::SliceRandom;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -90,6 +91,7 @@ pub struct BtPeerListenerManager {
         tokio::sync::Mutex<Option<mpsc::Receiver<super::utp_transport::IncomingUtpConnection>>>,
     >,
     incoming_handshake_timeout_secs: Arc<AtomicU64>,
+    utp_socket_options: Arc<std::sync::RwLock<UtpSocketOptions>>,
     shutdown: CancellationToken,
 }
 
@@ -120,6 +122,7 @@ impl BtPeerListenerManager {
                     .read_timeout
                     .as_secs(),
             )),
+            utp_socket_options: Arc::new(std::sync::RwLock::new(UtpSocketOptions::default())),
             shutdown: CancellationToken::new(),
         }
     }
@@ -129,6 +132,16 @@ impl BtPeerListenerManager {
     pub fn set_incoming_handshake_timeout(&self, timeout: std::time::Duration) {
         self.incoming_handshake_timeout_secs
             .store(timeout.as_secs().max(1), Ordering::Relaxed);
+    }
+
+    /// Set uTP options used when creating transport actors for new endpoints.
+    /// Existing actors keep their current options because their sockets are
+    /// shared by all torrent routes registered on that endpoint.
+    pub fn set_utp_socket_options(&self, options: UtpSocketOptions) {
+        *self
+            .utp_socket_options
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = options;
     }
 
     /// Register or reuse the process-owned uTP actor for one local endpoint.
@@ -156,6 +169,10 @@ impl BtPeerListenerManager {
             } else {
                 let transport = super::utp_transport::UtpTransportActor::bind(
                     address,
+                    self.utp_socket_options
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
                     self.utp_incoming_tx.clone(),
                     self.shutdown.clone(),
                 )?;

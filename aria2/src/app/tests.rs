@@ -150,6 +150,11 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--bt-request-timeout=61",
         "--peer-connection-timeout=16",
         "--bt-incoming-peer-handshake-timeout=45",
+        "--bt-utp-max-connections=73",
+        "--bt-utp-connect-timeout=14",
+        "--bt-utp-idle-timeout=46",
+        "--bt-utp-keepalive-interval=19",
+        "--bt-tracker-source-timeout=47",
         "--bt-peer-blocklist=blocked-peers.txt",
         "--enable-dht6=true",
         "--dht-listen-addr=127.0.0.1",
@@ -180,6 +185,26 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
             .get_global_i64("bt-incoming-peer-handshake-timeout")
             .await,
         Some(45)
+    );
+    for (name, expected) in [
+        ("bt-utp-max-connections", 73),
+        ("bt-utp-connect-timeout", 14),
+        ("bt-utp-idle-timeout", 46),
+        ("bt-utp-keepalive-interval", 19),
+    ] {
+        assert_eq!(
+            app.config.read().await.get_global_i64(name).await,
+            Some(expected),
+            "CLI must pass {name} into process configuration"
+        );
+    }
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("bt-tracker-source-timeout")
+            .await,
+        Some(47)
     );
     assert_eq!(
         options.bt_peer_blocklist.as_deref(),

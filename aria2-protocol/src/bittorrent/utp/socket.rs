@@ -17,7 +17,10 @@ mod options;
 #[cfg(test)]
 mod tests;
 mod timers;
-pub use options::UtpSocketOptions;
+pub use options::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_MAX_CONNECTIONS, UtpSocketOptions,
+};
 
 /// Maximum receive buffer size for UDP
 const MAX_UDP_RECV_BUFFER: usize = 65535;

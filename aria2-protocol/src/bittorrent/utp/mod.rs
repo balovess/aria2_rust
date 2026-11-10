@@ -17,7 +17,10 @@ pub use congestion::{
 pub use connection::{ConnectionError, ConnectionState, UtpConnection};
 pub use metrics::{BandwidthEstimator, DelayEstimator, RttEstimator};
 pub use packet::{PacketType, UTP_HEADER_SIZE, UTP_VERSION, UtpPacket, UtpPacketError};
-pub use socket::{ConnectionStats, UtpSocket, UtpSocketError, UtpSocketOptions};
+pub use socket::{
+    ConnectionStats, DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_MAX_CONNECTIONS, UtpSocket, UtpSocketError, UtpSocketOptions,
+};
 pub use timer::{
     IdleTimeoutDetector, KeepaliveManager, RetransmitScheduler, TimerManager, TimerType,
 };

@@ -477,3 +477,29 @@ async fn shutdown_waits_for_process_utp_transport_to_release_udp_port() {
         .expect("shutdown must wait for the process uTP actor to release its socket");
     drop(rebound);
 }
+
+#[tokio::test]
+async fn configured_utp_connection_limit_reaches_shared_transport_socket() {
+    let manager = BtPeerListenerManager::new();
+    manager.set_utp_socket_options(
+        aria2_protocol::bittorrent::utp::UtpSocketOptions::default().with_max_connections(1),
+    );
+    let reservation = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = reservation.local_addr().unwrap();
+    drop(reservation);
+
+    let transport = manager
+        .register_utp_transport(address)
+        .await
+        .expect("process uTP transport should bind with configured options");
+    let remote = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = remote.local_addr().unwrap();
+
+    let _first = transport
+        .connect(endpoint)
+        .await
+        .expect("first uTP connection should fit the configured limit");
+    assert!(transport.connect(endpoint).await.is_err());
+
+    manager.shutdown().await;
+}

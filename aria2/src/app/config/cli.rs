@@ -340,6 +340,10 @@ impl App {
             "bt-incoming-peer-handshake-timeout",
             b.bt_incoming_peer_handshake_timeout
         );
+        set_u64!("bt-utp-max-connections", b.bt_utp_max_connections);
+        set_u64!("bt-utp-connect-timeout", b.bt_utp_connect_timeout);
+        set_u64!("bt-utp-idle-timeout", b.bt_utp_idle_timeout);
+        set_u64!("bt-utp-keepalive-interval", b.bt_utp_keepalive_interval);
         set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);
         set_bool_true!("bt-force-encryption", b.bt_force_encryption);
@@ -384,6 +388,7 @@ impl App {
         set_bool_true!("enable-public-trackers", b.enable_public_trackers);
         set_str!("bt-tracker-source", b.bt_tracker_source);
         set_u64!("bt-tracker-update-interval", b.bt_tracker_update_interval);
+        set_u64!("bt-tracker-source-timeout", b.bt_tracker_source_timeout);
         set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
         set_u64!("bt-tracker-interval", b.bt_tracker_interval);
         set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);

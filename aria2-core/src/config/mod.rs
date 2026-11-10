@@ -26,6 +26,44 @@ pub use runtime::{
 };
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 
+/// Translate process-level uTP option values into protocol socket settings.
+#[cfg(feature = "bittorrent")]
+pub fn utp_socket_options_from_values(
+    max_connections: Option<i64>,
+    connect_timeout_secs: Option<i64>,
+    idle_timeout_secs: Option<i64>,
+    keepalive_interval_secs: Option<i64>,
+) -> aria2_protocol::bittorrent::utp::UtpSocketOptions {
+    use std::time::Duration;
+
+    use aria2_protocol::bittorrent::utp::{
+        DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL,
+        DEFAULT_MAX_CONNECTIONS, UtpSocketOptions,
+    };
+
+    UtpSocketOptions::default()
+        .with_max_connections(
+            max_connections
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(DEFAULT_MAX_CONNECTIONS),
+        )
+        .with_connect_timeout(Duration::from_secs(
+            connect_timeout_secs
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(DEFAULT_CONNECT_TIMEOUT.as_secs()),
+        ))
+        .with_idle_timeout(Duration::from_secs(
+            idle_timeout_secs
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(DEFAULT_IDLE_TIMEOUT.as_secs()),
+        ))
+        .with_keepalive_interval(Duration::from_secs(
+            keepalive_interval_secs
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(DEFAULT_KEEPALIVE_INTERVAL.as_secs()),
+        ))
+}
+
 #[cfg(test)]
 mod contract_tests;
 

@@ -323,6 +323,16 @@ facade.
    select the added tiers. This is a Rust extension: upstream aria2's
    response handler does not consume that field, and BEP 15's fixed binary UDP
    announce response has no URL-list field.
+7. The process-level `BtPeerListenerManager` owns uTP transport actors keyed by
+   local endpoint. It passes the configured `UtpSocketOptions` to each new
+   socket; CLI, global RPC updates, and the C API all update this process-level
+   configuration. Existing actors retain the options they were created with
+   because each socket is shared across torrent routes.
+8. `PublicTrackerList` owns remote source-list fetching and its complete
+   response deadline. The protocol library exposes that timeout separately
+   from `TrackerCatalogConfig`, preserving that public struct's existing
+   construction API. Core owns CLI/RPC/C API translation and sends runtime
+   updates to the catalog; an active source fetch keeps its captured deadline.
 
 ### DHT inbound query path
 

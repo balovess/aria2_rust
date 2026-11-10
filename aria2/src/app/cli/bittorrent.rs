@@ -65,6 +65,22 @@ pub struct BitTorrentArgs {
     #[arg(long = "bt-incoming-peer-handshake-timeout")]
     pub bt_incoming_peer_handshake_timeout: Option<u64>,
 
+    /// Maximum simultaneous uTP connections per local endpoint
+    #[arg(long = "bt-utp-max-connections")]
+    pub bt_utp_max_connections: Option<u64>,
+
+    /// uTP connection establishment timeout in seconds
+    #[arg(long = "bt-utp-connect-timeout")]
+    pub bt_utp_connect_timeout: Option<u64>,
+
+    /// uTP inactive connection timeout in seconds
+    #[arg(long = "bt-utp-idle-timeout")]
+    pub bt_utp_idle_timeout: Option<u64>,
+
+    /// uTP keepalive interval in seconds
+    #[arg(long = "bt-utp-keepalive-interval")]
+    pub bt_utp_keepalive_interval: Option<u64>,
+
     /// Seed without verifying hash
     #[arg(
         long = "bt-seed-unverified",
@@ -334,6 +350,10 @@ pub struct BitTorrentArgs {
     /// Public tracker list refresh interval in seconds
     #[arg(long = "bt-tracker-update-interval")]
     pub bt_tracker_update_interval: Option<u64>,
+
+    /// Timeout for each public tracker source download in seconds
+    #[arg(long = "bt-tracker-source-timeout")]
+    pub bt_tracker_source_timeout: Option<u64>,
 
     /// Connect timeout for tracker in seconds
     #[arg(long = "bt-tracker-connect-timeout")]
