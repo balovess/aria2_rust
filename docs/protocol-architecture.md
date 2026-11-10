@@ -131,7 +131,7 @@ retry admission.
 | Input | Core command path | Protocol implementation | Result path |
 |---|---|---|---|
 | HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_all` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
-| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | The adapter composes core DNS/address policy, proxy handling, FTP control flow, and lifecycle. `aria2-protocol::ftp::connection::control_io` shares injected control-stream reads/writes, `FtpActiveDataListener` shares active data acceptance, and `aria2-protocol::ftp::tls` supplies FTPS streams. Response and PASV/EPSV parsing policy stays with each source. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
+| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. Core composes DNS/address policy, proxies, FTPS negotiation, data sockets, active bind/accept policy, task lifecycle, and filesystem state. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
 | BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
 | Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
@@ -179,15 +179,16 @@ retry admission.
    origin addresses and connect through `OutboundNetworkPolicy`. Plain FTP,
    explicit FTPS, and implicit FTPS share `RawFtpControl`; both it and the
    standalone client pass their established control streams through
-   `aria2-protocol::ftp::connection::control_io`. FTPS upgrades use
+   `aria2-protocol::ftp::connection::FtpControlSession`, which owns FTP
+   command semantics, command framing, and response parsing. FTPS upgrades use
    `aria2-protocol::ftp::tls`.
-4. The FTP control flow authenticates, selects TYPE, traverses the URI directory
-   with PWD/CWD, and queries optional MDTM and SIZE metadata. Before RETR it
-   reconciles the remote size with the local file, continuation state, and
+4. The protocol session authenticates, selects TYPE, traverses the URI
+   directory with PWD/CWD, and queries optional MDTM and SIZE metadata. Before
+   RETR, core reconciles the remote size with the local file, continuation state, and
    checkpoint; dry-run and already-complete targets can finish here.
-5. The command negotiates EPSV/PASV or EPRT/PORT, applies REST when resuming,
-   sends RETR, accepts/connects the data socket, and upgrades FTPS data TLS when
-   configured. Active-mode listening/acceptance uses the shared
+5. The protocol session negotiates EPSV/PASV or EPRT/PORT, applies REST when
+   resuming, and sends RETR. Core establishes the data socket under its outbound
+   policy and upgrades FTPS data TLS when configured. Active-mode listening and acceptance use the shared
    `FtpActiveDataListener`; the core still controls bind address and advertised
    endpoint selection.
 6. `receive_data_transfer` passes source chunks through the core

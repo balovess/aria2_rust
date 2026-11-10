@@ -28,7 +28,7 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use crate::ftp::connection::percent_decode as urlencoding_decode;
+use aria2_protocol::ftp::connection::percent_decode as urlencoding_decode;
 
 /// FTP download command that handles the complete download lifecycle
 pub struct FtpDownloadCommand {

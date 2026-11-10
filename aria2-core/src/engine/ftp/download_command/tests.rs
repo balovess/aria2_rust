@@ -3,15 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::control::{RawFtpControl, parse_ftp_size_response};
+use super::control::RawFtpControl;
 use super::types::FtpDownloadCommand;
 use crate::engine::command::Command;
-use crate::error::{Aria2Error, RecoverableError};
-use crate::ftp::connection::{
-    parse_epsv_response, parse_pasv_response, percent_decode as urlencoding_decode,
-};
+use crate::error::Aria2Error;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::ftp::connection::{
+    parse_epsv_response, parse_pasv_response, parse_size_response as parse_ftp_size_response,
+    percent_decode as urlencoding_decode,
+};
 
 #[test]
 fn test_parse_uri_simple() {
@@ -320,11 +321,7 @@ fn test_parse_ftp_size_response_rejects_values_above_signed_offset_limit() {
     let error = parse_ftp_size_response("9223372036854775808")
         .expect_err("SIZE above the local offset range must be rejected");
 
-    assert!(matches!(
-        error,
-        Aria2Error::Recoverable(RecoverableError::FtpProtocolError { .. })
-    ));
-    assert!(error.to_string().contains("too large"));
+    assert!(error.contains("too large"));
 }
 
 #[test]

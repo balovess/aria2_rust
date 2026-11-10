@@ -97,6 +97,22 @@ behavior. An unlisted behavior has not been audited here.
   construction tests cover the propagation path. Original aria2 has no matching
   SFTP-specific timeout options; these are Rust extensions.
 
+## FTP control-session layering
+
+- **Internal design:** `aria2-protocol::ftp::connection::FtpControlSession`
+  wraps a caller-established stream and owns FTP command sequences, command
+  framing, RFC 959 response parsing, and path, SIZE, MDTM, PASV/EPSV, and
+  EPRT/PORT handling. Core retains address selection and outbound policy, proxy
+  and FTPS setup, data-channel connection/listener policy, task lifecycle, and
+  file state.
+- **Compatibility intent:** this is an internal relocation. FTP command order,
+  response acceptance, passive-address policy, retries, and output behavior are
+  intended to remain unchanged.
+- **Verification:** protocol-layer FTP tests (19) and core FTP tests (72) pass;
+  `cargo check -p aria2-protocol -p aria2-core`, workspace formatting, and
+  `git diff --check` pass. A mock control stream verifies the injected session
+  command sequence. Live FTP/FTPS interoperability was not exercised.
+
 ## Pause and unpause lifecycle status
 
 - **Compatibility:** `active` means the download is currently running;

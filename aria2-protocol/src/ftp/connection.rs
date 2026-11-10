@@ -4,8 +4,16 @@ pub mod control_io;
 
 mod commands;
 mod data;
+mod parsing;
+mod session;
 mod types;
 
+pub use parsing::{
+    cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
+    parse_pwd_response, parse_size_response, percent_decode, split_decoded_remote_path,
+    split_remote_path,
+};
+pub use session::{FtpControlResponse, FtpControlSession, FtpControlSessionError};
 pub use types::{FtpActiveDataListener, FtpConnection, FtpOptions, FtpResponse, FtpResponseClass};
 
 use tokio::net::TcpStream;
