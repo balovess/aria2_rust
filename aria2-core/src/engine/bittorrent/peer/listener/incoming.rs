@@ -230,7 +230,7 @@ async fn route_incoming_utp_peer(
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
 ) {
     let endpoint = normalize_peer_endpoint(incoming.endpoint);
-    let (mut connection, handshake) =
+    let mut connection =
         match super::super::connection::UtpPeerConnection::receive_incoming_handshake(
             incoming.connection,
             endpoint,
@@ -244,6 +244,10 @@ async fn route_incoming_utp_peer(
                 return;
             }
         };
+    let Some(handshake) = connection.session_remote_handshake() else {
+        tracing::debug!(%endpoint, "Rejected uTP peer without a completed BitTorrent handshake");
+        return;
+    };
     let info_hash = handshake.info_hash;
     let route = routes
         .read()
@@ -259,12 +263,7 @@ async fn route_incoming_utp_peer(
         return;
     }
     if let Err(error) = connection
-        .complete_incoming_handshake(
-            &handshake,
-            &route.local_peer_id,
-            route.info_hash_v2,
-            route.dht_enabled,
-        )
+        .complete_incoming_handshake(&route.local_peer_id, route.info_hash_v2, route.dht_enabled)
         .await
     {
         tracing::debug!(%endpoint, %error, "Failed to complete incoming uTP handshake");

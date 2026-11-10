@@ -133,7 +133,7 @@ retry admission.
 | HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_all` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
 | FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. Core composes DNS/address policy, proxies, FTPS negotiation, data sockets, active bind/accept policy, task lifecycle, and filesystem state. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
-| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, peer transport, DHT, tracker primitives, and extensions. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
+| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, TCP plain/MSE peer handshakes, DHT, tracker primitives, and protocol-specific transport primitives. Core owns the process-level TCP/uTP listeners, shared info-hash routes, address/port binding policy, handshake admission limits, and peer-storage admission. The uTP adapter in core also currently orchestrates its peer handshake and message framing over the process-owned actor. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
 | Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
 
 ### HTTP assembly and transfer path
@@ -292,15 +292,20 @@ facade.
    payload sync. Complete pieces pass their v1/v2 hash validator, are written
    and synced, then become live-complete and eligible for checkpoint publication
    through `WorkCommitter`.
-   Peer messages and transport use `aria2-protocol::bittorrent`; peer selection
-   and bad-peer feedback remain BitTorrent-specific policy.
+   Peer wire messages and TCP peer protocol use `aria2-protocol::bittorrent`;
+   core owns peer selection, outbound network policy, and the process uTP actor.
+   Bad-peer feedback remains BitTorrent-specific engine policy.
 5. Peer interaction selects uTP, MSE, or a plain TCP fallback from task
-   settings. Core establishes the policy-approved TCP stream and passes it to
-   the protocol handshake. Plain and MSE handshakes both return the same
-   `PeerConnection`; it owns message framing and applies MSE encryption when
-   negotiated. Its `PeerState` tracks locally sent choke/interest/request state
-   and updates remote choke/interest and request completion from received peer
-   messages. `BtPeerConn` then adds engine peer state and statistics. Once
+   settings. For TCP, core establishes the policy-approved stream and passes it
+   to the protocol crate's plain or MSE handshake; both return the same
+   `PeerConnection`, which owns message framing and applies MSE encryption when
+   negotiated. For uTP, core's `UtpPeerConnection` performs the handshake and
+   message framing over the process-owned transport actor, reusing the
+   protocol crate's handshake codec. This keeps socket policy in core but
+   leaves uTP peer-protocol sequencing split across the two crates. `PeerState`
+   tracks locally sent choke/interest/request state and updates remote
+   choke/interest and request completion from received peer messages. `BtPeerConn`
+   then adds engine peer state and statistics. Once
    initialized, it is moved into a long-lived `PeerActor`; that actor is the
    sole runtime owner of the connection and performs its socket reads/writes.
    Coordinators send peer commands and consume peer events rather than doing
@@ -577,6 +582,13 @@ Do not add pass-through engine clients around these public interfaces.
   capability or a useful ownership boundary. Remove aliases and forwarding
   variants that duplicate the canonical entry point. The `engine` module
   layout follows internal ownership.
+- `aria2_protocol::bittorrent::peer::listener::PeerListener` is a public
+  standalone TCP accept helper. It binds a wildcard address and forwards raw
+  accepted streams; the engine does not use it. It is distinct from the core
+  `BtPeerListenerManager`, which owns process-level binding, shared torrent
+  routing, handshake admission, and listener lifecycle. Protocol handshakes
+  remain in `aria2-protocol`; moving the engine manager there would pull core
+  peer-storage and task-admission policy into the lower-level crate.
 - **Narrow** `DownloadManager` source organization into its submission/query facade,
   per-download handle, and engine-lifecycle handle. Keep the crate-root
   re-exports and observable behavior unchanged; organize its interface tests by

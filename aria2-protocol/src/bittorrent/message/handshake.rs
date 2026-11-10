@@ -195,6 +195,18 @@ impl Handshake {
         (self.reserved[7] & RESERVED_BEP52) != 0
     }
 
+    /// Returns whether this handshake identifies the expected v1 torrent or
+    /// a compatible v2 hash advertised with BEP 52 support.
+    pub fn matches_info_hash(
+        &self,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+    ) -> bool {
+        self.info_hash == *info_hash_v1
+            || info_hash_v2
+                .is_some_and(|hash| self.info_hash == hash[..20] && self.supports_bep52())
+    }
+
     pub fn peer_id_str(&self) -> String {
         self.peer_id.iter().map(|b| format!("{:02x}", b)).collect()
     }

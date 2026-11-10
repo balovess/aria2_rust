@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
@@ -7,6 +6,7 @@ use super::state::PeerState;
 use crate::bittorrent::extension::mse_crypto::MseCryptoState;
 use crate::bittorrent::message::handshake::Handshake;
 use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
+use crate::bittorrent::peer::session::PeerFrameDecoder;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerAddr {
@@ -94,7 +94,7 @@ pub struct PeerConnection {
     /// Encrypted bytes read past the MSE handshake, awaiting message decoding.
     read_ahead: Vec<u8>,
     // Keep partially received frames across cancellation of read_message.
-    read_buffer: BytesMut,
+    frame_decoder: PeerFrameDecoder,
 }
 
 impl PeerConnection {
@@ -159,13 +159,7 @@ impl PeerConnection {
             .map_err(|e| format!("Failed to read handshake response: {}", e))?;
 
         let remote_hs = Handshake::parse(&response)?;
-        let v2_truncated: [u8; 20] = info_hash_v2[..20]
-            .try_into()
-            .expect("SHA-256 hash is 32 bytes");
-        if remote_hs.info_hash == *info_hash_v1 {
-            return Ok(remote_hs);
-        }
-        if remote_hs.info_hash == v2_truncated && remote_hs.supports_bep52() {
+        if remote_hs.matches_info_hash(info_hash_v1, Some(info_hash_v2)) {
             return Ok(remote_hs);
         }
         Err("hybrid handshake info_hash mismatch or missing BEP 52 capability".to_string())
@@ -192,7 +186,7 @@ impl PeerConnection {
             remote_supports_extended_messaging: remote_hs.supports_extended_messaging(),
             crypto: None,
             read_ahead: Vec::new(),
-            read_buffer: BytesMut::new(),
+            frame_decoder: PeerFrameDecoder::default(),
         })
     }
 
@@ -235,7 +229,7 @@ impl PeerConnection {
             remote_supports_extended_messaging,
             crypto: None,
             read_ahead: Vec::new(),
-            read_buffer: BytesMut::new(),
+            frame_decoder: PeerFrameDecoder::default(),
         }
     }
 
@@ -336,36 +330,23 @@ impl PeerConnection {
             if let Some(crypto) = &mut self.crypto {
                 crypto.decrypt(&mut pending);
             }
-            self.read_buffer.extend_from_slice(&pending);
+            self.frame_decoder.append(&pending);
         }
 
         loop {
-            if self.read_buffer.len() >= 4 {
-                let msg_len =
-                    u32::from_be_bytes(self.read_buffer[..4].try_into().unwrap()) as usize;
-                if msg_len > crate::bittorrent::message::MAX_BT_MESSAGE_LENGTH {
-                    return Err(format!(
-                        "BitTorrent message length {} exceeds maximum {}",
-                        msg_len,
-                        crate::bittorrent::message::MAX_BT_MESSAGE_LENGTH
-                    ));
+            if let Some(frame) = self.frame_decoder.next_frame()? {
+                if frame.len() == 4 {
+                    let message = BtMessage::KeepAlive;
+                    self.state.record_received_message(&message);
+                    return Ok(Some(message));
                 }
-                let frame_len = 4 + msg_len;
-                if self.read_buffer.len() >= frame_len {
-                    let frame = self.read_buffer.split_to(frame_len).freeze();
-                    if msg_len == 0 {
-                        let message = BtMessage::KeepAlive;
-                        self.state.record_received_message(&message);
-                        return Ok(Some(message));
-                    }
-                    if let Some(message) =
-                        crate::bittorrent::message::factory::parse_message_bytes(frame)?
-                    {
-                        self.state.record_received_message(&message);
-                        return Ok(Some(message));
-                    }
-                    continue;
+                if let Some(message) =
+                    crate::bittorrent::message::factory::parse_message_bytes(frame)?
+                {
+                    self.state.record_received_message(&message);
+                    return Ok(Some(message));
                 }
+                continue;
             }
 
             let mut chunk = [0u8; 16 * 1024];
@@ -375,7 +356,7 @@ impl PeerConnection {
                 .await
                 .map_err(|e| format!("Failed to read message: {}", e))?;
             if bytes_read == 0 {
-                return if self.read_buffer.is_empty() {
+                return if self.frame_decoder.is_empty() {
                     Ok(None)
                 } else {
                     Err("Failed to read message: unexpected eof".to_string())
@@ -384,7 +365,7 @@ impl PeerConnection {
             if let Some(crypto) = &mut self.crypto {
                 crypto.decrypt(&mut chunk[..bytes_read]);
             }
-            self.read_buffer.extend_from_slice(&chunk[..bytes_read]);
+            self.frame_decoder.append(&chunk[..bytes_read]);
         }
     }
 
