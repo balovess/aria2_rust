@@ -12,6 +12,7 @@ use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::mock_ftp_server::{MockFtpServer, medium_pattern, small_content};
+use std::io::BufReader as StdBufReader;
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -20,6 +21,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 async fn start_server() -> MockFtpServer {
     MockFtpServer::start().await
@@ -122,6 +124,144 @@ async fn test_ftps_does_not_downgrade_to_plain_ftp() {
     assert!(
         result.unwrap().is_err(),
         "an ftps:// request must not downgrade to plaintext FTP"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_ftps_explicit_control_and_data_channels_are_tls_protected() {
+    use rustls::pki_types::CertificateDer;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let certificates = rustls_pemfile::certs(&mut StdBufReader::new(
+        include_str!("../src/http/testdata/rustls_chain.pem").as_bytes(),
+    ))
+    .collect::<std::result::Result<Vec<CertificateDer<'static>>, _>>()
+    .unwrap();
+    let private_key = rustls_pemfile::private_key(&mut StdBufReader::new(
+        include_str!("../src/http/testdata/rustls_end.key").as_bytes(),
+    ))
+    .unwrap()
+    .unwrap();
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut plain_reader = tokio::io::BufReader::new(stream);
+        plain_reader
+            .get_mut()
+            .write_all(b"220 Local explicit FTPS test server\r\n")
+            .await
+            .unwrap();
+
+        let mut command = String::new();
+        plain_reader.read_line(&mut command).await.unwrap();
+        assert_eq!(command.trim_end(), "AUTH TLS");
+        plain_reader
+            .get_mut()
+            .write_all(b"234 Proceed with TLS\r\n")
+            .await
+            .unwrap();
+
+        let tls_stream = acceptor.accept(plain_reader.into_inner()).await.unwrap();
+        let mut control = tokio::io::BufReader::new(tls_stream);
+        for (expected, response) in [
+            ("PBSZ 0", "200 PBSZ accepted\r\n"),
+            ("PROT P", "200 Private data protection\r\n"),
+            ("USER anonymous", "331 Password required\r\n"),
+            ("PASS aria2@", "230 Logged in\r\n"),
+            ("TYPE I", "200 Binary\r\n"),
+            ("PWD", "257 \"/\" current\r\n"),
+            ("CWD /", "250 Root directory\r\n"),
+            ("CWD files", "250 Directory changed\r\n"),
+            ("SIZE small.bin", "213 4\r\n"),
+        ] {
+            command.clear();
+            control.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), expected);
+            control
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        command.clear();
+        control.read_line(&mut command).await.unwrap();
+        assert_eq!(command.trim_end(), "EPSV");
+        let data_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data_port = data_listener.local_addr().unwrap().port();
+        control
+            .get_mut()
+            .write_all(
+                format!("229 Entering Extended Passive Mode (|||{data_port}|)\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        for (expected, response) in [
+            ("REST 0", "350 Restart accepted\r\n"),
+            (
+                "RETR small.bin",
+                "150 Opening protected data connection\r\n",
+            ),
+        ] {
+            command.clear();
+            control.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), expected);
+            control
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let (data_stream, _) = data_listener.accept().await.unwrap();
+        let mut protected_data = acceptor.accept(data_stream).await.unwrap();
+        protected_data
+            .write_all(&[0xDE, 0xAD, 0xBE, 0xEF])
+            .await
+            .unwrap();
+        protected_data.shutdown().await.unwrap();
+        control
+            .get_mut()
+            .write_all(b"226 Transfer complete\r\n")
+            .await
+            .unwrap();
+
+        command.clear();
+        control.read_line(&mut command).await.unwrap();
+        assert_eq!(command.trim_end(), "QUIT");
+        control
+            .get_mut()
+            .write_all(b"221 Goodbye\r\n")
+            .await
+            .unwrap();
+    });
+
+    let output_dir = tmp_dir();
+    let url = format!("ftps://127.0.0.1:{}/files/small.bin", address.port());
+    let options = DownloadOptions {
+        check_certificate: false,
+        ..DownloadOptions::default()
+    };
+    let mut command = FtpDownloadCommand::new(
+        GroupId::new(107),
+        &url,
+        &options,
+        output_dir.path().to_str(),
+        None,
+    )
+    .unwrap();
+    command.execute().await.unwrap();
+    server_task.await.unwrap();
+    assert_eq!(
+        std::fs::read(output_dir.path().join("small.bin")).unwrap(),
+        small_content()
     );
 }
 

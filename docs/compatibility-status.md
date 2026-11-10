@@ -108,10 +108,17 @@ behavior. An unlisted behavior has not been audited here.
 - **Compatibility intent:** this is an internal relocation. FTP command order,
   response acceptance, passive-address policy, retries, and output behavior are
   intended to remain unchanged.
-- **Verification:** protocol-layer FTP tests (19) and core FTP tests (72) pass;
-  `cargo check -p aria2-protocol -p aria2-core`, workspace formatting, and
-  `git diff --check` pass. A mock control stream verifies the injected session
-  command sequence. Live FTP/FTPS interoperability was not exercised.
+- **Verification:** protocol-layer FTP tests (19), core FTP tests (72), FTP
+  download end-to-end tests (34), FTP proxy tests (2), and the legacy FTP
+  integration tests (13) pass. A mock control stream verifies the injected
+  session command sequence; an explicit FTPS mock verifies TLS on both control
+  and data channels with certificate checking disabled in that local test.
+  Windows test runs set `TEMP` and `TMP` to the writable
+  `target/ftp-test-tmp` directory; the default OS temp directory does not allow
+  the required control-file replacement in this sandbox. `cargo check -p
+  aria2-protocol -p aria2-core`, workspace formatting, and `git diff --check`
+  pass. A public remote FTP/FTPS server was not used for interoperability
+  testing.
 
 ## Pause and unpause lifecycle status
 
