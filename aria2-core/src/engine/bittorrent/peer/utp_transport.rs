@@ -1,8 +1,8 @@
 //! Process-owned uTP socket actor.
 //!
-//! One actor owns the UDP socket and all uTP protocol state for a bound local
-//! endpoint. Peer actors use bounded commands and per-connection receive
-//! queues; they never lock or poll `UtpSocket` themselves.
+//! One actor owns and asynchronously drives the protocol library's `UtpSocket`
+//! for a bound local endpoint. Peer actors use bounded commands and
+//! per-connection receive queues; they never lock or poll `UtpSocket` themselves.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
