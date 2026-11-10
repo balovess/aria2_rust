@@ -1,8 +1,10 @@
-//! BitTorrent incoming TCP connection listener.
+//! Standalone BitTorrent incoming TCP connection accept helper.
 //!
-//! Equivalent to C++ `PeerListenCommand`. Binds a TCP socket and accepts
-//! incoming peer connections, forwarding them via a channel to the download
-//! engine for MSE handshake and session assignment.
+//! Binds one wildcard IPv4 socket and forwards raw accepted streams to its
+//! caller. The built-in engine uses its process-level listener manager instead,
+//! because it must share sockets across torrent routes and coordinate peer
+//! admission and shutdown. This helper performs no BitTorrent handshake or
+//! torrent routing.
 //!
 //! # C++ Architecture Reference
 //!
@@ -23,11 +25,10 @@ use tracing::{debug, info, warn};
 ///
 /// Matches the C++ constant: `for (int i = 0; i < 3 && socket_->isReadable(0); ++i)`.
 const MAX_ACCEPT_PER_CYCLE: usize = 3;
+const ACCEPT_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const ACCEPT_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Channel message for notifying the engine about an accepted peer.
-///
-/// The engine receives this and spawns an MSE handshake handler
-/// (equivalent to C++ `ReceiverMSEHandshakeCommand`).
+/// Raw TCP stream and remote endpoint accepted by [`PeerListener`].
 #[derive(Debug)]
 pub struct AcceptedPeer {
     /// The accepted TCP stream.
@@ -38,9 +39,8 @@ pub struct AcceptedPeer {
 
 /// BitTorrent TCP listener for incoming peer connections.
 ///
-/// Binds to the configured port and accepts incoming connections,
-/// sending them via a channel to the download engine for MSE
-/// handshake and session assignment.
+/// Binds one wildcard IPv4 socket and sends accepted streams through a
+/// channel. The caller owns handshake, torrent routing, and session assignment.
 ///
 /// This is the Rust equivalent of C++ `PeerListenCommand`.
 pub struct PeerListener {
@@ -87,6 +87,7 @@ impl PeerListener {
     /// mirroring the C++ `socket_->isReadable(0)` non-blocking check.
     pub async fn run(self, mut shutdown: tokio::sync::oneshot::Receiver<()>) {
         info!(port = self.port, "Peer listener accept loop started");
+        let mut retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
@@ -96,6 +97,7 @@ impl PeerListener {
                 result = self.listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
+                            retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
                             debug!(addr = %addr, "Accepted incoming peer connection");
                             let peer = AcceptedPeer { stream, addr };
                             if self.tx.send(peer).await.is_err() {
@@ -105,10 +107,25 @@ impl PeerListener {
                             // Drain additional pending connections up to the
                             // batch limit, matching C++ PeerListenCommand which
                             // accepts up to 3 per execute() cycle.
-                            self.drain_pending().await;
+                            if !self.drain_pending().await {
+                                if self.tx.is_closed()
+                                    || !wait_for_retry(&mut shutdown, retry_delay).await
+                                {
+                                    break;
+                                }
+                                retry_delay = (retry_delay * 2).min(ACCEPT_RETRY_MAX_DELAY);
+                            }
                         }
                         Err(e) => {
-                            warn!(error = %e, "Failed to accept incoming connection");
+                            warn!(
+                                error = %e,
+                                retry_in_ms = retry_delay.as_millis(),
+                                "Failed to accept incoming connection; retrying"
+                            );
+                            if !wait_for_retry(&mut shutdown, retry_delay).await {
+                                break;
+                            }
+                            retry_delay = (retry_delay * 2).min(ACCEPT_RETRY_MAX_DELAY);
                         }
                     }
                 }
@@ -123,7 +140,7 @@ impl PeerListener {
     /// connections are waiting. This mirrors the C++ behavior where
     /// `socket_->isReadable(0)` checks for immediately available data
     /// without blocking.
-    async fn drain_pending(&self) {
+    async fn drain_pending(&self) -> bool {
         for _ in 1..MAX_ACCEPT_PER_CYCLE {
             match tokio::time::timeout(
                 std::time::Duration::from_micros(500),
@@ -136,16 +153,17 @@ impl PeerListener {
                     let peer = AcceptedPeer { stream, addr };
                     if self.tx.send(peer).await.is_err() {
                         warn!("Peer receiver dropped during drain");
-                        return;
+                        return false;
                     }
                 }
                 Ok(Err(e)) => {
                     warn!(error = %e, "Failed to accept incoming connection (drain)");
-                    return;
+                    return false;
                 }
-                Err(_) => return, // Timeout, no more pending connections
+                Err(_) => return true, // Timeout, no more pending connections
             }
         }
+        true
     }
 
     /// Returns the bound port number.
@@ -156,6 +174,16 @@ impl PeerListener {
     /// Returns the local address the listener is bound to.
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+}
+
+async fn wait_for_retry(
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+    delay: std::time::Duration,
+) -> bool {
+    tokio::select! {
+        _ = shutdown => false,
+        _ = tokio::time::sleep(delay) => true,
     }
 }
 

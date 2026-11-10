@@ -595,20 +595,14 @@ Do not add pass-through engine clients around these public interfaces.
   variants that duplicate the canonical entry point. The `engine` module
   layout follows internal ownership.
 - `aria2_protocol::bittorrent::peer::listener::PeerListener` is a public
-  standalone TCP accept helper. It binds a wildcard address and forwards raw
-  accepted streams; the engine does not use it. It is distinct from the core
-  `BtPeerListenerManager`, which owns process-level binding, shared torrent
-  routing, handshake admission, and listener lifecycle. Protocol handshakes
-  remain in `aria2-protocol`; moving the engine manager there would pull core
-  peer-storage and task-admission policy into the lower-level crate.
   standalone TCP accept helper. It binds one wildcard IPv4 socket and forwards
-  raw accepted streams; the engine does not use it. It does not provide
-  multi-family/port-range binding, shared torrent routes, global handshake
-  admission, per-route peer-storage admission, or process shutdown/draining.
-  The core `BtPeerListenerManager` owns those engine responsibilities and
-  shares TCP listeners and uTP actors across torrent routes. Protocol
-  handshakes remain in `aria2-protocol`; moving the engine manager there would
-  pull core peer-storage and task-admission policy into the lower-level crate.
+  raw accepted streams; it performs no handshake or torrent routing, and the
+  built-in engine does not use it. Keep this public helper for callers that want
+  standalone acceptance. The core `BtPeerListenerManager` owns process-level
+  binding, shared torrent routes, handshake admission, storage admission, and
+  shutdown/draining across TCP listeners and uTP actors. Protocol handshake
+  operations remain in `aria2-protocol`; moving the manager there would pull
+  core peer-storage and task-admission policy into the lower-level crate.
 - **Narrow** `DownloadManager` source organization into its submission/query facade,
   per-download handle, and engine-lifecycle handle. Keep the crate-root
   re-exports and observable behavior unchanged; organize its interface tests by
@@ -619,7 +613,10 @@ Do not add pass-through engine clients around these public interfaces.
   their torrent registration. Each accept/dispatch loop owns and drains its
   per-connection handshake tasks on shutdown; a peer-admission guard returns
   storage ownership if bounded route delivery is cancelled. Keep its loopback
-  lifecycle tests in the adjacent `peer/listener/tests.rs` file.
+  lifecycle tests in the adjacent `peer/listener/tests.rs` file. TCP accept
+  errors use capped exponential retry delays so a transient OS error does not
+  silently terminate the process listener while its socket and routes remain
+  registered.
 - **Delete** the unused `BtConnectionPool` and `ReadyConnection` raw TCP
   prewarm helper. Repository-wide call-site inspection found no production
   users; active peer attempts use the bounded `PeerDialQueue`, which performs

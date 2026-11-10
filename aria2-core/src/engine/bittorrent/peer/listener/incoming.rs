@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 use super::super::storage::{DefaultPeerStorage, PeerEntry};
 use super::{IncomingPeer, IncomingPeerConnection, SharedRoute};
 
+const ACCEPT_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const ACCEPT_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(super) async fn run_shared_listener(
     listener: Arc<TcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
@@ -24,22 +27,31 @@ pub(super) async fn run_shared_listener(
     enum Event {
         Shutdown,
         Accepted(io::Result<(tokio::net::TcpStream, SocketAddr)>),
+        AcceptRetryElapsed,
         ConnectionFinished(Result<OwnedSemaphorePermit, JoinError>),
     }
 
     let connection_shutdown = shutdown.child_token();
     let mut connections = JoinSet::<OwnedSemaphorePermit>::new();
+    let mut accept_retry_deadline = None;
+    let mut accept_retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
     loop {
         let event = tokio::select! {
             _ = shutdown.cancelled() => Event::Shutdown,
-            result = listener.accept() => Event::Accepted(result),
+            _ = tokio::time::sleep_until(
+                accept_retry_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if accept_retry_deadline.is_some() => Event::AcceptRetryElapsed,
+            result = listener.accept(), if accept_retry_deadline.is_none() => Event::Accepted(result),
             result = connections.join_next(), if !connections.is_empty() => {
                 Event::ConnectionFinished(result.expect("non-empty JoinSet has a task"))
             }
         };
         match event {
             Event::Shutdown => break,
+            Event::AcceptRetryElapsed => accept_retry_deadline = None,
             Event::Accepted(Ok((stream, endpoint))) => {
+                accept_retry_deadline = None;
+                accept_retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
                 let permit = match Arc::clone(&incoming_handshake_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -62,8 +74,13 @@ pub(super) async fn run_shared_listener(
                 });
             }
             Event::Accepted(Err(error)) => {
-                tracing::debug!(%error, "BitTorrent listener accept failed");
-                break;
+                tracing::warn!(
+                    %error,
+                    retry_in_ms = accept_retry_delay.as_millis(),
+                    "BitTorrent listener accept failed; retrying"
+                );
+                accept_retry_deadline = Some(tokio::time::Instant::now() + accept_retry_delay);
+                accept_retry_delay = (accept_retry_delay * 2).min(ACCEPT_RETRY_MAX_DELAY);
             }
             Event::ConnectionFinished(Ok(permit)) => drop(permit),
             Event::ConnectionFinished(Err(error)) if !error.is_cancelled() => {
