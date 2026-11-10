@@ -292,20 +292,20 @@ facade.
    payload sync. Complete pieces pass their v1/v2 hash validator, are written
    and synced, then become live-complete and eligible for checkpoint publication
    through `WorkCommitter`.
-   Peer wire messages and TCP peer protocol use `aria2-protocol::bittorrent`;
+   Peer wire messages, TCP peer protocol, torrent-geometry validation, and
+   per-peer protocol-session state use `aria2-protocol::bittorrent`;
    core owns peer selection, outbound network policy, and the process uTP actor.
    Bad-peer feedback remains BitTorrent-specific engine policy.
 5. Peer interaction selects uTP, MSE, or a plain TCP fallback from task
    settings. For TCP, core establishes the policy-approved stream and passes it
    to the protocol crate's plain or MSE handshake; both return the same
    `PeerConnection`, which owns message framing and applies MSE encryption when
-   negotiated. For uTP, core's `UtpPeerConnection` performs the handshake and
-   message framing over the process-owned transport actor, reusing the
-   protocol crate's handshake codec. This keeps socket policy in core but
-   leaves uTP peer-protocol sequencing split across the two crates. `PeerState`
-   tracks locally sent choke/interest/request state and updates remote
-   choke/interest and request completion from received peer messages. `BtPeerConn`
-   then adds engine peer state and statistics. Once
+   negotiated. For uTP, core owns the process transport actor and adapts its
+   byte stream to protocol `PeerWireSession`, which owns the handshake and
+   message framing. Protocol `PeerState` tracks choke/interest/request state,
+   while `PeerSessionResource` tracks torrent geometry, availability, and
+   negotiated extensions. `BtPeerConn` then adds engine peer identity, upload
+   policy state, and statistics. Once
    initialized, it is moved into a long-lived `PeerActor`; that actor is the
    sole runtime owner of the connection and performs its socket reads/writes.
    Coordinators send peer commands and consume peer events rather than doing
@@ -600,3 +600,9 @@ Do not add pass-through engine clients around these public interfaces.
   per-connection handshake tasks on shutdown; a peer-admission guard returns
   storage ownership if bounded route delivery is cancelled. Keep its loopback
   lifecycle tests in the adjacent `peer/listener/tests.rs` file.
+- **Delete** the unused `BtConnectionPool` and `ReadyConnection` raw TCP
+  prewarm helper. Repository-wide call-site inspection found no production
+  users; active peer attempts use the bounded `PeerDialQueue`, which performs
+  policy-aware connection establishment and the BitTorrent handshake. The old
+  type was reachable only through the engine implementation path, not the
+  supported crate-root library interface.

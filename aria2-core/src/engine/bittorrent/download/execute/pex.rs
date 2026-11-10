@@ -4,7 +4,7 @@
 //! - **Outbound**: Periodically build and queue PEX Extended messages on
 //!   connections that support ut_pex (after BEP 10 handshake).
 //! - **Inbound**: Consume negotiated `ut_pex` messages in the peer message
-//!   handler, add discovered peers to the connection pool, and attempt
+//!   handler, forward discovered peers into the bounded dial queue, and attempt
 //!   connections.
 //!
 //! Wire format (BEP 10/11):

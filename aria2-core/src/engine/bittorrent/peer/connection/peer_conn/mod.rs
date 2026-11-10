@@ -70,9 +70,6 @@ impl PeerActorId {
 
 /// Peer connection abstraction that supports TCP (plain or MSE) and uTP.
 ///
-/// This mirrors the original aria2 C++ architecture where connection management
-/// is separated from the download command logic (see BtRuntime in original).
-///
 /// Composes:
 /// - An `InnerConnection` for actual I/O.
 /// - A `SendBuffer` for batching outbound messages.

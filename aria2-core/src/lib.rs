@@ -199,7 +199,7 @@ pub mod validation;
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
 #[cfg(feature = "bittorrent")]
-pub use engine::bittorrent::peer::message_validation::{
+pub use aria2_protocol::bittorrent::peer::message_validation::{
     BtMessageValidationError, BtMessageValidator, MAX_BLOCK_LENGTH,
 };
 #[cfg(feature = "bittorrent")]
