@@ -93,12 +93,12 @@ impl TrackerResponse {
         let tracker_id = root.dict_get_str("tracker id").map(|s| s.to_string());
         let announce_list = Self::parse_announce_list(&root);
 
-        let peers = Self::parse_peers(&root)?;
+        let peers = Self::parse_peers(&root);
 
         // Parse IPv6 compact peers ("peers6" key) per BitTorrent tracker
         // protocol extension. The C++ aria2 references this as
         // BtAnnounce::PEERS6 in DefaultBtAnnounce::processAnnounceResponse.
-        let peers6 = Self::parse_peers6(&root)?;
+        let peers6 = Self::parse_peers6(&root);
 
         debug!(
             "Tracker response: interval={}s, seeders={:?}, leechers={:?}, downloaded={:?}, peers={}, peers6={}, tracker_id={:?}, announce_list={:?}",
@@ -127,9 +127,7 @@ impl TrackerResponse {
         })
     }
 
-    fn parse_peers(
-        root: &crate::bittorrent::bencode::codec::BencodeValue,
-    ) -> Result<Vec<PeerInfo>, String> {
+    fn parse_peers(root: &crate::bittorrent::bencode::codec::BencodeValue) -> Vec<PeerInfo> {
         match root.dict_get(b"peers") {
             Some(crate::bittorrent::bencode::codec::BencodeValue::Bytes(data)) => {
                 Self::parse_compact_peers(data)
@@ -137,7 +135,7 @@ impl TrackerResponse {
             Some(crate::bittorrent::bencode::codec::BencodeValue::List(list)) => {
                 Self::parse_normal_peers(list)
             }
-            _ => Ok(Vec::new()),
+            _ => Vec::new(),
         }
     }
 
@@ -166,12 +164,9 @@ impl TrackerResponse {
             .collect()
     }
 
-    fn parse_compact_peers(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
+    fn parse_compact_peers(data: &[u8]) -> Vec<PeerInfo> {
         if !data.len().is_multiple_of(6) {
-            return Err(format!(
-                "Compact peers data length ({}) is not a multiple of 6",
-                data.len()
-            ));
+            return Vec::new();
         }
 
         let mut peers = Vec::new();
@@ -188,15 +183,17 @@ impl TrackerResponse {
                 peer_id: None,
             });
         }
-        Ok(peers)
+        peers
     }
 
     fn parse_normal_peers(
         list: &[crate::bittorrent::bencode::codec::BencodeValue],
-    ) -> Result<Vec<PeerInfo>, String> {
+    ) -> Vec<PeerInfo> {
         let mut peers = Vec::new();
         for item in list {
-            let dict = item.as_dict().ok_or("Peer entry is not a dictionary")?;
+            let Some(dict) = item.as_dict() else {
+                continue;
+            };
             let ip = dict
                 .get(&b"ip"[..])
                 .and_then(|v| v.as_str())
@@ -205,8 +202,8 @@ impl TrackerResponse {
             let port = dict
                 .get(&b"port"[..])
                 .and_then(|v| v.as_int())
-                .map(|n| n as u16)
-                .unwrap_or(0);
+                .filter(|port| (1..=i64::from(u16::MAX)).contains(port))
+                .and_then(|port| u16::try_from(port).ok());
             let peer_id = dict
                 .get(&b"peer id"[..])
                 .and_then(|v| v.as_bytes())
@@ -217,41 +214,37 @@ impl TrackerResponse {
                     id
                 });
 
-            if !ip.is_empty() && port > 0 {
+            if !ip.is_empty()
+                && let Some(port) = port
+            {
                 peers.push(PeerInfo { ip, port, peer_id });
             }
         }
-        Ok(peers)
+        peers
     }
 
     /// Parse the "peers6" key from tracker response (IPv6 compact format).
     /// The compact format is 18 bytes per peer: 16-byte IPv6 address + 2-byte port.
-    fn parse_peers6(
-        root: &crate::bittorrent::bencode::codec::BencodeValue,
-    ) -> Result<Vec<PeerInfo>, String> {
+    fn parse_peers6(root: &crate::bittorrent::bencode::codec::BencodeValue) -> Vec<PeerInfo> {
         match root.dict_get(b"peers6") {
             Some(crate::bittorrent::bencode::codec::BencodeValue::Bytes(data)) => {
                 Self::parse_compact_peers_v6(data)
             }
             // The "peers6" key only supports compact format per the protocol
             // extension; dictionary/list format is not defined for IPv6.
-            _ => Ok(Vec::new()),
+            _ => Vec::new(),
         }
     }
 
     /// Decode compact IPv6 peer data (18 bytes per peer: 16-byte IP + 2-byte port).
-    fn parse_compact_peers_v6(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
+    fn parse_compact_peers_v6(data: &[u8]) -> Vec<PeerInfo> {
         use crate::bittorrent::peer::address::PeerAddr;
 
         if data.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         if !data.len().is_multiple_of(PeerAddr::COMPACT_SIZE_V6) {
-            return Err(format!(
-                "Compact peers6 data length ({}) is not a multiple of {}",
-                data.len(),
-                PeerAddr::COMPACT_SIZE_V6
-            ));
+            return Vec::new();
         }
 
         let count = data.len() / PeerAddr::COMPACT_SIZE_V6;
@@ -259,15 +252,15 @@ impl TrackerResponse {
         for i in 0..count {
             let start = i * PeerAddr::COMPACT_SIZE_V6;
             let end = start + PeerAddr::COMPACT_SIZE_V6;
-            let addr = PeerAddr::from_compact_v6(&data[start..end])
-                .ok_or_else(|| format!("Failed to parse IPv6 peer at index {}", i))?;
-            peers.push(PeerInfo {
-                ip: addr.ip,
-                port: addr.port,
-                peer_id: None,
-            });
+            if let Some(addr) = PeerAddr::from_compact_v6(&data[start..end]) {
+                peers.push(PeerInfo {
+                    ip: addr.ip,
+                    port: addr.port,
+                    peer_id: None,
+                });
+            }
         }
-        Ok(peers)
+        peers
     }
 
     pub fn is_failure(&self) -> bool {
@@ -361,6 +354,34 @@ mod tests {
         let response = TrackerResponse::parse(&BencodeValue::Dict(d).encode()).unwrap();
 
         assert_eq!(response.interval, 0);
+    }
+
+    #[test]
+    fn test_parse_normal_peers_skips_malformed_entries_and_invalid_ports() {
+        let peer = |port| {
+            BencodeValue::Dict(BTreeMap::from([
+                (b"ip".to_vec(), BencodeValue::Bytes(b"192.0.2.1".to_vec())),
+                (b"port".to_vec(), BencodeValue::Int(port)),
+            ]))
+        };
+        let mut response = BTreeMap::new();
+        response.insert(
+            b"peers".to_vec(),
+            BencodeValue::List(vec![
+                BencodeValue::Int(1),
+                peer(-1),
+                peer(0),
+                peer(65_536),
+                peer(65_537),
+                peer(65_535),
+            ]),
+        );
+
+        let parsed = TrackerResponse::parse(&BencodeValue::Dict(response).encode()).unwrap();
+
+        assert_eq!(parsed.peers.len(), 1);
+        assert_eq!(parsed.peers[0].ip, "192.0.2.1");
+        assert_eq!(parsed.peers[0].port, u16::MAX);
     }
 
     #[test]
@@ -498,8 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_peers6_invalid_length() {
-        // 17 bytes is not a multiple of 18 -> error
+    fn test_parse_peers6_invalid_length_preserves_ipv4_peers() {
+        // A malformed peers6 list is ignored without discarding other fields.
         let peers6_data = vec![0u8; 17];
 
         let mut resp_dict = BTreeMap::new();
@@ -509,12 +530,28 @@ mod tests {
 
         let root = BencodeValue::Dict(resp_dict);
         let encoded = root.encode();
-        let result = TrackerResponse::parse(&encoded);
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().contains("not a multiple of 18"),
-            "Expected error about peers6 length not being a multiple of 18"
-        );
+        let parsed = TrackerResponse::parse(&encoded).unwrap();
+
+        assert_eq!(parsed.peers.len(), 1);
+        assert!(parsed.peers6.is_empty());
+    }
+
+    #[test]
+    fn test_parse_compact_peers_invalid_length_preserves_ipv6_peers() {
+        let mut peers6_data = Vec::with_capacity(18);
+        peers6_data.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+        peers6_data.extend_from_slice(&6881u16.to_be_bytes());
+
+        let mut response = BTreeMap::new();
+        response.insert(b"peers".to_vec(), BencodeValue::Bytes(vec![0u8; 7]));
+        response.insert(b"peers6".to_vec(), BencodeValue::Bytes(peers6_data));
+
+        let parsed = TrackerResponse::parse(&BencodeValue::Dict(response).encode()).unwrap();
+
+        assert!(parsed.peers.is_empty());
+        assert_eq!(parsed.peers6.len(), 1);
+        assert_eq!(parsed.peers6[0].ip, "::1");
+        assert_eq!(parsed.peers6[0].port, 6881);
     }
 
     #[test]

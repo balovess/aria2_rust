@@ -265,7 +265,10 @@ async fn websocket_announce_timeout_reaches_live_tracker_snapshot() {
 #[tokio::test]
 async fn websocket_rejection_and_malformed_response_are_distinguished() {
     assert_eq!(
-        websocket_failure_from_response(r#"{"failure reason":"unknown torrent"}"#).await,
+        websocket_failure_from_response(
+            r#"{"action":"announce","failure reason":"unknown torrent"}"#,
+        )
+        .await,
         TrackerFailureKind::TrackerRejected
     );
     assert_eq!(
@@ -353,7 +356,9 @@ async fn concurrent_tracker_failures_remain_attached_to_their_urls() {
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
         websocket
             .send(Message::Text(
-                r#"{"failure reason":"not authorized"}"#.to_string().into(),
+                r#"{"action":"announce","failure reason":"not authorized"}"#
+                    .to_string()
+                    .into(),
             ))
             .await
             .expect("send tracker rejection");

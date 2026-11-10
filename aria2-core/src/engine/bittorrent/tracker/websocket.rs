@@ -385,6 +385,7 @@ mod tests {
     fn parses_json_and_compact_peers() {
         let compact = base64::engine::general_purpose::STANDARD.encode([192, 0, 2, 1, 0x1a, 0xe1]);
         let value = serde_json::json!({
+            "action": "announce",
             "peers": [
                 {"ip": "192.0.2.2", "port": 6882},
                 compact,
@@ -415,9 +416,28 @@ mod tests {
             };
             let request: Value = serde_json::from_str(&request).unwrap();
             assert_eq!(request["action"], "announce");
+            assert_eq!(
+                request["info_hash"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .map(u32::from)
+                    .collect::<Vec<_>>(),
+                vec![1; 20]
+            );
+            assert_eq!(
+                request["peer_id"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .map(u32::from)
+                    .collect::<Vec<_>>(),
+                vec![2; 20]
+            );
             websocket
                 .send(Message::Text(
                     serde_json::json!({
+                        "action": "announce",
                         "peers": [{"ip": "192.0.2.10", "port": 6881}]
                     })
                     .to_string()

@@ -61,8 +61,8 @@ enum CompactPeerFamily {
 pub fn encode_announce_request(request: &WebSocketAnnounceRequest<'_>) -> String {
     let mut message = serde_json::json!({
         "action": "announce",
-        "info_hash": base64::engine::general_purpose::STANDARD.encode(request.info_hash),
-        "peer_id": base64::engine::general_purpose::STANDARD.encode(request.peer_id),
+        "info_hash": binary_string(request.info_hash),
+        "peer_id": binary_string(request.peer_id),
         "uploaded": request.uploaded,
         "downloaded": request.downloaded,
         "left": request.left,
@@ -85,6 +85,14 @@ pub fn decode_announce_response(
 ) -> Result<WebSocketAnnounceResponse, WebSocketAnnounceResponseError> {
     let response: Value = serde_json::from_str(encoded)
         .map_err(|error| WebSocketAnnounceResponseError::Malformed(error.to_string()))?;
+    let response = response.as_object().ok_or_else(|| {
+        WebSocketAnnounceResponseError::Malformed("response must be a JSON object".to_owned())
+    })?;
+    if response.get("action").and_then(Value::as_str) != Some("announce") {
+        return Err(WebSocketAnnounceResponseError::Malformed(
+            "response action must be `announce`".to_owned(),
+        ));
+    }
     if let Some(reason) = response.get("failure reason").and_then(Value::as_str) {
         return Err(WebSocketAnnounceResponseError::Rejected(reason.to_owned()));
     }
@@ -101,10 +109,22 @@ pub fn decode_announce_response(
 
     Ok(WebSocketAnnounceResponse {
         peers,
-        interval: response.get("interval").and_then(Value::as_u64),
-        min_interval: response.get("min interval").and_then(Value::as_u64),
-        seeders: response.get("complete").and_then(Value::as_i64),
-        leechers: response.get("incomplete").and_then(Value::as_i64),
+        interval: response
+            .get("interval")
+            .and_then(Value::as_u64)
+            .filter(|seconds| *seconds > 0),
+        min_interval: response
+            .get("min interval")
+            .and_then(Value::as_u64)
+            .filter(|seconds| *seconds > 0),
+        seeders: response
+            .get("complete")
+            .and_then(Value::as_i64)
+            .filter(|count| *count >= 0),
+        leechers: response
+            .get("incomplete")
+            .and_then(Value::as_i64)
+            .filter(|count| *count >= 0),
     })
 }
 
@@ -129,6 +149,7 @@ fn parse_peer(value: &Value, family: CompactPeerFamily) -> Vec<SocketAddr> {
                 .get("port")
                 .and_then(Value::as_u64)
                 .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port > 0)
             else {
                 return Vec::new();
             };
@@ -141,7 +162,10 @@ fn parse_peer(value: &Value, family: CompactPeerFamily) -> Vec<SocketAddr> {
 
 fn parse_peer_string(peer: &str, family: CompactPeerFamily) -> Vec<SocketAddr> {
     if let Ok(address) = peer.parse::<SocketAddr>() {
-        return vec![address];
+        return (address.port() > 0)
+            .then_some(address)
+            .into_iter()
+            .collect();
     }
     parse_compact_peers(peer, family)
 }
@@ -156,7 +180,9 @@ fn parse_compact_peers(encoded: &str, family: CompactPeerFamily) -> Vec<SocketAd
             for chunk in bytes.as_chunks::<6>().0 {
                 let ip = IpAddr::from([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-                peers.push(SocketAddr::new(ip, port));
+                if port > 0 {
+                    peers.push(SocketAddr::new(ip, port));
+                }
             }
         }
         CompactPeerFamily::V6 if bytes.len().is_multiple_of(18) => {
@@ -165,7 +191,9 @@ fn parse_compact_peers(encoded: &str, family: CompactPeerFamily) -> Vec<SocketAd
                 octets.copy_from_slice(&chunk[..16]);
                 let ip = IpAddr::from(octets);
                 let port = u16::from_be_bytes([chunk[16], chunk[17]]);
-                peers.push(SocketAddr::new(ip, port));
+                if port > 0 {
+                    peers.push(SocketAddr::new(ip, port));
+                }
             }
         }
         _ => {}
@@ -177,6 +205,10 @@ fn tracker_peer_socket_addr(ip: &str, port: u16) -> Option<SocketAddr> {
     ip.parse::<IpAddr>()
         .ok()
         .map(|ip| SocketAddr::new(ip, port))
+}
+
+fn binary_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| char::from(*byte)).collect()
 }
 
 #[cfg(test)]
@@ -204,14 +236,8 @@ mod tests {
         assert_eq!(message["numwant"], 7);
         assert_eq!(message["port"], 6881);
         assert!(message.get("event").is_none());
-        assert_eq!(
-            message["info_hash"],
-            base64::engine::general_purpose::STANDARD.encode([0x11; 20])
-        );
-        assert_eq!(
-            message["peer_id"],
-            base64::engine::general_purpose::STANDARD.encode([0x22; 20])
-        );
+        assert_eq!(message["info_hash"], binary_string(&[0x11; 20]));
+        assert_eq!(message["peer_id"], binary_string(&[0x22; 20]));
     }
 
     #[test]
@@ -226,7 +252,12 @@ mod tests {
         );
         peers_v6[16..].copy_from_slice(&6882u16.to_be_bytes());
         let peers_v6 = base64::engine::general_purpose::STANDARD.encode(peers_v6);
-        let encoded = serde_json::json!({"peers": peers_v4, "peers6": peers_v6}).to_string();
+        let encoded = serde_json::json!({
+            "action": "announce",
+            "peers": peers_v4,
+            "peers6": peers_v6
+        })
+        .to_string();
 
         let response = decode_announce_response(&encoded).unwrap();
         assert_eq!(response.peers.len(), 2);
@@ -242,6 +273,7 @@ mod tests {
     fn decodes_mixed_object_and_compact_peer_entries() {
         let compact = base64::engine::general_purpose::STANDARD.encode([192, 0, 2, 1, 0x1a, 0xe1]);
         let encoded = serde_json::json!({
+            "action": "announce",
             "peers": [
                 {"ip": "192.0.2.2", "port": 6882},
                 compact,
@@ -265,7 +297,12 @@ mod tests {
     fn ignores_compact_peer_data_with_invalid_lengths() {
         let peers_v4 = base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4, 5]);
         let peers_v6 = base64::engine::general_purpose::STANDARD.encode([0; 17]);
-        let encoded = serde_json::json!({"peers": peers_v4, "peers6": peers_v6}).to_string();
+        let encoded = serde_json::json!({
+            "action": "announce",
+            "peers": peers_v4,
+            "peers6": peers_v6
+        })
+        .to_string();
 
         assert!(decode_announce_response(&encoded).unwrap().peers.is_empty());
     }
@@ -276,10 +313,47 @@ mod tests {
             decode_announce_response("{"),
             Err(WebSocketAnnounceResponseError::Malformed(_))
         ));
-        let error = decode_announce_response(r#"{"failure reason":"denied"}"#).unwrap_err();
+        assert!(matches!(
+            decode_announce_response("[]"),
+            Err(WebSocketAnnounceResponseError::Malformed(_))
+        ));
+        assert!(matches!(
+            decode_announce_response(r#"{"action":"scrape"}"#),
+            Err(WebSocketAnnounceResponseError::Malformed(_))
+        ));
+        let error = decode_announce_response(r#"{"action":"announce","failure reason":"denied"}"#)
+            .unwrap_err();
         assert_eq!(
             error,
             WebSocketAnnounceResponseError::Rejected("denied".to_owned())
         );
+    }
+
+    #[test]
+    fn ignores_zero_ports_and_invalid_tracker_statistics() {
+        let compact_v4 = base64::engine::general_purpose::STANDARD
+            .encode([192, 0, 2, 1, 0, 0, 192, 0, 2, 2, 0x1a, 0xe1]);
+        let encoded = serde_json::json!({
+            "action": "announce",
+            "peers": [
+                {"ip": "192.0.2.3", "port": 0},
+                {"ip": "192.0.2.4", "port": 65536},
+                "192.0.2.5:0",
+                compact_v4,
+            ],
+            "interval": 0,
+            "min interval": 0,
+            "complete": -1,
+            "incomplete": -2,
+        })
+        .to_string();
+
+        let response = decode_announce_response(&encoded).unwrap();
+
+        assert_eq!(response.peers, vec!["192.0.2.2:6881".parse().unwrap()]);
+        assert_eq!(response.interval, None);
+        assert_eq!(response.min_interval, None);
+        assert_eq!(response.seeders, None);
+        assert_eq!(response.leechers, None);
     }
 }
