@@ -265,28 +265,16 @@ impl BtPeerConn {
         };
         let result = result.and_then(|message| {
             if let Some(message_ref) = message.as_ref() {
-                if matches!(
-                    message_ref,
-                    BtMessage::AllowedFast { .. }
-                        | BtMessage::Reject { .. }
-                        | BtMessage::HaveAll
-                        | BtMessage::HaveNone
-                ) && !self.remote_supports_fast_extension()
+                if let Err(error) =
+                    aria2_protocol::bittorrent::peer::message_validation::validate_message_capabilities(
+                        message_ref,
+                        self.remote_supports_fast_extension(),
+                        self.remote_supports_extended_messaging(),
+                    )
                 {
                     return Err(Aria2Error::Recoverable(
                         RecoverableError::TemporaryNetworkFailure {
-                            message: "peer sent a Fast Extension message without negotiating Fast Extension"
-                                .to_owned(),
-                        },
-                    ));
-                }
-                if matches!(message_ref, BtMessage::Extended { .. })
-                    && !self.remote_supports_extended_messaging()
-                {
-                    return Err(Aria2Error::Recoverable(
-                        RecoverableError::TemporaryNetworkFailure {
-                            message: "peer sent an extended message without negotiating extended messaging"
-                                .to_owned(),
+                            message: error.to_string(),
                         },
                     ));
                 }
@@ -315,6 +303,9 @@ impl BtPeerConn {
                         payload,
                     )
             {
+                if let Some(resource) = self.session_resource.as_mut() {
+                    resource.apply_extension_handshake(&handshake);
+                }
                 if let Some(port) = handshake.port() {
                     self.remote_listen_port = Some(port);
                     self.incoming = false;
@@ -329,12 +320,6 @@ impl BtPeerConn {
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
                         Some(client.to_owned());
-                }
-                if let Some(id) = handshake.ut_metadata_id() {
-                    self.register_peer_extension("ut_metadata", id);
-                }
-                if let Some(id) = handshake.ut_pex_id() {
-                    self.register_peer_extension("ut_pex", id);
                 }
             }
             Ok(message)

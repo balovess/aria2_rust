@@ -216,6 +216,19 @@ impl PeerSessionResource {
         }
     }
 
+    /// Apply the peer's BEP 10 extension IDs to this protocol session.
+    pub fn apply_extension_handshake(
+        &mut self,
+        handshake: &crate::bittorrent::message::extension::ExtensionHandshake,
+    ) {
+        if let Some(id) = handshake.ut_metadata_id() {
+            self.add_extension("ut_metadata", id);
+        }
+        if let Some(id) = handshake.ut_pex_id() {
+            self.add_extension("ut_pex", id);
+        }
+    }
+
     /// Look up the message ID for a given extension key.
     pub fn get_extension_message_id(&self, key: &str) -> Option<u8> {
         self.peer_extensions.get(key).copied()

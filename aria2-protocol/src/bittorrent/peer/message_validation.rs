@@ -10,6 +10,50 @@ use std::fmt;
 
 use crate::bittorrent::message::types::BtMessage;
 
+/// Message received without the peer capability required to send it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerMessageCapabilityError {
+    FastExtensionNotNegotiated,
+    ExtendedMessagingNotNegotiated,
+}
+
+impl fmt::Display for PeerMessageCapabilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FastExtensionNotNegotiated => {
+                f.write_str("peer sent a Fast Extension message without negotiating Fast Extension")
+            }
+            Self::ExtendedMessagingNotNegotiated => {
+                f.write_str("peer sent an extended message without negotiating extended messaging")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PeerMessageCapabilityError {}
+
+/// Validate that a message is permitted by the capabilities in the peer handshake.
+pub fn validate_message_capabilities(
+    message: &BtMessage,
+    supports_fast_extension: bool,
+    supports_extended_messaging: bool,
+) -> Result<(), PeerMessageCapabilityError> {
+    if matches!(
+        message,
+        BtMessage::AllowedFast { .. }
+            | BtMessage::Reject { .. }
+            | BtMessage::HaveAll
+            | BtMessage::HaveNone
+    ) && !supports_fast_extension
+    {
+        return Err(PeerMessageCapabilityError::FastExtensionNotNegotiated);
+    }
+    if matches!(message, BtMessage::Extended { .. }) && !supports_extended_messaging {
+        return Err(PeerMessageCapabilityError::ExtendedMessagingNotNegotiated);
+    }
+    Ok(())
+}
+
 /// Maximum block length (64 KiB), matching C++ aria2 `BtConstants.h` `MAX_BLOCK_LENGTH`.
 ///
 /// Note: While aria2 typically *requests* 16 KiB blocks (`BLOCK_SIZE`), the

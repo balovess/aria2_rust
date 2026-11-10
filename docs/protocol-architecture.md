@@ -292,8 +292,9 @@ facade.
    payload sync. Complete pieces pass their v1/v2 hash validator, are written
    and synced, then become live-complete and eligible for checkpoint publication
    through `WorkCommitter`.
-   Peer wire messages, TCP peer protocol, torrent-geometry validation, and
-   per-peer protocol-session state use `aria2-protocol::bittorrent`;
+   Peer wire messages, TCP peer protocol, torrent-geometry and negotiated-
+   capability validation, and per-peer protocol-session state use
+   `aria2-protocol::bittorrent`;
    core owns peer selection, outbound network policy, and the process uTP actor.
    Bad-peer feedback remains BitTorrent-specific engine policy.
 5. Peer interaction selects uTP, MSE, or a plain TCP fallback from task
@@ -311,6 +312,8 @@ facade.
    Coordinators send peer commands and consume peer events rather than doing
    parallel socket I/O. `BtPeerConn` therefore remains the actor-owned
    connection/state object at runtime; only pre-actor ownership is temporary.
+   BEP 11 payload encoding, compact-address conversion, and message framing use
+   protocol types; core selects, filters, and schedules the peers to advertise.
    The torrent-scoped `TorrentSession` owns the `PeerSwarm`, which the
    piece-download coordinator borrows and then transfers into seeding. Magnet
    metadata actors are activated for payload in place, preserving the same

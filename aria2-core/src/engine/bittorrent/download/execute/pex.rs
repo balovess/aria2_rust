@@ -31,6 +31,7 @@ use crate::engine::bittorrent::peer::connection::BtPeerConn;
 use crate::engine::bittorrent::peer::interaction::{BtPeerInteraction, PEER_CONNECT_SETTLE_TIME};
 use crate::request::request_group::BtPeerSource;
 use aria2_protocol::bittorrent::extension::pex::PexHandler;
+use aria2_protocol::bittorrent::message::extension::UtPexMessage;
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
 use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
@@ -70,12 +71,14 @@ impl BtDownloadCommand {
             return None;
         }
 
-        let pex_bencode = PexHandler::build_pex_added(
-            &self.pex_known_peers,
-            remote_peer_addr,
-            PexHandler::DEFAULT_MAX_PEERS,
-        );
-        let payload = pex_bencode.encode();
+        let added = self
+            .pex_known_peers
+            .iter()
+            .filter(|peer| *peer != remote_peer_addr)
+            .take(PexHandler::DEFAULT_MAX_PEERS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload = UtPexMessage::from_peer_addrs(&added, &[]).to_payload();
         let wire_bytes = serialize_extended(remote_ut_pex_id, payload);
 
         self.update_pex_last_send();
@@ -268,12 +271,14 @@ async fn send_periodic_pex_to_swarm_at(
         if peer_addrs.is_empty() && dropped_addrs.is_empty() {
             continue;
         }
-        let payload = PexHandler::build_pex_message(&peer_addrs, &dropped_addrs).encode();
-        let wire_bytes = serialize_extended(remote_ut_pex_id, payload);
+        let payload = UtPexMessage::from_peer_addrs(&peer_addrs, &dropped_addrs).to_payload();
         if swarm
             .send_to(
                 actor_id,
-                crate::engine::bittorrent::peer::message_handler::PeerCommand::SendPex(wire_bytes),
+                crate::engine::bittorrent::peer::message_handler::PeerCommand::SendPex {
+                    remote_extension_id: remote_ut_pex_id,
+                    payload,
+                },
             )
             .await
             .is_err()

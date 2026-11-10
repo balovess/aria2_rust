@@ -10,20 +10,12 @@ pub(crate) fn process_pex_during_read(conn: &mut BtPeerConn, ext_id: u8, payload
     }
 
     use aria2_protocol::bittorrent::message::extension::UtPexMessage;
-    use aria2_protocol::bittorrent::peer::connection::PeerAddr;
-
     match UtPexMessage::from_payload(payload) {
         Ok(pex_msg) => {
-            for compact in &pex_msg.added {
-                let ip = std::net::Ipv4Addr::from(*compact.ip());
-                conn.pending_pex_peers
-                    .push(PeerAddr::new(&ip.to_string(), compact.port()));
-            }
-            for compact in &pex_msg.added6 {
-                let ip = std::net::Ipv6Addr::from(*compact.ip());
-                conn.pending_pex_peers
-                    .push(PeerAddr::new(&ip.to_string(), compact.port()));
-            }
+            conn.pending_pex_peers
+                .extend(pex_msg.added.iter().map(|peer| peer.to_peer_addr()));
+            conn.pending_pex_peers
+                .extend(pex_msg.added6.iter().map(|peer| peer.to_peer_addr()));
             if !pex_msg.added.is_empty() || !pex_msg.added6.is_empty() {
                 debug!(
                     "[BT] PEX during actor read: ext_id={}, {} v4 + {} v6 peers (buffered for swarm admission)",

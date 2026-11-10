@@ -28,6 +28,12 @@ impl CompactPeerV4 {
     pub fn port(&self) -> u16 {
         u16::from_be_bytes([self.0[4], self.0[5]])
     }
+
+    /// Convert this compact BEP 11 peer endpoint to the protocol address type.
+    pub fn to_peer_addr(&self) -> crate::bittorrent::peer::connection::PeerAddr {
+        let ip = std::net::Ipv4Addr::from(*self.ip()).to_string();
+        crate::bittorrent::peer::connection::PeerAddr::new(&ip, self.port())
+    }
 }
 
 /// Compact IPv6 peer representation: 16 bytes IP + 2 bytes port = 18 bytes.
@@ -43,6 +49,12 @@ impl CompactPeerV6 {
     /// Get the port in host byte order.
     pub fn port(&self) -> u16 {
         u16::from_be_bytes([self.0[16], self.0[17]])
+    }
+
+    /// Convert this compact BEP 11 peer endpoint to the protocol address type.
+    pub fn to_peer_addr(&self) -> crate::bittorrent::peer::connection::PeerAddr {
+        let ip = std::net::Ipv6Addr::from(*self.ip()).to_string();
+        crate::bittorrent::peer::connection::PeerAddr::new(&ip, self.port())
     }
 }
 
@@ -90,6 +102,46 @@ impl UtPexMessage {
             dropped: Vec::new(),
             dropped6: Vec::new(),
         }
+    }
+
+    /// Build a wire-level PEX message from discovered protocol peer addresses.
+    ///
+    /// Addresses that are not valid IPv4 or IPv6 literals are ignored, matching
+    /// the established PEX encoder behavior. Added peers receive zero flags.
+    pub fn from_peer_addrs(
+        added: &[crate::bittorrent::peer::connection::PeerAddr],
+        dropped: &[crate::bittorrent::peer::connection::PeerAddr],
+    ) -> Self {
+        let mut message = Self::new();
+        for peer in added {
+            if let Ok(ip) = peer.ip.parse::<std::net::Ipv4Addr>() {
+                let mut compact = [0; COMPACT_PEER_V4_SIZE];
+                compact[..4].copy_from_slice(&ip.octets());
+                compact[4..].copy_from_slice(&peer.port.to_be_bytes());
+                message.added.push(CompactPeerV4(compact));
+                message.added_f.push(0);
+            } else if let Ok(ip) = peer.ip.parse::<std::net::Ipv6Addr>() {
+                let mut compact = [0; COMPACT_PEER_V6_SIZE];
+                compact[..16].copy_from_slice(&ip.octets());
+                compact[16..].copy_from_slice(&peer.port.to_be_bytes());
+                message.added6.push(CompactPeerV6(compact));
+                message.added6_f.push(0);
+            }
+        }
+        for peer in dropped {
+            if let Ok(ip) = peer.ip.parse::<std::net::Ipv4Addr>() {
+                let mut compact = [0; COMPACT_PEER_V4_SIZE];
+                compact[..4].copy_from_slice(&ip.octets());
+                compact[4..].copy_from_slice(&peer.port.to_be_bytes());
+                message.dropped.push(CompactPeerV4(compact));
+            } else if let Ok(ip) = peer.ip.parse::<std::net::Ipv6Addr>() {
+                let mut compact = [0; COMPACT_PEER_V6_SIZE];
+                compact[..16].copy_from_slice(&ip.octets());
+                compact[16..].copy_from_slice(&peer.port.to_be_bytes());
+                message.dropped6.push(CompactPeerV6(compact));
+            }
+        }
+        message
     }
 
     /// Encode this message to the payload bytes (after the ext_id byte).

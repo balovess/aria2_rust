@@ -169,9 +169,14 @@ async fn peer_actor_sends_pex_frame_with_the_remote_extension_id() {
     let payload =
         aria2_protocol::bittorrent::extension::pex::PexHandler::build_pex_message(&[], &[])
             .encode();
-    let wire = aria2_protocol::bittorrent::message::serializer::serialize_extended(19, payload);
     swarm
-        .send_to(actor_id, PeerCommand::SendPex(wire))
+        .send_to(
+            actor_id,
+            PeerCommand::SendPex {
+                remote_extension_id: 19,
+                payload,
+            },
+        )
         .await
         .unwrap();
 
