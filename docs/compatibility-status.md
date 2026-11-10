@@ -49,6 +49,9 @@ behavior. An unlisted behavior has not been audited here.
   resumed attempt have completed. Successful ranges do not clear the backoff
   streak; it resets after 60 seconds without a 429. A five-minute no-progress
   limit remains as a final bound when retries are unlimited.
+- **Configuration:** all `http-adaptive-*` controls are exposed through the
+  option registry, CLI, global RPC option updates, and C API global-option
+  entry points. They configure subsequently created download tasks.
 - **Verification:** an engine-level pause/resume test lets a resumed range
   complete, then rate-limits subsequent ranges and verifies the command exits
   with an error instead of remaining active.

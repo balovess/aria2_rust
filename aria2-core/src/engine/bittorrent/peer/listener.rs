@@ -53,6 +53,7 @@ struct SharedRoute {
     crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
     info_hash_v2: Option<[u8; 32]>,
     dht_enabled: bool,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 struct SharedListenerState {
@@ -174,9 +175,23 @@ impl BtPeerListenerManager {
                     "BitTorrent peer listener is shutting down",
                 ));
             }
-            if let Some(transport) = transports.get(&address) {
+            let actor_finished = transports
+                .get(&address)
+                .is_some_and(super::utp_transport::UtpTransportActor::is_finished);
+            if !actor_finished && let Some(transport) = transports.get(&address) {
                 transport.handle()
             } else {
+                if let Some(stopped) = transports.remove(&address)
+                    && let Err(error) = stopped.join().await
+                {
+                    tracing::warn!(%error, %address, "Stopped uTP actor failed while joining before restart");
+                }
+                if self.shutdown.is_cancelled() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "BitTorrent peer listener is shutting down",
+                    ));
+                }
                 let transport = super::utp_transport::UtpTransportActor::bind(
                     address,
                     self.utp_socket_options
@@ -362,6 +377,7 @@ impl BtPeerListenerManager {
                 crypto_policy,
                 info_hash_v2,
                 dht_enabled,
+                cancellation: tokio_util::sync::CancellationToken::new(),
             },
         );
         drop(routes);
@@ -407,6 +423,9 @@ impl Drop for BtPeerRouteHandle {
             .get(&self.info_hash)
             .is_some_and(|route| route.id == self.id)
         {
+            if let Some(route) = routes.get(&self.info_hash) {
+                route.cancellation.cancel();
+            }
             routes.remove(&self.info_hash);
         }
     }

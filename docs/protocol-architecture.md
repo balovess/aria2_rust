@@ -342,7 +342,9 @@ facade.
    local endpoint. It passes the configured `UtpSocketOptions` to each new
    socket; CLI, global RPC updates, and the C API all update this process-level
    configuration. Existing actors retain the options they were created with
-   because each socket is shared across torrent routes.
+   because each socket is shared across torrent routes. If an actor exits,
+   existing peer handles fail and may fall back to TCP; a later registration
+   reaps the stopped actor and creates a fresh one for that endpoint.
 8. `PublicTrackerList` owns remote source-list fetching and its complete
    response deadline. The protocol library exposes that timeout separately
    from `TrackerCatalogConfig`, preserving that public struct's existing
@@ -611,8 +613,9 @@ Do not add pass-through engine clients around these public interfaces.
   router. Its clones share one listener lifecycle, which is cancelled only when
   the final manager owner is dropped; route handles still independently remove
   their torrent registration. Each accept/dispatch loop owns and drains its
-  per-connection handshake tasks on shutdown; a peer-admission guard returns
-  storage ownership if bounded route delivery is cancelled. Keep its loopback
+  per-connection handshake tasks on shutdown. Dropping one route cancels its
+  in-flight TCP/uTP handshake completion and mailbox delivery; a peer-admission
+  guard returns storage ownership if delivery is cancelled. Keep its loopback
   lifecycle tests in the adjacent `peer/listener/tests.rs` file. TCP accept
   errors use capped exponential retry delays so a transient OS error does not
   silently terminate the process listener while its socket and routes remain

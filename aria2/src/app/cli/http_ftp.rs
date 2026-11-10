@@ -126,6 +126,54 @@ pub struct HttpFtpArgs {
     #[arg(long = "max-http2-streams-per-session")]
     pub max_http2_streams_per_session: Option<u64>,
 
+    /// Reduce Range concurrency by this percentage after server capacity rejection
+    #[arg(long = "http-adaptive-reduction-percent")]
+    pub http_adaptive_reduction_percent: Option<u64>,
+
+    /// Minimum seconds between upward concurrency probes
+    #[arg(long = "http-adaptive-recovery-interval")]
+    pub http_adaptive_recovery_interval: Option<u64>,
+
+    /// Minimum successful Ranges before an upward concurrency probe
+    #[arg(long = "http-adaptive-recovery-successes-min")]
+    pub http_adaptive_recovery_successes_min: Option<u64>,
+
+    /// Maximum successful Ranges before an upward concurrency probe
+    #[arg(long = "http-adaptive-recovery-successes-max")]
+    pub http_adaptive_recovery_successes_max: Option<u64>,
+
+    /// Initial delay between starting HTTP Range requests, in milliseconds
+    #[arg(long = "http-adaptive-start-interval-ms")]
+    pub http_adaptive_start_interval_ms: Option<u64>,
+
+    /// Base capacity-rejection backoff, in seconds
+    #[arg(long = "http-adaptive-backoff-base")]
+    pub http_adaptive_backoff_base: Option<u64>,
+
+    /// Maximum capacity-rejection backoff, in seconds
+    #[arg(long = "http-adaptive-backoff-max")]
+    pub http_adaptive_backoff_max: Option<u64>,
+
+    /// Initial delay between Range starts after capacity rejection, in milliseconds
+    #[arg(long = "http-adaptive-capacity-start-interval-ms")]
+    pub http_adaptive_capacity_start_interval_ms: Option<u64>,
+
+    /// Maximum paced-start delay after repeated capacity rejection, in milliseconds
+    #[arg(long = "http-adaptive-capacity-start-interval-max-ms")]
+    pub http_adaptive_capacity_start_interval_max_ms: Option<u64>,
+
+    /// Successful Ranges required before easing request pacing
+    #[arg(long = "http-adaptive-rate-recovery-successes")]
+    pub http_adaptive_rate_recovery_successes: Option<u64>,
+
+    /// Minimum delay between Range starts after recovery, in milliseconds
+    #[arg(long = "http-adaptive-rate-min-interval-ms")]
+    pub http_adaptive_rate_min_interval_ms: Option<u64>,
+
+    /// Quiet seconds without capacity rejection before resetting backoff
+    #[arg(long = "http-adaptive-backoff-reset-after")]
+    pub http_adaptive_backoff_reset_after: Option<u64>,
+
     /// HTTP version: prefer HTTP/2 with HTTP/1.1 fallback, or force one version
     #[arg(long = "http-version", value_parser = ["auto", "1.1", "2"])]
     pub http_version: Option<String>,

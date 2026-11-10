@@ -144,14 +144,20 @@ async fn process_incoming_tcp_peer(
         tracing::debug!(%endpoint, "Rejected incoming peer for unknown info-hash");
         return;
     };
-    let connection = match incoming
-        .complete(route.local_peer_id, route.info_hash_v2, route.dht_enabled)
-        .await
-    {
-        Ok(connection) => connection,
-        Err(error) => {
-            tracing::debug!(%endpoint, %error, "Incoming BitTorrent handshake failed");
+    let connection = tokio::select! {
+        biased;
+        _ = route.cancellation.cancelled() => {
+            tracing::debug!(%endpoint, "Dropping incoming peer after torrent route was unregistered");
             return;
+        }
+        result = incoming.complete(route.local_peer_id, route.info_hash_v2, route.dht_enabled) => {
+            match result {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::debug!(%endpoint, %error, "Incoming BitTorrent handshake failed");
+                    return;
+                }
+            }
         }
     };
     tracing::debug!(%endpoint, remote_peer_id = ?connection.remote_peer_id(), "Incoming BitTorrent handshake completed");
@@ -279,10 +285,19 @@ async fn route_incoming_utp_peer(
         tracing::debug!(%endpoint, "Rejected plaintext uTP peer because encryption is required");
         return;
     }
-    if let Err(error) = connection
-        .complete_incoming_handshake(&route.local_peer_id, route.info_hash_v2, route.dht_enabled)
-        .await
-    {
+    let handshake_result = tokio::select! {
+        biased;
+        _ = route.cancellation.cancelled() => {
+            tracing::debug!(%endpoint, "Dropping incoming uTP peer after torrent route was unregistered");
+            return;
+        }
+        result = connection.complete_incoming_handshake(
+            &route.local_peer_id,
+            route.info_hash_v2,
+            route.dht_enabled,
+        ) => result,
+    };
+    if let Err(error) = handshake_result {
         tracing::debug!(%endpoint, %error, "Failed to complete incoming uTP handshake");
         return;
     }
@@ -323,15 +338,12 @@ async fn admit_incoming_peer(
     }
 
     let mut admission = PeerAdmissionGuard::new(Arc::clone(&route.peer_storage), endpoint);
-    if route
-        .sender
-        .send(IncomingPeer {
-            connection,
-            endpoint,
-        })
-        .await
-        .is_ok()
-    {
+    let delivered = tokio::select! {
+        biased;
+        _ = route.cancellation.cancelled() => false,
+        result = route.sender.send(IncomingPeer { connection, endpoint }) => result.is_ok(),
+    };
+    if delivered {
         admission.commit();
     } else {
         tracing::debug!(%endpoint, "Incoming BitTorrent peer route receiver closed");

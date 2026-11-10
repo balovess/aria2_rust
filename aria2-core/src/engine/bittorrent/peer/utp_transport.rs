@@ -132,6 +132,10 @@ impl UtpTransportActor {
         self.handle.clone()
     }
 
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
     pub(crate) async fn join(self) -> Result<(), JoinError> {
         self.task.await
     }

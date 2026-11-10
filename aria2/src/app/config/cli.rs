@@ -268,6 +268,48 @@ impl App {
             "max-http2-streams-per-session",
             h.max_http2_streams_per_session
         );
+        set_u64!(
+            "http-adaptive-reduction-percent",
+            h.http_adaptive_reduction_percent
+        );
+        set_u64!(
+            "http-adaptive-recovery-interval",
+            h.http_adaptive_recovery_interval
+        );
+        set_u64!(
+            "http-adaptive-recovery-successes-min",
+            h.http_adaptive_recovery_successes_min
+        );
+        set_u64!(
+            "http-adaptive-recovery-successes-max",
+            h.http_adaptive_recovery_successes_max
+        );
+        set_u64!(
+            "http-adaptive-start-interval-ms",
+            h.http_adaptive_start_interval_ms
+        );
+        set_u64!("http-adaptive-backoff-base", h.http_adaptive_backoff_base);
+        set_u64!("http-adaptive-backoff-max", h.http_adaptive_backoff_max);
+        set_u64!(
+            "http-adaptive-capacity-start-interval-ms",
+            h.http_adaptive_capacity_start_interval_ms
+        );
+        set_u64!(
+            "http-adaptive-capacity-start-interval-max-ms",
+            h.http_adaptive_capacity_start_interval_max_ms
+        );
+        set_u64!(
+            "http-adaptive-rate-recovery-successes",
+            h.http_adaptive_rate_recovery_successes
+        );
+        set_u64!(
+            "http-adaptive-rate-min-interval-ms",
+            h.http_adaptive_rate_min_interval_ms
+        );
+        set_u64!(
+            "http-adaptive-backoff-reset-after",
+            h.http_adaptive_backoff_reset_after
+        );
         set_str!("http-version", h.http_version);
         set_u64!("max-http-pipelining", h.max_http_pipelining);
         // Negation: --no-check-certificate takes precedence over --check-certificate
@@ -329,12 +371,6 @@ impl App {
         set_u64!("bt-keep-alive-interval", b.bt_keep_alive_interval);
         set_u64!("bt-timeout", b.bt_timeout);
         set_u64!("bt-request-timeout", b.bt_request_timeout);
-        set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
-        set_u64!(
-            "bt-optimistic-unchoke-interval",
-            b.bt_optimistic_unchoke_interval
-        );
-        set_u64!("bt-snubbed-timeout", b.bt_snubbed_timeout);
         set_u64!("peer-connection-timeout", b.peer_connection_timeout);
         set_u64!(
             "bt-incoming-peer-handshake-timeout",
