@@ -7,12 +7,10 @@
 //! lets the normal DHT/HTTP/UDP fallbacks continue when a tracker has no such
 //! peers.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tracing::debug;
@@ -23,6 +21,10 @@ use crate::http::{HttpConnectProxyTunnel, HttpProxyConfig, ProxyType};
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
+use aria2_protocol::bittorrent::tracker::websocket::{
+    WebSocketAnnounceRequest, WebSocketAnnounceResponseError, decode_announce_response,
+    encode_announce_request,
+};
 
 /// Announce a magnet lookup to a WebSocket tracker.
 ///
@@ -130,39 +132,30 @@ pub(crate) async fn announce_with_policy(
     })?
     .map_err(classify_websocket_error)?;
 
-    let mut message = serde_json::json!({
-        "action": "announce",
-        "info_hash": base64::engine::general_purpose::STANDARD.encode(announce.info_hash),
-        "peer_id": base64::engine::general_purpose::STANDARD.encode(announce.peer_id),
-        "uploaded": announce.uploaded,
-        "downloaded": announce.downloaded,
-        "left": announce.left,
-        "numwant": announce.numwant,
-        "port": announce.port,
-        "compact": 1,
+    let message = encode_announce_request(&WebSocketAnnounceRequest {
+        info_hash: announce.info_hash,
+        peer_id: announce.peer_id,
+        downloaded: announce.downloaded,
+        left: announce.left,
+        uploaded: announce.uploaded,
+        numwant: announce.numwant,
+        port: announce.port,
+        event: Some(announce.event.as_event_string()),
     });
-    if let Some(event) =
-        (!announce.event.as_event_string().is_empty()).then_some(announce.event.as_event_string())
-    {
-        message["event"] = Value::String(event.to_string());
-    }
-    tokio::time::timeout(
-        timeout,
-        websocket.send(Message::Text(message.to_string().into())),
-    )
-    .await
-    .map_err(|_| {
-        AnnounceError::new(
-            TrackerFailureKind::Timeout,
-            "WebSocket tracker announce timed out while sending",
-        )
-    })?
-    .map_err(|error| {
-        AnnounceError::new(
-            TrackerFailureKind::Network,
-            format!("WebSocket tracker announce send failed: {error}"),
-        )
-    })?;
+    tokio::time::timeout(timeout, websocket.send(Message::Text(message.into())))
+        .await
+        .map_err(|_| {
+            AnnounceError::new(
+                TrackerFailureKind::Timeout,
+                "WebSocket tracker announce timed out while sending",
+            )
+        })?
+        .map_err(|error| {
+            AnnounceError::new(
+                TrackerFailureKind::Network,
+                format!("WebSocket tracker announce send failed: {error}"),
+            )
+        })?;
 
     let response = tokio::time::timeout(timeout, async {
         let mut response = None;
@@ -210,32 +203,27 @@ pub(crate) async fn announce_with_policy(
             "WebSocket tracker closed without an announce response",
         ));
     };
-    let response: Value = serde_json::from_str(&response).map_err(|error| {
-        AnnounceError::new(
+    let response = decode_announce_response(&response).map_err(|error| match error {
+        WebSocketAnnounceResponseError::Malformed(error) => AnnounceError::new(
             TrackerFailureKind::MalformedResponse,
             format!("invalid WebSocket tracker response: {error}"),
-        )
-    })?;
-    if let Some(reason) = response.get("failure reason").and_then(Value::as_str) {
-        return Err(AnnounceError::new(
+        ),
+        WebSocketAnnounceResponseError::Rejected(reason) => AnnounceError::new(
             TrackerFailureKind::TrackerRejected,
             format!("WebSocket tracker rejected announce: {reason}"),
-        ));
-    }
-
-    let mut peers = response.get("peers").map(parse_peers).unwrap_or_default();
-    if let Some(peers6) = response.get("peers6").and_then(Value::as_str) {
-        peers.extend(parse_compact_peers(peers6));
-    }
-    peers.sort_unstable();
-    peers.dedup();
-    debug!(tracker = %tracker_url, peers = peers.len(), "WebSocket tracker announce completed");
+        ),
+    })?;
+    debug!(
+        tracker = %tracker_url,
+        peers = response.peers.len(),
+        "WebSocket tracker announce completed"
+    );
     Ok(AnnounceResponse {
-        peers,
-        interval: response.get("interval").and_then(Value::as_u64),
-        min_interval: response.get("min interval").and_then(Value::as_u64),
-        seeders: response.get("complete").and_then(Value::as_i64),
-        leechers: response.get("incomplete").and_then(Value::as_i64),
+        peers: response.peers,
+        interval: response.interval,
+        min_interval: response.min_interval,
+        seeders: response.seeders,
+        leechers: response.leechers,
     })
 }
 
@@ -387,73 +375,11 @@ async fn connect_socket(
     })
 }
 
-fn parse_peers(value: &Value) -> Vec<SocketAddr> {
-    match value {
-        Value::Array(peers) => peers.iter().flat_map(parse_peer).collect(),
-        Value::String(peers) => parse_peer_string(peers),
-        _ => Vec::new(),
-    }
-}
-
-fn parse_peer(value: &Value) -> Vec<SocketAddr> {
-    match value {
-        Value::Object(peer) => {
-            let Some(ip) = peer.get("ip").and_then(Value::as_str) else {
-                return Vec::new();
-            };
-            let Some(port) = peer
-                .get("port")
-                .and_then(Value::as_u64)
-                .and_then(|port| u16::try_from(port).ok())
-            else {
-                return Vec::new();
-            };
-            tracker_peer_socket_addr(ip, port).into_iter().collect()
-        }
-        Value::String(peer) => parse_peer_string(peer),
-        _ => Vec::new(),
-    }
-}
-
-fn parse_peer_string(peer: &str) -> Vec<SocketAddr> {
-    if let Ok(address) = peer.parse::<SocketAddr>() {
-        return vec![address];
-    }
-    parse_compact_peers(peer)
-}
-
-fn parse_compact_peers(encoded: &str) -> Vec<SocketAddr> {
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-        return Vec::new();
-    };
-    let mut peers = Vec::new();
-    if bytes.len() % 6 == 0 {
-        for chunk in bytes.as_chunks::<6>().0 {
-            let ip = IpAddr::from([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-            peers.push(SocketAddr::new(ip, port));
-        }
-    } else if bytes.len() % 18 == 0 {
-        for chunk in bytes.as_chunks::<18>().0 {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(&chunk[..16]);
-            let ip = IpAddr::from(octets);
-            let port = u16::from_be_bytes([chunk[16], chunk[17]]);
-            peers.push(SocketAddr::new(ip, port));
-        }
-    }
-    peers
-}
-
-fn tracker_peer_socket_addr(ip: &str, port: u16) -> Option<SocketAddr> {
-    ip.parse::<IpAddr>()
-        .ok()
-        .map(|ip| SocketAddr::new(ip, port))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use serde_json::Value;
 
     #[test]
     fn parses_json_and_compact_peers() {
@@ -464,8 +390,8 @@ mod tests {
                 compact,
             ]
         });
-        let mut peers = parse_peers(value.get("peers").unwrap());
-        peers.sort_unstable();
+        let encoded = value.to_string();
+        let peers = decode_announce_response(&encoded).unwrap().peers;
         assert_eq!(
             peers,
             vec![

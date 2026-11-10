@@ -258,7 +258,7 @@ fn validate_dispatches_bitfield() {
 fn validate_dispatches_request() {
     let v = validator_1k();
     let msg = BtMessage::Request {
-        request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(0, 0, 16384),
+        request: crate::bittorrent::message::types::PieceBlockRequest::new(0, 0, 16384),
     };
     assert!(v.validate(&msg).is_ok());
 }
@@ -267,7 +267,7 @@ fn validate_dispatches_request() {
 fn validate_dispatches_cancel() {
     let v = validator_1k();
     let msg = BtMessage::Cancel {
-        request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(0, 0, 16384),
+        request: crate::bittorrent::message::types::PieceBlockRequest::new(0, 0, 16384),
     };
     assert!(v.validate(&msg).is_ok());
 }
