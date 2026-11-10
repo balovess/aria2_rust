@@ -49,12 +49,13 @@ pub(super) fn create(
         .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
         as usize)
         .min(dl.range_clients.len().max(1));
-    let adaptive = HttpAdaptiveConcurrency::new(
+    let adaptive = HttpAdaptiveConcurrency::new_with_settings(
         split,
         max_conn,
         session_limit,
         options.http2_streams_per_session(),
         options.retry_wait,
+        options.http_adaptive,
     );
 
     tracing::info!(

@@ -190,6 +190,7 @@ impl DownloadCommand {
                     uri: &effective_uri,
                     cookie_header: cookie_header.as_deref(),
                     retry_policy: probe_retry_policy,
+                    adaptive_options: options.http_adaptive,
                 };
                 run_single_work_item(&mut work).await?
             };
@@ -579,6 +580,7 @@ struct HttpRangeProbeWork<'a> {
     uri: &'a str,
     cookie_header: Option<&'a str>,
     retry_policy: RetryPolicy,
+    adaptive_options: crate::request::request_group::HttpAdaptiveOptions,
 }
 
 #[async_trait::async_trait]
@@ -607,8 +609,10 @@ impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
                     ) && started.elapsed() < CAPACITY_PROBE_LIMIT =>
                 {
                     capacity_waits = capacity_waits.saturating_add(1);
-                    let wait =
-                        crate::engine::http::adaptive_concurrency::capacity_backoff(capacity_waits);
+                    let wait = crate::engine::http::adaptive_concurrency::capacity_backoff_with(
+                        capacity_waits,
+                        &self.adaptive_options,
+                    );
                     debug!(
                         waits = capacity_waits,
                         wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,

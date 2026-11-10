@@ -32,6 +32,38 @@ fn split_option_keeps_large_positive_values() {
 }
 
 #[test]
+fn adaptive_http_options_parse_and_normalize_external_values() {
+    let values = HashMap::from([
+        (
+            "http-adaptive-reduction-percent".to_string(),
+            "30".to_string(),
+        ),
+        (
+            "http-adaptive-recovery-successes-min".to_string(),
+            "40".to_string(),
+        ),
+        (
+            "http-adaptive-recovery-successes-max".to_string(),
+            "12".to_string(),
+        ),
+        (
+            "http-adaptive-start-interval-ms".to_string(),
+            "250".to_string(),
+        ),
+        ("http-adaptive-backoff-base".to_string(), "15".to_string()),
+        ("http-adaptive-backoff-max".to_string(), "10".to_string()),
+    ]);
+
+    let options = DownloadOptions::from_option_strings(&values).http_adaptive;
+    assert_eq!(options.reduction_percent, 30);
+    assert_eq!(options.recovery_successes_min, 40);
+    assert_eq!(options.recovery_successes_max, 40);
+    assert_eq!(options.start_interval_ms, 250);
+    assert_eq!(options.backoff_base_secs, 15);
+    assert_eq!(options.backoff_max_secs, 15);
+}
+
+#[test]
 fn memory_follow_mode_is_limited_to_metadata_sources() {
     let options = DownloadOptions {
         follow_torrent: Some(FollowMode::Memory),

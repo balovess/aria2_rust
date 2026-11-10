@@ -233,6 +233,7 @@ pub async fn execute(
                     if let Some(active) = active_segs.get_mut(&seg_idx) {
                         active.3 = task_id;
                     }
+                    adaptive.record_request_start(executor.is_http2(&authority_key));
                     active_work.insert(seg_idx, lease);
                     connection_guard.set(executor.in_flight());
                     let counts = executor.active_connection_counts();
@@ -608,15 +609,11 @@ pub async fn execute(
                         }
                         if is_capacity_limited {
                             // 429/503: the server wants fewer connections or a
-                            // pause, not a failed download. The ranges it is
-                            // serving go on; drop to their count, back off, and
-                            // retry this range without using its retries.
-                            let accepted = segment_progress
-                                .values()
-                                .filter(|progress| progress.downloaded_bytes() > 0)
-                                .count();
+                            // pause, not a failed download. Let ranges already
+                            // in flight continue, reduce concurrency gradually,
+                            // and retry this range without using its retries.
                             let wait =
-                                adaptive.record_capacity_rejection(is_http2, accepted, retry_after);
+                                adaptive.record_capacity_rejection(is_http2, retry_after);
                             tracing::warn!(
                                 seg_idx,
                                 target_connections = adaptive.connection_target(is_http2),

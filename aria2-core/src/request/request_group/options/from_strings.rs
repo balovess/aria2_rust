@@ -65,6 +65,7 @@ impl DownloadOptions {
                 .get("http-version")
                 .and_then(|value| crate::http::HttpVersion::parse_option(value))
                 .unwrap_or_default(),
+            http_adaptive: super::HttpAdaptiveOptions::from_option_strings(options),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),

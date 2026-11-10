@@ -240,6 +240,9 @@ pub async fn execute_with_coordinator(
                 break;
             };
 
+            if let Some(controller) = adaptive.get_mut(&key) {
+                controller.record_request_start(executor.is_http2(&key));
+            }
             connection_guard.set(executor.in_flight());
             let counts = executor.active_connection_counts();
             connection_guard.set_http_counts(
@@ -300,7 +303,7 @@ pub async fn execute_with_coordinator(
             if let Some(wait) = adaptive
                 .values()
                 .filter_map(|c| c.cooldown_remaining())
-                .max()
+                .min()
             {
                 dl.wait_for_retry(wait).await?;
                 continue;

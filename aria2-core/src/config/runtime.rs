@@ -57,6 +57,18 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "max-file-not-found",
     "max-tries",
     "http-version",
+    "http-adaptive-reduction-percent",
+    "http-adaptive-recovery-interval",
+    "http-adaptive-recovery-successes-min",
+    "http-adaptive-recovery-successes-max",
+    "http-adaptive-start-interval-ms",
+    "http-adaptive-backoff-base",
+    "http-adaptive-backoff-max",
+    "http-adaptive-capacity-start-interval-ms",
+    "http-adaptive-capacity-start-interval-max-ms",
+    "http-adaptive-rate-recovery-successes",
+    "http-adaptive-rate-min-interval-ms",
+    "http-adaptive-backoff-reset-after",
     "no-netrc",
     "piece-length",
     "remote-time",
@@ -279,6 +291,18 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "max-http2-sessions-per-server",
     "max-http2-streams-per-session",
     "http-version",
+    "http-adaptive-reduction-percent",
+    "http-adaptive-recovery-interval",
+    "http-adaptive-recovery-successes-min",
+    "http-adaptive-recovery-successes-max",
+    "http-adaptive-start-interval-ms",
+    "http-adaptive-backoff-base",
+    "http-adaptive-backoff-max",
+    "http-adaptive-capacity-start-interval-ms",
+    "http-adaptive-capacity-start-interval-max-ms",
+    "http-adaptive-rate-recovery-successes",
+    "http-adaptive-rate-min-interval-ms",
+    "http-adaptive-backoff-reset-after",
     "max-mmap-limit",
     "max-resume-failure-tries",
     "max-tries",
@@ -408,6 +432,18 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "max-mmap-limit",
     "max-http2-streams-per-session",
     "http-version",
+    "http-adaptive-reduction-percent",
+    "http-adaptive-recovery-interval",
+    "http-adaptive-recovery-successes-min",
+    "http-adaptive-recovery-successes-max",
+    "http-adaptive-start-interval-ms",
+    "http-adaptive-backoff-base",
+    "http-adaptive-backoff-max",
+    "http-adaptive-capacity-start-interval-ms",
+    "http-adaptive-capacity-start-interval-max-ms",
+    "http-adaptive-rate-recovery-successes",
+    "http-adaptive-rate-min-interval-ms",
+    "http-adaptive-backoff-reset-after",
     "max-resume-failure-tries",
     "min-http-range-size",
     "min-split-size",
@@ -612,9 +648,15 @@ mod tests {
         assert!(is_global_option_changeable("min-http-range-size"));
         assert!(is_global_option_changeable("max-http2-sessions-per-server"));
         assert!(is_global_option_changeable("max-http2-streams-per-session"));
+        assert!(is_global_option_changeable(
+            "http-adaptive-reduction-percent"
+        ));
+        assert!(is_global_option_changeable("http-adaptive-backoff-max"));
         for name in [
             "max-http2-sessions-per-server",
             "max-http2-streams-per-session",
+            "http-adaptive-reduction-percent",
+            "http-adaptive-backoff-max",
         ] {
             assert_eq!(
                 is_option_changeable(name, false),
@@ -659,9 +701,9 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 135);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 147);
         #[cfg(not(feature = "bittorrent"))]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 134);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 146);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate

@@ -72,12 +72,13 @@ pub(super) fn create(
     for key in &server_keys {
         adaptive.insert(
             key.clone(),
-            HttpAdaptiveConcurrency::new(
+            HttpAdaptiveConcurrency::new_with_settings(
                 split,
                 max_conn,
                 session_limit,
                 options.http2_streams_per_session(),
                 retry_wait,
+                options.http_adaptive,
             ),
         );
     }

@@ -2,12 +2,14 @@ mod conversion;
 mod default;
 mod follow_mode;
 mod from_strings;
+mod http_adaptive;
 mod runtime;
 #[cfg(test)]
 mod tests;
 
 pub use conversion::option_value_to_string;
 pub use follow_mode::FollowMode;
+pub use http_adaptive::HttpAdaptiveOptions;
 
 pub const DEFAULT_DISK_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -26,6 +28,8 @@ pub struct DownloadOptions {
     /// HTTP protocol selection: automatic negotiation, forced HTTP/1.1, or
     /// forced HTTP/2.
     pub http_version: crate::http::HttpVersion,
+    /// Adaptive HTTP Range behavior for this download.
+    pub http_adaptive: HttpAdaptiveOptions,
     pub max_download_limit: Option<u64>,
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,

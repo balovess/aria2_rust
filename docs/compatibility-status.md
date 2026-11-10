@@ -22,7 +22,19 @@ behavior. An unlisted behavior has not been audited here.
   their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
   HTTP Range concurrency starts at the configured effective ceiling, backs off
   on explicit server capacity feedback, then probes upward by one Range after
-  a 5-second cooldown and 8 successful ranges without an intervening failure.
+  a 10-second cooldown and a target-scaled 8..=32 successful ranges without an
+  intervening failure. Capacity feedback reduces the target by 25%, starts
+  subsequent Ranges at 1-second intervals (doubling to 4 seconds on repeated
+  feedback), and uses jittered exponential backoff from 20 seconds to 300
+  seconds. These are Rust extension defaults and can be adjusted per download
+  with the `http-adaptive-*` options.
+- **External configuration:** all adaptive controller parameters are available
+  through CLI flags, configuration files, and JSON-RPC/XML-RPC option maps.
+  `changeGlobalOption` changes the defaults used for future tasks;
+  `changeOption` applies immediately to waiting tasks and is queued as pending
+  for active tasks, taking effect when they are restarted. `getGlobalOption`
+  and task option projections expose the registered values. These option names
+  are Rust extensions and are not part of original aria2.
 - **Verification:** focused tests cover values above the old `split=128`
   ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
   reuse of the control-file piece layout ahead of a new configuration.
@@ -30,7 +42,9 @@ behavior. An unlisted behavior has not been audited here.
 ## HTTP Range capacity retries
 
 - **Engine policy:** HTTP 429/503 responses back off exponentially up to
-  30 seconds, honoring `Retry-After` when present. Consecutive capacity
+  300 seconds by default, honoring longer `Retry-After` values when present.
+  The base and cap are configurable with `http-adaptive-backoff-base` and
+  `http-adaptive-backoff-max`. Consecutive capacity
   rejection episodes are bounded by `max-retries` even if other ranges in the
   resumed attempt have completed. Successful ranges do not clear the backoff
   streak; it resets after 60 seconds without a 429. A five-minute no-progress
