@@ -41,6 +41,37 @@ fn test_socket_bind() {
 }
 
 #[test]
+fn socket_options_configure_connection_limit_and_timers() {
+    let options = UtpSocketOptions::default()
+        .with_max_connections(1)
+        .with_connect_timeout(Duration::from_secs(3))
+        .with_idle_timeout(Duration::from_secs(4))
+        .with_keepalive_interval(Duration::from_secs(5));
+    let mut socket = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let remote = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let remote_addr = remote.local_addr().unwrap();
+
+    assert_eq!(
+        socket.timers.default_connect_timeout(),
+        Duration::from_secs(3)
+    );
+    assert_eq!(socket.timers.default_idle_timeout(), Duration::from_secs(4));
+    assert_eq!(
+        socket.timers.default_keepalive_interval(),
+        Duration::from_secs(5)
+    );
+    assert!(socket.connect(remote_addr).is_ok());
+    assert!(matches!(
+        socket.connect(remote_addr),
+        Err(UtpSocketError::MaxConnectionsReached)
+    ));
+}
+
+#[test]
 fn test_socket_close() {
     let mut socket = UtpSocket::bind_any().unwrap();
     assert!(!socket.is_closed());
