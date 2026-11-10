@@ -406,12 +406,34 @@ impl SftpDownloadCommand {
 
     /// Build SshOptions from the command's stored credentials.
     pub(super) fn build_ssh_options(&self) -> SshOptions {
+        let (connect_timeout, read_timeout, compression, keepalive_interval, preferred_ciphers) = {
+            let group = self.group();
+            let options = group.options();
+            (
+                options
+                    .sftp_connect_timeout
+                    .unwrap_or(constants::SFTP_CONNECT_TIMEOUT_SECS),
+                options
+                    .sftp_read_timeout
+                    .unwrap_or(constants::SFTP_READ_TIMEOUT_SECS),
+                options.sftp_compression,
+                options
+                    .sftp_keepalive_interval
+                    .unwrap_or(aria2_protocol::DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS),
+                options.sftp_preferred_ciphers.clone().unwrap_or_default(),
+            )
+        };
         let mut opts = SshOptions::new(&self.host, &self.username)
             .with_port(self.port)
             .with_timeouts(
-                Duration::from_secs(constants::SFTP_CONNECT_TIMEOUT_SECS),
-                Duration::from_secs(constants::SFTP_READ_TIMEOUT_SECS),
+                Duration::from_secs(connect_timeout),
+                Duration::from_secs(read_timeout),
             )
+            .with_compression(compression)
+            .with_keepalive_interval(
+                (keepalive_interval != 0).then(|| Duration::from_secs(keepalive_interval)),
+            )
+            .with_preferred_ciphers(preferred_ciphers)
             .with_host_key_mode(if self.host_key_fingerprint.is_some() {
                 HostKeyCheckingMode::Strict
             } else {

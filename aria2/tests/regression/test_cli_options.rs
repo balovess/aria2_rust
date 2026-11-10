@@ -987,6 +987,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     const COMPATIBILITY_OPTION_INVENTORY: &str =
         include_str!("../fixtures/compatibility_option_inventory.txt");
     const EXPECTED_RUST_EXTENSIONS: &[&str] = &[
+        "bt-incoming-peer-handshake-timeout",
         "bt-enable-web-seed",
         "bt-max-upload-slots",
         "bt-optimistic-unchoke-interval",
@@ -1012,7 +1013,24 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "max-http2-sessions-per-server",
         "max-http2-streams-per-session",
         "min-http-range-size",
+        "sftp-connect-timeout",
+        "sftp-read-timeout",
+        "sftp-compression",
+        "sftp-keepalive-interval",
+        "sftp-preferred-ciphers",
         "http-version",
+        "http-adaptive-reduction-percent",
+        "http-adaptive-recovery-interval",
+        "http-adaptive-recovery-successes-min",
+        "http-adaptive-recovery-successes-max",
+        "http-adaptive-start-interval-ms",
+        "http-adaptive-backoff-base",
+        "http-adaptive-backoff-max",
+        "http-adaptive-capacity-start-interval-ms",
+        "http-adaptive-capacity-start-interval-max-ms",
+        "http-adaptive-rate-recovery-successes",
+        "http-adaptive-rate-min-interval-ms",
+        "http-adaptive-backoff-reset-after",
         "mmap-threshold",
         "on-bt-download-error",
         "pid-file",
@@ -1046,7 +1064,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        248,
+        266,
         "all-features registry inventory changed"
     );
     assert_eq!(

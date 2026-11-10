@@ -530,6 +530,7 @@ pub(super) fn apply_rpc_option(
         | "dry-run"
         | "ftp-pasv"
         | "ftp-reuse-connection"
+        | "sftp-compression"
         | "no-netrc"
         | "realtime-chunk-checksum"
         | "remote-time"
@@ -542,6 +543,7 @@ pub(super) fn apply_rpc_option(
                 "dry-run" => opts.dry_run = value,
                 "ftp-pasv" => opts.ftp_pasv = value,
                 "ftp-reuse-connection" => opts.ftp_reuse_connection = value,
+                "sftp-compression" => opts.sftp_compression = value,
                 "no-netrc" => opts.no_netrc = value,
                 "realtime-chunk-checksum" => opts.realtime_chunk_checksum = value,
                 "remote-time" => opts.remote_time = value,
@@ -575,12 +577,20 @@ pub(super) fn apply_rpc_option(
             opts.bt_remove_unselected_file = rpc_option_bool(value, key)?;
             Ok(true)
         }
-        "timeout" | "connect-timeout" | "bt-stop-timeout" => {
+        "timeout"
+        | "connect-timeout"
+        | "bt-stop-timeout"
+        | "sftp-connect-timeout"
+        | "sftp-read-timeout"
+        | "sftp-keepalive-interval" => {
             let value = rpc_option_u64(value, key)?;
             match key {
                 "timeout" => opts.timeout = Some(value),
                 "connect-timeout" => opts.connect_timeout = Some(value),
                 "bt-stop-timeout" => opts.bt_stop_timeout = Some(value),
+                "sftp-connect-timeout" => opts.sftp_connect_timeout = Some(value),
+                "sftp-read-timeout" => opts.sftp_read_timeout = Some(value),
+                "sftp-keepalive-interval" => opts.sftp_keepalive_interval = Some(value),
                 _ => unreachable!("duration option handled above"),
             }
             Ok(true)
@@ -688,6 +698,10 @@ pub(super) fn apply_rpc_option(
         }
         "bt-exclude-tracker" => {
             opts.bt_exclude_tracker = Some(rpc_option_list(value, key)?);
+            Ok(true)
+        }
+        "sftp-preferred-ciphers" => {
+            opts.sftp_preferred_ciphers = Some(rpc_option_list(value, key)?);
             Ok(true)
         }
         _ => Ok(false),

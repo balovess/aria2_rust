@@ -435,6 +435,16 @@ pub struct DownloadOptions {
     pub ftp_passwd: Option<String>,
     /// SSH host-key fingerprint in aria2's `hashType=digest` format.
     pub ssh_host_key_md: Option<String>,
+    /// SFTP SSH connection timeout in seconds. `None` uses the protocol default.
+    pub sftp_connect_timeout: Option<u64>,
+    /// SFTP I/O read timeout in seconds. `None` uses the protocol default.
+    pub sftp_read_timeout: Option<u64>,
+    /// Whether to negotiate SSH transport compression for SFTP.
+    pub sftp_compression: bool,
+    /// SSH keepalive interval in seconds; zero disables keepalives.
+    pub sftp_keepalive_interval: Option<u64>,
+    /// Preferred SSH cipher names in preference order.
+    pub sftp_preferred_ciphers: Option<Vec<String>>,
     /// Whether to disable Netrc lookups. Maps to C++ `PREF_NO_NETRC`.
     pub no_netrc: bool,
     /// Path to the .netrc file for credential lookup.

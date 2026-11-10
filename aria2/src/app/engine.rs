@@ -200,6 +200,16 @@ impl App {
         #[cfg(not(feature = "bittorrent"))]
         let mut engine = DownloadEngine::new();
 
+        #[cfg(feature = "bittorrent")]
+        if let Some(timeout) = self
+            .get_opt_i64("bt-incoming-peer-handshake-timeout")
+            .await
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .map(std::time::Duration::from_secs)
+        {
+            engine.set_incoming_peer_handshake_timeout(timeout);
+        }
+
         let global_download_limit = self
             .get_opt_i64("max-overall-download-limit")
             .await

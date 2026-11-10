@@ -63,6 +63,40 @@ behavior. An unlisted behavior has not been audited here.
   three extension fields. Runtime H2 pool-slot accounting is covered by the
   HTTP request executor tests.
 
+## Incoming BitTorrent peer handshake timeout
+
+- **Extension:** `bt-incoming-peer-handshake-timeout` is a process-wide setting
+  for the maximum wait on each read while receiving an incoming TCP peer
+  handshake. It defaults to 30 seconds and accepts 1 through 600 seconds.
+  The process-wide scope matches the shared listener, which serves multiple
+  torrents before the info-hash route is known. Existing task-scoped
+  `peer-connection-timeout` retains its outbound connection meaning.
+- **Runtime behavior:** CLI/configuration values are applied when the engine
+  starts. `changeGlobalOption` updates the timeout for newly accepted peers;
+  handshakes already in progress retain the value captured when accepted.
+- **Verification:** protocol-level timeout behavior and core shared-listener
+  timeout propagation are covered by focused tests. Original aria2 has no
+  corresponding process-wide option, so this is a Rust extension.
+
+## SFTP connection and transport options
+
+- **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
+  SSH connection and SFTP I/O read timeouts independently, in seconds. Defaults
+  remain 15 and 30 seconds; each accepts 1 through 600 seconds.
+  `sftp-compression` enables SSH compression (default `false`),
+  `sftp-keepalive-interval` defaults to 60 seconds and accepts 0 through 600
+  (`0` disables keepalives), and `sftp-preferred-ciphers` sets the ordered
+  comma-separated cipher preference (empty means library defaults). These
+  settings are per download and do not change the meanings of aria2's generic
+  HTTP/FTP `connect-timeout` and `timeout` options.
+- **Propagation:** CLI/configuration values, RPC `addUri` options, and session
+  persistence feed the SFTP protocol connection builder. `changeOption` stores
+  changes for reserved downloads and defers them on active downloads until the
+  task is restarted.
+- **Verification:** focused CLI, RPC option validation, and protocol option
+  construction tests cover the propagation path. Original aria2 has no matching
+  SFTP-specific timeout options; these are Rust extensions.
+
 ## Pause and unpause lifecycle status
 
 - **Compatibility:** `active` means the download is currently running;

@@ -106,6 +106,24 @@ impl CoreRpcBackend {
             })
             .transpose()?;
 
+        #[cfg(feature = "bittorrent")]
+        let incoming_peer_handshake_timeout = parsed
+            .iter()
+            .find(|(key, _)| key == "bt-incoming-peer-handshake-timeout")
+            .map(|(_, value)| {
+                let seconds = value.as_i64().ok_or_else(|| {
+                    Self::execution(
+                        "Option 'bt-incoming-peer-handshake-timeout' must be an integer",
+                    )
+                })?;
+                u64::try_from(seconds).map_err(|_| {
+                    Self::execution(
+                        "Option 'bt-incoming-peer-handshake-timeout' must be greater than zero",
+                    )
+                })
+            })
+            .transpose()?;
+
         {
             let mut config = self.config.write().await;
             for (key, value) in &parsed {
@@ -136,6 +154,9 @@ impl CoreRpcBackend {
             }
             if let Some(enabled) = public_trackers_enabled {
                 self.send(EngineCommand::SetPublicTrackersEnabled { enabled })?;
+            }
+            if let Some(seconds) = incoming_peer_handshake_timeout {
+                self.send(EngineCommand::SetIncomingPeerHandshakeTimeout { seconds })?;
             }
         }
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
@@ -202,4 +223,80 @@ fn parse_rate_limit(
         )));
     }
     Ok((bytes as u64 > 0).then_some(bytes as u64))
+}
+
+#[cfg(all(test, feature = "bittorrent"))]
+mod tests {
+    use super::*;
+    use aria2_core::config::ConfigManager;
+    use aria2_core::engine::engine_command::{EngineCommand, channel};
+    use aria2_core::request::request_group_man::RequestGroupMan;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn global_handshake_timeout_updates_config_and_engine() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "bt-incoming-peer-handshake-timeout".to_string(),
+                serde_json::json!(42),
+            )]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("bt-incoming-peer-handshake-timeout")
+                .await,
+            Some(42)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetIncomingPeerHandshakeTimeout { seconds: 42 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_global_handshake_timeout_is_rejected_before_update() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        assert!(
+            backend
+                .change_global_option(HashMap::from([(
+                    "bt-incoming-peer-handshake-timeout".to_string(),
+                    serde_json::json!(0),
+                )]))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("bt-incoming-peer-handshake-timeout")
+                .await,
+            Some(30)
+        );
+        assert!(receiver.try_recv().is_err());
+    }
 }

@@ -17,6 +17,10 @@ use crate::bittorrent::message::handshake::Handshake;
 
 const HANDSHAKE_LENGTH: usize = 68;
 
+/// Default maximum wait for each required incoming handshake read.
+pub const DEFAULT_INCOMING_HANDSHAKE_READ_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// Settings for receiving an incoming BitTorrent handshake.
 #[derive(Debug, Clone, Copy)]
 pub struct IncomingHandshakeOptions {
@@ -27,7 +31,7 @@ pub struct IncomingHandshakeOptions {
 impl Default for IncomingHandshakeOptions {
     fn default() -> Self {
         Self {
-            read_timeout: std::time::Duration::from_secs(30),
+            read_timeout: DEFAULT_INCOMING_HANDSHAKE_READ_TIMEOUT,
         }
     }
 }

@@ -348,4 +348,24 @@ pub struct HttpFtpArgs {
     /// SSH host key fingerprint (hashType=digest format)
     #[arg(long = "ssh-host-key-md")]
     pub ssh_host_key_md: Option<String>,
+
+    /// SFTP SSH connection timeout in seconds
+    #[arg(long = "sftp-connect-timeout")]
+    pub sftp_connect_timeout: Option<u64>,
+
+    /// SFTP I/O read timeout in seconds
+    #[arg(long = "sftp-read-timeout")]
+    pub sftp_read_timeout: Option<u64>,
+
+    /// Enable SSH compression for SFTP
+    #[arg(long = "sftp-compression", num_args(0..=1), require_equals = true, default_missing_value = "true")]
+    pub sftp_compression: Option<bool>,
+
+    /// SSH keepalive interval in seconds for SFTP; 0 disables keepalives
+    #[arg(long = "sftp-keepalive-interval")]
+    pub sftp_keepalive_interval: Option<u64>,
+
+    /// Comma-separated preferred SSH ciphers for SFTP
+    #[arg(long = "sftp-preferred-ciphers")]
+    pub sftp_preferred_ciphers: Option<String>,
 }

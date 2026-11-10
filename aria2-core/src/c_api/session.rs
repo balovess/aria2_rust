@@ -30,6 +30,14 @@ impl Aria2RustSession {
         let mut engine = DownloadEngine::new();
         #[cfg(feature = "bittorrent")]
         {
+            if let Some(incoming_handshake_timeout) = runtime
+                .block_on(config.get_global_i64("bt-incoming-peer-handshake-timeout"))
+                .and_then(|seconds| u64::try_from(seconds).ok())
+            {
+                engine.set_incoming_peer_handshake_timeout(Duration::from_secs(
+                    incoming_handshake_timeout,
+                ));
+            }
             let sources = runtime.block_on(config.get_global_option("bt-tracker-source"));
             let sources = match sources {
                 Some(OptionValue::List(values)) => values,
@@ -386,6 +394,8 @@ impl Aria2RustSession {
         let mut public_tracker_update_interval = None;
         #[cfg(feature = "bittorrent")]
         let mut public_trackers_enabled = None;
+        #[cfg(feature = "bittorrent")]
+        let mut incoming_peer_handshake_timeout = None;
         for (name, value) in options {
             if name == "keep-running" {
                 match parse_bool(&value) {
@@ -426,6 +436,10 @@ impl Aria2RustSession {
                 "bt-tracker-update-interval" => public_tracker_update_interval = parsed.as_i64(),
                 #[cfg(feature = "bittorrent")]
                 "enable-public-trackers" => public_trackers_enabled = parsed.as_bool(),
+                #[cfg(feature = "bittorrent")]
+                "bt-incoming-peer-handshake-timeout" => {
+                    incoming_peer_handshake_timeout = parsed.as_i64()
+                }
                 _ => {}
             }
         }
@@ -467,6 +481,13 @@ impl Aria2RustSession {
                 let _ = self
                     .command_tx
                     .send(EngineCommand::SetPublicTrackersEnabled { enabled });
+            }
+            if let Some(seconds) = incoming_peer_handshake_timeout.filter(|seconds| *seconds > 0) {
+                let _ = self
+                    .command_tx
+                    .send(EngineCommand::SetIncomingPeerHandshakeTimeout {
+                        seconds: seconds as u64,
+                    });
             }
         }
         0

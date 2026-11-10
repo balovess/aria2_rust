@@ -100,6 +100,11 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "ftp-type",
     "ftp-user",
     "ssh-host-key-md",
+    "sftp-connect-timeout",
+    "sftp-read-timeout",
+    "sftp-compression",
+    "sftp-keepalive-interval",
+    "sftp-preferred-ciphers",
     "http-proxy",
     "http-proxy-passwd",
     "http-proxy-user",
@@ -134,6 +139,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-save-metadata",
     "bt-stop-timeout",
     "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "bt-incoming-peer-handshake-timeout",
     #[cfg(feature = "bittorrent")]
     "enable-public-trackers",
     #[cfg(feature = "bittorrent")]
@@ -339,6 +346,11 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "select-file",
     "split",
     "ssh-host-key-md",
+    "sftp-connect-timeout",
+    "sftp-read-timeout",
+    "sftp-compression",
+    "sftp-keepalive-interval",
+    "sftp-preferred-ciphers",
     "stream-piece-selector",
     "timeout",
     "uri-selector",
@@ -486,6 +498,11 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "ftp-type",
     "ftp-user",
     "ssh-host-key-md",
+    "sftp-connect-timeout",
+    "sftp-read-timeout",
+    "sftp-compression",
+    "sftp-keepalive-interval",
+    "sftp-preferred-ciphers",
     // Proxy
     "http-proxy",
     "http-proxy-passwd",
@@ -652,6 +669,10 @@ mod tests {
             "http-adaptive-reduction-percent"
         ));
         assert!(is_global_option_changeable("http-adaptive-backoff-max"));
+        #[cfg(feature = "bittorrent")]
+        assert!(is_global_option_changeable(
+            "bt-incoming-peer-handshake-timeout"
+        ));
         for name in [
             "max-http2-sessions-per-server",
             "max-http2-streams-per-session",

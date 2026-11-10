@@ -32,6 +32,13 @@ pub mod ftp;
 pub mod http;
 pub mod identity;
 
+/// Default TCP connection timeout for SFTP's SSH transport, in seconds.
+pub const DEFAULT_SFTP_CONNECT_TIMEOUT_SECS: u64 = 15;
+/// Default SFTP channel read timeout, in seconds.
+pub const DEFAULT_SFTP_READ_TIMEOUT_SECS: u64 = 30;
+/// Default SSH keepalive interval for SFTP transport, in seconds.
+pub const DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS: u64 = 60;
+
 #[cfg(feature = "bittorrent")]
 pub mod bittorrent;
 

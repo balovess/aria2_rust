@@ -9,6 +9,60 @@ fn runtime_split_update_keeps_values_above_u16() {
 }
 
 #[test]
+fn sftp_timeouts_are_valid_rpc_task_options() {
+    assert_eq!(
+        crate::config::is_option_changeable("sftp-connect-timeout", false),
+        crate::config::ChangeableKind::Immediate
+    );
+    assert_eq!(
+        crate::config::is_option_changeable("sftp-read-timeout", true),
+        crate::config::ChangeableKind::Pending
+    );
+    for (name, value) in [
+        ("sftp-connect-timeout", serde_json::json!(41)),
+        ("sftp-read-timeout", serde_json::json!(73)),
+    ] {
+        assert!(
+            crate::request::request_group::RequestGroup::validate_option_update(name, &value)
+                .unwrap()
+        );
+    }
+    assert!(
+        crate::request::request_group::RequestGroup::validate_option_update(
+            "sftp-connect-timeout",
+            &serde_json::json!(0)
+        )
+        .is_err()
+    );
+
+    let rpc_options = std::collections::HashMap::from([
+        ("sftp-connect-timeout".to_string(), serde_json::json!(41)),
+        ("sftp-read-timeout".to_string(), serde_json::json!(73)),
+        ("sftp-compression".to_string(), serde_json::json!(true)),
+        ("sftp-keepalive-interval".to_string(), serde_json::json!(0)),
+        (
+            "sftp-preferred-ciphers".to_string(),
+            serde_json::json!("aes256-gcm@openssh.com,chacha20-poly1305@openssh.com"),
+        ),
+    ]);
+    let parsed = DownloadOptions::try_from_rpc_options(&rpc_options)
+        .expect("addUri RPC timeout options should parse");
+    assert_eq!(parsed.sftp_connect_timeout, Some(41));
+    assert_eq!(parsed.sftp_read_timeout, Some(73));
+    assert!(parsed.sftp_compression);
+    assert_eq!(parsed.sftp_keepalive_interval, Some(0));
+    assert_eq!(parsed.sftp_preferred_ciphers.as_deref().unwrap().len(), 2);
+
+    let mut options = DownloadOptions::default();
+    assert!(
+        apply_rpc_option(&mut options, "sftp-connect-timeout", &serde_json::json!(41)).unwrap()
+    );
+    assert!(apply_rpc_option(&mut options, "sftp-read-timeout", &serde_json::json!(73)).unwrap());
+    assert_eq!(options.sftp_connect_timeout, Some(41));
+    assert_eq!(options.sftp_read_timeout, Some(73));
+}
+
+#[test]
 fn http2_limits_can_be_updated_through_task_rpc_options() {
     let mut options = DownloadOptions::default();
     assert!(

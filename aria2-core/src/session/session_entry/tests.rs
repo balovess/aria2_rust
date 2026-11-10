@@ -763,6 +763,38 @@ fn test_download_options_to_map_defaults_excluded() {
 }
 
 #[test]
+fn sftp_timeouts_round_trip_through_session_options() {
+    let options = DownloadOptions {
+        sftp_connect_timeout: Some(41),
+        sftp_read_timeout: Some(73),
+        sftp_compression: true,
+        sftp_keepalive_interval: Some(0),
+        sftp_preferred_ciphers: Some(vec!["aes256-gcm@openssh.com".to_string()]),
+        ..DownloadOptions::default()
+    };
+
+    let serialized = download_options_to_map(&options);
+    assert_eq!(
+        serialized.get("sftp-connect-timeout").map(String::as_str),
+        Some("41")
+    );
+    assert_eq!(
+        serialized.get("sftp-read-timeout").map(String::as_str),
+        Some("73")
+    );
+
+    let restored = DownloadOptions::from_option_strings(&serialized);
+    assert_eq!(restored.sftp_connect_timeout, Some(41));
+    assert_eq!(restored.sftp_read_timeout, Some(73));
+    assert!(restored.sftp_compression);
+    assert_eq!(restored.sftp_keepalive_interval, Some(0));
+    assert_eq!(
+        restored.sftp_preferred_ciphers.as_deref(),
+        Some(["aes256-gcm@openssh.com".to_string()].as_slice())
+    );
+}
+
+#[test]
 fn test_download_options_to_map_preserves_disabled_default_true_options() {
     let opts = DownloadOptions {
         enable_mmap: false,

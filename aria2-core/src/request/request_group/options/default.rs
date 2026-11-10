@@ -182,6 +182,11 @@ impl Default for DownloadOptions {
             ftp_user: None,
             ftp_passwd: None,
             ssh_host_key_md: None,
+            sftp_connect_timeout: None,
+            sftp_read_timeout: None,
+            sftp_compression: false,
+            sftp_keepalive_interval: None,
+            sftp_preferred_ciphers: None,
             no_netrc: false,
             netrc_path: None,
             // Conditional GET

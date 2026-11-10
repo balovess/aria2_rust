@@ -491,6 +491,21 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.ssh_host_key_md {
         map.insert("ssh-host-key-md".to_string(), v.clone());
     }
+    if let Some(v) = opts.sftp_connect_timeout {
+        map.insert("sftp-connect-timeout".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.sftp_read_timeout {
+        map.insert("sftp-read-timeout".to_string(), v.to_string());
+    }
+    if opts.sftp_compression {
+        map.insert("sftp-compression".to_string(), "true".to_string());
+    }
+    if let Some(v) = opts.sftp_keepalive_interval {
+        map.insert("sftp-keepalive-interval".to_string(), v.to_string());
+    }
+    if let Some(ref ciphers) = opts.sftp_preferred_ciphers {
+        map.insert("sftp-preferred-ciphers".to_string(), ciphers.join(","));
+    }
 
     // --- HTTP headers ---
     if !opts.header.is_empty() {

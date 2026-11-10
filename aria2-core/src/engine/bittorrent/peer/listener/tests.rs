@@ -1,6 +1,40 @@
 use super::*;
 
 #[tokio::test]
+async fn configured_incoming_handshake_timeout_is_applied_by_shared_listener() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let manager = BtPeerListenerManager::new();
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(1));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [91; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 91,
+            max_peers: 1,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(b"x").await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut byte))
+        .await
+        .expect("configured handshake timeout should close the incomplete peer");
+    assert_eq!(read.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn shared_manager_routes_two_torrents_on_one_socket() {
     use aria2_protocol::bittorrent::message::handshake::Handshake;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

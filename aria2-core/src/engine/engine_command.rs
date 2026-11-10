@@ -464,6 +464,10 @@ pub enum EngineCommand {
     /// Enable or disable the process-wide public tracker catalog.
     #[cfg(feature = "bittorrent")]
     SetPublicTrackersEnabled { enabled: bool },
+
+    /// Change the process-wide timeout applied to reads in incoming BT peer handshakes.
+    #[cfg(feature = "bittorrent")]
+    SetIncomingPeerHandshakeTimeout { seconds: u64 },
 }
 
 impl EngineCommand {
@@ -506,6 +510,7 @@ impl EngineCommand {
                 Self::SetPublicTrackerSources { .. }
                     | Self::SetPublicTrackerUpdateInterval { .. }
                     | Self::SetPublicTrackersEnabled { .. }
+                    | Self::SetIncomingPeerHandshakeTimeout { .. }
             );
         common
     }

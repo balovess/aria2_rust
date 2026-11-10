@@ -61,6 +61,10 @@ pub struct BitTorrentArgs {
     #[arg(long = "peer-connection-timeout", hide = true)]
     pub peer_connection_timeout: Option<u64>,
 
+    /// Maximum wait per read during an incoming BitTorrent peer handshake, in seconds
+    #[arg(long = "bt-incoming-peer-handshake-timeout")]
+    pub bt_incoming_peer_handshake_timeout: Option<u64>,
+
     /// Seed without verifying hash
     #[arg(
         long = "bt-seed-unverified",

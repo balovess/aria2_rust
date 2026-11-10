@@ -289,6 +289,12 @@ impl DownloadEngine {
         self.set_dns_config(timeout, None);
     }
 
+    /// Configure the process-wide incoming BitTorrent peer handshake timeout.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_incoming_peer_handshake_timeout(&mut self, timeout: Duration) {
+        self.bt_listener.set_incoming_handshake_timeout(timeout);
+    }
+
     /// Configure the process-wide DNS timeout and optional explicit nameservers.
     pub fn set_dns_config(
         &mut self,

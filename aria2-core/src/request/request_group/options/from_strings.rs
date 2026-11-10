@@ -547,6 +547,16 @@ impl DownloadOptions {
             ftp_user: options.get("ftp-user").cloned(),
             ftp_passwd: options.get("ftp-passwd").cloned(),
             ssh_host_key_md: options.get("ssh-host-key-md").cloned(),
+            sftp_connect_timeout: positive_u64("sftp-connect-timeout"),
+            sftp_read_timeout: positive_u64("sftp-read-timeout"),
+            sftp_compression: options
+                .get("sftp-compression")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            sftp_keepalive_interval: options
+                .get("sftp-keepalive-interval")
+                .and_then(|v| v.parse::<u64>().ok()),
+            sftp_preferred_ciphers: parse_list_option(options, "sftp-preferred-ciphers"),
             no_netrc: options
                 .get("no-netrc")
                 .map(|v| v == "true")

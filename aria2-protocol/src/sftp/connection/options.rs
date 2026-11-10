@@ -65,12 +65,14 @@ impl Default for SshOptions {
             password: None,
             private_key_path: None,
             private_key_passphrase: None,
-            connect_timeout: Duration::from_secs(15),
-            read_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(crate::DEFAULT_SFTP_CONNECT_TIMEOUT_SECS),
+            read_timeout: Duration::from_secs(crate::DEFAULT_SFTP_READ_TIMEOUT_SECS),
             host_key_mode: HostKeyCheckingMode::default(),
             host_key_fingerprint: None,
             compression: false,
-            keepalive_interval: Some(Duration::from_secs(60)),
+            keepalive_interval: Some(Duration::from_secs(
+                crate::DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS,
+            )),
             preferred_ciphers: Vec::new(),
         }
     }

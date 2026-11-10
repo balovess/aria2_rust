@@ -379,6 +379,16 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
                     "Public tracker catalog enabled state changed at runtime"
                 );
             }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetIncomingPeerHandshakeTimeout { seconds } => {
+                ctx.bt_listener
+                    .set_incoming_handshake_timeout(Duration::from_secs(seconds));
+                info!(
+                    seconds,
+                    "Incoming BitTorrent peer handshake timeout updated"
+                );
+            }
         }
     }
     processed

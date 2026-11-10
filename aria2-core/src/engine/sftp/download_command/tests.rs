@@ -119,6 +119,42 @@ fn test_build_ssh_options_with_password() {
 }
 
 #[test]
+fn sftp_timeout_options_reach_the_protocol_connection() {
+    let options = DownloadOptions {
+        sftp_connect_timeout: Some(41),
+        sftp_read_timeout: Some(73),
+        sftp_compression: true,
+        sftp_keepalive_interval: Some(0),
+        sftp_preferred_ciphers: Some(vec![
+            "aes256-gcm@openssh.com".to_string(),
+            "chacha20-poly1305@openssh.com".to_string(),
+        ]),
+        ..DownloadOptions::default()
+    };
+    let cmd = SftpDownloadCommand::new(
+        GroupId::new(98),
+        "sftp://user@example.com/file",
+        &options,
+        None,
+        None,
+    )
+    .expect("SFTP command should accept configured timeouts");
+
+    let ssh_options = cmd.build_ssh_options();
+    assert_eq!(ssh_options.connect_timeout, Duration::from_secs(41));
+    assert_eq!(ssh_options.read_timeout, Duration::from_secs(73));
+    assert!(ssh_options.compression);
+    assert_eq!(ssh_options.keepalive_interval, None);
+    assert_eq!(
+        ssh_options.preferred_ciphers,
+        [
+            "aes256-gcm@openssh.com".to_string(),
+            "chacha20-poly1305@openssh.com".to_string()
+        ]
+    );
+}
+
+#[test]
 fn test_build_ssh_options_without_password() {
     let cmd = SftpDownloadCommand {
         group: Arc::new(std::sync::RwLock::new(RequestGroup::new(

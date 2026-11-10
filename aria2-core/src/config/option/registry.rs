@@ -276,6 +276,11 @@ impl OptionRegistry {
             | "ftp-reuse-connection"
             | "ftp-type"
             | "ssh-host-key-md"
+            | "sftp-connect-timeout"
+            | "sftp-read-timeout"
+            | "sftp-compression"
+            | "sftp-keepalive-interval"
+            | "sftp-preferred-ciphers"
             | "dir"
             | "out"
             | "allow-piece-length-change"
@@ -417,7 +422,8 @@ impl OptionRegistry {
             | "log-max-size"
             | "log-max-files"
             | "lpd-listen-port"
-            | "bt-lpd-interface" => Some(OptionOwner::ProcessEngine),
+            | "bt-lpd-interface"
+            | "bt-incoming-peer-handshake-timeout" => Some(OptionOwner::ProcessEngine),
 
             "async-dns" | "enable-async-dns6" | "startup-idle-time" => {
                 Some(OptionOwner::DownloadTask)
@@ -550,6 +556,10 @@ mod tests {
             ("startup-idle-time", OptionOwner::DownloadTask),
             ("async-dns-server", OptionOwner::ProcessEngine),
             ("dns-timeout", OptionOwner::ProcessEngine),
+            (
+                "bt-incoming-peer-handshake-timeout",
+                OptionOwner::ProcessEngine,
+            ),
         ];
 
         for (name, expected_owner) in cases {

@@ -22,6 +22,26 @@ const RUST_HTTP2_POLICY_EXTENSIONS: &[&str] = &[
 ];
 
 const RUST_HTTP_RANGE_POLICY_EXTENSIONS: &[&str] = &["min-http-range-size"];
+const RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS: &[&str] = &["sftp-connect-timeout", "sftp-read-timeout"];
+const RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS: &[&str] = &[
+    "sftp-compression",
+    "sftp-keepalive-interval",
+    "sftp-preferred-ciphers",
+];
+const RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS: &[&str] = &[
+    "http-adaptive-reduction-percent",
+    "http-adaptive-recovery-interval",
+    "http-adaptive-recovery-successes-min",
+    "http-adaptive-recovery-successes-max",
+    "http-adaptive-start-interval-ms",
+    "http-adaptive-backoff-base",
+    "http-adaptive-backoff-max",
+    "http-adaptive-capacity-start-interval-ms",
+    "http-adaptive-capacity-start-interval-max-ms",
+    "http-adaptive-rate-recovery-successes",
+    "http-adaptive-rate-min-interval-ms",
+    "http-adaptive-backoff-reset-after",
+];
 
 const RUST_BITTORRENT_POLICY_EXTENSIONS: &[&str] = &[
     "bt-max-upload-slots",
@@ -117,6 +137,9 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     initial_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setInitialOption",
         compatibility_policy_names("setInitialOption"),
@@ -124,6 +147,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         &initial_extensions,
     );
     let mut global_extensions = vec![
+        "bt-incoming-peer-handshake-timeout",
         "bt-tracker-source",
         "bt-tracker-update-interval",
         "bt-tracker-stopped-timeout",
@@ -132,6 +156,9 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     global_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeGlobalOption",
         compatibility_policy_names("setChangeGlobalOption"),
@@ -143,6 +170,9 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     reserved_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeOptionForReserved",
         compatibility_policy_names("setChangeOptionForReserved"),

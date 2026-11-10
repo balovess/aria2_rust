@@ -10,8 +10,14 @@ fn test_ssh_options_defaults() {
     assert_eq!(opts.username, "");
     assert!(opts.password.is_none());
     assert!(opts.private_key_path.is_none());
-    assert_eq!(opts.connect_timeout, Duration::from_secs(15));
-    assert_eq!(opts.read_timeout, Duration::from_secs(30));
+    assert_eq!(
+        opts.connect_timeout,
+        Duration::from_secs(crate::DEFAULT_SFTP_CONNECT_TIMEOUT_SECS)
+    );
+    assert_eq!(
+        opts.read_timeout,
+        Duration::from_secs(crate::DEFAULT_SFTP_READ_TIMEOUT_SECS)
+    );
     assert!(matches!(opts.host_key_mode, HostKeyCheckingMode::Strict));
 }
 

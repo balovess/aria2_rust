@@ -619,6 +619,21 @@ impl crate::config::OptionRegistry {
             hidden: true,
             ..Default::default()
         });
+        self.register(OptionDef {
+            name: "bt-incoming-peer-handshake-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::peer::incoming::DEFAULT_INCOMING_HANDSHAKE_READ_TIMEOUT
+                    .as_secs() as i64,
+            ),
+            min: Some(1),
+            max: Some(600),
+            description:
+                "Maximum wait per read during an incoming BitTorrent peer handshake, in seconds"
+                    .into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
 
         // --- DHT Entry Points (Fine-Grained) ---
         self.register(OptionDef {

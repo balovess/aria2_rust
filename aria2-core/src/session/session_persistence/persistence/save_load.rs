@@ -302,6 +302,12 @@ impl SessionPersistence {
         if let Some(value) = resume_data.options.get("ssh-host-key-md") {
             options.ssh_host_key_md = Some(value.clone());
         }
+        if let Some(value) = resume_data.options.get("sftp-connect-timeout") {
+            options.sftp_connect_timeout = value.parse().ok();
+        }
+        if let Some(value) = resume_data.options.get("sftp-read-timeout") {
+            options.sftp_read_timeout = value.parse().ok();
+        }
 
         // Set output path if available
         if let Some(ref output_path) = resume_data.output_path {

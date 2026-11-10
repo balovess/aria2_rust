@@ -307,6 +307,11 @@ impl App {
         set_bool_true!("ftp-reuse-connection", h.ftp_reuse_connection);
         set_str!("ftp-type", h.ftp_type);
         set_str!("ssh-host-key-md", h.ssh_host_key_md);
+        set_u64!("sftp-connect-timeout", h.sftp_connect_timeout);
+        set_u64!("sftp-read-timeout", h.sftp_read_timeout);
+        set_bool_true!("sftp-compression", h.sftp_compression);
+        set_u64!("sftp-keepalive-interval", h.sftp_keepalive_interval);
+        set_str!("sftp-preferred-ciphers", h.sftp_preferred_ciphers);
 
         // --- BitTorrent options ---
         set_f64!("seed-time", b.seed_time);
@@ -331,6 +336,10 @@ impl App {
         );
         set_u64!("bt-snubbed-timeout", b.bt_snubbed_timeout);
         set_u64!("peer-connection-timeout", b.peer_connection_timeout);
+        set_u64!(
+            "bt-incoming-peer-handshake-timeout",
+            b.bt_incoming_peer_handshake_timeout
+        );
         set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);
         set_bool_true!("bt-force-encryption", b.bt_force_encryption);

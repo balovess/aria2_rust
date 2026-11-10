@@ -149,6 +149,7 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--bt-timeout=181",
         "--bt-request-timeout=61",
         "--peer-connection-timeout=16",
+        "--bt-incoming-peer-handshake-timeout=45",
         "--bt-peer-blocklist=blocked-peers.txt",
         "--enable-dht6=true",
         "--dht-listen-addr=127.0.0.1",
@@ -173,6 +174,14 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.bt_request_timeout, 61);
     assert_eq!(options.peer_connection_timeout, 16);
     assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("bt-incoming-peer-handshake-timeout")
+            .await,
+        Some(45)
+    );
+    assert_eq!(
         options.bt_peer_blocklist.as_deref(),
         Some("blocked-peers.txt")
     );
@@ -185,6 +194,31 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.dht_entry_point_host6.as_deref(), Some("::1"));
     assert_eq!(options.dht_entry_point_port6, Some(6882));
     assert_eq!(options.dht_file_path6.as_deref(), Some("dht6.dat"));
+}
+
+#[tokio::test]
+async fn test_cli_sftp_timeouts_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--sftp-connect-timeout=41",
+        "--sftp-read-timeout=73",
+        "--sftp-compression=true",
+        "--sftp-keepalive-interval=0",
+        "--sftp-preferred-ciphers=aes256-gcm@openssh.com,chacha20-poly1305@openssh.com",
+    ])
+    .expect("SFTP timeout options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.sftp_connect_timeout, Some(41));
+    assert_eq!(options.sftp_read_timeout, Some(73));
+    assert!(options.sftp_compression);
+    assert_eq!(options.sftp_keepalive_interval, Some(0));
+    assert_eq!(options.sftp_preferred_ciphers.as_ref().unwrap().len(), 2);
 }
 
 #[cfg(feature = "bittorrent")]
