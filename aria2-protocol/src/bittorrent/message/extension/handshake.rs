@@ -50,7 +50,8 @@ pub struct ExtensionHandshake {
 /// Default ext_id for ut_metadata in the `m` dict.
 const DEFAULT_UT_METADATA_ID: u8 = 1;
 /// Default ext_id for ut_pex in the `m` dict.
-const DEFAULT_UT_PEX_ID: u8 = 2;
+/// Default `ut_pex` ID advertised by this implementation.
+pub const DEFAULT_UT_PEX_ID: u8 = 2;
 /// Default maximum outstanding metadata requests (reqq).
 const DEFAULT_REQQ: u32 = 500;
 /// Default client version string sent in the `v` key.

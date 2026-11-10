@@ -223,7 +223,7 @@ impl TrackerResponse {
 
     /// Decode compact IPv6 peer data (18 bytes per peer: 16-byte IP + 2-byte port).
     fn parse_compact_peers_v6(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
-        use crate::bittorrent::peer::connection::PeerAddr;
+        use crate::bittorrent::peer::address::PeerAddr;
 
         if data.is_empty() {
             return Ok(Vec::new());

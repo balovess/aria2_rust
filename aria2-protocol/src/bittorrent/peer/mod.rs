@@ -1,3 +1,4 @@
+pub mod address;
 pub mod connection;
 pub mod id;
 pub mod incoming;
