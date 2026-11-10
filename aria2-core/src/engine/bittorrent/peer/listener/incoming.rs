@@ -17,7 +17,7 @@ use super::{IncomingPeer, IncomingPeerConnection, SharedRoute};
 pub(super) async fn run_shared_listener(
     listener: Arc<TcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
-    incoming_handshake_timeout_secs: Arc<std::sync::atomic::AtomicU64>,
+    incoming_handshake_timeout_nanos: Arc<std::sync::atomic::AtomicU64>,
     shutdown: CancellationToken,
 ) {
     enum Event {
@@ -40,13 +40,14 @@ pub(super) async fn run_shared_listener(
             Event::Shutdown => break,
             Event::Accepted(Ok((stream, endpoint))) => {
                 let routes = Arc::clone(&routes);
-                let timeout_secs =
-                    incoming_handshake_timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
+                let timeout = std::time::Duration::from_nanos(
+                    incoming_handshake_timeout_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 let connection_shutdown = connection_shutdown.clone();
                 connections.spawn(async move {
                     tokio::select! {
                         _ = connection_shutdown.cancelled() => {},
-                        _ = process_incoming_tcp_peer(stream, endpoint, routes, timeout_secs) => {},
+                        _ = process_incoming_tcp_peer(stream, endpoint, routes, timeout) => {},
                     }
                 });
             }
@@ -73,7 +74,7 @@ async fn process_incoming_tcp_peer(
     stream: tokio::net::TcpStream,
     endpoint: SocketAddr,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
-    timeout_secs: u64,
+    timeout: std::time::Duration,
 ) {
     let endpoint = normalize_peer_endpoint(endpoint);
     let (known_info_hashes, policies) = {
@@ -92,7 +93,7 @@ async fn process_incoming_tcp_peer(
         &known_info_hashes,
         &policies,
         aria2_protocol::bittorrent::peer::incoming::IncomingHandshakeOptions {
-            read_timeout: std::time::Duration::from_secs(timeout_secs),
+            read_timeout: timeout,
         },
     )
     .await

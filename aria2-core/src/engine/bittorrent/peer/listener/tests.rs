@@ -1,11 +1,24 @@
 use super::*;
 
+#[test]
+fn zero_incoming_handshake_timeout_keeps_one_second_minimum() {
+    let manager = BtPeerListenerManager::new();
+    manager.set_incoming_handshake_timeout(std::time::Duration::ZERO);
+
+    assert_eq!(
+        manager
+            .incoming_handshake_timeout_nanos
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1_000_000_000
+    );
+}
+
 #[tokio::test]
 async fn configured_incoming_handshake_timeout_is_applied_by_shared_listener() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let manager = BtPeerListenerManager::new();
-    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(1));
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_millis(250));
     let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
     let (port, _incoming, _route) = manager
         .register(BtPeerRouteConfig {
@@ -28,9 +41,12 @@ async fn configured_incoming_handshake_timeout_is_applied_by_shared_listener() {
         .unwrap();
     stream.write_all(b"x").await.unwrap();
     let mut byte = [0u8; 1];
-    let read = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut byte))
-        .await
-        .expect("configured handshake timeout should close the incomplete peer");
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        stream.read(&mut byte),
+    )
+    .await
+    .expect("subsecond configured timeout should close the incomplete peer");
     assert_eq!(read.unwrap(), 0);
 }
 
