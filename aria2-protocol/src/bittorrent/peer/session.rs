@@ -19,6 +19,15 @@ pub trait PeerTransport: Send {
     async fn close(&mut self) -> Result<(), String>;
 }
 
+/// Failure while receiving a framed peer message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerMessageReceiveError {
+    /// The underlying byte transport failed or closed mid-frame.
+    Transport(String),
+    /// A complete frame could not be parsed as a BitTorrent message.
+    InvalidMessage(String),
+}
+
 /// Incremental decoder for length-prefixed BitTorrent peer messages.
 #[derive(Default)]
 pub struct PeerFrameDecoder {
@@ -168,11 +177,41 @@ impl<T: PeerTransport> PeerWireSession<T> {
         self.transport.send(frame).await
     }
 
+    /// Serialize and send one BitTorrent peer message.
+    pub async fn send_bt_message(
+        &mut self,
+        message: &crate::bittorrent::message::types::BtMessage,
+    ) -> Result<(), String> {
+        let frame = crate::bittorrent::message::serializer::serialize(message);
+        self.send_message(&frame).await
+    }
+
     /// Receive one complete length-prefixed BitTorrent message.
     pub async fn receive_message(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.receive_frame()
+            .await
+            .map(|frame| frame.map(|frame| frame.to_vec()))
+    }
+
+    /// Receive and parse one complete BitTorrent peer message.
+    pub async fn receive_bt_message(
+        &mut self,
+    ) -> Result<Option<crate::bittorrent::message::types::BtMessage>, PeerMessageReceiveError> {
+        let Some(frame) = self
+            .receive_frame()
+            .await
+            .map_err(PeerMessageReceiveError::Transport)?
+        else {
+            return Ok(None);
+        };
+        crate::bittorrent::message::factory::parse_message_bytes(frame)
+            .map_err(PeerMessageReceiveError::InvalidMessage)
+    }
+
+    async fn receive_frame(&mut self) -> Result<Option<Bytes>, String> {
         loop {
             if let Some(frame) = self.frame_decoder.next_frame()? {
-                return Ok(Some(frame.to_vec()));
+                return Ok(Some(frame));
             }
 
             let Some(bytes) = self.transport.receive().await? else {

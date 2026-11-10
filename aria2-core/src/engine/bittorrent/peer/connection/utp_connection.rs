@@ -1,6 +1,6 @@
 //! Engine adapter from the process-owned uTP actor to BitTorrent peer sessions.
 
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use aria2_protocol::bittorrent::peer::session::{PeerTransport, PeerWireSession};
 
 use super::super::utp_transport::{UtpConnectionHandle, UtpTransportHandle};
@@ -111,9 +111,37 @@ impl UtpPeerConnection {
             .map_err(network_error)
     }
 
+    pub async fn send_bt_message(
+        &mut self,
+        message: &aria2_protocol::bittorrent::message::types::BtMessage,
+    ) -> Result<()> {
+        self.session
+            .send_bt_message(message)
+            .await
+            .map_err(network_error)
+    }
+
     /// Receive one framed BitTorrent message from the uTP actor.
     pub async fn recv_message(&mut self) -> Result<Option<Vec<u8>>> {
         self.session.receive_message().await.map_err(network_error)
+    }
+
+    pub async fn recv_bt_message(
+        &mut self,
+    ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
+        self.session
+            .receive_bt_message()
+            .await
+            .map_err(|error| {
+                match error {
+                aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::Transport(
+                    message,
+                ) => network_error(message),
+                aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::InvalidMessage(
+                    message,
+                ) => Aria2Error::Fatal(FatalError::Config(message)),
+            }
+            })
     }
 
     pub async fn close(&mut self) -> Result<()> {
