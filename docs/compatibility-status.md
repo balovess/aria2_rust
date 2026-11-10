@@ -78,6 +78,15 @@ behavior. An unlisted behavior has not been audited here.
   timeout propagation are covered by focused tests. Original aria2 has no
   corresponding process-wide option, so this is a Rust extension.
 
+## BitTorrent peer connection state
+
+- **Library behavior:** `PeerConnection::state()` reflects remote choke and
+  interest messages. Responses to tracked block requests (`Piece` and `Reject`)
+  retire their matching request from the connection state. The state is derived
+  from protocol messages and does not need a CLI/RPC setting.
+- **Verification:** protocol tests cover choke/interest transitions and request
+  completion; core peer-connection tests and choking-policy tests pass.
+
 ## BitTorrent DHT outbound source binding
 
 - **Policy:** when an explicit outbound interface/source address is configured,

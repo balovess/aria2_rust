@@ -298,7 +298,9 @@ facade.
    settings. Core establishes the policy-approved TCP stream and passes it to
    the protocol handshake. Plain and MSE handshakes both return the same
    `PeerConnection`; it owns message framing and applies MSE encryption when
-   negotiated. `BtPeerConn` then adds engine peer state and statistics. Once
+   negotiated. Its `PeerState` tracks locally sent choke/interest/request state
+   and updates remote choke/interest and request completion from received peer
+   messages. `BtPeerConn` then adds engine peer state and statistics. Once
    initialized, it is moved into a long-lived `PeerActor`; that actor is the
    sole runtime owner of the connection and performs its socket reads/writes.
    Coordinators send peer commands and consume peer events rather than doing

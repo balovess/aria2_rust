@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::bittorrent::message::types::PieceBlockRequest;
+use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerChokingState {
@@ -124,6 +124,29 @@ impl PeerState {
 
     pub fn mark_message_received(&mut self) {
         self.last_message_time = Instant::now();
+    }
+
+    pub(crate) fn record_received_message(&mut self, message: &BtMessage) {
+        self.mark_message_received();
+        match message {
+            BtMessage::Choke => self.set_peer_choking(true),
+            BtMessage::Unchoke => self.set_peer_choking(false),
+            BtMessage::Interested => self.set_peer_interested(true),
+            BtMessage::NotInterested => self.set_peer_interested(false),
+            BtMessage::Piece { index, begin, data } => {
+                if let Ok(length) = u32::try_from(data.len()) {
+                    self.remove_request(&PieceBlockRequest::new(*index, *begin, length));
+                }
+            }
+            BtMessage::Reject {
+                index,
+                offset,
+                length,
+            } => {
+                self.remove_request(&PieceBlockRequest::new(*index, *offset, *length));
+            }
+            _ => {}
+        }
     }
 
     pub fn is_active(&self) -> bool {

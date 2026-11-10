@@ -354,13 +354,14 @@ impl PeerConnection {
                 if self.read_buffer.len() >= frame_len {
                     let frame = self.read_buffer.split_to(frame_len).freeze();
                     if msg_len == 0 {
-                        self.state.mark_message_received();
-                        return Ok(Some(BtMessage::KeepAlive));
+                        let message = BtMessage::KeepAlive;
+                        self.state.record_received_message(&message);
+                        return Ok(Some(message));
                     }
                     if let Some(message) =
                         crate::bittorrent::message::factory::parse_message_bytes(frame)?
                     {
-                        self.state.mark_message_received();
+                        self.state.record_received_message(&message);
                         return Ok(Some(message));
                     }
                     continue;
