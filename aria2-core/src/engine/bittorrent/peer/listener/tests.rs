@@ -51,6 +51,57 @@ async fn configured_incoming_handshake_timeout_is_applied_by_shared_listener() {
 }
 
 #[tokio::test]
+async fn shared_listener_rejects_tcp_handshakes_when_global_slots_are_full() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut manager = BtPeerListenerManager::new();
+    manager.incoming_handshake_slots = Arc::new(tokio::sync::Semaphore::new(1));
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(5));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [92; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 92,
+            max_peers: 2,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let mut first = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    first.write_all(b"x").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut second = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    second.write_all(b"x").await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        second.read(&mut byte),
+    )
+    .await
+    .expect("over-capacity incoming peer should be closed promptly");
+    assert!(matches!(read, Err(_) | Ok(0)));
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), first.read(&mut byte),)
+            .await
+            .is_err()
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn shared_manager_routes_two_torrents_on_one_socket() {
     use aria2_protocol::bittorrent::message::handshake::Handshake;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

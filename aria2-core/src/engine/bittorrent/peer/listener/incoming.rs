@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -17,17 +17,18 @@ use super::{IncomingPeer, IncomingPeerConnection, SharedRoute};
 pub(super) async fn run_shared_listener(
     listener: Arc<TcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    incoming_handshake_slots: Arc<Semaphore>,
     incoming_handshake_timeout_nanos: Arc<std::sync::atomic::AtomicU64>,
     shutdown: CancellationToken,
 ) {
     enum Event {
         Shutdown,
         Accepted(io::Result<(tokio::net::TcpStream, SocketAddr)>),
-        ConnectionFinished(Result<(), JoinError>),
+        ConnectionFinished(Result<OwnedSemaphorePermit, JoinError>),
     }
 
     let connection_shutdown = shutdown.child_token();
-    let mut connections = JoinSet::new();
+    let mut connections = JoinSet::<OwnedSemaphorePermit>::new();
     loop {
         let event = tokio::select! {
             _ = shutdown.cancelled() => Event::Shutdown,
@@ -39,6 +40,14 @@ pub(super) async fn run_shared_listener(
         match event {
             Event::Shutdown => break,
             Event::Accepted(Ok((stream, endpoint))) => {
+                let permit = match Arc::clone(&incoming_handshake_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::debug!(%endpoint, "Dropping incoming TCP peer at handshake capacity");
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let routes = Arc::clone(&routes);
                 let timeout = std::time::Duration::from_nanos(
                     incoming_handshake_timeout_nanos.load(std::sync::atomic::Ordering::Relaxed),
@@ -49,12 +58,14 @@ pub(super) async fn run_shared_listener(
                         _ = connection_shutdown.cancelled() => {},
                         _ = process_incoming_tcp_peer(stream, endpoint, routes, timeout) => {},
                     }
+                    permit
                 });
             }
             Event::Accepted(Err(error)) => {
                 tracing::debug!(%error, "BitTorrent listener accept failed");
                 break;
             }
+            Event::ConnectionFinished(Ok(permit)) => drop(permit),
             Event::ConnectionFinished(Err(error)) if !error.is_cancelled() => {
                 tracing::warn!(%error, "Incoming BitTorrent TCP task failed");
             }
@@ -133,16 +144,17 @@ async fn process_incoming_tcp_peer(
 pub(super) async fn run_shared_utp_listener(
     mut incoming: mpsc::Receiver<super::super::utp_transport::IncomingUtpConnection>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    incoming_handshake_slots: Arc<Semaphore>,
     shutdown: CancellationToken,
 ) {
     enum Event {
         Shutdown,
         Incoming(Option<super::super::utp_transport::IncomingUtpConnection>),
-        ConnectionFinished(Result<(), JoinError>),
+        ConnectionFinished(Result<OwnedSemaphorePermit, JoinError>),
     }
 
     let connection_shutdown = shutdown.child_token();
-    let mut connections = JoinSet::new();
+    let mut connections = JoinSet::<OwnedSemaphorePermit>::new();
     loop {
         let event = tokio::select! {
             _ = shutdown.cancelled() => Event::Shutdown,
@@ -154,6 +166,13 @@ pub(super) async fn run_shared_utp_listener(
         match event {
             Event::Shutdown | Event::Incoming(None) => break,
             Event::Incoming(Some(incoming)) => {
+                let permit = match Arc::clone(&incoming_handshake_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::debug!(endpoint = %incoming.endpoint, "Dropping incoming uTP peer at handshake capacity");
+                        continue;
+                    }
+                };
                 let routes = Arc::clone(&routes);
                 let connection_shutdown = connection_shutdown.clone();
                 connections.spawn(async move {
@@ -161,8 +180,10 @@ pub(super) async fn run_shared_utp_listener(
                         _ = connection_shutdown.cancelled() => {},
                         _ = route_incoming_utp_peer(incoming, routes) => {},
                     }
+                    permit
                 });
             }
+            Event::ConnectionFinished(Ok(permit)) => drop(permit),
             Event::ConnectionFinished(Err(error)) if !error.is_cancelled() => {
                 tracing::warn!(%error, "Incoming BitTorrent uTP task failed");
             }
@@ -178,12 +199,17 @@ pub(super) async fn run_shared_utp_listener(
     .await;
 }
 
-async fn drain_connections(mut connections: JoinSet<()>, failure_message: &'static str) {
+async fn drain_connections(
+    mut connections: JoinSet<OwnedSemaphorePermit>,
+    failure_message: &'static str,
+) {
     while let Some(result) = connections.join_next().await {
-        if let Err(error) = result
-            && !error.is_cancelled()
-        {
-            tracing::warn!(%error, "{failure_message}");
+        match result {
+            Ok(permit) => drop(permit),
+            Err(error) if !error.is_cancelled() => {
+                tracing::warn!(%error, "{failure_message}");
+            }
+            Err(_) => {}
         }
     }
 }

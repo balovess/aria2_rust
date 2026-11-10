@@ -9,10 +9,13 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use aria2_protocol::bittorrent::utp::UtpSocketOptions;
 use rand::seq::SliceRandom;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::storage::DefaultPeerStorage;
+
+/// Process-wide cap for incoming TCP and uTP peer handshake tasks.
+const MAX_CONCURRENT_INCOMING_HANDSHAKES: usize = 128;
 
 /// A successfully admitted incoming peer.
 pub struct IncomingPeer {
@@ -90,6 +93,7 @@ pub struct BtPeerListenerManager {
     utp_incoming_rx: Arc<
         tokio::sync::Mutex<Option<mpsc::Receiver<super::utp_transport::IncomingUtpConnection>>>,
     >,
+    incoming_handshake_slots: Arc<Semaphore>,
     incoming_handshake_timeout_nanos: Arc<AtomicU64>,
     utp_socket_options: Arc<std::sync::RwLock<UtpSocketOptions>>,
     shutdown: CancellationToken,
@@ -117,6 +121,7 @@ impl BtPeerListenerManager {
             utp_transports: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             utp_incoming_tx,
             utp_incoming_rx: Arc::new(tokio::sync::Mutex::new(Some(utp_incoming_rx))),
+            incoming_handshake_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_INCOMING_HANDSHAKES)),
             incoming_handshake_timeout_nanos: Arc::new(AtomicU64::new(
                 aria2_protocol::bittorrent::peer::incoming::IncomingHandshakeOptions::default()
                     .read_timeout
@@ -188,9 +193,11 @@ impl BtPeerListenerManager {
         };
 
         if let Some(receiver) = self.utp_incoming_rx.lock().await.take() {
+            let incoming_handshake_slots = Arc::clone(&self.incoming_handshake_slots);
             let task = tokio::spawn(incoming::run_shared_utp_listener(
                 receiver,
                 Arc::clone(&self.routes),
+                incoming_handshake_slots,
                 self.shutdown.clone(),
             ));
             self.state.lock().await.listener_tasks.push(task);
@@ -249,16 +256,19 @@ impl BtPeerListenerManager {
 
         let routes = Arc::clone(&self.routes);
         let shutdown = self.shutdown.clone();
+        let incoming_handshake_slots = Arc::clone(&self.incoming_handshake_slots);
         let incoming_handshake_timeout_nanos = Arc::clone(&self.incoming_handshake_timeout_nanos);
         let mut listener_tasks = Vec::with_capacity(listeners.len());
         for listener in listeners {
             let routes = Arc::clone(&routes);
             let shutdown = shutdown.clone();
+            let incoming_handshake_slots = Arc::clone(&incoming_handshake_slots);
             let incoming_handshake_timeout_nanos = Arc::clone(&incoming_handshake_timeout_nanos);
             listener_tasks.push(tokio::spawn(async move {
                 incoming::run_shared_listener(
                     listener,
                     routes,
+                    incoming_handshake_slots,
                     incoming_handshake_timeout_nanos,
                     shutdown,
                 )

@@ -160,6 +160,18 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** focused task construction coverage checks zero, a lower
   configured value, and a value above the safety ceiling.
 
+## Incoming BitTorrent handshake admission
+
+- **Behavior:** the process listener allows at most 128 TCP and uTP incoming
+  handshake tasks at once. Connections arriving above that process-wide safety
+  cap are closed before starting another handshake.
+- **Compatibility impact:** admission is unchanged below the cap; an overloaded
+  listener now applies a fixed resource bound instead of accumulating handshake
+  tasks without limit.
+- **Verification:** a local TCP listener test sets the internal cap to one,
+  confirms the active handshake remains open, and confirms the excess peer is
+  closed promptly. A multi-peer external network stress run has not been done.
+
 ## SFTP connection and transport options
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
