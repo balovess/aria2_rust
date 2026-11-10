@@ -102,6 +102,56 @@ async fn shared_listener_rejects_tcp_handshakes_when_global_slots_are_full() {
 }
 
 #[tokio::test]
+async fn tcp_and_utp_listeners_share_the_handshake_slot_limit() {
+    use tokio::io::AsyncWriteExt;
+
+    let mut manager = BtPeerListenerManager::new();
+    manager.incoming_handshake_slots = Arc::new(tokio::sync::Semaphore::new(1));
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(5));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [93; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 93,
+            max_peers: 2,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+    let _utp_transport = manager
+        .register_utp_transport("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    tcp.write_all(b"x").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let endpoint = "127.0.0.1:6881".parse().unwrap();
+    let (incoming, close_requested) =
+        super::super::utp_transport::incoming_connection_for_test(endpoint);
+    manager.utp_incoming_tx.send(incoming).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        while !close_requested.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("uTP peer should be dropped while the TCP handshake holds the only slot");
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn shared_manager_routes_two_torrents_on_one_socket() {
     use aria2_protocol::bittorrent::message::handshake::Handshake;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

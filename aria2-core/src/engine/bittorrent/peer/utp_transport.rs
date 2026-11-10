@@ -44,6 +44,32 @@ pub(crate) struct UtpConnectionHandle {
     close_notify: Arc<Notify>,
 }
 
+#[cfg(test)]
+pub(crate) fn incoming_connection_for_test(
+    endpoint: SocketAddr,
+) -> (IncomingUtpConnection, Arc<AtomicBool>) {
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let (_receive_tx, receive_rx) = mpsc::channel(1);
+    let (_state_tx, state_rx) = watch::channel(ConnectionState::Established);
+    let close_requested = Arc::new(AtomicBool::new(false));
+    let connection = UtpConnectionHandle {
+        id: 1,
+        command_tx,
+        receive_rx,
+        state_rx,
+        close_requested: Arc::clone(&close_requested),
+        close_notify: Arc::new(Notify::new()),
+    };
+
+    (
+        IncomingUtpConnection {
+            connection,
+            endpoint,
+        },
+        close_requested,
+    )
+}
+
 enum Command {
     Connect {
         endpoint: SocketAddr,
