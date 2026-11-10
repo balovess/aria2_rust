@@ -1,9 +1,11 @@
 //! BT peer connection manager and initialization path.
 //!
-//! This module manages the interaction with BitTorrent peers, including:
-//! - Connection establishment (plain and encrypted)
-//! - BitTorrent handshake and peer identity checks
-//! - Handing the established stream to its long-lived Swarm actor
+//! This module manages engine-side policy and lifecycle for peer attempts:
+//! - Selecting uTP, MSE, or plain TCP and applying fallback rules
+//! - Applying outbound-network policy before protocol handshakes
+//! - Checking peer identity and preparing the long-lived Swarm actor
+//!
+//! The protocol crate performs the BitTorrent and MSE handshakes.
 //!
 //! # Compatibility Reference
 //!
