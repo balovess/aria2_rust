@@ -55,7 +55,6 @@ aria2-protocol = { workspace = true }
 # The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
 # automatically use ring as the crypto provider.
 reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio` enables the async resolver; `system-config` loads the operating system's DNS settings.
 # Uses 0.26: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
@@ -107,6 +106,7 @@ tokio-uring = { version = "0.5", optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
+tokio-tungstenite.workspace = true
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
 # for serving test HTTP responses. reqwest 0.13 already depends on hyper 1.x
 # as a transitive dep, so no additional version conflicts are introduced.

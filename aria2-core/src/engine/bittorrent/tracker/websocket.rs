@@ -10,9 +10,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tracing::debug;
 
 use crate::engine::bittorrent::tracker::communication::AnnounceEvent;
@@ -22,8 +20,7 @@ use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 use aria2_protocol::bittorrent::tracker::websocket::{
-    WebSocketAnnounceRequest, WebSocketAnnounceResponseError, decode_announce_response_for_request,
-    encode_announce_request,
+    WebSocketAnnounceError, WebSocketAnnounceRequest, announce_over_stream,
 };
 
 /// Announce a magnet lookup to a WebSocket tracker.
@@ -111,111 +108,25 @@ pub(crate) async fn announce_with_policy(
             .max(1),
     );
 
-    crate::http::client_pool::ensure_rustls_provider();
     let stream = connect_socket(&url, host, port, announce.options, timeout, policy).await?;
-    let ws_request = tracker_url.into_client_request().map_err(|error| {
-        AnnounceError::new(
-            TrackerFailureKind::Network,
-            format!("invalid WebSocket tracker request: {error}"),
-        )
-    })?;
-    let (mut websocket, _) = tokio::time::timeout(
+    let event = announce.event.as_event_string();
+    let response = announce_over_stream(
+        stream,
+        tracker_url,
+        &WebSocketAnnounceRequest {
+            info_hash: announce.info_hash,
+            peer_id: announce.peer_id,
+            downloaded: announce.downloaded,
+            left: announce.left,
+            uploaded: announce.uploaded,
+            numwant: announce.numwant,
+            port: announce.port,
+            event: Some(&event),
+        },
         timeout,
-        tokio_tungstenite::client_async_tls_with_config(ws_request, stream, None, None),
     )
     .await
-    .map_err(|_| {
-        AnnounceError::new(
-            TrackerFailureKind::Timeout,
-            "WebSocket tracker handshake timed out",
-        )
-    })?
-    .map_err(classify_websocket_error)?;
-
-    let message = encode_announce_request(&WebSocketAnnounceRequest {
-        info_hash: announce.info_hash,
-        peer_id: announce.peer_id,
-        downloaded: announce.downloaded,
-        left: announce.left,
-        uploaded: announce.uploaded,
-        numwant: announce.numwant,
-        port: announce.port,
-        event: Some(announce.event.as_event_string()),
-    });
-    tokio::time::timeout(timeout, websocket.send(Message::Text(message.into())))
-        .await
-        .map_err(|_| {
-            AnnounceError::new(
-                TrackerFailureKind::Timeout,
-                "WebSocket tracker announce timed out while sending",
-            )
-        })?
-        .map_err(|error| {
-            AnnounceError::new(
-                TrackerFailureKind::Network,
-                format!("WebSocket tracker announce send failed: {error}"),
-            )
-        })?;
-
-    let response = tokio::time::timeout(timeout, async {
-        let mut response = None;
-        while let Some(message) = websocket.next().await {
-            match message {
-                Ok(Message::Text(text)) => {
-                    response = Some(text.to_string());
-                    break;
-                }
-                Ok(Message::Binary(bytes)) => {
-                    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                        response = Some(text);
-                        break;
-                    }
-                }
-                Ok(Message::Ping(payload)) => {
-                    websocket
-                        .send(Message::Pong(payload))
-                        .await
-                        .map_err(|error| {
-                            AnnounceError::new(
-                                TrackerFailureKind::Network,
-                                format!("WebSocket tracker pong send failed: {error}"),
-                            )
-                        })?;
-                }
-                Ok(Message::Close(_)) => break,
-                Ok(_) => {}
-                Err(error) => return Err(classify_websocket_error(error)),
-            }
-        }
-        Ok::<_, AnnounceError>(response)
-    })
-    .await
-    .map_err(|_| {
-        AnnounceError::new(
-            TrackerFailureKind::Timeout,
-            "WebSocket tracker announce timed out while receiving",
-        )
-    })??;
-
-    let Some(response) = response else {
-        return Err(AnnounceError::new(
-            TrackerFailureKind::MalformedResponse,
-            "WebSocket tracker closed without an announce response",
-        ));
-    };
-    let response =
-        decode_announce_response_for_request(&response, announce.info_hash).map_err(|error| {
-            match error {
-                WebSocketAnnounceResponseError::Malformed(error) => AnnounceError::new(
-                    TrackerFailureKind::MalformedResponse,
-                    format!("invalid WebSocket tracker response: {error}"),
-                ),
-                WebSocketAnnounceResponseError::Rejected(reason) => AnnounceError::new(
-                    TrackerFailureKind::TrackerRejected,
-                    format!("WebSocket tracker rejected announce: {reason}"),
-                ),
-            }
-        })?;
+    .map_err(classify_websocket_announce_error)?;
     debug!(
         tracker = %tracker_url,
         peers = response.peers.len(),
@@ -230,39 +141,28 @@ pub(crate) async fn announce_with_policy(
     })
 }
 
-fn classify_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> AnnounceError {
-    use tokio_tungstenite::tungstenite::Error;
-
-    let (kind, message) = match error {
-        Error::Http(response)
-            if response.status().is_server_error()
-                || matches!(response.status().as_u16(), 408 | 425 | 429) =>
+fn classify_websocket_announce_error(error: WebSocketAnnounceError) -> AnnounceError {
+    let kind = match &error {
+        WebSocketAnnounceError::Timeout(_) => TrackerFailureKind::Timeout,
+        WebSocketAnnounceError::HandshakeRejected(status)
+            if *status >= 500 || matches!(*status, 408 | 425 | 429) =>
         {
-            (
-                TrackerFailureKind::RemoteTemporary,
-                format!(
-                    "WebSocket tracker rejected handshake with {}",
-                    response.status()
-                ),
-            )
+            TrackerFailureKind::RemoteTemporary
         }
-        Error::Http(response) => (
-            TrackerFailureKind::TrackerRejected,
-            format!(
-                "WebSocket tracker rejected handshake with {}",
-                response.status()
-            ),
-        ),
-        Error::Protocol(error) => (
-            TrackerFailureKind::MalformedResponse,
-            format!("invalid WebSocket tracker protocol response: {error}"),
-        ),
-        error => (
-            TrackerFailureKind::Network,
-            format!("WebSocket tracker connection failed: {error}"),
-        ),
+        WebSocketAnnounceError::HandshakeRejected(_) => TrackerFailureKind::TrackerRejected,
+        WebSocketAnnounceError::Protocol(_)
+        | WebSocketAnnounceError::Closed
+        | WebSocketAnnounceError::Response(
+            aria2_protocol::bittorrent::tracker::websocket::WebSocketAnnounceResponseError::Malformed(_),
+        ) => TrackerFailureKind::MalformedResponse,
+        WebSocketAnnounceError::Response(
+            aria2_protocol::bittorrent::tracker::websocket::WebSocketAnnounceResponseError::Rejected(_),
+        ) => TrackerFailureKind::TrackerRejected,
+        WebSocketAnnounceError::InvalidRequest(_) | WebSocketAnnounceError::Transport(_) => {
+            TrackerFailureKind::Network
+        }
     };
-    AnnounceError::new(kind, message)
+    AnnounceError::new(kind, error.to_string())
 }
 
 async fn connect_socket(
@@ -383,7 +283,9 @@ mod tests {
     use super::*;
     use aria2_protocol::bittorrent::tracker::websocket::decode_announce_response;
     use base64::Engine;
+    use futures::{SinkExt, StreamExt};
     use serde_json::Value;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn parses_json_and_compact_peers() {

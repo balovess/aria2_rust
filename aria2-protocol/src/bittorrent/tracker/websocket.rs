@@ -1,9 +1,13 @@
 //! JSON and compact-peer wire formats for WebSocket tracker announces.
 
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use base64::Engine;
+use futures::{SinkExt, StreamExt};
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 /// Inputs encoded into a WebTorrent-compatible announce JSON message.
 pub struct WebSocketAnnounceRequest<'a> {
@@ -26,6 +30,10 @@ pub struct WebSocketAnnounceRequest<'a> {
 }
 
 /// Parsed WebSocket tracker announce response.
+///
+/// WebRTC signaling fields such as `peer_id`, `offer`, `offer_id`, and
+/// `answer` are intentionally not exposed; this response contains only
+/// tracker statistics and peers with TCP socket addresses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSocketAnnounceResponse {
     /// TCP-compatible peers decoded from `peers` and `peers6`.
@@ -51,10 +59,110 @@ pub enum WebSocketAnnounceResponseError {
     Rejected(String),
 }
 
+/// Failure while running a WebSocket tracker announce over an established stream.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WebSocketAnnounceError {
+    /// The WebSocket URL could not be used to create a handshake request.
+    #[error("invalid WebSocket tracker request: {0}")]
+    InvalidRequest(String),
+    /// A WebSocket operation exceeded its timeout.
+    #[error("WebSocket tracker timed out during {0}")]
+    Timeout(&'static str),
+    /// The tracker rejected the HTTP upgrade with this status.
+    #[error("WebSocket tracker rejected handshake with HTTP {0}")]
+    HandshakeRejected(u16),
+    /// The WebSocket protocol exchange failed.
+    #[error("WebSocket tracker protocol error: {0}")]
+    Protocol(String),
+    /// The WebSocket transport failed.
+    #[error("WebSocket tracker transport error: {0}")]
+    Transport(String),
+    /// The tracker closed the socket before returning an announce response.
+    #[error("WebSocket tracker closed without an announce response")]
+    Closed,
+    /// The announce response was invalid or belonged to another torrent.
+    #[error(transparent)]
+    Response(#[from] WebSocketAnnounceResponseError),
+}
+
 #[derive(Clone, Copy)]
 enum CompactPeerFamily {
     V4,
     V6,
+}
+
+/// Perform a WebSocket tracker announce over a stream established by the caller.
+///
+/// The caller owns DNS, socket selection, proxying, and outbound-address policy;
+/// this function owns the WebSocket handshake, framing, announce exchange, and
+/// response validation.
+pub async fn announce_over_stream<S>(
+    stream: S,
+    tracker_url: &str,
+    request: &WebSocketAnnounceRequest<'_>,
+    timeout: Duration,
+) -> Result<WebSocketAnnounceResponse, WebSocketAnnounceError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let ws_request = tracker_url
+        .into_client_request()
+        .map_err(|error| WebSocketAnnounceError::InvalidRequest(error.to_string()))?;
+    let (mut websocket, _) = tokio::time::timeout(
+        timeout,
+        tokio_tungstenite::client_async_tls_with_config(ws_request, stream, None, None),
+    )
+    .await
+    .map_err(|_| WebSocketAnnounceError::Timeout("handshake"))?
+    .map_err(classify_websocket_error)?;
+
+    let message = encode_announce_request(request);
+    tokio::time::timeout(timeout, websocket.send(Message::Text(message.into())))
+        .await
+        .map_err(|_| WebSocketAnnounceError::Timeout("sending"))?
+        .map_err(classify_websocket_error)?;
+
+    let response = tokio::time::timeout(timeout, async {
+        while let Some(message) = websocket.next().await {
+            match message {
+                Ok(Message::Text(text)) => return Ok(Some(text.to_string())),
+                Ok(Message::Binary(bytes)) => {
+                    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+                        return Ok(Some(text));
+                    }
+                }
+                Ok(Message::Ping(payload)) => websocket
+                    .send(Message::Pong(payload))
+                    .await
+                    .map_err(classify_websocket_error)?,
+                Ok(Message::Close(_)) => return Ok(None),
+                Ok(_) => {}
+                Err(error) => return Err(classify_websocket_error(error)),
+            }
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(|_| WebSocketAnnounceError::Timeout("receiving"))??
+    .ok_or(WebSocketAnnounceError::Closed)?;
+
+    decode_announce_response_for_request(&response, request.info_hash)
+        .map_err(WebSocketAnnounceError::Response)
+}
+
+fn classify_websocket_error(
+    error: tokio_tungstenite::tungstenite::Error,
+) -> WebSocketAnnounceError {
+    use tokio_tungstenite::tungstenite::Error;
+
+    match error {
+        Error::Http(response) => {
+            WebSocketAnnounceError::HandshakeRejected(response.status().as_u16())
+        }
+        Error::Protocol(error) => WebSocketAnnounceError::Protocol(error.to_string()),
+        error => WebSocketAnnounceError::Transport(error.to_string()),
+    }
 }
 
 /// Encode a WebTorrent-compatible JSON announce request.
@@ -331,6 +439,24 @@ mod tests {
         assert_eq!(response.min_interval, Some(60));
         assert_eq!(response.seeders, Some(3));
         assert_eq!(response.leechers, Some(4));
+    }
+
+    #[test]
+    fn ignores_webrtc_signaling_fields_without_treating_them_as_tcp_peers() {
+        let encoded = serde_json::json!({
+            "action": "announce",
+            "interval": 120,
+            "peer_id": binary_string(&[0x22; 20]),
+            "offer": {"type": "offer", "sdp": "opaque signaling data"},
+            "offer_id": "offer-1",
+            "answer": {"type": "answer", "sdp": "opaque signaling data"},
+        })
+        .to_string();
+
+        let response = decode_announce_response(&encoded).unwrap();
+
+        assert!(response.peers.is_empty());
+        assert_eq!(response.interval, Some(120));
     }
 
     #[test]
