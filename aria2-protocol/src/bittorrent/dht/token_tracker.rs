@@ -64,7 +64,12 @@ impl TokenTracker {
     }
 
     pub fn maybe_rotate(&mut self) -> bool {
-        if self.last_rotation.elapsed() >= Duration::from_secs(ROTATION_INTERVAL_SECS) {
+        self.maybe_rotate_after(Duration::from_secs(ROTATION_INTERVAL_SECS))
+    }
+
+    /// Rotate the token secret when the caller's configured interval has elapsed.
+    pub fn maybe_rotate_after(&mut self, interval: Duration) -> bool {
+        if self.last_rotation.elapsed() >= interval {
             self.rotate();
             return true;
         }
@@ -192,6 +197,15 @@ mod tests {
         // Force rotation by setting a past timestamp is not possible with public API,
         // but we can verify the method exists and returns bool without panicking.
         let _ = tt.maybe_rotate();
+    }
+
+    #[test]
+    fn configured_rotation_interval_controls_token_rotation() {
+        let mut tt = TokenTracker::new();
+        tt.last_rotation = Instant::now() - Duration::from_secs(5);
+
+        assert!(!tt.maybe_rotate_after(Duration::from_secs(6)));
+        assert!(tt.maybe_rotate_after(Duration::from_secs(4)));
     }
 
     #[test]

@@ -13,6 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 impl MagnetDownloadCommand {
+    fn metadata_exchange_config(options: &DownloadOptions) -> MetadataExchangeConfig {
+        MetadataExchangeConfig {
+            max_peers_to_try: MAX_MAGNET_METADATA_PEERS_PER_SOURCE * 2,
+            connect_timeout: Duration::from_secs(options.peer_connection_timeout.max(1)),
+            request_timeout: Duration::from_secs(options.bt_request_timeout.max(1)),
+            ..MetadataExchangeConfig::default()
+        }
+    }
+
     pub(super) async fn fetch_magnet_exact_source(
         &self,
         magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
@@ -271,13 +280,7 @@ impl MagnetDownloadCommand {
             return Ok(metadata);
         }
 
-        let mut metadata_swarm = MetadataPeerSwarm::new(MetadataExchangeConfig {
-            max_peers_to_try: MAX_MAGNET_METADATA_PEERS_PER_SOURCE * 2,
-            connect_timeout: Duration::from_secs(15),
-            request_timeout: Duration::from_secs(10),
-            piece_size: 16 * 1024,
-            ..MetadataExchangeConfig::default()
-        });
+        let mut metadata_swarm = MetadataPeerSwarm::new(Self::metadata_exchange_config(&options));
 
         // Magnet links commonly carry tracker URLs, and tracker discovery is
         // available even when DHT bootstrap is blocked by NAT or a firewall.
@@ -378,5 +381,42 @@ impl MagnetDownloadCommand {
         Err(Aria2Error::Recoverable(
             RecoverableError::TemporaryNetworkFailure { message },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magnet_metadata_exchange_uses_bittorrent_timeouts() {
+        let options = DownloadOptions {
+            peer_connection_timeout: 23,
+            bt_request_timeout: 47,
+            ..DownloadOptions::default()
+        };
+
+        let config = MagnetDownloadCommand::metadata_exchange_config(&options);
+
+        assert_eq!(config.connect_timeout, Duration::from_secs(23));
+        assert_eq!(config.request_timeout, Duration::from_secs(47));
+        assert_eq!(
+            config.max_peers_to_try,
+            MAX_MAGNET_METADATA_PEERS_PER_SOURCE * 2
+        );
+    }
+
+    #[test]
+    fn magnet_metadata_exchange_timeouts_are_never_zero() {
+        let options = DownloadOptions {
+            peer_connection_timeout: 0,
+            bt_request_timeout: 0,
+            ..DownloadOptions::default()
+        };
+
+        let config = MagnetDownloadCommand::metadata_exchange_config(&options);
+
+        assert_eq!(config.connect_timeout, Duration::from_secs(1));
+        assert_eq!(config.request_timeout, Duration::from_secs(1));
     }
 }

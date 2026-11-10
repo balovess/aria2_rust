@@ -119,7 +119,7 @@ impl DhtEngine {
                             .token_tracker
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
-                        tokens.maybe_rotate();
+                        tokens.maybe_rotate_after(config.token_rotation_interval);
                         trace!("DHT token rotation check");
                     }
                     _ = refresh_check_interval.tick() => {
@@ -188,6 +188,7 @@ impl DhtEngineContext {
                 self.task_context.clone(),
                 self.config.bootstrap_timeout,
                 entry_points,
+                self.config.max_concurrent_lookups,
             )))
             .await;
 

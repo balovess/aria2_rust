@@ -137,6 +137,29 @@ behavior. An unlisted behavior has not been audited here.
   address. Full tracker/DHT interoperability under multiple real interfaces
   has not been exercised.
 
+## BitTorrent DHT token rotation interval
+
+- **Behavior:** `dht-token-rotation-interval` now controls the token secret
+  rotation check inside the protocol DHT engine. The token tracker retains its
+  900-second no-argument default for standalone callers.
+- **Compatibility impact:** fixes the engine path, which previously applied an
+  additional fixed 900-second gate even when the configured interval was 600
+  seconds or a caller selected a shorter interval. Old and new tokens remain
+  accepted during the existing grace period.
+- **Verification:** protocol token-tracker coverage checks configured intervals
+  on both sides of the deadline; engine configuration already maps the option
+  into `DhtEngineConfig::token_rotation_interval`.
+
+## BitTorrent DHT bootstrap concurrency
+
+- **Behavior:** bootstrap peer pings respect `dht-max-concurrent-lookups`,
+  bounded to the existing 15-ping safety ceiling. A value of zero is clamped
+  to one, matching the DHT task executor.
+- **Compatibility impact:** lower configured concurrency now limits bootstrap
+  fan-out too; the default remains capped at 15 concurrent pings.
+- **Verification:** focused task construction coverage checks zero, a lower
+  configured value, and a value above the safety ceiling.
+
 ## SFTP connection and transport options
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the

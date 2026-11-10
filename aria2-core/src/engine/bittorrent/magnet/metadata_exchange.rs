@@ -6,12 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
+use aria2_protocol::bittorrent::message::extension::MAX_UT_METADATA_SIZE;
+
 use crate::engine::bittorrent::dht::engine_set::DhtEngineSet;
 use crate::engine::bittorrent::magnet::metadata_swarm::MetadataPeerSwarm;
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::{BtPeerSource, DownloadOptions};
 
-pub(super) const METADATA_MAX_SIZE: u64 = 8 * 1024 * 1024;
+pub(super) const METADATA_MAX_SIZE: u64 = MAX_UT_METADATA_SIZE as u64;
 const PIECE_SIZE_MIN: u32 = 1024;
 const PIECE_SIZE_MAX: u32 = 65536;
 const DEFAULT_MAX_ATTEMPTS: usize = 3;

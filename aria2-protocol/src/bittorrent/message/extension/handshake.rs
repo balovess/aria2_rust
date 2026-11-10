@@ -55,8 +55,11 @@ const DEFAULT_UT_PEX_ID: u8 = 2;
 const DEFAULT_REQQ: u32 = 500;
 /// Default client version string sent in the `v` key.
 const DEFAULT_CLIENT_VERSION: &str = crate::identity::DEFAULT_PEER_AGENT;
-/// Maximum metadata size accepted from peers (8 MiB), matching C++ aria2.
-const MAX_METADATA_SIZE: u32 = 8 * 1024 * 1024;
+/// Maximum BEP 9 metadata size accepted from peers (8 MiB).
+///
+/// This is an interoperability and resource-safety limit shared with the core
+/// metadata collector.
+pub const MAX_UT_METADATA_SIZE: u32 = 8 * 1024 * 1024;
 
 impl ExtensionHandshake {
     /// Create a new handshake with default values:
@@ -173,7 +176,7 @@ impl ExtensionHandshake {
         let metadata_size = dict
             .get(b"metadata_size".as_slice())
             .and_then(|v| v.as_int())
-            .filter(|&i| i > 0 && i <= MAX_METADATA_SIZE as i64)
+            .filter(|&i| i > 0 && i <= MAX_UT_METADATA_SIZE as i64)
             .and_then(|i| u32::try_from(i).ok());
 
         Ok(Self {
@@ -517,7 +520,7 @@ mod tests {
     #[test]
     fn test_handshake_metadata_size_max_8mib() {
         // 8 MiB is the maximum accepted metadata_size (C++ aria2 limit)
-        let max_size = 8 * 1024 * 1024; // 8 MiB
+        let max_size = MAX_UT_METADATA_SIZE;
         let mut hs = ExtensionHandshake::new();
         hs.with_metadata_size(max_size);
         let bytes = hs.to_bytes();
@@ -528,7 +531,7 @@ mod tests {
     #[test]
     fn test_handshake_metadata_size_over_8mib_rejected() {
         // metadata_size > 8 MiB should be rejected
-        let oversized = 8 * 1024 * 1024 + 1;
+        let oversized = MAX_UT_METADATA_SIZE + 1;
         let mut m_dict = BTreeMap::new();
         m_dict.insert(b"ut_metadata".to_vec(), BencodeValue::Int(1));
         let mut root = BTreeMap::new();
