@@ -26,14 +26,16 @@ pub(crate) async fn build_dht_engine_config_with_policy(
     options: &DownloadOptions,
     policy: &crate::network::OutboundNetworkPolicy,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
-    build_dht_engine_config_for_family(options, policy, options.enable_dht6).await
+    build_dht_engine_config_for_family(options, policy, options.enable_dht6)
+        .await?
+        .ok_or_else(|| config_error("no compatible outbound source for DHT".to_string()))
 }
 
 pub(crate) async fn build_dht_engine_config_for_family(
     options: &DownloadOptions,
     policy: &crate::network::OutboundNetworkPolicy,
     use_ipv6: bool,
-) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
+) -> Result<Option<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig>> {
     let port_range = options
         .dht_listen_port
         .as_deref()
@@ -48,40 +50,57 @@ pub(crate) async fn build_dht_engine_config_for_family(
         .transpose()
         .map_err(|error| config_error(format!("invalid dht-listen-port: {error}")))?;
 
-    let listen_addr = selected_listen_addr(options, use_ipv6)?
-        .or_else(|| {
-            policy
-                .addresses()
-                .into_iter()
-                .find(|address| address.is_ipv6() == use_ipv6)
-        })
-        .or_else(|| use_ipv6.then_some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+    let requested_listen_addr = selected_listen_addr(options, use_ipv6)?;
+    let listen_addr = if policy.is_direct() {
+        requested_listen_addr.or_else(|| use_ipv6.then_some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)))
+    } else {
+        let addresses = policy.addresses();
+        if let Some(address) = requested_listen_addr {
+            if !addresses.contains(&address) {
+                return Err(config_error(format!(
+                    "DHT listen address '{address}' is not an outbound source address"
+                )));
+            }
+            Some(address)
+        } else if let Some(address) = addresses
+            .into_iter()
+            .find(|address| address.is_ipv6() == use_ipv6)
+        {
+            Some(address)
+        } else {
+            return Ok(None);
+        }
+    };
     let bootstrap_specs = selected_bootstrap_specs(options, use_ipv6)?;
     let bootstrap_nodes = resolve_bootstrap_nodes(&bootstrap_specs, use_ipv6).await?;
     let dht_file_path = selected_file_path(options, use_ipv6)
         .map(|path| expand_home_path(path, home_dir().as_deref()))
         .or_else(|| Some(default_dht_file_path(use_ipv6)));
 
-    Ok(aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
-        port: port_range
-            .as_ref()
-            .and_then(|ports| ports.first().copied())
-            .unwrap_or(0),
-        port_range,
-        listen_addr,
-        bootstrap_nodes,
-        dht_file_path,
-        query_timeout: Duration::from_secs(options.dht_message_timeout.max(1)),
-        refresh_check_interval: Duration::from_secs(options.dht_refresh_check_interval.max(1)),
-        token_rotation_interval: Duration::from_secs(options.dht_token_rotation_interval.max(1)),
-        node_contact_interval: Duration::from_secs(options.dht_node_contact_interval.max(1)),
-        cleanup_interval: Duration::from_secs(options.dht_cleanup_interval.max(1)),
-        save_interval: Duration::from_secs(options.dht_save_interval.max(1)),
-        bootstrap_timeout: Duration::from_secs(options.dht_bootstrap_timeout.max(1)),
-        max_concurrent_lookups: options.dht_max_concurrent_lookups.max(1),
-        persistence_max_age: Duration::from_secs(options.dht_persistence_max_age.max(1)),
-        ..Default::default()
-    })
+    Ok(Some(
+        aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+            port: port_range
+                .as_ref()
+                .and_then(|ports| ports.first().copied())
+                .unwrap_or(0),
+            port_range,
+            listen_addr,
+            bootstrap_nodes,
+            dht_file_path,
+            query_timeout: Duration::from_secs(options.dht_message_timeout.max(1)),
+            refresh_check_interval: Duration::from_secs(options.dht_refresh_check_interval.max(1)),
+            token_rotation_interval: Duration::from_secs(
+                options.dht_token_rotation_interval.max(1),
+            ),
+            node_contact_interval: Duration::from_secs(options.dht_node_contact_interval.max(1)),
+            cleanup_interval: Duration::from_secs(options.dht_cleanup_interval.max(1)),
+            save_interval: Duration::from_secs(options.dht_save_interval.max(1)),
+            bootstrap_timeout: Duration::from_secs(options.dht_bootstrap_timeout.max(1)),
+            max_concurrent_lookups: options.dht_max_concurrent_lookups.max(1),
+            persistence_max_age: Duration::from_secs(options.dht_persistence_max_age.max(1)),
+            ..Default::default()
+        },
+    ))
 }
 
 fn selected_listen_addr(options: &DownloadOptions, use_ipv6: bool) -> Result<Option<IpAddr>> {
@@ -295,15 +314,53 @@ mod tests {
 
         let config4 = build_dht_engine_config_for_family(&options, &policy, false)
             .await
-            .expect("IPv4 DHT options should build independently");
+            .expect("IPv4 DHT options should build independently")
+            .expect("direct IPv4 DHT should be available");
         let config6 = build_dht_engine_config_for_family(&options, &policy, true)
             .await
-            .expect("IPv6 DHT options should build independently");
+            .expect("IPv6 DHT options should build independently")
+            .expect("direct IPv6 DHT should be available");
 
         assert_eq!(config4.listen_addr, Some("127.0.0.1".parse().unwrap()));
         assert_eq!(config6.listen_addr, Some("::1".parse().unwrap()));
         assert_eq!(config4.dht_file_path.as_deref(), Some(Path::new("v4.dat")));
         assert_eq!(config6.dht_file_path.as_deref(), Some(Path::new("v6.dat")));
+    }
+
+    #[tokio::test]
+    async fn constrained_policy_skips_dht_for_an_unavailable_address_family() {
+        let options = DownloadOptions {
+            enable_dht6: true,
+            ..Default::default()
+        };
+        let policy = crate::network::OutboundNetworkPolicy::single("::1".parse().unwrap());
+
+        let config4 = build_dht_engine_config_for_family(&options, &policy, false)
+            .await
+            .expect("an unavailable address family should be skipped");
+        let config6 = build_dht_engine_config_for_family(&options, &policy, true)
+            .await
+            .expect("the configured address family should build");
+
+        assert!(config4.is_none());
+        assert_eq!(config6.unwrap().listen_addr, Some("::1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn constrained_policy_rejects_a_conflicting_explicit_dht_address() {
+        let options = DownloadOptions {
+            dht_listen_addr: Some("127.0.0.2".to_string()),
+            ..Default::default()
+        };
+        let policy = crate::network::OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap());
+
+        let error = build_dht_engine_config_for_family(&options, &policy, false)
+            .await
+            .expect_err("DHT must not bind outside the selected source address");
+
+        assert!(
+            matches!(error, Aria2Error::Fatal(FatalError::Config(message)) if message.contains("not an outbound source address"))
+        );
     }
 
     #[tokio::test]

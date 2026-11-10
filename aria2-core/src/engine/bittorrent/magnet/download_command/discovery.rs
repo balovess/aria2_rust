@@ -104,6 +104,13 @@ impl MagnetDownloadCommand {
                     use_ipv6,
                 )
                 .await?;
+            let Some(config) = config else {
+                info!(
+                    ipv6 = use_ipv6,
+                    "Skipping DHT family without a compatible outbound source"
+                );
+                continue;
+            };
             match self
                 .dht_engines
                 .start_or_join(self.bt_registry.as_ref(), gid, config)

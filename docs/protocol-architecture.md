@@ -334,6 +334,13 @@ operations; `engine/lifecycle.rs` owns bootstrap state, shutdown, and statistics
 membership and replacement candidates; `DhtNode` records responsiveness; the
 private `bucket_tree` module owns bucket splitting and tree traversal.
 
+Core translates the process outbound-network policy into the DHT socket's
+family-specific bind address before creating the protocol engine. Under a
+constrained policy, it skips a family with no compatible source and rejects a
+conflicting explicit DHT listen address; only direct routing may use a wildcard
+bind. The protocol engine owns the bound UDP socket and all subsequent DHT
+traffic.
+
 `DhtEngineContext` stores one `DhtTaskContext` for the effective local node ID,
 routing table, UDP socket, transaction tracker, and query timeout used at
 runtime. Startup copies the configured timeout into that context. `DhtEngineInner`

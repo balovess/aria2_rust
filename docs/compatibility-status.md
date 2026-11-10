@@ -78,6 +78,21 @@ behavior. An unlisted behavior has not been audited here.
   timeout propagation are covered by focused tests. Original aria2 has no
   corresponding process-wide option, so this is a Rust extension.
 
+## BitTorrent DHT outbound source binding
+
+- **Policy:** when an explicit outbound interface/source address is configured,
+  each DHT address-family engine must bind to a matching local source. A family
+  with no matching source is skipped; an explicitly configured DHT listen
+  address outside the source policy is rejected. It must not fall back to a
+  wildcard socket.
+- **Compatibility impact:** this closes a route where an IPv4 DHT engine could
+  bind `0.0.0.0` under an IPv6-only source policy and send outside the selected
+  interface. Direct routing retains the existing wildcard behavior.
+- **Verification:** focused configuration tests cover family skipping,
+  compatible source selection, and rejection of a conflicting explicit
+  address. Full tracker/DHT interoperability under multiple real interfaces
+  has not been exercised.
+
 ## SFTP connection and transport options
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
