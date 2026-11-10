@@ -83,6 +83,21 @@ pub fn encode_announce_request(request: &WebSocketAnnounceRequest<'_>) -> String
 pub fn decode_announce_response(
     encoded: &str,
 ) -> Result<WebSocketAnnounceResponse, WebSocketAnnounceResponseError> {
+    decode_announce_response_inner(encoded, None)
+}
+
+/// Decode an announce response and verify that it belongs to the requested torrent.
+pub fn decode_announce_response_for_request(
+    encoded: &str,
+    expected_info_hash: &[u8; 20],
+) -> Result<WebSocketAnnounceResponse, WebSocketAnnounceResponseError> {
+    decode_announce_response_inner(encoded, Some(expected_info_hash))
+}
+
+fn decode_announce_response_inner(
+    encoded: &str,
+    expected_info_hash: Option<&[u8; 20]>,
+) -> Result<WebSocketAnnounceResponse, WebSocketAnnounceResponseError> {
     let response: Value = serde_json::from_str(encoded)
         .map_err(|error| WebSocketAnnounceResponseError::Malformed(error.to_string()))?;
     let response = response.as_object().ok_or_else(|| {
@@ -92,6 +107,22 @@ pub fn decode_announce_response(
         return Err(WebSocketAnnounceResponseError::Malformed(
             "response action must be `announce`".to_owned(),
         ));
+    }
+    if let Some(expected_info_hash) = expected_info_hash {
+        let actual_info_hash = response
+            .get("info_hash")
+            .and_then(Value::as_str)
+            .and_then(parse_binary_info_hash)
+            .ok_or_else(|| {
+                WebSocketAnnounceResponseError::Malformed(
+                    "response must contain a 20-byte binary info_hash".to_owned(),
+                )
+            })?;
+        if &actual_info_hash != expected_info_hash {
+            return Err(WebSocketAnnounceResponseError::Malformed(
+                "response info_hash does not match the announce request".to_owned(),
+            ));
+        }
     }
     if let Some(reason) = response.get("failure reason").and_then(Value::as_str) {
         return Err(WebSocketAnnounceResponseError::Rejected(reason.to_owned()));
@@ -126,6 +157,15 @@ pub fn decode_announce_response(
             .and_then(Value::as_i64)
             .filter(|count| *count >= 0),
     })
+}
+
+fn parse_binary_info_hash(value: &str) -> Option<[u8; 20]> {
+    let mut bytes = [0; 20];
+    let mut chars = value.chars();
+    for byte in &mut bytes {
+        *byte = u8::try_from(u32::from(chars.next()?)).ok()?;
+    }
+    chars.next().is_none().then_some(bytes)
 }
 
 fn parse_peers(value: &Value, family: CompactPeerFamily) -> Vec<SocketAddr> {
@@ -305,6 +345,28 @@ mod tests {
         .to_string();
 
         assert!(decode_announce_response(&encoded).unwrap().peers.is_empty());
+    }
+
+    #[test]
+    fn validates_response_info_hash_against_announce_request() {
+        let expected_info_hash = [0x31; 20];
+        let encoded = serde_json::json!({
+            "action": "announce",
+            "info_hash": binary_string(&expected_info_hash),
+        })
+        .to_string();
+
+        assert!(decode_announce_response_for_request(&encoded, &expected_info_hash).is_ok());
+        assert!(matches!(
+            decode_announce_response_for_request(&encoded, &[0x32; 20]),
+            Err(WebSocketAnnounceResponseError::Malformed(_))
+        ));
+
+        let missing_hash = r#"{"action":"announce"}"#;
+        assert!(matches!(
+            decode_announce_response_for_request(missing_hash, &expected_info_hash),
+            Err(WebSocketAnnounceResponseError::Malformed(_))
+        ));
     }
 
     #[test]

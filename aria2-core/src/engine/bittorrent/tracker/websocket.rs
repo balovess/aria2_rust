@@ -22,7 +22,7 @@ use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 use aria2_protocol::bittorrent::tracker::websocket::{
-    WebSocketAnnounceRequest, WebSocketAnnounceResponseError, decode_announce_response,
+    WebSocketAnnounceRequest, WebSocketAnnounceResponseError, decode_announce_response_for_request,
     encode_announce_request,
 };
 
@@ -203,16 +203,19 @@ pub(crate) async fn announce_with_policy(
             "WebSocket tracker closed without an announce response",
         ));
     };
-    let response = decode_announce_response(&response).map_err(|error| match error {
-        WebSocketAnnounceResponseError::Malformed(error) => AnnounceError::new(
-            TrackerFailureKind::MalformedResponse,
-            format!("invalid WebSocket tracker response: {error}"),
-        ),
-        WebSocketAnnounceResponseError::Rejected(reason) => AnnounceError::new(
-            TrackerFailureKind::TrackerRejected,
-            format!("WebSocket tracker rejected announce: {reason}"),
-        ),
-    })?;
+    let response =
+        decode_announce_response_for_request(&response, announce.info_hash).map_err(|error| {
+            match error {
+                WebSocketAnnounceResponseError::Malformed(error) => AnnounceError::new(
+                    TrackerFailureKind::MalformedResponse,
+                    format!("invalid WebSocket tracker response: {error}"),
+                ),
+                WebSocketAnnounceResponseError::Rejected(reason) => AnnounceError::new(
+                    TrackerFailureKind::TrackerRejected,
+                    format!("WebSocket tracker rejected announce: {reason}"),
+                ),
+            }
+        })?;
     debug!(
         tracker = %tracker_url,
         peers = response.peers.len(),
@@ -378,6 +381,7 @@ async fn connect_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria2_protocol::bittorrent::tracker::websocket::decode_announce_response;
     use base64::Engine;
     use serde_json::Value;
 
@@ -434,10 +438,16 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![2; 20]
             );
+            let response_info_hash = [1u8; 20]
+                .iter()
+                .copied()
+                .map(char::from)
+                .collect::<String>();
             websocket
                 .send(Message::Text(
                     serde_json::json!({
                         "action": "announce",
+                        "info_hash": response_info_hash,
                         "peers": [{"ip": "192.0.2.10", "port": 6881}]
                     })
                     .to_string()

@@ -178,8 +178,15 @@ async fn websocket_failure_from_response(response: &'static str) -> TrackerFailu
             .await
             .expect("complete WebSocket handshake");
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
+        let response = match serde_json::from_str::<serde_json::Value>(response) {
+            Ok(mut response) if response.is_object() => {
+                response["info_hash"] = serde_json::Value::String("\0".repeat(20));
+                response.to_string()
+            }
+            _ => response.to_owned(),
+        };
         websocket
-            .send(Message::Text(response.to_string().into()))
+            .send(Message::Text(response.into()))
             .await
             .expect("send tracker response");
     });
