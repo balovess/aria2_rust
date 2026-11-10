@@ -42,6 +42,40 @@ fn test_ssh_options_builder_pattern() {
 }
 
 #[test]
+fn ssh_transport_options_are_applied_to_russh_config() {
+    let options = SshOptions::new("example.com", "user")
+        .with_keepalive_interval(None)
+        .with_compression(true)
+        .with_preferred_ciphers(["chacha20-poly1305@openssh.com"]);
+    let config = build_client_config(&options).unwrap();
+
+    assert_eq!(config.keepalive_interval, None);
+    assert_eq!(
+        config.preferred.cipher[0].as_ref(),
+        "chacha20-poly1305@openssh.com"
+    );
+    assert_eq!(config.preferred.compression[0].as_ref(), "zlib@openssh.com");
+
+    let compression_disabled = build_client_config(&SshOptions::default()).unwrap();
+    assert_eq!(compression_disabled.preferred.compression.len(), 1);
+    assert_eq!(
+        compression_disabled.preferred.compression[0].as_ref(),
+        "none"
+    );
+}
+
+#[test]
+fn ssh_transport_rejects_unsupported_preferred_cipher() {
+    let options =
+        SshOptions::new("example.com", "user").with_preferred_ciphers(["not-a-real-cipher"]);
+
+    assert!(matches!(
+        build_client_config(&options),
+        Err(SshError::Config { message }) if message.contains("Unsupported SSH cipher")
+    ));
+}
+
+#[test]
 fn test_ssh_options_with_private_key() {
     let opts = SshOptions::new("server.example.com", "deploy")
         .with_private_key("/home/deploy/.ssh/id_ed25519")

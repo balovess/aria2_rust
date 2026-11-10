@@ -136,6 +136,24 @@ impl SshOptions {
         self
     }
 
+    /// Set the preferred SSH cipher algorithms in negotiation order.
+    ///
+    /// Names are validated when the connection is established.
+    pub fn with_preferred_ciphers<I, S>(mut self, ciphers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.preferred_ciphers = ciphers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the SSH keep-alive interval, or disable keep-alives with `None`.
+    pub fn with_keepalive_interval(mut self, interval: Option<Duration>) -> Self {
+        self.keepalive_interval = interval;
+        self
+    }
+
     /// Get a human-readable target identifier string
     pub fn target(&self) -> String {
         format!("{}@{}:{}", self.username, self.host, self.port)

@@ -270,12 +270,12 @@ impl HashState {
 
     fn finalize_hex(self) -> String {
         match self {
-            Self::Md5(state) => format!("{:x}", state.finalize()),
-            Self::Sha1(state) => format!("{:x}", state.finalize()),
-            Self::Sha224(state) => format!("{:x}", state.finalize()),
-            Self::Sha256(state) => format!("{:x}", state.finalize()),
-            Self::Sha384(state) => format!("{:x}", state.finalize()),
-            Self::Sha512(state) => format!("{:x}", state.finalize()),
+            Self::Md5(state) => hex::encode(state.finalize()),
+            Self::Sha1(state) => hex::encode(state.finalize()),
+            Self::Sha224(state) => hex::encode(state.finalize()),
+            Self::Sha256(state) => hex::encode(state.finalize()),
+            Self::Sha384(state) => hex::encode(state.finalize()),
+            Self::Sha512(state) => hex::encode(state.finalize()),
         }
     }
 }
@@ -494,7 +494,7 @@ mod tests {
             h.update(b"test");
             h.finalize()
         };
-        let actual_hex = format!("{:x}", actual_md5);
+        let actual_hex = hex::encode(actual_md5);
 
         let expected = HashEntry::new(HashAlgorithm::Md5, &actual_hex);
 

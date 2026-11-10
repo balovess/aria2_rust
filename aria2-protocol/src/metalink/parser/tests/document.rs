@@ -75,6 +75,22 @@ fn test_parse_v4_metalink() {
 }
 
 #[test]
+fn test_parse_xml_character_references() {
+    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="a&amp;b.bin">
+    <identity>x&amp;y</identity>
+    <url>https://example.com/file?a=1&amp;b=2</url>
+  </file>
+</metalink>"#;
+
+    let document = MetalinkDocument::parse(data, None).unwrap();
+    let file = &document.files[0];
+    assert_eq!(file.name, "a&b.bin");
+    assert_eq!(file.identity.as_deref(), Some("x&y"));
+    assert_eq!(file.urls[0].url, "https://example.com/file?a=1&b=2");
+}
+
+#[test]
 fn test_url_sorting() {
     let data = make_v3_metalink();
     let doc = MetalinkDocument::parse(&data, None).unwrap();

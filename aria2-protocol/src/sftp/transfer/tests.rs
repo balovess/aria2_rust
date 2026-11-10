@@ -39,7 +39,7 @@ mod integration {
         }
 
         fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
-            getrandom::getrandom(dest).expect("OS random source failed");
+            getrandom::fill(dest).expect("OS random source failed");
             Ok(())
         }
     }
@@ -94,10 +94,12 @@ mod integration {
         async fn channel_open_session(
             &mut self,
             channel: Channel<Msg>,
+            reply: server::ChannelOpenHandle,
             _session: &mut Session,
-        ) -> Result<bool, Self::Error> {
+        ) -> Result<(), Self::Error> {
             self.channels.lock().await.insert(channel.id(), channel);
-            Ok(true)
+            reply.accept().await;
+            Ok(())
         }
 
         async fn subsystem_request(

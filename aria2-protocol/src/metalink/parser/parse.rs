@@ -47,14 +47,19 @@ pub fn resolve_url(base_uri: Option<&str>, url: &str) -> String {
     url.to_string()
 }
 
-fn bts(b: &[u8]) -> String {
-    std::str::from_utf8(b).unwrap_or("").trim().to_string()
+fn bts(text: &str) -> String {
+    text.trim().to_string()
 }
 
-fn collect_attrs(e: &quick_xml::events::BytesStart) -> Vec<(String, String)> {
+fn collect_attrs(e: &quick_xml::events::BytesStart) -> Result<Vec<(String, String)>, String> {
     e.attributes()
-        .flatten()
-        .map(|a| (bts(a.key.as_ref()), bts(&a.value)))
+        .map(|attribute| {
+            let attribute = attribute.map_err(|error| error.to_string())?;
+            let value = attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(|error| error.to_string())?;
+            Ok((bts(attribute.key.as_ref()), bts(value.as_ref())))
+        })
         .collect()
 }
 
@@ -147,7 +152,7 @@ impl MetalinkDocument {
                     let tag = bts(e.local_name().as_ref());
                     match tag.as_str() {
                         "metalink" => {
-                            let attrs = collect_attrs(&e);
+                            let attrs = collect_attrs(&e)?;
                             for (key, val) in &attrs {
                                 if key == "xmlns" {
                                     // V4 namespace: urn:ietf:params:xml:ns:metalink
@@ -164,7 +169,7 @@ impl MetalinkDocument {
                             saw_files_wrapper = true;
                         }
                         "file" => {
-                            let name = find_attr(&collect_attrs(&e), "name");
+                            let name = find_attr(&collect_attrs(&e)?, "name");
                             let file_name = if name.is_empty() {
                                 format!("unknown_{}", doc.files.len())
                             } else {
@@ -185,7 +190,7 @@ impl MetalinkDocument {
                             // `<pieces length="N" type="sha-256">` — V4 uses
                             // `<hash>` children (one digest each); V3-style
                             // docs may inline the digests as element text.
-                            let attrs = collect_attrs(&e);
+                            let attrs = collect_attrs(&e)?;
                             let len_s = find_attr(&attrs, "length");
                             let type_s = find_attr(&attrs, "type");
                             let length: u32 = len_s.parse().unwrap_or(0);
@@ -210,16 +215,34 @@ impl MetalinkDocument {
                                 pieces_sub_element = true;
                             }
                             text_buf.clear();
-                            pending_attrs = collect_attrs(&e);
+                            pending_attrs = collect_attrs(&e)?;
                         }
                         _ => {
                             text_buf.clear();
-                            pending_attrs = collect_attrs(&e);
+                            pending_attrs = collect_attrs(&e)?;
                         }
                     }
                 }
                 Ok(Event::Text(e)) => {
-                    text_buf.push_str(bts(&e).trim());
+                    text_buf.push_str(&bts(e.as_ref()));
+                }
+                Ok(Event::GeneralRef(reference)) => {
+                    let replacement = if let Some(character) = reference
+                        .resolve_char_ref()
+                        .map_err(|error| format!("XML parse error: {error}"))?
+                    {
+                        character.to_string()
+                    } else if let Some(entity) =
+                        quick_xml::escape::resolve_predefined_entity(reference.as_ref())
+                    {
+                        entity.to_string()
+                    } else {
+                        return Err(format!(
+                            "XML parse error: unsupported entity reference &{};",
+                            reference.as_ref()
+                        ));
+                    };
+                    text_buf.push_str(&replacement);
                 }
                 Ok(Event::End(e)) => {
                     let tag = bts(e.local_name().as_ref());

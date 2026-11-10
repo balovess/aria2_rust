@@ -65,10 +65,11 @@ fn is_transient_io_error(error: &std::io::Error) -> bool {
 impl<'a> FtpDownload<'a> {
     /// Create a new FTP download manager
     pub fn new(conn: &'a mut FtpConnection, options: Option<FtpDownloadOptions>) -> Self {
-        Self {
-            conn,
-            options: options.unwrap_or_default(),
-        }
+        let options = options.unwrap_or_else(|| FtpDownloadOptions {
+            max_retries: conn.options.max_retries,
+            ..FtpDownloadOptions::default()
+        });
+        Self { conn, options }
     }
 
     /// Download a single file from FTP server to local filesystem

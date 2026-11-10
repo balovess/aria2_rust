@@ -15,8 +15,10 @@ use md5::Md5;
 use russh::client;
 use russh::keys;
 use russh::keys::ssh_key::HashAlg;
+use russh::{cipher, compression};
 use sha1::Digest as Sha1Digest;
 use sha1::Sha1;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -85,11 +87,11 @@ impl client::Handler for SshClientHandler {
     #[allow(refining_impl_trait)]
     fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let mode = self.options.host_key_mode.clone();
         let expected = self.options.host_key_fingerprint.clone();
-        let server_key = _server_public_key.clone();
+        let server_key = _server_public_key.public_key();
         async move {
             debug!("[SFTP] Checking server key (mode={})", mode);
             if let Some(expected) = expected {
@@ -165,6 +167,7 @@ impl SshConnection {
     pub async fn connect(options: SshOptions) -> Result<Self, SshError> {
         let target = options.target();
         debug!("[SFTP] Connecting to SSH (russh): {}", target);
+        let config = build_client_config(&options)?;
         let stream = tokio::time::timeout(
             options.connect_timeout,
             tokio::net::TcpStream::connect((options.host.as_str(), options.port)),
@@ -178,7 +181,7 @@ impl SshConnection {
         .map_err(|error| SshError::Handshake {
             message: format!("SSH TCP connection failed: {error}"),
         })?;
-        Self::connect_with_stream(options, stream).await
+        Self::connect_with_config(options, stream, config).await
     }
 
     /// Complete the SSH handshake over a TCP stream created by the caller.
@@ -190,13 +193,20 @@ impl SshConnection {
         options: SshOptions,
         stream: tokio::net::TcpStream,
     ) -> Result<Self, SshError> {
+        let config = build_client_config(&options)?;
+        Self::connect_with_config(options, stream, config).await
+    }
+
+    async fn connect_with_config(
+        options: SshOptions,
+        stream: tokio::net::TcpStream,
+        config: client::Config,
+    ) -> Result<Self, SshError> {
         let target = options.target();
         debug!("[SFTP] Connecting to SSH (russh): {}", target);
 
         let options_arc = Arc::new(options);
 
-        // Step 1: Build russh client config
-        let config = client::Config::default();
         let config = Arc::new(config);
 
         // Step 2: Create handler and establish SSH connection over the supplied TCP stream.
@@ -362,6 +372,31 @@ impl SshConnection {
         info!("[SFTP] SSH disconnected: {}", target);
         Ok(())
     }
+}
+
+fn build_client_config(options: &SshOptions) -> Result<client::Config, SshError> {
+    let mut config = client::Config::default();
+    config.keepalive_interval = options.keepalive_interval;
+    config.preferred.compression = if options.compression {
+        Cow::Borrowed(&[compression::ZLIB_LEGACY, compression::NONE])
+    } else {
+        Cow::Borrowed(&[compression::NONE])
+    };
+
+    if !options.preferred_ciphers.is_empty() {
+        let ciphers = options
+            .preferred_ciphers
+            .iter()
+            .map(|name| {
+                cipher::Name::try_from(name.as_str()).map_err(|()| SshError::Config {
+                    message: format!("Unsupported SSH cipher: {name}"),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        config.preferred.cipher = Cow::Owned(ciphers);
+    }
+
+    Ok(config)
 }
 
 // =============================================================================

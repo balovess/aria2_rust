@@ -16,7 +16,21 @@ use crate::bittorrent::extension::mse_handshake::{
 use crate::bittorrent::message::handshake::Handshake;
 
 const HANDSHAKE_LENGTH: usize = 68;
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Settings for receiving an incoming BitTorrent handshake.
+#[derive(Debug, Clone, Copy)]
+pub struct IncomingHandshakeOptions {
+    /// Maximum time to wait for each required read from the peer.
+    pub read_timeout: std::time::Duration,
+}
+
+impl Default for IncomingHandshakeOptions {
+    fn default() -> Self {
+        Self {
+            read_timeout: std::time::Duration::from_secs(30),
+        }
+    }
+}
 
 /// Per-torrent policy applied after an incoming MSE handshake reveals the
 /// info-hash. This keeps route selection independent from download options.
@@ -124,7 +138,13 @@ pub async fn receive(
     stream: TcpStream,
     known_info_hashes: &[[u8; 20]],
 ) -> Result<IncomingHandshake, String> {
-    receive_with_policies(stream, known_info_hashes, &HashMap::new()).await
+    receive_with_options(
+        stream,
+        known_info_hashes,
+        &HashMap::new(),
+        IncomingHandshakeOptions::default(),
+    )
+    .await
 }
 
 /// Read an incoming handshake using policies indexed by torrent info-hash.
@@ -132,16 +152,35 @@ pub async fn receive(
 /// The info-hash is intentionally concealed until MSE `req2 ^ req3` has been
 /// checked. Only then can the route's download options affect negotiation.
 pub async fn receive_with_policies(
-    mut stream: TcpStream,
+    stream: TcpStream,
     known_info_hashes: &[[u8; 20]],
     policies: &HashMap<[u8; 20], IncomingCryptoPolicy>,
 ) -> Result<IncomingHandshake, String> {
+    receive_with_options(
+        stream,
+        known_info_hashes,
+        policies,
+        IncomingHandshakeOptions::default(),
+    )
+    .await
+}
+
+/// Receive an incoming handshake with explicit per-read timeout and policies.
+///
+/// Existing callers can use [`receive`] or [`receive_with_policies`] to retain
+/// the default 30-second read timeout.
+pub async fn receive_with_options(
+    mut stream: TcpStream,
+    known_info_hashes: &[[u8; 20]],
+    policies: &HashMap<[u8; 20], IncomingCryptoPolicy>,
+    options: IncomingHandshakeOptions,
+) -> Result<IncomingHandshake, String> {
     let mut prefix = [0u8; 20];
-    read_exact(&mut stream, &mut prefix).await?;
+    read_exact(&mut stream, &mut prefix, options.read_timeout).await?;
     if prefix[0] == 19 && &prefix[1..20] == b"BitTorrent protocol" {
         let mut bytes = [0u8; HANDSHAKE_LENGTH];
         bytes[..20].copy_from_slice(&prefix);
-        read_exact(&mut stream, &mut bytes[20..]).await?;
+        read_exact(&mut stream, &mut bytes[20..], options.read_timeout).await?;
         let handshake = Handshake::parse(&bytes)?;
         if policies
             .get(&handshake.info_hash)
@@ -155,7 +194,7 @@ pub async fn receive_with_policies(
     let mut responder = MseHandshake::new_responder([0u8; 20]);
     let mut public_key = vec![0u8; MSE_PUBLIC_KEY_LENGTH];
     public_key[..20].copy_from_slice(&prefix);
-    read_exact(&mut stream, &mut public_key[20..]).await?;
+    read_exact(&mut stream, &mut public_key[20..], options.read_timeout).await?;
     responder.receive_step1(&public_key)?;
     stream
         .write_all(&responder.build_step1())
@@ -175,7 +214,7 @@ pub async fn receive_with_policies(
             ));
         }
         let mut byte = [0u8; 1];
-        read_exact(&mut stream, &mut byte).await?;
+        read_exact(&mut stream, &mut byte, options.read_timeout).await?;
         step2.push(byte[0]);
     };
 
@@ -190,7 +229,7 @@ pub async fn receive_with_policies(
             ));
         }
         let mut byte = [0u8; 1];
-        read_exact(&mut stream, &mut byte).await?;
+        read_exact(&mut stream, &mut byte, options.read_timeout).await?;
         step2.push(byte[0]);
     };
     if required > MSE_MAX_INCOMING_HANDSHAKE_LENGTH {
@@ -200,7 +239,7 @@ pub async fn receive_with_policies(
         let remaining = required - step2.len();
         let chunk_len = remaining.min(64);
         let mut chunk = vec![0u8; chunk_len];
-        read_exact(&mut stream, &mut chunk).await?;
+        read_exact(&mut stream, &mut chunk, options.read_timeout).await?;
         step2.extend_from_slice(&chunk);
     }
 
@@ -219,7 +258,12 @@ pub async fn receive_with_policies(
     let mut handshake_bytes = [0u8; HANDSHAKE_LENGTH];
     let initial_length = initial_payload.len();
     handshake_bytes[..initial_length].copy_from_slice(&initial_payload);
-    read_exact(&mut stream, &mut handshake_bytes[initial_length..]).await?;
+    read_exact(
+        &mut stream,
+        &mut handshake_bytes[initial_length..],
+        options.read_timeout,
+    )
+    .await?;
     crypto.decrypt(&mut handshake_bytes[initial_length..]);
     let handshake_data = handshake_bytes.to_vec();
     let handshake = Handshake::parse(&handshake_data).map_err(|error| {
@@ -239,8 +283,12 @@ pub async fn receive_with_policies(
     })
 }
 
-async fn read_exact(stream: &mut TcpStream, buffer: &mut [u8]) -> Result<(), String> {
-    tokio::time::timeout(READ_TIMEOUT, stream.read_exact(buffer))
+async fn read_exact(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    read_timeout: std::time::Duration,
+) -> Result<(), String> {
+    tokio::time::timeout(read_timeout, stream.read_exact(buffer))
         .await
         .map_err(|_| "Incoming handshake read timeout".to_string())?
         .map(|_| ())
@@ -274,6 +322,29 @@ mod tests {
             incoming.complete([2u8; 20], None, false).await
         });
         (address, server)
+    }
+
+    #[tokio::test]
+    async fn configured_read_timeout_is_used_for_incoming_handshake() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            receive_with_options(
+                stream,
+                &[],
+                &HashMap::new(),
+                IncomingHandshakeOptions {
+                    read_timeout: std::time::Duration::from_millis(20),
+                },
+            )
+            .await
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        let error = server.await.unwrap().err().unwrap();
+        assert!(error.contains("Incoming handshake read timeout"));
     }
 
     #[tokio::test]

@@ -70,6 +70,36 @@ fn test_ftp_download_options_default() {
     assert!(!opts.recursive_download);
 }
 
+#[tokio::test]
+async fn download_inherits_connection_retry_limit_unless_overridden() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut connection = FtpConnection {
+        stream: BufReader::new(stream),
+        options: FtpOptions {
+            max_retries: 7,
+            ..FtpOptions::default()
+        },
+        host: "127.0.0.1".to_string(),
+        port: address.port(),
+    };
+
+    {
+        let download = FtpDownload::new(&mut connection, None);
+        assert_eq!(download.options.max_retries, 7);
+    }
+
+    let explicit_options = FtpDownloadOptions {
+        max_retries: 2,
+        ..FtpDownloadOptions::default()
+    };
+    let download = FtpDownload::new(&mut connection, Some(explicit_options));
+    assert_eq!(download.options.max_retries, 2);
+    drop(client);
+}
+
 #[test]
 fn test_is_transient_io_error() {
     use std::io::ErrorKind;
