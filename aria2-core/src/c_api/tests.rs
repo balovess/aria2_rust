@@ -4,6 +4,8 @@ use std::sync::Mutex;
 
 #[path = "tests/http_adaptive_options.rs"]
 mod http_adaptive_options;
+#[path = "tests/sftp_options.rs"]
+mod sftp_options;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 

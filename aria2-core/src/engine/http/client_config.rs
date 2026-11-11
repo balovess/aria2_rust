@@ -120,6 +120,7 @@ pub(super) fn build_download_clients(
         local_address,
         resolved_addresses,
     )?;
+    let connect_timeout = http_connect_timeout(options);
     let has_custom_tls = client_tls.requires_custom_client();
     let has_resolved_target = resolved_addresses
         .target
@@ -127,11 +128,12 @@ pub(super) fn build_download_clients(
         .is_some_and(|addresses| !addresses.is_empty());
     let session_count = range_client_pool_count(options);
     let range_clients = if proxy_disabled && !has_resolved_target && !has_custom_tls {
-        crate::http::client_pool::get_bound_download_clients_with_version(
+        crate::http::client_pool::get_bound_download_clients_with_version_and_timeout(
             local_address,
             options.http_accept_gzip,
             session_count,
             options.http_version,
+            connect_timeout,
         )
     } else {
         let mut clients = Vec::with_capacity(session_count);
@@ -215,6 +217,14 @@ pub(super) fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
 }
 
+pub(crate) fn http_connect_timeout(options: &DownloadOptions) -> Duration {
+    Duration::from_secs(
+        options
+            .connect_timeout
+            .unwrap_or(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS),
+    )
+}
+
 pub(super) fn source_for_remotes(
     policy: &OutboundNetworkPolicy,
     remotes: &[std::net::SocketAddr],
@@ -251,6 +261,7 @@ pub(super) fn build_download_client(
     resolved_addresses: &ResolvedNetworkAddresses,
 ) -> Result<Arc<reqwest::Client>> {
     let has_custom_tls = client_tls.requires_custom_client();
+    let connect_timeout = http_connect_timeout(options);
     if proxy_disabled {
         if let Some(addresses) = resolved_addresses
             .target
@@ -263,9 +274,7 @@ pub(super) fn build_download_client(
                 ))
             })?;
             let builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(
-                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                ))
+                .connect_timeout(connect_timeout)
                 .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
@@ -288,9 +297,7 @@ pub(super) fn build_download_client(
 
         if has_custom_tls {
             let builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(
-                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                ))
+                .connect_timeout(connect_timeout)
                 .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
@@ -317,17 +324,18 @@ pub(super) fn build_download_client(
                 });
         }
 
-        return Ok(crate::http::client_pool::get_bound_client_with_version(
-            local_address,
-            options.http_accept_gzip,
-            options.http_version,
-        ));
+        return Ok(
+            crate::http::client_pool::get_bound_client_with_version_and_timeout(
+                local_address,
+                options.http_accept_gzip,
+                options.http_version,
+                connect_timeout,
+            ),
+        );
     }
 
     let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(
-            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-        ))
+        .connect_timeout(connect_timeout)
         .gzip(options.http_accept_gzip)
         .user_agent(constants::USER_AGENT)
         // Redirects are handled by SequentialDownloader so direct, DNS-pinned,
@@ -482,5 +490,26 @@ pub(crate) fn add_reqwest_proxy(
             warn!(%proxy_url, ?target, %error, "Ignoring invalid HTTP proxy configuration");
             builder
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_connect_timeout_uses_the_request_option() {
+        let mut options = DownloadOptions::default();
+        options.connect_timeout = Some(47);
+        assert_eq!(http_connect_timeout(&options), Duration::from_secs(47));
+    }
+
+    #[test]
+    fn download_connect_timeout_has_a_fallback_for_direct_core_callers() {
+        let options = DownloadOptions::default();
+        assert_eq!(
+            http_connect_timeout(&options),
+            Duration::from_secs(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS)
+        );
     }
 }

@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_http_adaptive_options_are_stored_from_rpc_updates() {
+    async fn global_http_and_connection_options_are_stored_from_rpc_updates() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, _receiver) = channel();
         let backend = CoreRpcBackend::new(
@@ -397,6 +397,7 @@ mod tests {
             "test",
         );
         let option_names = [
+            "connect-timeout",
             "http-adaptive-reduction-percent",
             "http-adaptive-recovery-interval",
             "http-adaptive-recovery-successes-min",
@@ -412,14 +413,18 @@ mod tests {
         ];
         let changes = option_names
             .iter()
-            .map(|name| ((*name).to_string(), serde_json::json!(1)))
+            .map(|name| {
+                let value = if *name == "connect-timeout" { 47 } else { 1 };
+                ((*name).to_string(), serde_json::json!(value))
+            })
             .collect();
 
         backend.change_global_option(changes).await.unwrap();
 
         let config = config.read().await;
         for name in option_names {
-            assert_eq!(config.get_global_i64(name).await, Some(1), "{name}");
+            let expected = if name == "connect-timeout" { 47 } else { 1 };
+            assert_eq!(config.get_global_i64(name).await, Some(expected), "{name}");
         }
     }
 

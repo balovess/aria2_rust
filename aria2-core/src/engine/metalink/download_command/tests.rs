@@ -5,6 +5,21 @@ use crate::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::metalink::parser::UrlEntry;
 
 #[test]
+fn metalink_http_connect_timeout_uses_task_option_and_keeps_legacy_fallback() {
+    let mut options = DownloadOptions::default();
+    assert_eq!(
+        super::metalink_http_connect_timeout(&options),
+        std::time::Duration::from_secs(30)
+    );
+
+    options.connect_timeout = Some(47);
+    assert_eq!(
+        super::metalink_http_connect_timeout(&options),
+        std::time::Duration::from_secs(47)
+    );
+}
+
+#[test]
 fn test_priority_ascending_order() {
     let urls = vec![
         UrlEntry::new("http://mirror3.example.com/file.bin").with_priority(3),

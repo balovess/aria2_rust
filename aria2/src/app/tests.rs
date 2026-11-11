@@ -246,6 +246,20 @@ async fn test_cli_sftp_timeouts_reach_download_options() {
     assert_eq!(options.sftp_preferred_ciphers.as_ref().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn test_cli_connect_timeout_reaches_download_options() {
+    let cli = CliArgs::try_parse_from(["aria2", "--connect-timeout=41"])
+        .expect("HTTP connect timeout should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.connect_timeout, Some(41));
+}
+
 #[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_bt_input_does_not_inherit_implicit_generic_timeout() {

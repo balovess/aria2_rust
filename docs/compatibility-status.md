@@ -355,10 +355,10 @@ behavior. An unlisted behavior has not been audited here.
   reparses selected SFTP fields with different validation. `changeOption`
   stores changes for reserved downloads and defers them on active downloads
   until the task is restarted.
-- **Verification:** focused CLI, RPC option validation, and protocol option
-  construction and session restore tests cover the propagation path, including
-  rejection of a persisted zero connect timeout and timeout of a pending
-  connection future. Original aria2 has no matching
+- **Verification:** focused CLI, RPC option validation, C API global-option
+  propagation, protocol option construction, and session restore tests cover
+  the path, including rejection of a persisted zero connect timeout and
+  timeout of a pending connection future. Original aria2 has no matching
   SFTP-specific timeout options; these are Rust extensions.
 - **Host-key verification:** the protocol library now enforces the documented
   `Strict`, `AcceptNew`, and `Disable` modes using OpenSSH-format
@@ -516,9 +516,34 @@ behavior. An unlisted behavior has not been audited here.
   formats, streaming state, and decoder error categories are preserved.
   Response filter-chain execution and null-sink behavior remain in core.
   `bzip2-rs` is now a protocol dependency rather than a core dependency.
+- **Legacy buffered interface:** `aria2_protocol::http::encoding::{HttpEncoding,
+  ChunkedDecoder}` remains available. It has no in-repository production
+  callers and retains its independent whole-buffer acceptance and error
+  behavior; this compatibility surface is not routed through the incremental
+  decoders.
 - **Verification:** all 31 focused core stream-filter tests passed, including
   chunk extensions, split input, strict chunk terminators, tolerated bare LF,
   early EOF, and HTTP response decoding. All 29 protocol stream-filter tests
   passed, covering each decoder, header selection, and magic-byte detection.
   Protocol and core clippy with BitTorrent enabled and core clippy with
   BitTorrent, Metalink, and SFTP enabled passed with warnings denied.
+
+## HTTP connect timeout propagation
+
+- **Configuration contract:** `connect-timeout` defaults to 60 seconds and is
+  accepted through CLI/config, RPC task/global options, and the C API global
+  option entry point. The HTTP engine and Metalink's HTTP client now pass the
+  task value to their reqwest clients. Direct, proxy, DNS-pinned,
+  TLS-customized, and range-pool HTTP clients are covered; bound-client cache
+  keys include the timeout.
+- **Correction:** prior to this change, those HTTP clients used a fixed
+  15-second timeout even though `DownloadOptions` held the configured value.
+  Calls made directly through core with no option retain the 15-second
+  HTTP fallback. Metalink keeps its previous 30-second fallback for direct
+  core calls with no option. Configured tasks follow the registered 60-second
+  default or their explicit value.
+- **Verification:** core client-config tests cover configured and fallback
+  values; client-pool tests cover timeout-aware reuse and cache separation.
+  Metalink tests cover task-option use and its legacy fallback. CLI, RPC option
+  parsing/runtime update, and C API global-option tests cover propagation into
+  `DownloadOptions`.

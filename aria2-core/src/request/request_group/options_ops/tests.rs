@@ -11,7 +11,15 @@ fn runtime_split_update_keeps_values_above_u16() {
 }
 
 #[test]
-fn sftp_timeouts_are_valid_rpc_task_options() {
+fn connection_timeouts_are_valid_rpc_task_options() {
+    assert_eq!(
+        crate::config::is_option_changeable("connect-timeout", false),
+        crate::config::ChangeableKind::Immediate
+    );
+    assert_eq!(
+        crate::config::is_option_changeable("connect-timeout", true),
+        crate::config::ChangeableKind::Pending
+    );
     assert_eq!(
         crate::config::is_option_changeable("sftp-connect-timeout", false),
         crate::config::ChangeableKind::Immediate
@@ -21,6 +29,7 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
         crate::config::ChangeableKind::Pending
     );
     for (name, value) in [
+        ("connect-timeout", serde_json::json!(47)),
         ("sftp-connect-timeout", serde_json::json!(41)),
         ("sftp-read-timeout", serde_json::json!(73)),
     ] {
@@ -38,6 +47,7 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
     );
 
     let rpc_options = std::collections::HashMap::from([
+        ("connect-timeout".to_string(), serde_json::json!(47)),
         ("sftp-connect-timeout".to_string(), serde_json::json!(41)),
         ("sftp-read-timeout".to_string(), serde_json::json!(73)),
         ("sftp-compression".to_string(), serde_json::json!(true)),
@@ -49,6 +59,7 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
     ]);
     let parsed = DownloadOptions::try_from_rpc_options(&rpc_options)
         .expect("addUri RPC timeout options should parse");
+    assert_eq!(parsed.connect_timeout, Some(47));
     assert_eq!(parsed.sftp_connect_timeout, Some(41));
     assert_eq!(parsed.sftp_read_timeout, Some(73));
     assert!(parsed.sftp_compression);
@@ -56,6 +67,10 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
     assert_eq!(parsed.sftp_preferred_ciphers.as_deref().unwrap().len(), 2);
 
     let mut options = DownloadOptions::default();
+    assert!(
+        apply_runtime_option_value(&mut options, "connect-timeout", &serde_json::json!(47))
+            .unwrap()
+    );
     assert!(
         apply_runtime_option_value(&mut options, "sftp-connect-timeout", &serde_json::json!(41))
             .unwrap()
@@ -66,6 +81,7 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
     );
     assert_eq!(options.sftp_connect_timeout, Some(41));
     assert_eq!(options.sftp_read_timeout, Some(73));
+    assert_eq!(options.connect_timeout, Some(47));
 }
 
 #[test]

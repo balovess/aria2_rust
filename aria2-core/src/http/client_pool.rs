@@ -57,7 +57,12 @@ pub fn ensure_rustls_provider() {
 /// - Apply method change rules (301/302/303 → GET; 307/308 → preserve)
 static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
     ensure_rustls_provider();
-    Arc::new(build_bound_client(None, false, HttpVersion::Auto))
+    Arc::new(build_bound_client(
+        None,
+        false,
+        HttpVersion::Auto,
+        Duration::from_secs(crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS),
+    ))
 });
 
 /// Get the global shared HTTP client instance.
@@ -70,9 +75,9 @@ pub fn get_global_client() -> Arc<Client> {
     GLOBAL_CLIENT.clone()
 }
 
-type BoundClientKey = (Option<IpAddr>, bool, HttpVersion);
+type BoundClientKey = (Option<IpAddr>, bool, HttpVersion, Duration);
 type BoundClients = DashMap<BoundClientKey, Arc<Client>>;
-type BoundDownloadClientKey = (Option<IpAddr>, bool, usize, HttpVersion);
+type BoundDownloadClientKey = (Option<IpAddr>, bool, usize, HttpVersion, Duration);
 type BoundDownloadClients = DashMap<BoundDownloadClientKey, Arc<Vec<Client>>>;
 
 static BOUND_CLIENTS: Lazy<BoundClients> = Lazy::new(DashMap::new);
@@ -82,7 +87,7 @@ static BOUND_DOWNLOAD_CLIENTS: Lazy<BoundDownloadClients> = Lazy::new(DashMap::n
 ///
 /// reqwest fixes `local_address` on a client, so each configured source gets
 /// one lazily-created connection pool. Clients are reused by every download
-/// using the same source and gzip mode.
+/// using the same source, gzip mode, HTTP version, and connect timeout.
 pub fn get_bound_client(local_address: Option<IpAddr>, accept_gzip: bool) -> Arc<Client> {
     get_bound_client_with_version(local_address, accept_gzip, HttpVersion::Auto)
 }
@@ -93,15 +98,39 @@ pub(crate) fn get_bound_client_with_version(
     accept_gzip: bool,
     http_version: HttpVersion,
 ) -> Arc<Client> {
-    if local_address.is_none() && !accept_gzip && http_version == HttpVersion::Auto {
+    get_bound_client_with_version_and_timeout(
+        local_address,
+        accept_gzip,
+        http_version,
+        Duration::from_secs(crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS),
+    )
+}
+
+pub(crate) fn get_bound_client_with_version_and_timeout(
+    local_address: Option<IpAddr>,
+    accept_gzip: bool,
+    http_version: HttpVersion,
+    connect_timeout: Duration,
+) -> Arc<Client> {
+    if local_address.is_none()
+        && !accept_gzip
+        && http_version == HttpVersion::Auto
+        && connect_timeout
+            == Duration::from_secs(crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS)
+    {
         return get_global_client();
     }
-    let key = (local_address, accept_gzip, http_version);
+    let key = (local_address, accept_gzip, http_version, connect_timeout);
     if let Some(client) = BOUND_CLIENTS.get(&key) {
         return Arc::clone(client.value());
     }
 
-    let client = Arc::new(build_bound_client(local_address, accept_gzip, http_version));
+    let client = Arc::new(build_bound_client(
+        local_address,
+        accept_gzip,
+        http_version,
+        connect_timeout,
+    ));
     let entry = BOUND_CLIENTS
         .entry(key)
         .or_insert_with(|| Arc::clone(&client));
@@ -109,25 +138,38 @@ pub(crate) fn get_bound_client_with_version(
 }
 
 /// Return independent clients for concurrent Range traffic using one
-/// consistent protocol selection across every pool.
-pub(crate) fn get_bound_download_clients_with_version(
+/// consistent protocol selection and connect timeout across every pool.
+pub(crate) fn get_bound_download_clients_with_version_and_timeout(
     local_address: Option<IpAddr>,
     accept_gzip: bool,
     session_count: usize,
     http_version: HttpVersion,
+    connect_timeout: Duration,
 ) -> Arc<Vec<Client>> {
     let session_count = session_count.clamp(1, crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER);
-    let key = (local_address, accept_gzip, session_count, http_version);
+    let key = (
+        local_address,
+        accept_gzip,
+        session_count,
+        http_version,
+        connect_timeout,
+    );
     if let Some(clients) = BOUND_DOWNLOAD_CLIENTS.get(&key) {
         return Arc::clone(clients.value());
     }
 
-    let primary = get_bound_client_with_version(local_address, accept_gzip, http_version);
+    let primary = get_bound_client_with_version_and_timeout(
+        local_address,
+        accept_gzip,
+        http_version,
+        connect_timeout,
+    );
     let mut clients = Vec::with_capacity(session_count);
     clients.push(primary.as_ref().clone());
-    clients.extend(
-        (1..session_count).map(|_| build_bound_client(local_address, accept_gzip, http_version)),
-    );
+    clients
+        .extend((1..session_count).map(|_| {
+            build_bound_client(local_address, accept_gzip, http_version, connect_timeout)
+        }));
     let clients = Arc::new(clients);
     let entry = BOUND_DOWNLOAD_CLIENTS
         .entry(key)
@@ -172,12 +214,11 @@ fn build_bound_client(
     local_address: Option<IpAddr>,
     accept_gzip: bool,
     http_version: HttpVersion,
+    connect_timeout: Duration,
 ) -> Client {
     ensure_rustls_provider();
     let mut builder = Client::builder()
-        .connect_timeout(Duration::from_secs(
-            crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-        ))
+        .connect_timeout(connect_timeout)
         .gzip(accept_gzip)
         .user_agent(crate::constants::USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
@@ -231,19 +272,90 @@ mod tests {
     }
 
     #[test]
+    fn bound_clients_are_partitioned_by_connect_timeout() {
+        let source = Some("127.0.0.1".parse().unwrap());
+        let first = get_bound_client_with_version_and_timeout(
+            source,
+            false,
+            HttpVersion::Auto,
+            Duration::from_secs(41),
+        );
+        let same = get_bound_client_with_version_and_timeout(
+            source,
+            false,
+            HttpVersion::Auto,
+            Duration::from_secs(41),
+        );
+        let different = get_bound_client_with_version_and_timeout(
+            source,
+            false,
+            HttpVersion::Auto,
+            Duration::from_secs(42),
+        );
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &different));
+    }
+
+    #[test]
     fn download_client_pool_cache_is_keyed_by_session_count() {
         let source = Some("127.0.0.55".parse().unwrap());
-        let two_sessions =
-            get_bound_download_clients_with_version(source, false, 2, HttpVersion::Auto);
-        let two_sessions_again =
-            get_bound_download_clients_with_version(source, false, 2, HttpVersion::Auto);
-        let four_sessions =
-            get_bound_download_clients_with_version(source, false, 4, HttpVersion::Auto);
+        let timeout = Duration::from_secs(crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS);
+        let two_sessions = get_bound_download_clients_with_version_and_timeout(
+            source,
+            false,
+            2,
+            HttpVersion::Auto,
+            timeout,
+        );
+        let two_sessions_again = get_bound_download_clients_with_version_and_timeout(
+            source,
+            false,
+            2,
+            HttpVersion::Auto,
+            timeout,
+        );
+        let four_sessions = get_bound_download_clients_with_version_and_timeout(
+            source,
+            false,
+            4,
+            HttpVersion::Auto,
+            timeout,
+        );
 
         assert_eq!(two_sessions.len(), 2);
         assert_eq!(four_sessions.len(), 4);
         assert!(Arc::ptr_eq(&two_sessions, &two_sessions_again));
         assert!(!Arc::ptr_eq(&two_sessions, &four_sessions));
+    }
+
+    #[test]
+    fn download_client_pool_cache_is_keyed_by_connect_timeout() {
+        let source = Some("127.0.0.56".parse().unwrap());
+        let first = get_bound_download_clients_with_version_and_timeout(
+            source,
+            false,
+            2,
+            HttpVersion::Auto,
+            Duration::from_secs(41),
+        );
+        let same = get_bound_download_clients_with_version_and_timeout(
+            source,
+            false,
+            2,
+            HttpVersion::Auto,
+            Duration::from_secs(41),
+        );
+        let different = get_bound_download_clients_with_version_and_timeout(
+            source,
+            false,
+            2,
+            HttpVersion::Auto,
+            Duration::from_secs(42),
+        );
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &different));
     }
 
     #[tokio::test]

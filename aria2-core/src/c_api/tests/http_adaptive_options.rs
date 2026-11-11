@@ -12,6 +12,7 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
     assert!(!session.is_null());
 
     let option_names = [
+        "connect-timeout",
         "http-adaptive-reduction-percent",
         "http-adaptive-recovery-interval",
         "http-adaptive-recovery-successes-min",
@@ -52,6 +53,7 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
         .expect("C API should create a request group using the global options");
     let group = group.read().unwrap();
     let adaptive = group.options().http_adaptive;
+    assert_eq!(group.options().connect_timeout, Some(1));
     assert_eq!(adaptive.reduction_percent, 1);
     assert_eq!(adaptive.recovery_interval_secs, 1);
     assert_eq!(adaptive.recovery_successes_min, 1);

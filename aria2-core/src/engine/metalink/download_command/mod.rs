@@ -129,7 +129,7 @@ pub(crate) fn build_http_client_with_source(
     crate::http::client_pool::ensure_rustls_provider();
     let client_tls = crate::http::client_identity::ClientTlsConfig::from_download_options(options);
     let builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(metalink_http_connect_timeout(options))
         .gzip(options.http_accept_gzip)
         .user_agent(crate::constants::USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(5));
@@ -146,4 +146,8 @@ pub(crate) fn build_http_client_with_source(
                 e
             )))
         })
+}
+
+fn metalink_http_connect_timeout(options: &DownloadOptions) -> Duration {
+    Duration::from_secs(options.connect_timeout.unwrap_or(30))
 }

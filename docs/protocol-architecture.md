@@ -134,7 +134,7 @@ retry admission.
 | FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. `aria2-protocol::ftp::tls::FtpsClient` owns reusable TLS configuration, TLS handshakes, and RFC 4217 protection negotiation. Core composes DNS/address policy, proxies, data sockets, active bind/accept policy, task lifecycle, and filesystem state. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
 | BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, LPD announcement encoding/parsing, wire messages, TCP plain/MSE peer handshakes, DHT, tracker primitives, WebSocket tracker URL parsing/validation and handshake/framing/announce exchange, uTP packet/connection state machines, and BitTorrent peer handshake/framing. Core owns tracker URL selection, DNS/socket/proxy setup under outbound-address policy, process-level TCP/uTP listeners and the async uTP socket actor, shared info-hash routes, address/port binding policy, handshake admission limits, and peer-storage admission. The core LPD adapter attaches the observed sender and applies local-address classification; the core uTP peer adapter bridges actor handles to the protocol `PeerTransport` interface and maps errors without parsing BitTorrent handshakes or frames. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
-| Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
+| Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. Its HTTP client consumes the task `connect-timeout` while preserving the legacy 30-second fallback for direct core callers without that option. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
 
 ### HTTP assembly and transfer path
 
@@ -144,7 +144,10 @@ retry admission.
    enabled, then supplies those results and the outbound-address policy to
    `DownloadCommand`.
 3. `download_command::constructor` calls `client_config` to build the primary
-   reqwest client and range-client pool. It then owns the request, auth, cookie,
+   reqwest client and range-client pool with the task's configured
+   `connect-timeout`. The timeout participates in bound-client cache identity so
+   tasks with different settings do not share an incompatible client. The
+   command then owns request, auth, cookie,
    progress, and output-path state for the task.
 4. `download_command::execute` prepares metadata and, when needed, probes Range
    support through `HttpSegmentDownloader::probe_range_metadata`. The probe
@@ -553,6 +556,11 @@ Do not add pass-through engine clients around these public interfaces.
   `aria2-protocol::http::stream_filter`. Core keeps its public decoder types,
   selector, and `StreamFilter` interface as compatibility adapters; response
   lifecycle, filter-chain execution, and the null sink remain in core.
+- **Keep** `aria2_protocol::http::encoding::{HttpEncoding, ChunkedDecoder}`
+  as the public whole-buffer compatibility interface. There are no in-repository
+  production callers, and its accepted input/error behavior differs from the
+  incremental decoder path; routing it through the streaming API would change
+  observable behavior for external library users.
 - **Narrow** HTTP `Retry-After` syntax into the protocol response module.
   Core supplies the current time and keeps the five-minute retry cap and
   scheduler behavior.
@@ -562,6 +570,11 @@ Do not add pass-through engine clients around these public interfaces.
 - **Keep** HTTP adaptive concurrency in the core engine: it owns admission,
   per-source feedback, pacing and recovery policy; the protocol client only
   performs the HTTP requests. Keep its policy tests in an adjacent test module.
+- **Keep** the public `aria2_core::http::connection::HttpConnectionManager`
+  as a standalone low-level library API. It has no production callers in the
+  download engine; callers provide `HttpConfig`, including its independent
+  connect timeout. The active HTTP task path remains the reqwest-based engine
+  described above, so this API is not an unconfigured bypass of task options.
 - **Improve** sequential HTTP gap filling: derive completed progress from the
   normalized missing ranges so overlapping input ranges cannot be double
   counted, clip out-of-file coverage while planning gaps, and cross
