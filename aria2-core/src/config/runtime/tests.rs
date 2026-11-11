@@ -9,6 +9,7 @@ fn policy_matches_original_wire_names() {
     assert!(is_global_option_changeable("min-http-range-size"));
     assert!(is_global_option_changeable("max-http2-sessions-per-server"));
     assert!(is_global_option_changeable("max-http2-streams-per-session"));
+    assert!(is_global_option_changeable("http-adaptive-enabled"));
     assert!(is_global_option_changeable(
         "http-adaptive-reduction-percent"
     ));
@@ -29,6 +30,7 @@ fn policy_matches_original_wire_names() {
     for name in [
         "max-http2-sessions-per-server",
         "max-http2-streams-per-session",
+        "http-adaptive-enabled",
         "http-adaptive-reduction-percent",
         "http-adaptive-backoff-max",
     ] {
@@ -75,9 +77,9 @@ fn initial_option_projection_keeps_request_options_only() {
 fn task_policy_matches_runtime_changeability_axes() {
     assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
     #[cfg(feature = "bittorrent")]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 152);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 153);
     #[cfg(not(feature = "bittorrent"))]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 151);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 152);
     assert_eq!(
         is_option_changeable("max-download-limit", true),
         ChangeableKind::Immediate

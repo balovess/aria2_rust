@@ -13,6 +13,7 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
 
     let option_names = [
         "connect-timeout",
+        "http-adaptive-enabled",
         "http-adaptive-reduction-percent",
         "http-adaptive-recovery-interval",
         "http-adaptive-recovery-successes-min",
@@ -28,7 +29,16 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
     ];
     let options = option_names
         .iter()
-        .map(|name| kv(name, "1"))
+        .map(|name| {
+            kv(
+                name,
+                if *name == "http-adaptive-enabled" {
+                    "false"
+                } else {
+                    "1"
+                },
+            )
+        })
         .collect::<Vec<_>>();
     let entries = options
         .iter()
@@ -54,6 +64,7 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
     let group = group.read().unwrap();
     let adaptive = group.options().http_adaptive;
     assert_eq!(group.options().connect_timeout, Some(1));
+    assert!(!adaptive.enabled);
     assert_eq!(adaptive.reduction_percent, 1);
     assert_eq!(adaptive.recovery_interval_secs, 1);
     assert_eq!(adaptive.recovery_successes_min, 1);

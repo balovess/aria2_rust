@@ -63,6 +63,12 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
     }
     let adaptive = opts.http_adaptive;
     let adaptive_defaults = crate::request::request_group::HttpAdaptiveOptions::default();
+    if adaptive.enabled != adaptive_defaults.enabled {
+        map.insert(
+            "http-adaptive-enabled".to_string(),
+            adaptive.enabled.to_string(),
+        );
+    }
     for (name, value, default) in [
         (
             "http-adaptive-reduction-percent",

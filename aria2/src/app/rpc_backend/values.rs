@@ -389,6 +389,7 @@ mod tests {
         );
         let option_names = [
             "connect-timeout",
+            "http-adaptive-enabled",
             "http-adaptive-reduction-percent",
             "http-adaptive-recovery-interval",
             "http-adaptive-recovery-successes-min",
@@ -405,7 +406,13 @@ mod tests {
         let changes = option_names
             .iter()
             .map(|name| {
-                let value = if *name == "connect-timeout" { 47 } else { 1 };
+                let value = if *name == "http-adaptive-enabled" {
+                    serde_json::json!("false")
+                } else if *name == "connect-timeout" {
+                    serde_json::json!(47)
+                } else {
+                    serde_json::json!(1)
+                };
                 ((*name).to_string(), serde_json::json!(value))
             })
             .collect();
@@ -414,8 +421,12 @@ mod tests {
 
         let config = config.read().await;
         for name in option_names {
-            let expected = if name == "connect-timeout" { 47 } else { 1 };
-            assert_eq!(config.get_global_i64(name).await, Some(expected), "{name}");
+            if name == "http-adaptive-enabled" {
+                assert_eq!(config.get_global_bool(name).await, Some(false), "{name}");
+            } else {
+                let expected = if name == "connect-timeout" { 47 } else { 1 };
+                assert_eq!(config.get_global_i64(name).await, Some(expected), "{name}");
+            }
         }
     }
 

@@ -34,6 +34,7 @@ fn split_option_keeps_large_positive_values() {
 #[test]
 fn adaptive_http_options_parse_and_normalize_external_values() {
     let values = HashMap::from([
+        ("http-adaptive-enabled".to_string(), "false".to_string()),
         (
             "http-adaptive-reduction-percent".to_string(),
             "30".to_string(),
@@ -55,6 +56,7 @@ fn adaptive_http_options_parse_and_normalize_external_values() {
     ]);
 
     let options = DownloadOptions::from_option_strings(&values).http_adaptive;
+    assert!(!options.enabled);
     assert_eq!(options.reduction_percent, 30);
     assert_eq!(options.recovery_successes_min, 40);
     assert_eq!(options.recovery_successes_max, 40);

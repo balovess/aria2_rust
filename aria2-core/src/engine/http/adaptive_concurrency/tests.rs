@@ -103,6 +103,36 @@ fn configured_reduction_and_backoff_reach_the_controller() {
 }
 
 #[test]
+fn disabled_adaptive_mode_keeps_connection_target_fixed_while_backoff_remains() {
+    let settings = HttpAdaptiveOptions {
+        enabled: false,
+        ..HttpAdaptiveOptions::default()
+    };
+    let mut controller = HttpAdaptiveConcurrency::new_with_settings(16, 16, 4, 4, 0, settings);
+
+    let first_wait = controller.record_capacity_rejection(false, None);
+    assert_eq!(controller.connection_target(false), 16);
+    assert_eq!(controller.range_target(false), 16);
+    assert!(first_wait >= Duration::from_secs(20));
+    assert!(!controller.can_start(0, false));
+
+    controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+    controller.record_capacity_failure(false);
+    let update = controller.finish_round(false);
+    assert_eq!(update, AdaptiveUpdate::default());
+    assert_eq!(controller.connection_target(false), 16);
+
+    controller.record_failure(false);
+    controller.http1.last_target_adjustment =
+        Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);
+    for _ in 0..64 {
+        controller.record_success(false);
+    }
+    assert_eq!(controller.finish_round(false), AdaptiveUpdate::default());
+    assert_eq!(controller.connection_target(false), 16);
+}
+
+#[test]
 fn backoff_persists_across_successes_and_resets_after_a_quiet_window() {
     let mut controller = HttpAdaptiveConcurrency::new(16, 3, 4, 4, 0);
     let first_wait = controller.record_capacity_rejection(false, None);

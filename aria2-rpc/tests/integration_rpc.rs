@@ -114,6 +114,26 @@ async fn options_are_normalized_and_invalid_values_are_rejected() {
 }
 
 #[tokio::test]
+async fn adaptive_switch_is_preserved_as_a_per_task_option() {
+    let engine = test_engine();
+    let add = engine
+        .handle_request(&request(
+            "aria2.addUri",
+            json!([
+                ["http://example.test/file.bin"],
+                {"http-adaptive-enabled": "false"}
+            ]),
+        ))
+        .await;
+    let gid = add.result.unwrap().as_str().unwrap().to_owned();
+
+    let options = engine
+        .handle_request(&request("aria2.getOption", json!([gid])))
+        .await;
+    assert_eq!(options.result.unwrap()["http-adaptive-enabled"], "false");
+}
+
+#[tokio::test]
 async fn read_multicall_uses_one_backend_snapshot() {
     let engine = test_engine();
     for index in 0..2 {

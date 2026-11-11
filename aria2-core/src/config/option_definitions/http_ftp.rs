@@ -276,6 +276,14 @@ impl crate::config::OptionRegistry {
         });
 
         // --- Adaptive HTTP Range concurrency ---
+        self.register(OptionDef {
+            name: "http-adaptive-enabled".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Enable adaptive HTTP Range concurrency target adjustments; server capacity backoff remains active".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
         for (name, default, min, max, description) in [
             (
                 "http-adaptive-reduction-percent",

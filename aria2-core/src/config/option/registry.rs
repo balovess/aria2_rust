@@ -238,6 +238,7 @@ impl OptionRegistry {
             | "max-http2-sessions-per-server"
             | "max-http2-streams-per-session"
             | "http-version"
+            | "http-adaptive-enabled"
             | "http-adaptive-reduction-percent"
             | "http-adaptive-recovery-interval"
             | "http-adaptive-recovery-successes-min"

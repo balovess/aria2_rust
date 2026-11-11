@@ -285,7 +285,9 @@ impl HttpAdaptiveConcurrency {
         let protocol = self.protocol_target_mut(is_http2);
         let in_cooldown = protocol.cooldown_until.is_some_and(|until| now < until);
         if !in_cooldown {
-            protocol.target = Self::reduce_target(protocol.target, settings.reduction_percent);
+            if settings.enabled {
+                protocol.target = Self::reduce_target(protocol.target, settings.reduction_percent);
+            }
             self.note_capacity_feedback(is_http2);
         }
         let protocol = self.protocol_target_mut(is_http2);
@@ -357,10 +359,15 @@ impl HttpAdaptiveConcurrency {
         let protocol = self.protocol_target_mut(is_http2);
         let now = Instant::now();
         let (changed, increased) = if protocol.capacity_rejected {
-            let reduced_target = Self::reduce_target(protocol.target, settings.reduction_percent);
-            let changed = if reduced_target < protocol.target {
-                protocol.target = reduced_target;
-                Some(protocol.target)
+            let changed = if settings.enabled {
+                let reduced_target =
+                    Self::reduce_target(protocol.target, settings.reduction_percent);
+                if reduced_target < protocol.target {
+                    protocol.target = reduced_target;
+                    Some(protocol.target)
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -372,7 +379,8 @@ impl HttpAdaptiveConcurrency {
                     Some(protocol.cooldown_until.map_or(until, |old| old.max(until)));
             }
             (changed, false)
-        } else if protocol.target < protocol.ceiling
+        } else if settings.enabled
+            && protocol.target < protocol.ceiling
             && protocol.successful_ranges_since_adjustment >= success_threshold
             && protocol.cooldown_until.is_none_or(|until| now >= until)
             && now.duration_since(protocol.last_target_adjustment)

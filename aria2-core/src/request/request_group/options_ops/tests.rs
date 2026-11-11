@@ -129,6 +129,7 @@ fn http2_limits_can_be_updated_through_task_rpc_options() {
 fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
     let mut options = DownloadOptions::default();
     for (name, value) in [
+        ("http-adaptive-enabled", "false"),
         ("http-adaptive-reduction-percent", "30"),
         ("http-adaptive-recovery-interval", "20"),
         ("http-adaptive-recovery-successes-min", "40"),
@@ -145,6 +146,7 @@ fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
         assert!(apply_runtime_option_value(&mut options, name, &serde_json::json!(value)).unwrap());
     }
 
+    assert!(!options.http_adaptive.enabled);
     assert_eq!(options.http_adaptive.reduction_percent, 30);
     assert_eq!(options.http_adaptive.recovery_interval_secs, 20);
     assert_eq!(options.http_adaptive.recovery_successes_min, 40);
@@ -157,6 +159,14 @@ fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
     assert_eq!(options.http_adaptive.rate_recovery_successes, 80);
     assert_eq!(options.http_adaptive.rate_min_interval_ms, 25);
     assert_eq!(options.http_adaptive.backoff_reset_after_secs, 90);
+    assert!(
+        apply_runtime_option_value(
+            &mut options,
+            "http-adaptive-enabled",
+            &serde_json::json!("yes")
+        )
+        .is_err()
+    );
     assert!(
         apply_runtime_option_value(
             &mut options,

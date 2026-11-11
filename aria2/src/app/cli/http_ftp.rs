@@ -126,6 +126,16 @@ pub struct HttpFtpArgs {
     #[arg(long = "max-http2-streams-per-session")]
     pub max_http2_streams_per_session: Option<u64>,
 
+    /// Enable adaptive HTTP Range concurrency target adjustments
+    #[arg(
+        long = "http-adaptive-enabled",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub http_adaptive_enabled: Option<bool>,
+
     /// Reduce Range concurrency by this percentage after server capacity rejection
     #[arg(long = "http-adaptive-reduction-percent")]
     pub http_adaptive_reduction_percent: Option<u64>,

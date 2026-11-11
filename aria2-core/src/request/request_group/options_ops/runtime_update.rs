@@ -233,6 +233,10 @@ pub(super) fn apply_runtime_option_value(
             opts.max_connection_per_server = Some(value);
             Ok(true)
         }
+        "http-adaptive-enabled" => {
+            opts.http_adaptive.enabled = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
         "http-adaptive-reduction-percent"
         | "http-adaptive-recovery-interval"
         | "http-adaptive-recovery-successes-min"

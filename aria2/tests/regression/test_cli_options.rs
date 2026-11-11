@@ -994,8 +994,13 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-peer-blocklist",
         "bt-snubbed-timeout",
         "bt-tracker-source",
+        "bt-tracker-source-timeout",
         "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
+        "bt-utp-connect-timeout",
+        "bt-utp-idle-timeout",
+        "bt-utp-keepalive-interval",
+        "bt-utp-max-connections",
         "dht-bootstrap-timeout",
         "dht-cleanup-interval",
         "dht-max-concurrent-lookups",
@@ -1019,6 +1024,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "sftp-keepalive-interval",
         "sftp-preferred-ciphers",
         "http-version",
+        "http-adaptive-enabled",
         "http-adaptive-reduction-percent",
         "http-adaptive-recovery-interval",
         "http-adaptive-recovery-successes-min",
@@ -1064,7 +1070,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        266,
+        272,
         "all-features registry inventory changed"
     );
     assert_eq!(

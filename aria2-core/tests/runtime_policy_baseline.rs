@@ -29,6 +29,7 @@ const RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS: &[&str] = &[
     "sftp-preferred-ciphers",
 ];
 const RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS: &[&str] = &[
+    "http-adaptive-enabled",
     "http-adaptive-reduction-percent",
     "http-adaptive-recovery-interval",
     "http-adaptive-recovery-successes-min",
@@ -149,8 +150,13 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     let mut global_extensions = vec![
         "bt-incoming-peer-handshake-timeout",
         "bt-tracker-source",
+        "bt-tracker-source-timeout",
         "bt-tracker-update-interval",
         "bt-tracker-stopped-timeout",
+        "bt-utp-connect-timeout",
+        "bt-utp-idle-timeout",
+        "bt-utp-keepalive-interval",
+        "bt-utp-max-connections",
         "enable-public-trackers",
     ];
     global_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);

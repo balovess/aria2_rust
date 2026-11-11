@@ -37,14 +37,18 @@ behavior. An unlisted behavior has not been audited here.
   subsequent Ranges at 1-second intervals (doubling to 4 seconds on repeated
   feedback), and uses jittered exponential backoff from 20 seconds to 300
   seconds. These are Rust extension defaults and can be adjusted per download
-  with the `http-adaptive-*` options.
+  with the `http-adaptive-*` options. `http-adaptive-enabled=false` fixes each
+  protocol's Range target at its configured effective ceiling; capacity
+  rejection backoff, Retry-After handling, and request pacing remain active.
 - **External configuration:** all adaptive controller parameters are available
   through CLI flags, configuration files, and JSON-RPC/XML-RPC option maps.
   `changeGlobalOption` changes the defaults used for future tasks;
   `changeOption` applies immediately to waiting tasks and is queued as pending
   for active tasks, taking effect when they are restarted. `getGlobalOption`
-  and task option projections expose the registered values. These option names
-  are Rust extensions and are not part of original aria2.
+  and task option projections expose the registered values. Individual
+  `addUri`/`addTorrent` option maps may set `http-adaptive-enabled=false`
+  without changing the process-wide default. These option names are Rust
+  extensions and are not part of original aria2.
 - **Verification:** focused tests cover the `max-connection-per-server=10`
   default in `ConfigManager` and `FileEntry`, and the `--init` generated
   configuration. CLI help was checked manually. Additional focused tests cover
