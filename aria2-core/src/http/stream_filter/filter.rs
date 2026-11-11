@@ -9,6 +9,9 @@ use crate::http::stream_filter::chunked::ChunkedDecoder;
 use crate::http::stream_filter::deflate::DeflateDecoder;
 use crate::http::stream_filter::gzip::GZipDecoder;
 use crate::http::stream_filter::types::StreamFilter;
+use aria2_protocol::http::stream_filter::{
+    HttpBodyCoding, HttpStreamFilterError, detect_http_body_encoding, select_http_body_codings,
+};
 
 /// Process input data through a sequence of filters.
 ///
@@ -81,51 +84,26 @@ impl AutoFilterSelector {
         content_encoding: Option<&str>,
         transfer_encoding: Option<&str>,
     ) -> Result<Vec<Box<dyn StreamFilter>>> {
-        let mut filters = Self::select_content_encoding_filters(content_encoding);
-
-        if let Some(transfer_encoding) = transfer_encoding {
-            let encoding = transfer_encoding.trim();
-            if !encoding.eq_ignore_ascii_case("chunked") {
-                return Err(Aria2Error::HttpProtocol(format!(
-                    "Transfer-Encoding not supported: {transfer_encoding}"
-                )));
-            }
-
-            filters.insert(0, Box::new(ChunkedDecoder::new()));
-        }
-
+        let codings = select_http_body_codings(content_encoding, transfer_encoding)
+            .map_err(map_protocol_error)?;
+        let filters = codings
+            .into_iter()
+            .map(|coding| match coding {
+                HttpBodyCoding::Chunked => Box::new(ChunkedDecoder::new()) as Box<dyn StreamFilter>,
+                HttpBodyCoding::Gzip => Box::new(GZipDecoder::new()),
+                HttpBodyCoding::Deflate => Box::new(DeflateDecoder::new()),
+                HttpBodyCoding::Bzip2 => Box::new(BZip2Decoder::new()),
+            })
+            .collect();
         Ok(filters)
     }
+}
 
-    fn select_content_encoding_filters(
-        content_encoding: Option<&str>,
-    ) -> Vec<Box<dyn StreamFilter>> {
-        let mut filters = Vec::new();
-
-        let Some(content_encoding) = content_encoding else {
-            return filters;
-        };
-
-        for encoding in content_encoding.split(',') {
-            let encoding = encoding.trim().to_lowercase();
-            match encoding.as_str() {
-                "gzip" | "x-gzip" => filters.push(Box::new(GZipDecoder::new())),
-                "deflate" => filters.push(Box::new(DeflateDecoder::new())),
-                "bzip2" | "x-bzip2" => filters.push(Box::new(BZip2Decoder::new())),
-                "identity" | "" | "none" => {}
-                _ if encoding.contains("lzma") => {
-                    tracing::warn!(
-                        "LZMA content encoding not yet supported, returning passthrough"
-                    );
-                }
-                "br" => {
-                    tracing::debug!("Brotli content encoding detected but not yet implemented");
-                }
-                _ => tracing::debug!("Unknown content encoding: {}", encoding),
-            }
-        }
-
-        filters
+fn map_protocol_error(error: HttpStreamFilterError) -> Aria2Error {
+    match error {
+        HttpStreamFilterError::Parse(message) => Aria2Error::Parse(message),
+        HttpStreamFilterError::Io(message) => Aria2Error::Io(message),
+        HttpStreamFilterError::Protocol(message) => Aria2Error::HttpProtocol(message),
     }
 }
 
@@ -158,20 +136,5 @@ impl AutoFilterSelector {
 /// assert_eq!(detect_encoding_from_magic_bytes(&gzip_data), "gzip");
 /// ```
 pub fn detect_encoding_from_magic_bytes(data: &[u8]) -> &'static str {
-    // Check for Gzip magic number: 0x1f 0x8b
-    if data.len() >= 2 {
-        if data[0] == 0x1f && data[1] == 0x8b {
-            return "gzip";
-        }
-        // Check for BZip2 magic number: 0x42 0x5a ("BZ")
-        if data[0] == 0x42 && data[1] == 0x5a {
-            return "bzip2";
-        }
-    }
-    // Check for Zlib/Deflate magic number: 0x78 followed by valid flag byte
-    if !data.is_empty() && data[0] == 0x78 {
-        return "deflate";
-    }
-    // Default to identity (no compression)
-    "identity"
+    detect_http_body_encoding(data)
 }

@@ -167,17 +167,33 @@ behavior. An unlisted behavior has not been audited here.
 
 - **Layering:** Digest challenge parsing, response computation, and header
   serialization are shared by `aria2-protocol::http::digest`. The protocol
-  crate's older `HttpAuth` API and core compatibility types delegate to that
-  implementation. HTTP and FTP CONNECT retry flows retain credential lookup
-  and retry policy in core.
+  crate's older `HttpAuth` API, core HTTP types, and public
+  `aria2_core::auth::digest_auth` provider delegate syntax and hashing to that
+  implementation. Core retains public compatibility values, zeroizing secret
+  storage, nonce counting, credential lookup, retry state, and Basic's
+  HTTPS-only policy.
 - **Supported algorithms and qop:** MD5, MD5-sess, SHA-256, SHA-256-sess,
   SHA-512-256, and SHA-512-256-sess; `auth` and `auth-int` are parsed and
   computed according to the selected challenge. Quoted commas and escaped
   challenge parameters are handled by the shared parser.
 - **Verification:** protocol tests cover the RFC 2617 MD5 vector, supported
   challenge syntax and algorithm selection; proxy tests cover `auth-int` with
-  SHA-256-sess and exercise both CONNECT integrations. No external authenticated
-  proxy interoperability test was run.
+  SHA-256-sess and exercise both CONNECT integrations. Core provider tests cover
+  legacy challenge fields, qop calculations, nonce counting, and zeroization.
+  No external authenticated proxy interoperability test was run.
+
+## SOCKS connection handshake ownership
+
+- **Layering:** SOCKS4 and SOCKS5 greeting, username/password negotiation,
+  CONNECT framing, and reply parsing now live in `aria2-protocol::socks`.
+  Existing core connector types delegate to those functions; core retains
+  proxy URL/configuration parsing, connector selection, no-proxy rules, and
+  outbound network policy.
+- **Compatibility intent:** supported auth methods, address types, request
+  bytes, and error messages preserve the prior core connector behavior.
+- **Verification:** protocol tests cover SOCKS4 success framing and SOCKS5
+  username/password plus IPv4 CONNECT framing; core connector tests exercise
+  the compatibility adapters and their existing error paths.
 
 ## HTTP live connection status
 
@@ -317,6 +333,10 @@ behavior. An unlisted behavior has not been audited here.
   FTPS TLS policy, and engine error mapping. Existing focused FTP URI tests and
   protocol SFTP parser tests pass; the SFTP engine URI compatibility tests are
   run with the optional `sftp` feature.
+- FTP proxy GET username escaping uses the same protocol FTP URI module's RFC
+  3986 user-info encoder. Output remains uppercase hexadecimal with only
+  unreserved bytes left literal; protocol and FTP proxy builder tests cover
+  non-ASCII and reserved characters.
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
   SFTP connection-establishment and SFTP I/O read timeouts independently, in seconds.
@@ -484,3 +504,21 @@ behavior. An unlisted behavior has not been audited here.
   not exercised. The project parser and writer use the documented native
   in-flight record layout, but this does not establish an end-to-end
   cross-binary interoperability result.
+
+## HTTP body decoder ownership
+
+- **Protocol ownership:** transfer/content coding selection and incremental
+  chunked, GZip, Deflate, and BZip2 decoding now live in
+  `aria2-protocol::http::stream_filter`. Core public decoder types, selector,
+  and `StreamFilter` interface remain compatibility adapters and preserve the
+  existing `Aria2Error` mapping.
+- **Compatibility:** chunk framing, zlib/raw Deflate fallback, compressed
+  formats, streaming state, and decoder error categories are preserved.
+  Response filter-chain execution and null-sink behavior remain in core.
+  `bzip2-rs` is now a protocol dependency rather than a core dependency.
+- **Verification:** all 31 focused core stream-filter tests passed, including
+  chunk extensions, split input, strict chunk terminators, tolerated bare LF,
+  early EOF, and HTTP response decoding. All 29 protocol stream-filter tests
+  passed, covering each decoder, header selection, and magic-byte detection.
+  Protocol and core clippy with BitTorrent enabled and core clippy with
+  BitTorrent, Metalink, and SFTP enabled passed with warnings denied.

@@ -462,7 +462,8 @@ impl FtpProxyGetRequestBuilder {
         if !has_embedded_username && !self.proxy_config.ftp_username.is_empty() {
             // C++: Insert user into URI, like ftp://USER@host/
             // Percent-encode the username per RFC 3986
-            let encoded_user = percent_encode_username(&self.proxy_config.ftp_username);
+            let encoded_user =
+                aria2_protocol::ftp::uri::percent_encode_userinfo(&self.proxy_config.ftp_username);
             let url_str = self.ftp_url.to_string();
             // Insert after "ftp://"
             if let Some(pos) = url_str.find("://") {
@@ -503,26 +504,6 @@ impl FtpProxyGetRequestBuilder {
 /// Mirrors C++ `HttpRequest::getProxyAuthString()`.
 fn build_basic_proxy_auth(username: &str, password: &str) -> String {
     aria2_protocol::http::auth::basic_authorization(username, password)
-}
-
-/// Percent-encode a username for embedding in a URL.
-///
-/// Mirrors C++ `util::percentEncode()` for the FTP username.
-/// Encodes all characters except unreserved (RFC 3986 section 2.3).
-fn percent_encode_username(username: &str) -> String {
-    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
-                                 abcdefghijklmnopqrstuvwxyz\
-                                 0123456789\
-                                 -._~";
-    let mut result = String::with_capacity(username.len());
-    for byte in username.bytes() {
-        if UNRESERVED.contains(&byte) {
-            result.push(byte as char);
-        } else {
-            result.push_str(&format!("%{:02X}", byte));
-        }
-    }
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -648,18 +629,6 @@ mod tests {
         assert!(header.starts_with("Basic "));
         // Base64 of "proxyuser:proxypass"
         assert_eq!(header, "Basic cHJveHl1c2VyOnByb3h5cGFzcw==");
-    }
-
-    #[test]
-    fn test_percent_encode_username_simple() {
-        assert_eq!(percent_encode_username("user"), "user");
-    }
-
-    #[test]
-    fn test_percent_encode_username_special_chars() {
-        assert_eq!(percent_encode_username("user@domain"), "user%40domain");
-        assert_eq!(percent_encode_username("user name"), "user%20name");
-        assert_eq!(percent_encode_username("user/pass"), "user%2Fpass");
     }
 
     #[test]

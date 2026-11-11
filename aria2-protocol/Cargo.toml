@@ -37,6 +37,7 @@ rustls-pemfile = { workspace = true }
 webpki-roots = "1.0"
 
 flate2 = "1.1"
+bzip2-rs = "0.1"
 base64.workspace = true
 url = "2.5"
 md-5 = "0.11"

@@ -10,6 +10,7 @@ pub mod metalink_http;
 pub mod proxy;
 pub mod request;
 pub mod response;
+pub mod stream_filter;
 
 pub use client::{
     HttpBodyStream, HttpClient, HttpClientOptions, HttpRequestBuilder, HttpRequestBuilderError,

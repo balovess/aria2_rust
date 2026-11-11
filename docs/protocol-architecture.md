@@ -511,6 +511,9 @@ Do not add pass-through engine clients around these public interfaces.
 - **Narrow** raw HTTP request framing in proxy and splice paths to
   `aria2-protocol::http::request`. Core keeps proxy routing, auth retries,
   Range policy, outbound networking and zero-copy transfer decisions.
+- **Narrow** SOCKS4/5 wire handshakes into `aria2-protocol::socks`. Core keeps
+  the public connector types as adapters and retains proxy URL/configuration,
+  no-proxy matching, connector selection, and outbound socket policy.
 - **Narrow** the core Metalink/HTTP module to compatibility exports. Link and
   Digest header parsing and its values live in
   `aria2-protocol::http::metalink_http`; task integration remains in the core
@@ -540,10 +543,16 @@ Do not add pass-through engine clients around these public interfaces.
   `aria2-protocol::http::request::HttpRequest::to_bytes`. Core retains its
   option-driven request construction and FTP-proxy GET policy, then uses the
   protocol serializer. Public core request types keep their existing APIs.
-- **Keep** the public `aria2_core::auth::digest_auth::DigestAuthProvider`
-  extension API, including its provider abstraction and nonce-counter
-  semantics. The HTTP engine uses the protocol Digest value and serializer;
-  removing the standalone core API would be a separate compatibility change.
+- **Narrow** the public `aria2_core::auth::digest_auth` API into a compatibility
+  facade: challenge syntax and Digest hashing/header generation use
+  `aria2-protocol::http::digest`, while the core retains its public value types,
+  provider abstraction, zeroizing secret storage, nonce counter, and
+  HTTPS-only Basic policy.
+- **Narrow** HTTP transfer/content coding selection and incremental chunked,
+  GZip, Deflate, and BZip2 decoding into
+  `aria2-protocol::http::stream_filter`. Core keeps its public decoder types,
+  selector, and `StreamFilter` interface as compatibility adapters; response
+  lifecycle, filter-chain execution, and the null sink remain in core.
 - **Narrow** HTTP `Retry-After` syntax into the protocol response module.
   Core supplies the current time and keeps the five-minute retry cap and
   scheduler behavior.
@@ -589,9 +598,10 @@ Do not add pass-through engine clients around these public interfaces.
   FTPS configuration, output naming, and task lifecycle. The parsed secure-scheme
   flag is carried into core policy without reparsing the URI. FTP and SFTP
   default ports are defined by their protocol modules; the public core constants
-  remain aliases for compatibility. FTP percent decoding is owned by its URI
-  parser and re-exported through the historical connection module path; SFTP
-  decoding remains in its URI parser rather than the engine.
+  remain aliases for compatibility. FTP percent decoding and user-info
+  percent-encoding are owned by the URI module; the decoder remains
+  re-exported through the historical connection module path for compatibility.
+  SFTP decoding remains in its URI parser rather than the engine.
 - **Narrow** FTP engine parser access: `download_command` imports the core FTP
   parsers directly instead of re-exporting them through its control module.
   Remove the unused private FTP error classifier; live response handling stays

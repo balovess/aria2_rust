@@ -65,7 +65,6 @@ regex = "1"
 url = "2.5"
 base64.workspace = true
 flate2 = "1.1"
-bzip2-rs = "0.1"
 zeroize = "1.9"
 hex.workspace = true
 ring = "0.17"

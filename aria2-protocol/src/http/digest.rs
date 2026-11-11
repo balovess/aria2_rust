@@ -104,6 +104,13 @@ pub struct DigestResponse {
     pub opaque: Option<String>,
 }
 
+/// Request data needed to calculate a Digest response.
+pub struct DigestRequest<'a> {
+    pub method: &'a str,
+    pub uri: &'a str,
+    pub entity_body: Option<&'a [u8]>,
+}
+
 impl DigestResponse {
     /// Compute RFC 7616 Digest fields from a parsed challenge.
     pub fn compute(
@@ -132,7 +139,16 @@ impl DigestResponse {
         cnonce: &str,
     ) -> Self {
         Self::compute_with_body_and_cnonce(
-            username, password, method, uri, challenge, nc, cnonce, None,
+            username,
+            password,
+            challenge,
+            nc,
+            cnonce,
+            DigestRequest {
+                method,
+                uri,
+                entity_body: None,
+            },
         )
     }
 
@@ -140,12 +156,10 @@ impl DigestResponse {
     pub fn compute_with_body_and_cnonce(
         username: &str,
         password: &str,
-        method: &str,
-        uri: &str,
         challenge: &DigestChallenge,
         nc: u32,
         cnonce: &str,
-        entity_body: Option<&[u8]>,
+        request: DigestRequest<'_>,
     ) -> Self {
         let algorithm = challenge.algorithm.to_ascii_uppercase();
         let session_algorithm = algorithm.ends_with("-SESS");
@@ -176,19 +190,22 @@ impl DigestResponse {
             initial_ha1
         };
         let ha2 = if qop.as_deref() == Some("auth-int") {
-            let entity_hash = hash_parts(&algorithm, &[entity_body.unwrap_or_default()]);
+            let entity_hash = hash_parts(&algorithm, &[request.entity_body.unwrap_or_default()]);
             hash_parts(
                 &algorithm,
                 &[
-                    method.as_bytes(),
+                    request.method.as_bytes(),
                     b":",
-                    uri.as_bytes(),
+                    request.uri.as_bytes(),
                     b":",
                     entity_hash.as_bytes(),
                 ],
             )
         } else {
-            hash_parts(&algorithm, &[method.as_bytes(), b":", uri.as_bytes()])
+            hash_parts(
+                &algorithm,
+                &[request.method.as_bytes(), b":", request.uri.as_bytes()],
+            )
         };
         let nc_string = format!("{nc:08x}");
         let response = match qop.as_deref() {
@@ -224,7 +241,7 @@ impl DigestResponse {
             username: username.to_owned(),
             realm: challenge.realm.clone(),
             nonce: challenge.nonce.clone(),
-            uri: uri.to_owned(),
+            uri: request.uri.to_owned(),
             qop,
             nc,
             cnonce: cnonce.to_owned(),

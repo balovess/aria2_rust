@@ -35,6 +35,21 @@ pub fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Percent-encode a URI user-info component using the RFC 3986 unreserved set.
+pub fn percent_encode_userinfo(value: &str) -> String {
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if UNRESERVED.contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+    }
+    encoded
+}
+
 /// Parse the FTP URI forms accepted by the download engine.
 ///
 /// The parser intentionally preserves the historical permissive port handling:
@@ -127,5 +142,13 @@ mod tests {
     #[test]
     fn path_decoding_preserves_plus_and_malformed_escapes() {
         assert_eq!(percent_decode("a+b%20c%ZZ%3"), "a+b c%ZZ%3");
+    }
+
+    #[test]
+    fn userinfo_encoding_preserves_only_unreserved_bytes() {
+        assert_eq!(
+            percent_encode_userinfo("user@name /é"),
+            "user%40name%20%2F%C3%A9"
+        );
     }
 }

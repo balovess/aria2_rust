@@ -32,6 +32,7 @@
 pub mod ftp;
 pub mod http;
 pub mod identity;
+pub mod socks;
 
 /// Default TCP connection timeout for SFTP's SSH transport, in seconds.
 pub const DEFAULT_SFTP_CONNECT_TIMEOUT_SECS: u64 = 15;

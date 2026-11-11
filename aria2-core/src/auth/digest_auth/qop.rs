@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 
 use crate::error::{Aria2Error, Result};
 
-use super::{AuthChallenge, DigestAlgorithm, DigestAuthProvider};
+use super::{AuthChallenge, DigestAuthProvider};
 
 impl DigestAuthProvider {
     /// Computes HA1 = H(username:realm:password).
@@ -137,12 +137,14 @@ impl DigestAuthProvider {
         let response = aria2_protocol::http::digest::DigestResponse::compute_with_body_and_cnonce(
             self.username.expose_secret(),
             self.password.expose_secret(),
-            method,
-            uri,
             &protocol_challenge,
             nc_raw,
             &cnonce,
-            entity_body,
+            aria2_protocol::http::digest::DigestRequest {
+                method,
+                uri,
+                entity_body,
+            },
         );
         Ok(response.to_header_value())
     }
