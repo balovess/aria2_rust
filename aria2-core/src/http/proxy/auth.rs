@@ -3,7 +3,6 @@
 //! Constructs Proxy-Authorization headers for Basic and Digest schemes,
 //! and selects the appropriate scheme from Proxy-Authenticate challenges.
 
-use base64::{Engine, engine::general_purpose};
 use tracing::{debug, warn};
 
 use crate::http::digest_auth::{DigestAuthChallenge, DigestAuthResponse};
@@ -11,9 +10,7 @@ use crate::http::header_processor::HttpResponseHead;
 
 /// Build a Proxy-Authorization: Basic ... header value.
 pub(crate) fn proxy_basic_auth(username: &str, password: &str) -> String {
-    let credentials = format!("{}:{}", username, password);
-    let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
-    format!("Basic {}", encoded)
+    aria2_protocol::http::auth::basic_authorization(username, password)
 }
 
 /// Build a Proxy-Authorization: Digest ... header value using the existing
@@ -44,7 +41,10 @@ pub(crate) fn build_proxy_auth_header(
 ) -> Option<String> {
     // Check for Digest first (more secure), then Basic
     for (_, value) in head.iter_headers() {
-        if (value.starts_with("Digest ") || value.starts_with("digest "))
+        if value
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Digest"))
             && let Ok(challenge) = DigestAuthChallenge::parse(value)
         {
             let auth = proxy_digest_auth(username, password, method, uri, &challenge, nc);
@@ -58,7 +58,11 @@ pub(crate) fn build_proxy_auth_header(
 
     // Fall back to Basic
     for (_, value) in head.iter_headers() {
-        if value.starts_with("Basic ") || value.starts_with("basic ") {
+        if value
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Basic"))
+        {
             let auth = proxy_basic_auth(username, password);
             debug!("Using Basic proxy authentication");
             return Some(auth);

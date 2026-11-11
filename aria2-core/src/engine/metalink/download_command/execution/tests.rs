@@ -1,4 +1,13 @@
+use super::payload::parse_content_range_total;
 use super::*;
+
+#[test]
+fn parses_payload_total_from_protocol_content_range_parser() {
+    assert_eq!(parse_content_range_total("bytes 10-19/100"), Some(100));
+    assert_eq!(parse_content_range_total("bytes */100"), Some(100));
+    assert_eq!(parse_content_range_total("bytes 10-100/100"), None);
+    assert_eq!(parse_content_range_total("not-a-range/100"), None);
+}
 
 #[cfg(test)]
 mod http_status_tests {

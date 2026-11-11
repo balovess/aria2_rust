@@ -43,29 +43,5 @@ pub fn parse_url_list(
 ///
 /// * `Vec<String>` - Extracted web-seed URLs (empty if missing/malformed)
 pub fn parse_url_list_from_bytes(torrent_bytes: &[u8]) -> Vec<String> {
-    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
-
-    let (root, _) = match BencodeValue::decode(torrent_bytes) {
-        Ok(result) => result,
-        Err(_) => return Vec::new(),
-    };
-
-    match root.dict_get(b"url-list") {
-        Some(BencodeValue::Bytes(url_bytes)) => {
-            // Single URL string
-            match std::str::from_utf8(url_bytes) {
-                Ok(url) => vec![url.to_string()],
-                Err(_) => Vec::new(),
-            }
-        }
-        Some(BencodeValue::List(items)) => {
-            // List of URL strings
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .map(|s| s.to_string())
-                .collect()
-        }
-        _ => Vec::new(), // Missing or wrong type
-    }
+    aria2_protocol::bittorrent::torrent::parser::parse_web_seeds_from_bytes(torrent_bytes)
 }

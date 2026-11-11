@@ -78,7 +78,7 @@ pub(crate) struct RuntimeOptionChanges {
     pub(crate) pending: HashMap<String, serde_json::Value>,
 }
 
-pub(super) fn apply_rpc_option(
+pub(super) fn apply_runtime_option_value(
     opts: &mut super::super::DownloadOptions,
     key: &str,
     value: &serde_json::Value,

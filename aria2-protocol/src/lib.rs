@@ -11,7 +11,8 @@
 //! - **[`http`]** — HTTP/HTTPS client built on reqwest/hyper: request construction,
 //!   Range header handling, BASIC/Digest authentication, proxy support (HTTP/SOCKS5),
 //!   gzip/deflate decompression, Cookie management, chunked transfer decoding,
-//!   custom headers, and redirect following.
+//!   incremental HTTP/1.x response-header parsing, custom headers, and redirect
+//!   following.
 //!
 //! - **[`ftp`]** — FTP client: control connection (USER/PASS/CWD/SIZE/PASV/EPSV),
 //!   passive mode data transfer, anonymous and authenticated login, REST-based resume.
@@ -34,10 +35,16 @@ pub mod identity;
 
 /// Default TCP connection timeout for SFTP's SSH transport, in seconds.
 pub const DEFAULT_SFTP_CONNECT_TIMEOUT_SECS: u64 = 15;
+/// Default TCP port for SSH/SFTP connections.
+pub const DEFAULT_SFTP_PORT: u16 = 22;
 /// Default SFTP channel read timeout, in seconds.
 pub const DEFAULT_SFTP_READ_TIMEOUT_SECS: u64 = 30;
 /// Default SSH keepalive interval for SFTP transport, in seconds.
 pub const DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS: u64 = 60;
+/// Standard BitTorrent Local Peer Discovery multicast address.
+pub const DEFAULT_LPD_MULTICAST_ADDRESS: &str = "239.192.152.143";
+/// Standard BitTorrent Local Peer Discovery UDP port.
+pub const DEFAULT_LPD_PORT: u16 = 6771;
 
 #[cfg(feature = "bittorrent")]
 pub mod bittorrent;

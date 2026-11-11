@@ -3,6 +3,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use aria2_protocol::http::parse_unsatisfied_content_range_length;
+
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -356,8 +358,4 @@ impl HttpSegmentDownloader {
         // Freeze BytesMut to immutable Bytes (zero-cost conversion)
         Ok(data.freeze())
     }
-}
-
-fn parse_unsatisfied_content_range_length(value: &str) -> Option<u64> {
-    value.trim().strip_prefix("bytes */")?.trim().parse().ok()
 }

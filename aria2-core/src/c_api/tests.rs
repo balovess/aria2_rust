@@ -2,6 +2,9 @@ use super::*;
 use std::ffi::CString;
 use std::sync::Mutex;
 
+#[path = "tests/http_adaptive_options.rs"]
+mod http_adaptive_options;
+
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn kv(name: &str, value: &str) -> (Aria2RustKeyValue, CString, CString) {
@@ -15,6 +18,97 @@ fn kv(name: &str, value: &str) -> (Aria2RustKeyValue, CString, CString) {
         name_c,
         value_c,
     )
+}
+
+#[test]
+fn c_api_applies_process_engine_network_and_server_stat_options() {
+    let runtime = Runtime::new().unwrap();
+    let mut config = ConfigManager::new();
+    runtime.block_on(async {
+        config
+            .set_global_option("interface", OptionValue::Str("127.0.0.2".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("multiple-interface", OptionValue::Str("127.0.0.1".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("dns-timeout", OptionValue::Str("9".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("async-dns-server", OptionValue::Str("127.0.0.1".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("server-stat-timeout", OptionValue::Str("0".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("server-stat-if", OptionValue::Str("stats.in".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("server-stat-of", OptionValue::Str("stats.out".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("save-server-stat-interval", OptionValue::Str("17".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-concurrent-downloads", OptionValue::Str("3".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option(
+                "max-overall-download-limit",
+                OptionValue::Str("1024".into()),
+            )
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-overall-upload-limit", OptionValue::Str("2048".into()))
+            .await
+            .unwrap();
+    });
+
+    let options = runtime.block_on(config.get_all_global_options());
+    let request_man = Arc::new(RequestGroupMan::new());
+    let engine = runtime.block_on(DownloadEngine::from_process_options(
+        &options,
+        Arc::clone(&request_man),
+    ));
+
+    assert_eq!(
+        engine.outbound_network_policy().addresses(),
+        ["127.0.0.2".parse::<std::net::IpAddr>().unwrap()]
+    );
+    runtime.block_on(async {
+        let dns_cache = engine.dns_cache().lock().await;
+        assert_eq!(dns_cache.dns_timeout(), Duration::from_secs(9));
+        assert_eq!(
+            dns_cache.dns_server_addresses(),
+            ["127.0.0.1:53".parse::<std::net::SocketAddr>().unwrap()]
+        );
+    });
+    assert_eq!(engine.server_stat_max_age(), None);
+    assert_eq!(
+        engine.server_stat_input_path().unwrap(),
+        std::path::Path::new("stats.in")
+    );
+    assert_eq!(
+        engine.server_stat_output_path().unwrap(),
+        std::path::Path::new("stats.out")
+    );
+    assert_eq!(
+        engine.server_stat_save_interval(),
+        Some(Duration::from_secs(17))
+    );
+    assert_eq!(request_man.max_concurrent(), 3);
+    assert_eq!(request_man.global_download_limit(), Some(1024));
+    assert_eq!(request_man.global_upload_limit(), Some(2048));
 }
 
 #[test]

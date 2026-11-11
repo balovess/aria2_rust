@@ -28,8 +28,6 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use aria2_protocol::ftp::connection::percent_decode as urlencoding_decode;
-
 /// FTP download command that handles the complete download lifecycle
 pub struct FtpDownloadCommand {
     pub(super) group: Arc<std::sync::RwLock<RequestGroup>>,
@@ -65,6 +63,15 @@ pub struct FtpDownloadCommand {
     pub(super) file_allocation: String,
     pub(super) secure_falloc: bool,
     pub(super) checkpoint: Option<ProgressCheckpoint>,
+}
+
+pub(super) struct FtpDownloadTarget {
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) username: String,
+    pub(super) password: String,
+    pub(super) remote_path: String,
+    pub(super) secure: bool,
 }
 
 impl FtpDownloadCommand {
@@ -114,10 +121,9 @@ impl FtpDownloadCommand {
             group.recover().mark_in_memory_download();
         }
 
-        let (host, port, username, password, remote_path) = Self::parse_uri(&uri)?;
-        let is_ftps = Self::is_ftps_uri(&uri);
-        let ftps_implicit = is_ftps && port == 990;
-        let ftps_config = is_ftps.then(|| Self::ftps_config(&options));
+        let target = Self::parse_uri(&uri)?;
+        let ftps_implicit = target.secure && target.port == 990;
+        let ftps_config = target.secure.then(|| Self::ftps_config(&options));
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -126,7 +132,7 @@ impl FtpDownloadCommand {
 
         let filename = output_name
             .map(|n| n.to_string())
-            .or_else(|| Self::extract_filename(&remote_path))
+            .or_else(|| Self::extract_filename(&target.remote_path))
             .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
@@ -144,9 +150,9 @@ impl FtpDownloadCommand {
             "FtpDownloadCommand created (shared group): {} -> {} ({}:{}/{}) [resume_offset={}]",
             uri,
             path.display(),
-            host,
-            port,
-            remote_path,
+            target.host,
+            target.port,
+            target.remote_path,
             resume_offset
         );
 
@@ -155,11 +161,11 @@ impl FtpDownloadCommand {
             output_path: path,
             started: false,
             completed_bytes: 0,
-            host,
-            port,
-            remote_path,
-            username,
-            password,
+            host: target.host,
+            port: target.port,
+            remote_path: target.remote_path,
+            username: target.username,
+            password: target.password,
             ftps_config,
             ftps_implicit,
             resume_offset,
@@ -277,11 +283,6 @@ impl FtpDownloadCommand {
         )))
     }
 
-    fn is_ftps_uri(uri: &str) -> bool {
-        uri.get(..7)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftps://"))
-    }
-
     fn ftps_config(options: &DownloadOptions) -> FtpsConfig {
         let min_tls_version = match options
             .min_tls_version
@@ -304,65 +305,26 @@ impl FtpDownloadCommand {
         }
     }
 
-    pub(super) fn parse_uri(uri: &str) -> Result<(String, u16, String, String, String)> {
-        let scheme_len = if uri
-            .get(..6)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftp://"))
-        {
-            6
-        } else if Self::is_ftps_uri(uri) {
-            7
-        } else {
-            return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
+    pub(super) fn parse_uri(uri: &str) -> Result<FtpDownloadTarget> {
+        let parsed = aria2_protocol::ftp::uri::parse_uri(uri).ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::UnsupportedProtocol {
                 protocol: "ftp".into(),
-            }));
-        };
-
-        let without_scheme = &uri[scheme_len..];
-
-        let (auth_host_port, path) = match without_scheme.find('/') {
-            Some(idx) => (&without_scheme[..idx], &without_scheme[idx..]),
-            None => (without_scheme, "/"),
-        };
-
-        let (auth, host_port) = match auth_host_port.rfind('@') {
-            Some(idx) => (&auth_host_port[..idx], &auth_host_port[idx + 1..]),
-            None => ("", auth_host_port),
-        };
-
-        let (username, password) = if auth.is_empty() {
-            (
-                constants::FTP_DEFAULT_USER.to_string(),
-                constants::FTP_DEFAULT_PASSWORD.to_string(),
-            )
-        } else if let Some(colon_pos) = auth.find(':') {
-            (
-                auth[..colon_pos].to_string(),
-                auth[colon_pos + 1..].to_string(),
-            )
-        } else {
-            (auth.to_string(), String::new())
-        };
-
-        let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
-            let (host, suffix) = bracketed
-                .split_once(']')
-                .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("Invalid FTP host".into())))?;
-            let port = suffix
-                .strip_prefix(':')
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(constants::FTP_DEFAULT_PORT);
-            (host.to_string(), port)
-        } else {
-            match host_port.rsplit_once(':') {
-                Some((host, port)) if port.parse::<u16>().is_ok() => {
-                    (host.to_string(), port.parse().unwrap())
-                }
-                _ => (host_port.to_string(), constants::FTP_DEFAULT_PORT),
-            }
-        };
-
-        Ok((host, port, username, password, urlencoding_decode(path)))
+            })
+        })?;
+        let username = parsed
+            .username
+            .unwrap_or_else(|| constants::FTP_DEFAULT_USER.to_string());
+        let password = parsed
+            .password
+            .unwrap_or_else(|| constants::FTP_DEFAULT_PASSWORD.to_string());
+        Ok(FtpDownloadTarget {
+            host: parsed.host,
+            port: parsed.port,
+            username,
+            password,
+            remote_path: parsed.remote_path,
+            secure: parsed.secure,
+        })
     }
 
     /// Extract filename from remote path

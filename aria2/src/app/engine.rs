@@ -7,14 +7,10 @@
 
 use super::App;
 use super::startup::StartupPlan;
-#[cfg(feature = "bittorrent")]
-use aria2_core::config::TrackerCatalogConfig;
-use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 #[cfg(feature = "metalink")]
 use aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup;
-use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
@@ -99,194 +95,10 @@ fn option_snapshot_for_input(
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
-        // `--interface` takes precedence over `--multiple-interface`, as in
-        // aria2_original. Resolve the specification before constructing any
-        // protocol-owned sockets so special BT paths such as LPD use the same
-        // process-wide outbound policy.
-        let outbound_policy_spec = self
-            .get_opt_str("interface")
-            .await
-            .or(self.get_opt_str("multiple-interface").await);
-        let outbound_policy = match outbound_policy_spec {
-            Some(spec) => match OutboundNetworkPolicy::resolve_spec(&spec).await {
-                Ok(policy) => Arc::new(policy),
-                Err(error) => {
-                    tracing::warn!(%error, %spec, "Ignoring invalid network interface configuration");
-                    Arc::new(OutboundNetworkPolicy::direct())
-                }
-            },
-            None => Arc::new(OutboundNetworkPolicy::direct()),
-        };
-
-        #[cfg(feature = "bittorrent")]
-        let mut engine = {
-            let config = self.config.read().await;
-            let sources = match config.get_global_option("bt-tracker-source").await {
-                Some(aria2_core::config::OptionValue::List(values)) => values,
-                Some(aria2_core::config::OptionValue::Str(value)) => value
-                    .split([',', '\n'])
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                _ => Vec::new(),
-            };
-            let update_interval = config
-                .get_global_i64("bt-tracker-update-interval")
-                .await
-                .filter(|seconds| *seconds > 0)
-                .map(|seconds| std::time::Duration::from_secs(seconds as u64))
-                .unwrap_or(
-                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL,
-                );
-            let source_timeout = config
-                .get_global_i64("bt-tracker-source-timeout")
-                .await
-                .and_then(|seconds| u64::try_from(seconds).ok())
-                .filter(|seconds| *seconds > 0)
-                .map(std::time::Duration::from_secs)
-                .unwrap_or(
-                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE_TIMEOUT,
-                );
-            let enabled = config
-                .get_global_bool("enable-public-trackers")
-                .await
-                .unwrap_or(true);
-            let utp_options = aria2_core::config::utp_socket_options_from_values(
-                config.get_global_i64("bt-utp-max-connections").await,
-                config.get_global_i64("bt-utp-connect-timeout").await,
-                config.get_global_i64("bt-utp-idle-timeout").await,
-                config.get_global_i64("bt-utp-keepalive-interval").await,
-            );
-            let lpd_port = config
-                .get_global_i64("lpd-listen-port")
-                .await
-                .and_then(|port| u16::try_from(port).ok())
-                .unwrap_or(aria2_core::constants::LPD_PORT);
-            let lpd_interface = match config.get_global_option("bt-lpd-interface").await {
-                Some(aria2_core::config::OptionValue::Str(value)) if !value.trim().is_empty() => {
-                    match value.parse::<std::net::Ipv4Addr>() {
-                        Ok(interface) => Some(interface),
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                value = %value,
-                                "Ignoring invalid bt-lpd-interface"
-                            );
-                            None
-                        }
-                    }
-                }
-                _ => None,
-            };
-            let lpd_interface = lpd_interface.or_else(|| {
-                outbound_policy
-                    .addresses()
-                    .into_iter()
-                    .find_map(|address| match address {
-                        std::net::IpAddr::V4(address) => Some(address),
-                        std::net::IpAddr::V6(_) => None,
-                    })
-            });
-            let lpd_manager = match aria2_core::engine::bittorrent::discovery::lpd::LpdManager::with_interval_and_interface_and_port(
-                aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
-                lpd_interface,
-                lpd_port,
-            ) {
-                Ok(manager) => Arc::new(manager),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Using default LPD manager because configured LPD setup failed"
-                    );
-                    Arc::new(aria2_core::engine::bittorrent::discovery::lpd::LpdManager::new())
-                }
-            };
-
-            let mut engine = DownloadEngine::with_lpd_manager(lpd_manager);
-            engine.set_utp_socket_options(utp_options);
-            engine.set_public_tracker_config(TrackerCatalogConfig {
-                enabled,
-                sources,
-                update_interval,
-            });
-            engine.set_public_tracker_source_timeout(source_timeout);
-            engine
-        };
-
-        #[cfg(not(feature = "bittorrent"))]
-        let mut engine = DownloadEngine::new();
-
-        #[cfg(feature = "bittorrent")]
-        if let Some(timeout) = self
-            .get_opt_i64("bt-incoming-peer-handshake-timeout")
-            .await
-            .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(std::time::Duration::from_secs)
-        {
-            engine.set_incoming_peer_handshake_timeout(timeout);
-        }
-
-        let global_download_limit = self
-            .get_opt_i64("max-overall-download-limit")
-            .await
-            .and_then(|limit| (limit > 0).then_some(limit as u64));
-        let global_upload_limit = self
-            .get_opt_i64("max-overall-upload-limit")
-            .await
-            .and_then(|limit| (limit > 0).then_some(limit as u64));
-        if global_download_limit.is_some() || global_upload_limit.is_some() {
-            engine.set_global_rate_limiter(aria2_core::rate_limiter::RateLimiterConfig::new(
-                global_download_limit,
-                global_upload_limit,
-            ));
-        }
-
-        engine.set_outbound_network_policy(outbound_policy);
-
-        let dns_timeout = self
-            .get_opt_i64("dns-timeout")
-            .await
-            .filter(|value| *value > 0)
-            .map(|value| std::time::Duration::from_secs(value as u64))
-            .unwrap_or_else(|| std::time::Duration::from_secs(30));
-        let dns_servers = self
-            .get_opt_str("async-dns-server")
-            .await
-            .and_then(|value| match DnsCache::parse_dns_server_list(&value) {
-                Ok(servers) => Some(servers),
-                Err(error) => {
-                    tracing::warn!(%error, "Ignoring invalid async-dns-server configuration");
-                    None
-                }
-            });
-        engine.set_dns_config(dns_timeout, dns_servers);
-
-        let server_stat_timeout = self
-            .get_opt_i64("server-stat-timeout")
-            .await
-            .filter(|value| *value >= 0)
-            .map(|value| value as u64)
-            .unwrap_or(24 * 60 * 60);
-        let server_stat_input = self
-            .get_opt_str("server-stat-if")
-            .await
-            .map(std::path::PathBuf::from);
-        let server_stat_output = self
-            .get_opt_str("server-stat-of")
-            .await
-            .map(std::path::PathBuf::from);
-        let server_stat_interval = self
-            .get_opt_i64("save-server-stat-interval")
-            .await
-            .filter(|value| *value > 0)
-            .map(|value| std::time::Duration::from_secs(value as u64));
-        engine.set_server_stat_timeout(server_stat_timeout);
-        engine.set_server_stat_persistence(
-            server_stat_input,
-            server_stat_output,
-            server_stat_interval,
-        );
+        let process_options = self.global_option_values().await;
+        let mut engine =
+            DownloadEngine::from_process_options(&process_options, Arc::clone(&self.request_man))
+                .await;
 
         let save_session_path = self
             .get_opt_str("save-session")
@@ -308,7 +120,6 @@ impl App {
             .and_then(|v| (v > 0).then_some(std::time::Duration::from_secs(v as u64)));
 
         engine.set_auto_save_interval(auto_save_interval);
-        engine.set_request_group_man(self.request_man.clone());
         if let Some(path) = save_session_path {
             engine.set_save_session(path, save_session_interval, self.request_man.clone());
         }

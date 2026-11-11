@@ -57,7 +57,7 @@ fn render_torrent(torrent: &aria2_protocol::bittorrent::torrent::parser::Torrent
         writeln!(
             output,
             "Creation Date: {}",
-            aria2_core::http::cookie::parsing::format_http_date(creation_date)
+            aria2_protocol::http::cookie::parsing::format_http_date(creation_date)
         )
         .unwrap();
     }

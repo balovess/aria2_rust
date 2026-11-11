@@ -463,6 +463,17 @@ impl SftpPacket {
             SSH_FXP_NAME => {
                 let request_id = read_u32(&mut cursor)?;
                 let count = read_u32(&mut cursor)? as usize;
+                // Each entry requires two string length fields and the attrs
+                // flags word, even when both strings and all attributes are
+                // empty. Reject impossible counts before reserving memory.
+                const MIN_ENCODED_NAME_ENTRY_LEN: usize = 12;
+                let remaining = payload.len().saturating_sub(cursor.position() as usize);
+                if count > remaining / MIN_ENCODED_NAME_ENTRY_LEN {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "SFTP NAME entry count exceeds packet payload",
+                    ));
+                }
                 let mut entries = Vec::with_capacity(count);
                 for _ in 0..count {
                     let filename = read_string(&mut cursor)?;

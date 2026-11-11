@@ -8,6 +8,7 @@ use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+use url::Url;
 
 /// Inputs encoded into a WebTorrent-compatible announce JSON message.
 pub struct WebSocketAnnounceRequest<'a> {
@@ -91,6 +92,33 @@ enum CompactPeerFamily {
     V6,
 }
 
+/// Parse and validate a WebSocket tracker URL before the caller establishes
+/// its policy-controlled socket.
+///
+/// The protocol layer owns the accepted URL schemes and required authority
+/// fields. Callers retain DNS, proxy, socket, and outbound-address policy.
+pub fn parse_tracker_url(tracker_url: &str) -> Result<Url, WebSocketAnnounceError> {
+    let url = Url::parse(tracker_url)
+        .map_err(|error| WebSocketAnnounceError::InvalidRequest(error.to_string()))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(WebSocketAnnounceError::InvalidRequest(format!(
+            "unsupported WebSocket tracker scheme '{}'",
+            url.scheme()
+        )));
+    }
+    if url.host_str().is_none() {
+        return Err(WebSocketAnnounceError::InvalidRequest(
+            "WebSocket tracker URL has no host".to_owned(),
+        ));
+    }
+    if url.port_or_known_default().is_none() {
+        return Err(WebSocketAnnounceError::InvalidRequest(
+            "WebSocket tracker URL has no port".to_owned(),
+        ));
+    }
+    Ok(url)
+}
+
 /// Perform a WebSocket tracker announce over a stream established by the caller.
 ///
 /// The caller owns DNS, socket selection, proxying, and outbound-address policy;
@@ -106,7 +134,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let tracker_url = parse_tracker_url(tracker_url)?;
     let ws_request = tracker_url
+        .as_str()
         .into_client_request()
         .map_err(|error| WebSocketAnnounceError::InvalidRequest(error.to_string()))?;
     let (mut websocket, _) = tokio::time::timeout(
@@ -362,6 +392,17 @@ fn binary_string(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_only_websocket_tracker_urls_with_an_authority() {
+        let url = parse_tracker_url("wss://tracker.example/announce").unwrap();
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.host_str(), Some("tracker.example"));
+        assert_eq!(url.port_or_known_default(), Some(443));
+
+        assert!(parse_tracker_url("https://tracker.example/announce").is_err());
+        assert!(parse_tracker_url("ws://").is_err());
+    }
 
     #[test]
     fn encodes_announce_fields_and_omits_empty_event() {

@@ -25,6 +25,21 @@ struct SourceState {
     failures: AtomicU32,
 }
 
+struct InFlightConnectionGuard<'a>(&'a AtomicUsize);
+
+impl InFlightConnectionGuard<'_> {
+    fn new(in_flight: &AtomicUsize) -> InFlightConnectionGuard<'_> {
+        in_flight.fetch_add(1, Ordering::Relaxed);
+        InFlightConnectionGuard(in_flight)
+    }
+}
+
+impl Drop for InFlightConnectionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl SourceState {
     fn new(address: IpAddr) -> Self {
         Self {
@@ -213,9 +228,9 @@ impl OutboundNetworkPolicy {
             return Err(family_mismatch(remote));
         };
 
-        source.in_flight.fetch_add(1, Ordering::Relaxed);
+        let in_flight_guard = InFlightConnectionGuard::new(&source.in_flight);
         let result = connect_from(source.address, remote).await;
-        source.in_flight.fetch_sub(1, Ordering::Relaxed);
+        drop(in_flight_guard);
         let failed = result.is_err();
         let mut failures = source.failures.load(Ordering::Relaxed);
         loop {
@@ -479,5 +494,15 @@ mod tests {
             policy.source_for("127.0.0.1:1".parse().unwrap()).unwrap(),
             Some(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)))
         );
+    }
+
+    #[test]
+    fn cancelled_connection_releases_its_in_flight_source_slot() {
+        let policy = OutboundNetworkPolicy::single(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        {
+            let _guard = InFlightConnectionGuard::new(&policy.sources[0].in_flight);
+            assert_eq!(policy.sources[0].in_flight.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(policy.sources[0].in_flight.load(Ordering::Relaxed), 0);
     }
 }

@@ -7,8 +7,8 @@
 
 use tracing::debug;
 
-use crate::http::content_disposition::parse_content_disposition_with_default_utf8;
 use crate::http::header_processor::HttpResponseHead;
+use aria2_protocol::http::content_disposition::parse_content_disposition_with_default_utf8;
 
 /// Determine the output filename from response metadata or the effective URL.
 ///
@@ -66,7 +66,7 @@ pub(crate) fn determine_filename_from_response(
             ))
         })
         .collect();
-    let head = HttpResponseHead::new(
+    let head = HttpResponseHead::from_parts(
         format!("{:?}", response.version()),
         response.status().as_u16(),
         response

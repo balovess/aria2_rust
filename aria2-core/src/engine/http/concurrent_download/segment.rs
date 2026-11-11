@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use crate::constants;
 use crate::engine::concurrent_segment_manager::SegmentStatus;
-use crate::engine::http::request_executor::HttpSegmentRequest;
 use crate::engine::http::segment_downloader::{
     SegmentProgress, SegmentProgressTracker, WriteChunk,
 };
@@ -17,22 +16,23 @@ use crate::engine::work_scheduler::{
     RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduleError, WorkScheduler,
 };
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::in_flight::InFlightProgress;
-use super::range_size_limit::lower_rejected_range_size_limit;
 use super::slow_range::SlowRangeRecovery;
 use super::{ConcurrentDownloadResult, ConcurrentDownloader};
 
+mod admission;
 mod cancel;
+mod completion;
 mod executor;
 mod finalize;
 mod io;
 mod output;
 mod plan;
 mod resume;
+mod stall;
 
 use super::range_commit::{HttpRangeCommitOptions, write_http_range_chunk};
 pub(super) use cancel::cancel_and_persist;
@@ -40,6 +40,14 @@ pub(super) use cancel::cancel_and_persist;
 /// How long 429/503 answers may go on with no range finishing before the
 /// download fails.
 const CAPACITY_GIVE_UP: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Copy)]
+struct ActiveSegment {
+    offset: u64,
+    length: u64,
+    started_at: std::time::Instant,
+    task_id: u64,
+}
 
 fn work_scheduler_error(context: &str, error: WorkScheduleError) -> Aria2Error {
     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -88,8 +96,6 @@ pub async fn execute(
 
     let mut consecutive_416_count = 0u32;
     let mut total_416_count = 0u32;
-    let fallback_threshold_consecutive = 3u32;
-    let fallback_threshold_ratio = 0.2f64;
     let mut should_fallback = false;
 
     let cookie_hdr = dl.cookie_helper.build_cookie_header(uri);
@@ -122,7 +128,7 @@ pub async fn execute(
     let initial_completed = completed_bytes;
     let mut ctrl_bytes_since_save = 0;
 
-    let mut active_segs: HashMap<u32, (u64, u64, std::time::Instant, u64)> = HashMap::new();
+    let mut active_segments: HashMap<u32, ActiveSegment> = HashMap::new();
     let progress_tracker = SegmentProgressTracker::new(initial_completed, Arc::clone(&dl.progress));
     let mut segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();
     let mut active_work: HashMap<u32, WorkLease<u32>> = HashMap::new();
@@ -188,84 +194,24 @@ pub async fn execute(
             return Err(e);
         }
 
-        executor::update_capacity(
-            &mut executor,
-            &mut adaptive,
-            &authority_key,
+        admission::admit_pending_ranges(admission::Admission {
+            uri,
+            total_length,
             split,
-            manager.is_complete(),
-        );
-
-        while adaptive.can_start(
-            executor.in_flight_for(&authority_key),
-            executor.is_http2(&authority_key),
-        ) {
-            let Some(lease) = work_queue.admit_one(split, std::time::Instant::now()) else {
-                break;
-            };
-            let seg_idx = *lease.payload();
-            match manager.next_pending_range_for_segment(0, seg_idx, range_size_limit) {
-                Some((_, offset, length)) => {
-                    let progress = progress_tracker.new_segment();
-                    segment_progress.insert(seg_idx, Arc::clone(&progress));
-                    active_segs.insert(seg_idx, (offset, length, std::time::Instant::now(), 0));
-                    let submitted = executor.try_submit(HttpSegmentRequest {
-                        segment_index: seg_idx,
-                        authority_key: authority_key.clone(),
-                        url: uri.to_string(),
-                        offset,
-                        length,
-                        range_size_limit,
-                        cookie_header: cookie_hdr.clone(),
-                        progress,
-                        write_tx: write_tx.clone(),
-                        expected_entity_length: total_length,
-                    });
-                    let Some(task_id) = submitted else {
-                        active_segs.remove(&seg_idx);
-                        segment_progress.remove(&seg_idx);
-                        manager.requeue_segment(seg_idx);
-                        work_queue.requeue_unstarted(lease).map_err(|error| {
-                            work_scheduler_error("requeue an unstarted range", error)
-                        })?;
-                        break;
-                    };
-                    if let Some(active) = active_segs.get_mut(&seg_idx) {
-                        active.3 = task_id;
-                    }
-                    adaptive.record_request_start(executor.is_http2(&authority_key));
-                    active_work.insert(seg_idx, lease);
-                    connection_guard.set(executor.in_flight());
-                    let counts = executor.active_connection_counts();
-                    connection_guard.set_http_counts(
-                        counts.http1_connections,
-                        counts.http2_sessions,
-                        counts.http2_streams,
-                    );
-                    tracing::debug!(
-                        seg_idx = seg_idx,
-                        task_id,
-                        offset = offset,
-                        length = length,
-                        "Submitted segment to HTTP connection pool"
-                    );
-                }
-                None => match manager.segment_status(seg_idx as usize) {
-                    Some(SegmentStatus::Done | SegmentStatus::Failed) => {
-                        work_queue.complete(lease).map_err(|error| {
-                            work_scheduler_error("complete a terminal range", error)
-                        })?;
-                        continue;
-                    }
-                    _ => {
-                        work_queue.requeue_unstarted(lease).map_err(|error| {
-                            work_scheduler_error("requeue a blocked range", error)
-                        })?;
-                        break;
-                    }
-                },
-            }
-        }
+            authority_key: &authority_key,
+            cookie_header: &cookie_hdr,
+            range_size_limit,
+            executor: &mut executor,
+            adaptive: &mut adaptive,
+            manager: &mut manager,
+            progress_tracker: &progress_tracker,
+            segment_progress: &mut segment_progress,
+            active_segments: &mut active_segments,
+            active_work: &mut active_work,
+            work_queue: &mut work_queue,
+            write_tx: &write_tx,
+            connection_guard: &connection_guard,
+        })?;
 
         if executor.in_flight() == 0 {
             // Drain any remaining write chunks before checking completion
@@ -321,10 +267,10 @@ pub async fn execute(
                 total_bytes = total_length,
                 pending_segments = manager.has_pending_segments(),
                 failed_segments = manager.has_failed_segments(),
-                tracked_active_segments = ?active_segs.keys().collect::<Vec<_>>(),
-                tracked_active_requests = ?active_segs
+                tracked_active_segments = ?active_segments.keys().collect::<Vec<_>>(),
+                tracked_active_requests = ?active_segments
                     .iter()
-                    .map(|(segment_index, (offset, _, _, task_id))| (*segment_index, *offset, *task_id))
+                    .map(|(segment_index, active)| (*segment_index, active.offset, active.task_id))
                     .collect::<Vec<_>>(),
                 finished_executor_tasks = ?executor.finished_tasks(),
                 incomplete_segments = ?incomplete_segments,
@@ -362,45 +308,33 @@ pub async fn execute(
         // Use tokio::select! to drain writes concurrently while waiting
         // for segment completions — prevents chunks from piling up in the
         // channel while other segments are still downloading.
-        tokio::select! {
+        let completion_action = tokio::select! {
             // A segment completed
             Some(pool_result) = executor.next_result() => {
                 executor.reap_task(pool_result.task_id).await;
-                connection_guard.set(executor.in_flight());
-                let counts = executor.active_connection_counts();
-                connection_guard.set_http_counts(
-                    counts.http1_connections,
-                    counts.http2_sessions,
-                    counts.http2_streams,
-                );
+                executor::update_connection_snapshot(&executor, &connection_guard);
                 let seg_idx = pool_result.segment_index;
-                let Some((_, _, _segment_started_at, active_task_id)) =
-                    active_segs.get(&seg_idx).copied()
+                let Some(active_segment) = active_segments.get(&seg_idx).copied()
                 else {
                     tracing::warn!(
                         segment_index = seg_idx,
                         result_task_id = pool_result.task_id,
                         in_flight = executor.in_flight_for(&authority_key),
-                        tracked_active_segments = ?active_segs.keys().collect::<Vec<_>>(),
+                        tracked_active_segments = ?active_segments.keys().collect::<Vec<_>>(),
                         "Received HTTP Range completion for an untracked segment"
                     );
                     continue;
                 };
-                if active_task_id != pool_result.task_id {
+                if active_segment.task_id != pool_result.task_id {
                     tracing::warn!(
                         segment_index = seg_idx,
-                        active_task_id,
+                        active_task_id = active_segment.task_id,
                         result_task_id = pool_result.task_id,
                         "Received HTTP Range completion for a replaced task"
                     );
                     continue;
                 }
-                let result = pool_result.result;
-                let peer_addr = pool_result.peer_addr;
-                let rejected_range_size_limit = pool_result.range_size_limit;
-                let explicit_range_size_rejection = pool_result.range_size_rejected;
-                let retry_after = pool_result.retry_after;
-                if let Some(peer_addr) = peer_addr
+                if let Some(peer_addr) = pool_result.peer_addr
                     && let Ok(url) = reqwest::Url::parse(uri)
                         && let Some(host) = url.host_str()
                     {
@@ -412,7 +346,7 @@ pub async fn execute(
                             ),
                         );
                     }
-                // Drain writes again after a segment completes
+                // Drain committed bytes before reconciling the completed range.
                 io::drain_write_chunks(
                     dl,
                     &mut write_rx,
@@ -427,298 +361,57 @@ pub async fn execute(
                 )
                 .await?;
 
-                let active_segment = active_segs.remove(&seg_idx);
+                let active_segment = active_segments.remove(&seg_idx).ok_or_else(|| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "HTTP work scheduler lost the active range {seg_idx}"
+                    )))
+                })?;
                 let work_lease = active_work.remove(&seg_idx).ok_or_else(|| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "HTTP work scheduler lost the active lease for range {seg_idx}"
                     )))
                 })?;
-
-                // The request has emitted its completion only after all
-                // progress writes, so the atomic segment handle is already
-                // fully reconciled here.
-                let segment_progress_for_result = segment_progress.remove(&seg_idx);
-
-                match result {
-                    Ok(total_written) => {
-                        last_range_finished = std::time::Instant::now();
-                        adaptive.record_success(executor.is_http2(&authority_key));
-                        if let Some((_, _, started_at, _)) = active_segment {
-                            slow_range_recovery.record_success(
-                                &authority_key,
-                                total_written,
-                                started_at.elapsed(),
-                            );
-                        }
-                        let Some(parent_complete) = manager.complete_range(seg_idx, total_written)
-                        else {
-                            return Err(Aria2Error::Fatal(
-                                crate::error::FatalError::Config(format!(
-                                    "HTTP segment scheduler rejected completed range for parent {seg_idx}"
-                                )),
-                            ));
-                        };
-                        let mut payload_synced = false;
-                        if parent_complete {
-                            writer.sync_all().await.map_err(|error| {
-                                Aria2Error::FileIo(format!(
-                                    "Failed to durably sync completed HTTP range: {error}"
-                                ))
-                            })?;
-                            payload_synced = true;
-                        }
-                        completed_bytes += total_written;
-
-                        // ADR-0001: Update control file with segment progress.
-                        // Mark the piece done and periodically save to disk.
-                        if let Some(ref mut cf) = ctrl_file {
-                            if parent_complete {
-                                cf.mark_piece_done(seg_idx as usize);
-                            }
-                            ctrl_bytes_since_save += total_written;
-                            if ctrl_bytes_since_save >= ctrl_save_interval {
-                                if !payload_synced {
-                                    writer.sync_all().await.map_err(|error| {
-                                        Aria2Error::FileIo(format!(
-                                            "Failed to durably sync HTTP range checkpoint payload: {error}"
-                                        ))
-                                    })?;
-                                }
-                                cf.set_in_flight_pieces(in_flight_progress.snapshot(cf.bitfield()));
-                                cf.update_completed_length(completed_bytes);
-                                if let Err(e) = cf.save().await {
-                                    tracing::warn!("Control file save failed: {}", e);
-                                }
-                                ctrl_bytes_since_save = 0;
-                            }
-                        }
-                        if parent_complete {
-                            work_queue
-                                .complete(work_lease)
-                                .map_err(|error| work_scheduler_error("complete a range", error))?;
-                        } else {
-                            work_queue
-                                .reschedule_after_success(work_lease)
-                                .map_err(|error| work_scheduler_error("reschedule a partial range", error))?;
-                        }
-                        // Use the atomic total for progress updates so that
-                        // in-flight progress from concurrent segments is not
-                        // overwritten by the committed-only value.
-                        let display_total = progress_tracker.total();
-
-                        dl.progress_updater
-                            .update_progress_without_speed(
-                                display_total,
-                                constants::PROGRESS_UPDATE_BYTES as u64,
-                                constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
-                            )
-                            .await;
-                        super::flush_requested_control_file(
-                            dl,
-                            &mut writer,
-                            &mut ctrl_file,
-                            completed_bytes,
-                            Some(&in_flight_progress),
-                        )
-                        .await?;
-                    }
-                    Err(e) => {
-                        if let Some(progress) = segment_progress_for_result {
-                            progress.rollback();
-                        }
-                        let e = if matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-                        ) {
-                            dl.group.recover().file_not_found_error()
-                        } else {
-                            e
-                        };
-                        tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
-                        let is_http2 = executor.is_http2(&authority_key);
-                        let is_capacity_limited = super::is_capacity_limited_error(&e);
-                        if !is_capacity_limited {
-                            adaptive.record_failure(is_http2);
-                        }
-                        let current_limit_rejected = explicit_range_size_rejection
-                            && rejected_range_size_limit >= range_size_limit;
-                        let rejection_is_from_an_older_limit =
-                            rejected_range_size_limit > range_size_limit;
-                        let reduced_limit = if current_limit_rejected
-                            && rejected_range_size_limit == range_size_limit
-                        {
-                            lower_rejected_range_size_limit(
-                                range_size_limit,
-                                rejected_range_size_limit,
-                                minimum_range_size_limit,
-                            )
-                        } else {
-                            None
-                        };
-                        if let Some(next_limit) = reduced_limit {
-                            range_size_limit = next_limit;
-                            tracing::warn!(
-                                authority = %authority_key,
-                                previous_range_size_limit = rejected_range_size_limit,
-                                range_size_limit,
-                                fixed_piece_size = piece_length,
-                                "Reduced HTTP Range size limit after explicit server rejection"
-                            );
-                        }
-                        let range_size_rejection_handled = current_limit_rejected
-                            && (reduced_limit.is_some() || rejection_is_from_an_older_limit);
-                        if range_size_rejection_handled {
-                            if !manager.requeue_segment(seg_idx) {
-                                return Err(Aria2Error::Fatal(
-                                    crate::error::FatalError::Config(format!(
-                                        "HTTP segment scheduler could not requeue size-rejected parent {seg_idx}"
-                                    )),
-                                ));
-                            }
-                            work_queue
-                                .retry_without_consuming_attempt(work_lease)
-                                .map_err(|error| work_scheduler_error("retry a smaller range", error))?;
-                            consecutive_416_count = 0;
-                        } else {
-                        let is_file_not_found = matches!(
-                            &e,
-                            Aria2Error::Recoverable(
-                                RecoverableError::ResourceNotFound
-                                    | RecoverableError::MaxFileNotFound
-                            )
-                        );
-                        let file_not_found_retry_allowed = !matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                        ) && dl.group.recover().can_retry_file_not_found();
-                        if is_file_not_found && !file_not_found_retry_allowed {
-                            fail_work(&mut work_queue, work_lease, None)?;
-                            work_queue.cancel();
-                            cancel_and_persist(
-                                dl,
-                                executor,
-                                &mut write_rx,
-                                &mut writer,
-                                limiter.as_ref(),
-                                &mut ctrl_file,
-                                completed_bytes,
-                                Some(&mut in_flight_progress),
-                            )
-                            .await?;
-                            return Err(e);
-                        }
-                        if is_capacity_limited {
-                            // 429/503: the server wants fewer connections or a
-                            // pause, not a failed download. Let ranges already
-                            // in flight continue, reduce concurrency gradually,
-                            // and retry this range without using its retries.
-                            let wait =
-                                adaptive.record_capacity_rejection(is_http2, retry_after);
-                            tracing::warn!(
-                                seg_idx,
-                                target_connections = adaptive.connection_target(is_http2),
-                                wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
-                                "Server limited HTTP Range requests; backing off"
-                            );
-                            // Enforce max-retries for consecutive capacity
-                            // rejection episodes even when earlier ranges in
-                            // this resumed attempt already completed.
-                            let gave_up = last_range_finished.elapsed() >= CAPACITY_GIVE_UP
-                                || (options.max_retries != 0
-                                    && adaptive.backoff_steps() > options.max_retries);
-                            if gave_up {
-                                fail_work(&mut work_queue, work_lease, None)?;
-                                work_queue.cancel();
-                                cancel_and_persist(
-                                    dl,
-                                    executor,
-                                    &mut write_rx,
-                                    &mut writer,
-                                    limiter.as_ref(),
-                                    &mut ctrl_file,
-                                    completed_bytes,
-                                    Some(&mut in_flight_progress),
-                                )
-                                .await?;
-                                return Err(e);
-                            }
-                            if !manager.requeue_segment(seg_idx) {
-                                return Err(Aria2Error::Fatal(
-                                    crate::error::FatalError::Config(format!(
-                                        "HTTP segment scheduler could not requeue rate-limited parent {seg_idx}"
-                                    )),
-                                ));
-                            }
-                            work_queue
-                                .retry_without_consuming_attempt(work_lease)
-                                .map_err(|error| work_scheduler_error("retry a rate-limited range", error))?;
-                            consecutive_416_count = 0;
-                            continue;
-                        }
-                        let is_416 = matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. })
-                        );
-                        if is_416 {
-                            consecutive_416_count += 1;
-                            total_416_count += 1;
-                            tracing::warn!(
-                                seg_idx = seg_idx,
-                                consecutive_416 = consecutive_416_count,
-                                total_416 = total_416_count,
-                                "RangeNotSatisfiable (416) detected"
-                            );
-                            let failure_ratio = total_416_count as f64 / split as f64;
-                            let threshold_exceeded = consecutive_416_count
-                                >= fallback_threshold_consecutive
-                                || failure_ratio >= fallback_threshold_ratio;
-                            if threshold_exceeded {
-                                tracing::warn!(
-                                    uri = uri,
-                                    consecutive_416 = consecutive_416_count,
-                                    failure_ratio = failure_ratio,
-                                    "Fallback to sequential mode triggered due to RangeNotSatisfiable errors"
-                                );
-                                should_fallback = true;
-                                fail_work(&mut work_queue, work_lease, None)?;
-                                work_queue.cancel();
-                                break;
-                            }
-                        } else {
-                            consecutive_416_count = 0;
-                        }
-                        let retry_count = work_lease.attempt().saturating_sub(1);
-                        let retry_allowed = super::should_retry_segment(
-                            &retry_policy,
-                            retry_count,
-                            &e,
-                            file_not_found_retry_allowed,
-                        );
-                        if !retry_allowed {
-                            fail_work(&mut work_queue, work_lease, None)?;
-                            work_queue.cancel();
-                            cancel_and_persist(
-                                dl,
-                                executor,
-                                &mut write_rx,
-                                &mut writer,
-                                limiter.as_ref(),
-                                &mut ctrl_file,
-                                completed_bytes,
-                                Some(&mut in_flight_progress),
-                            )
-                            .await?;
-                            return Err(e);
-                        }
-                        manager.fail_segment(seg_idx);
-                        let _ = fail_work(
-                            &mut work_queue,
-                            work_lease,
-                            Some(std::time::Instant::now()),
-                        )?;
-                        }
-                    }
-                }
+                let segment_progress = segment_progress.remove(&seg_idx);
+                let action = completion::handle(
+                    completion::CompletionState {
+                        downloader: dl,
+                        uri,
+                        authority_key: &authority_key,
+                        split,
+                        piece_length,
+                        range_size_limit: &mut range_size_limit,
+                        minimum_range_size_limit,
+                        max_retries: options.max_retries,
+                        retry_policy: &retry_policy,
+                        adaptive: &mut adaptive,
+                        manager: &mut manager,
+                        work_queue: &mut work_queue,
+                        slow_range_recovery: &mut slow_range_recovery,
+                        last_range_finished: &mut last_range_finished,
+                        consecutive_416_count: &mut consecutive_416_count,
+                        total_416_count: &mut total_416_count,
+                        writer: &mut writer,
+                        ctrl_file: &mut ctrl_file,
+                        ctrl_save_interval,
+                        ctrl_bytes_since_save: &mut ctrl_bytes_since_save,
+                        completed_bytes: &mut completed_bytes,
+                        in_flight_progress: &mut in_flight_progress,
+                        progress_tracker: &progress_tracker,
+                    },
+                    completion::CompletionData {
+                        segment_index: seg_idx,
+                        result: pool_result.result,
+                        active_segment,
+                        work_lease,
+                        segment_progress,
+                        rejected_range_size_limit: pool_result.range_size_limit,
+                        explicit_range_size_rejection: pool_result.range_size_rejected,
+                        retry_after: pool_result.retry_after,
+                        is_http2: executor.is_http2(&authority_key),
+                    },
+                )
+                .await?;
+                Some(action)
             }
             // A write chunk arrived while segments are still running
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
@@ -736,6 +429,7 @@ pub async fn execute(
                     WriteChunk { offset, data },
                 )
                 .await?;
+                None
             }
             // Lifecycle changes wake the loop immediately, even when segment
             // futures are blocked on slow network reads.
@@ -762,109 +456,47 @@ pub async fn execute(
                     .await?;
                     return Err(e);
                 }
+                None
             }
             _ = stall_check.tick() => {
-                progress_tracker.refresh_speed();
-                let stalled_segment = active_segs.keys().find_map(|seg_idx| {
-                    segment_progress
-                        .get(seg_idx)
-                        .filter(|progress| progress.is_stalled(segment_stall_timeout))
-                        .map(|_| *seg_idx)
-                });
-                if let Some(seg_idx) = stalled_segment
-                    && executor.abort_segment(seg_idx).await
-                {
-                    connection_guard.set(executor.in_flight());
-                    let counts = executor.active_connection_counts();
-                    connection_guard.set_http_counts(
-                        counts.http1_connections,
-                        counts.http2_sessions,
-                        counts.http2_streams,
-                    );
-                    active_segs.remove(&seg_idx);
-                    let lease = active_work.remove(&seg_idx).ok_or_else(|| {
-                        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                            "HTTP work scheduler lost the stalled range lease {seg_idx}"
-                        )))
-                    })?;
-                    let last_throughput_bps = if let Some(progress) = segment_progress.remove(&seg_idx) {
-                        let throughput = progress.recent_throughput_bps();
-                        progress.rollback();
-                        throughput
-                    } else {
-                        0
-                    };
-                    manager.fail_segment(seg_idx);
-                    let _ = fail_work(
-                        &mut work_queue,
-                        lease,
-                        Some(std::time::Instant::now()),
-                    )?;
-                    tracing::warn!(
-                        seg_idx,
-                        stall_timeout_secs = segment_stall_timeout.as_secs(),
-                        last_throughput_bps,
-                        "Reclaimed fully stalled HTTP Range request"
-                    );
-                } else {
-                    let slow_outlier = active_segs.iter().find_map(
-                        |(seg_idx, (_, length, started_at, _))| {
-                            let progress = segment_progress.get(seg_idx)?;
-                            slow_range_recovery
-                                .slow_outlier(
-                                    &authority_key,
-                                    *seg_idx,
-                                    progress.downloaded_bytes(),
-                                    progress.recent_throughput_bps(),
-                                    *length,
-                                    started_at.elapsed(),
-                                )
-                                .map(|observation| (*seg_idx, observation))
-                        },
-                    );
-                    if let Some((seg_idx, observation)) = slow_outlier
-                        && executor.abort_segment(seg_idx).await
-                    {
-                        connection_guard.set(executor.in_flight());
-                        let counts = executor.active_connection_counts();
-                        connection_guard.set_http_counts(
-                            counts.http1_connections,
-                            counts.http2_sessions,
-                            counts.http2_streams,
-                        );
-                        active_segs.remove(&seg_idx);
-                        let lease = active_work.remove(&seg_idx).ok_or_else(|| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "HTTP work scheduler lost the slow range lease {seg_idx}"
-                            )))
-                        })?;
-                        if let Some(progress) = segment_progress.remove(&seg_idx) {
-                            progress.rollback();
-                        }
-                        if manager.requeue_segment(seg_idx) {
-                            work_queue
-                                .retry_without_consuming_attempt(lease)
-                                .map_err(|error| work_scheduler_error("retry a slow range", error))?;
-                            slow_range_recovery.mark_recovered(seg_idx);
-                            tracing::warn!(
-                                seg_idx,
-                                goodput_bps = observation.goodput_bps,
-                                reference_goodput_bps = observation.reference_goodput_bps,
-                                estimated_remaining_ms = observation.estimated_remaining.as_millis(),
-                                estimated_retry_ms = observation.estimated_retry.as_millis(),
-                                downloaded_bytes = observation.downloaded_bytes,
-                                range_length = observation.range_length,
-                                "Requeued slow HTTP Range outlier once"
-                            );
-                        } else {
-                            manager.fail_segment(seg_idx);
-                            fail_work(&mut work_queue, lease, None)?;
-                            tracing::warn!(
-                                seg_idx,
-                                "Slow HTTP Range recovery could not requeue its active segment"
-                            );
-                        }
-                    }
+                stall::handle_tick(stall::StallTick {
+                    executor: &mut executor,
+                    connection_guard: &connection_guard,
+                    authority_key: &authority_key,
+                    progress_tracker: &progress_tracker,
+                    segment_progress: &mut segment_progress,
+                    active_segments: &mut active_segments,
+                    active_work: &mut active_work,
+                    manager: &mut manager,
+                    work_queue: &mut work_queue,
+                    slow_range_recovery: &mut slow_range_recovery,
+                    stall_timeout: segment_stall_timeout,
+                })
+                .await?;
+                None
+            }
+        };
+
+        if let Some(action) = completion_action {
+            match action {
+                completion::CompletionAction::Continue => {}
+                completion::CompletionAction::Fallback => {
+                    should_fallback = true;
+                    break;
+                }
+                completion::CompletionAction::Abort(error) => {
+                    cancel_and_persist(
+                        dl,
+                        executor,
+                        &mut write_rx,
+                        &mut writer,
+                        limiter.as_ref(),
+                        &mut ctrl_file,
+                        completed_bytes,
+                        Some(&mut in_flight_progress),
+                    )
+                    .await?;
+                    return Err(error);
                 }
             }
         }

@@ -8,14 +8,13 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 use tracing::debug;
 
 use super::control_io::{
-    FtpControlReadError, FtpControlWriteError, read_control_line, write_control_command,
+    BoundedControlReadError, FtpControlReadError, FtpControlWriteError, MAX_RESPONSE_BYTES,
+    read_control_line_bounded, write_control_command,
 };
 use super::parsing::{
     cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
     parse_pwd_response, parse_size_response, split_decoded_remote_path,
 };
-
-const MAX_RESPONSE_BYTES: usize = 65_536;
 
 #[derive(Debug)]
 pub enum FtpControlSessionError {
@@ -250,12 +249,14 @@ where
         &mut self,
         timeout: Duration,
     ) -> Result<u16, FtpControlSessionError> {
-        if let Ok(response) = self.command("EPSV", timeout).await {
-            if response.code == 229 {
-                if let Some(port) = parse_epsv_response(&response.message) {
-                    return Ok(port);
-                }
-            }
+        if let Some(port) = self
+            .command("EPSV", timeout)
+            .await
+            .ok()
+            .filter(|response| response.code == 229)
+            .and_then(|response| parse_epsv_response(&response.message))
+        {
+            return Ok(port);
         }
         let response = self.command("PASV", timeout).await?;
         if response.code != 227 {
@@ -367,21 +368,22 @@ where
 
     loop {
         line.clear();
-        let bytes_read = read_control_line(reader, &mut line, timeout)
+        let remaining = MAX_RESPONSE_BYTES.saturating_sub(total_bytes);
+        let bytes_read = read_control_line_bounded(reader, &mut line, timeout, remaining)
             .await
             .map_err(|error| match error {
-                FtpControlReadError::Timeout => FtpControlSessionError::ReadTimeout(timeout),
-                FtpControlReadError::Io(error) => {
+                BoundedControlReadError::Timeout => FtpControlSessionError::ReadTimeout(timeout),
+                BoundedControlReadError::Io(error) => {
                     FtpControlSessionError::Read(FtpControlReadError::Io(error))
+                }
+                BoundedControlReadError::TooLarge(bytes) => {
+                    FtpControlSessionError::ResponseTooLarge(total_bytes + bytes)
                 }
             })?;
         if bytes_read == 0 || !line.ends_with("\r\n") {
             return Err(FtpControlSessionError::IncompleteResponse);
         }
         total_bytes += bytes_read;
-        if total_bytes > MAX_RESPONSE_BYTES {
-            return Err(FtpControlSessionError::ResponseTooLarge(total_bytes));
-        }
 
         let line = &line[..line.len() - 2];
         if code.is_none() {
@@ -456,6 +458,19 @@ mod tests {
         assert!(matches!(
             read_response(&mut incomplete, Duration::from_secs(1)).await,
             Err(FtpControlSessionError::IncompleteResponse)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_single_response_line_over_the_size_limit() {
+        let mut bytes = b"220 ".to_vec();
+        bytes.extend(std::iter::repeat_n(b'x', MAX_RESPONSE_BYTES));
+        bytes.extend_from_slice(b"\r\n");
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+
+        assert!(matches!(
+            read_response(&mut reader, Duration::from_secs(1)).await,
+            Err(FtpControlSessionError::ResponseTooLarge(_))
         ));
     }
 

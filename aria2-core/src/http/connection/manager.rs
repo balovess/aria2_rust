@@ -17,7 +17,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use url::Url;
 
-use aria2_protocol::http::response::is_redirect_status;
+use aria2_protocol::http::{ContentRange, response::is_redirect_status};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::cookie::CookieStorage;
@@ -393,26 +393,8 @@ impl HttpConnectionManager {
 
     /// Parse Content-Range response header. Returns `(start, end, total)`.
     pub fn parse_content_range(&self, header: &str) -> Option<(u64, u64, u64)> {
-        let header = header.trim();
-        let range = header
-            .strip_prefix("bytes ")
-            .or_else(|| header.strip_prefix("bytes="))
-            .unwrap_or(header);
-        let (range, total) = range.split_once('/')?;
-        let (start, end) = range.split_once('-')?;
-        let start = start.trim().parse::<u64>().ok()?;
-        let end = end.trim().parse::<u64>().ok()?;
-        if start > end {
-            return None;
-        }
-        let total = match total.trim() {
-            "*" => u64::MAX,
-            value => value.parse().ok()?,
-        };
-        if total != u64::MAX && end >= total {
-            return None;
-        }
-        Some((start, end, total))
+        let range = ContentRange::parse(header)?;
+        Some((range.start, range.end, range.total_size.unwrap_or(u64::MAX)))
     }
 
     // ==================== Cookie Jar Integration ====================

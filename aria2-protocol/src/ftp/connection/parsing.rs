@@ -2,28 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub fn percent_decode(value: &str) -> String {
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(character) = chars.next() {
-        if character == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2
-                && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && let Ok(byte) = u8::from_str_radix(&hex, 16)
-            {
-                bytes.push(byte);
-            } else {
-                bytes.push(b'%');
-                bytes.extend_from_slice(hex.as_bytes());
-            }
-        } else {
-            let mut encoded = [0; 4];
-            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
+pub use super::super::uri::percent_decode;
 
 pub fn split_decoded_remote_path(path: &str) -> (String, String) {
     if path.is_empty() {

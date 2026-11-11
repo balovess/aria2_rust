@@ -149,17 +149,16 @@ pub async fn try_splice_download_with_policy(
         format!("{host}:{port}")
     };
     let range_value = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
-    let request = format!(
-        "GET {path_query} HTTP/1.1\r\n\
-         Host: {host_header}\r\n\
-         Range: {range_value}\r\n\
-         Connection: close\r\n\
-         User-Agent: {}\r\n\
-         Accept: */*\r\n\
-         \r\n",
-        crate::constants::USER_AGENT,
-    );
-    stream.write_all(request.as_bytes()).await?;
+    let headers = [
+        ("Host", host_header.as_str()),
+        ("Range", range_value.as_str()),
+        ("Connection", "close"),
+        ("User-Agent", crate::constants::USER_AGENT),
+        ("Accept", "*/*"),
+    ];
+    let request =
+        aria2_protocol::http::request::serialize_http_request("GET", &path_query, &headers, None);
+    stream.write_all(&request).await?;
     debug!(range = %range_value, "splice_download: request sent");
 
     // 5. Read response headers into a buffer until we find \r\n\r\n.

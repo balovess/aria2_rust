@@ -62,7 +62,7 @@ impl Default for SshOptions {
     fn default() -> Self {
         Self {
             host: "localhost".to_string(),
-            port: 22,
+            port: crate::sftp::DEFAULT_PORT,
             username: String::new(),
             password: None,
             private_key_path: None,
@@ -86,7 +86,7 @@ impl SshOptions {
     pub fn new(host: &str, username: &str) -> Self {
         Self {
             host: host.to_string(),
-            port: 22,
+            port: crate::sftp::DEFAULT_PORT,
             username: username.to_string(),
             ..Default::default()
         }

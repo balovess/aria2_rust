@@ -54,63 +54,31 @@ impl HttpResponse {
     ///
     /// Returns an error if the response format is invalid or cannot be parsed
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let response_str = String::from_utf8(data.to_vec())
-            .map_err(|e| Aria2Error::Parse(format!("Invalid UTF-8 in HTTP response: {}", e)))?;
-
-        // Separate headers and body
-        let (header_part, body_part) = match response_str.find("\r\n\r\n") {
-            Some(pos) => (&response_str[..pos], &response_str[pos + 4..]),
-            None => (response_str.as_str(), ""),
+        let header_end = data.windows(4).position(|window| window == b"\r\n\r\n");
+        let (header_bytes, body_bytes) = match header_end {
+            Some(position) => (&data[..position + 4], &data[position + 4..]),
+            None => (data, &[][..]),
         };
-
-        // Parse status line
-        let mut lines = header_part.split("\r\n");
-        let status_line = lines
-            .next()
-            .ok_or_else(|| Aria2Error::Parse("Empty HTTP response".to_string()))?;
-
-        // Parse version, status_code, reason_phrase
-        let parts: Vec<&str> = status_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(Aria2Error::Parse(
-                "Invalid HTTP status line format".to_string(),
-            ));
+        let mut complete_header = header_bytes.to_vec();
+        if !complete_header.ends_with(b"\r\n\r\n") {
+            complete_header.extend_from_slice(b"\r\n\r\n");
         }
+        let parsed = aria2_protocol::http::header_processor::parse_response_head(&complete_header)
+            .map_err(|error| Aria2Error::Parse(error.to_string()))?;
 
-        let version = parts[0].to_string();
-        let status_code: u16 = parts[1]
-            .parse()
-            .map_err(|e| Aria2Error::Parse(format!("Invalid status code: {}", e)))?;
-        let reason_phrase = if parts.len() > 2 {
-            parts[2..].join(" ")
-        } else {
-            String::new()
-        };
-
-        // Parse headers (supports multi-value)
         let mut headers: HashMap<String, Vec<String>> = HashMap::new();
-        for line in lines {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                headers.entry(key).or_default().push(value);
-            }
+        for (key, value) in parsed.iter_headers() {
+            headers
+                .entry(key.to_owned())
+                .or_default()
+                .push(value.to_owned());
         }
-
-        // Process body
-        let body = if body_part.is_empty() {
-            None
-        } else {
-            Some(body_part.as_bytes().to_vec())
-        };
+        let body = (!body_bytes.is_empty()).then(|| body_bytes.to_vec());
 
         Ok(HttpResponse {
-            status_code,
-            reason_phrase,
-            version,
+            status_code: parsed.status_code,
+            reason_phrase: parsed.reason_phrase,
+            version: parsed.http_version,
             headers,
             body,
         })
@@ -290,6 +258,18 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_parser_delegates_headers_and_preserves_binary_body() {
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n\r\n".to_vec();
+        response.extend_from_slice(&[0, 0xff, b'x']);
+
+        let parsed = HttpResponse::from_bytes(&response).unwrap();
+        assert_eq!(parsed.status_code, 200);
+        assert_eq!(parsed.header_all("set-cookie").len(), 2);
+        assert_eq!(parsed.body.as_deref(), Some(&[0, 0xff, b'x'][..]));
+    }
 
     #[test]
     fn test_response_status_parsing() {

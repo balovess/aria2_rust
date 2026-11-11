@@ -19,10 +19,9 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::uri::sftp_percent_decode;
-
 use aria2_protocol::sftp::connection::{HostKeyCheckingMode, SshError, SshOptions};
 use aria2_protocol::sftp::file_ops::FileOpError;
+use aria2_protocol::sftp::uri::SftpUriError;
 
 /// Command that executes an SFTP file download from a remote server to local disk.
 ///
@@ -66,14 +65,7 @@ pub struct SftpDownloadCommand {
 /// `aria2_original` parses URI userinfo separately from its auth resolution
 /// chain. Keeping that distinction allows the core `AuthConfigFactory` to
 /// apply the same URL, netrc, CLI, and anonymous-default precedence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ParsedSftpUri {
-    pub(super) host: String,
-    pub(super) port: u16,
-    pub(super) username: Option<String>,
-    pub(super) password: Option<String>,
-    pub(super) remote_path: String,
-}
+pub(super) use aria2_protocol::sftp::uri::SftpUri as ParsedSftpUri;
 
 impl SftpDownloadCommand {
     pub(super) fn validate_resume_offset(existing_length: u64, total_length: u64) -> Result<u64> {
@@ -222,105 +214,13 @@ impl SftpDownloadCommand {
     /// - `sftp://user@host:port/path`
     /// - `sftp://user:password@host:port/path`
     pub(super) fn parse_uri(uri: &str) -> Result<ParsedSftpUri> {
-        if !uri.starts_with("sftp://") {
-            return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
+        aria2_protocol::sftp::uri::parse_uri(uri).map_err(|error| match error {
+            SftpUriError::UnsupportedScheme => Aria2Error::Fatal(FatalError::UnsupportedProtocol {
                 protocol: "sftp".into(),
-            }));
-        }
-
-        let without_scheme = uri.trim_start_matches("sftp://");
-
-        // `uri_split` keeps query and fragment out of `Request::getDir()` /
-        // `getFile()`. SFTP must therefore open only the path component.
-        let authority_end = without_scheme
-            .find(['/', '?', '#'])
-            .unwrap_or(without_scheme.len());
-        let authority = &without_scheme[..authority_end];
-        if authority.is_empty() {
-            return Err(Self::invalid_uri("SFTP URI has no host"));
-        }
-        let path_and_suffix = &without_scheme[authority_end..];
-        let path_end = path_and_suffix
-            .find(['?', '#'])
-            .unwrap_or(path_and_suffix.len());
-        let path = if path_and_suffix.starts_with('/') {
-            &path_and_suffix[..path_end]
-        } else {
-            "/"
-        };
-
-        // The original URI parser tracks the final '@' delimiter, allowing
-        // an unescaped '@' in the userinfo prefix while retaining the last
-        // segment as the host delimiter.
-        let (userinfo, host_port) = match authority.rfind('@') {
-            Some(index) => (&authority[..index], &authority[index + 1..]),
-            None => ("", authority),
-        };
-        if host_port.is_empty() {
-            return Err(Self::invalid_uri("SFTP URI has no host"));
-        }
-
-        let (username, password) = if userinfo.is_empty() {
-            (None, None)
-        } else if let Some((username, password)) = userinfo.split_once(':') {
-            (
-                Some(sftp_percent_decode(username)),
-                Some(sftp_percent_decode(password)),
-            )
-        } else {
-            (Some(sftp_percent_decode(userinfo)), None)
-        };
-        if username.as_deref().is_some_and(str::is_empty) {
-            return Err(Self::invalid_uri("SFTP URI has an empty username"));
-        }
-
-        // Split host from port. Bracketed IPv6 literals are handled without
-        // mistaking their internal colons for a port separator.
-        let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
-            let (host, suffix) = bracketed
-                .split_once(']')
-                .ok_or_else(|| Self::invalid_uri("Invalid bracketed SFTP host"))?;
-            if host.is_empty() {
-                return Err(Self::invalid_uri("SFTP URI has an empty IPv6 host"));
+            }),
+            SftpUriError::Invalid(message) => {
+                Aria2Error::Fatal(FatalError::Config(message.to_string()))
             }
-            let port = match suffix {
-                "" => constants::SFTP_DEFAULT_PORT,
-                value if value.starts_with(':') => Self::parse_port(&value[1..])?,
-                _ => return Err(Self::invalid_uri("Invalid SFTP host suffix")),
-            };
-            (host.to_string(), port)
-        } else {
-            match host_port.split_once(':') {
-                Some((host, port)) => {
-                    if host.is_empty() || port.contains(':') {
-                        return Err(Self::invalid_uri("Invalid SFTP host or port"));
-                    }
-                    (host.to_string(), Self::parse_port(port)?)
-                }
-                None => (host_port.to_string(), constants::SFTP_DEFAULT_PORT),
-            }
-        };
-
-        Ok(ParsedSftpUri {
-            host,
-            port,
-            username,
-            password,
-            remote_path: sftp_percent_decode(path),
-        })
-    }
-
-    fn parse_port(value: &str) -> Result<u16> {
-        if value.is_empty() {
-            return Ok(constants::SFTP_DEFAULT_PORT);
-        }
-        let port = value
-            .parse::<u16>()
-            .map_err(|_| Self::invalid_uri("Invalid SFTP port"))?;
-        Ok(if port == 0 {
-            constants::SFTP_DEFAULT_PORT
-        } else {
-            port
         })
     }
 

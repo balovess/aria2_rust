@@ -64,7 +64,7 @@ pub fn compute_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let result = hasher.finalize();
-    format!("{:x}", result)
+    hex::encode(result)
 }
 
 pub const SMALL_CONTENT: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];

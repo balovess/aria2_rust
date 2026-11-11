@@ -1,7 +1,8 @@
 //! Tests for the streaming HTTP header processor.
 
-use super::processor::HttpHeaderProcessor;
-use super::types::{HttpHeaderParseState, MAX_HEADER_SIZE};
+use super::{HttpHeaderParseState, HttpHeaderProcessor};
+
+const MAX_HEADER_SIZE: usize = 8 * 1024;
 
 #[test]
 fn test_simple_headers_complete_in_one_feed() {

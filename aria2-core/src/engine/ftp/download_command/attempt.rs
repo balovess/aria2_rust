@@ -11,6 +11,7 @@ use crate::error::{Aria2Error, RecoverableError};
 use crate::network::ConnectionContext;
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::ftp::tls::FtpsClient;
 
 use super::control::RawFtpControl;
 use super::execution::FtpAttemptError;
@@ -49,23 +50,30 @@ impl FtpDownloadCommand {
         let connect_timeout = self.connect_timeout;
         let proxy_for_connection = proxy_config.as_ref().map(|(proxy, _)| proxy.clone());
         let connect_result = tokio::time::timeout(connect_timeout, async move {
+            let ftps_client = ftps_config
+                .as_ref()
+                .map(FtpsClient::new)
+                .transpose()
+                .map_err(|error| {
+                    Aria2Error::Network(format!("FTPS TLS configuration failed: {error}"))
+                })?;
             if let Some(proxy) = proxy_for_connection.as_ref() {
                 RawFtpControl::connect_via_http_proxy(
                     &host,
                     port,
                     proxy,
-                    ftps_config.as_ref(),
+                    ftps_client.as_ref(),
                     ftps_implicit,
                     Arc::clone(&outbound_network_policy),
                 )
                 .await
-            } else if let Some(config) = ftps_config.as_ref() {
+            } else if let Some(client) = ftps_client.as_ref() {
                 if ftps_implicit {
                     RawFtpControl::connect_ftps_implicit_at(
                         &host,
                         port,
                         control_address,
-                        config,
+                        client,
                         Arc::clone(&outbound_network_policy),
                     )
                     .await
@@ -74,7 +82,7 @@ impl FtpDownloadCommand {
                         &host,
                         port,
                         control_address,
-                        config,
+                        client,
                         Arc::clone(&outbound_network_policy),
                     )
                     .await

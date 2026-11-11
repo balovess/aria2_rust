@@ -234,6 +234,20 @@ fn test_build_proxy_auth_header_digest_preferred_over_basic() {
 }
 
 #[test]
+fn test_build_proxy_auth_header_handles_mixed_case_digest_scheme() {
+    let mut proc = HttpHeaderProcessor::new();
+    proc.feed(b"HTTP/1.1 407 Auth\r\nProxy-Authenticate: dIgEsT realm=\"proxy, internal\", nonce=\"n1\", qop=\"auth-int\", algorithm=SHA-256\r\n\r\n");
+    let head = proc.get_result().unwrap();
+
+    let auth = build_proxy_auth_header(&head, "user", "pass", "CONNECT", "t:443", 1)
+        .expect("mixed-case Digest challenge should be recognized");
+    assert!(auth.starts_with("Digest "));
+    assert!(auth.contains("realm=\"proxy, internal\""));
+    assert!(auth.contains("qop=auth-int"));
+    assert!(auth.contains("algorithm=SHA-256"));
+}
+
+#[test]
 fn test_build_proxy_auth_header_no_auth_header() {
     let mut proc = HttpHeaderProcessor::new();
     proc.feed(b"HTTP/1.1 407 Auth\r\n\r\n");

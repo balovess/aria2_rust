@@ -27,6 +27,29 @@ fn make_simple_torrent() -> Vec<u8> {
     BencodeValue::Dict(root).encode()
 }
 
+#[test]
+fn parses_web_seeds_from_raw_metainfo_without_validating_the_full_torrent() {
+    let mut root = BTreeMap::new();
+    root.insert(
+        b"url-list".to_vec(),
+        BencodeValue::List(vec![
+            BencodeValue::Bytes(b"https://seed.example/a".to_vec()),
+            BencodeValue::Int(1),
+            BencodeValue::Bytes(b"https://seed.example/b".to_vec()),
+        ]),
+    );
+    let bytes = BencodeValue::Dict(root).encode();
+
+    assert_eq!(
+        parse_web_seeds_from_bytes(&bytes),
+        vec![
+            "https://seed.example/a".to_string(),
+            "https://seed.example/b".to_string()
+        ]
+    );
+    assert!(parse_web_seeds_from_bytes(b"not bencode").is_empty());
+}
+
 fn make_torrent_with_name_and_path(name: &str, path: Option<&[&str]>) -> Vec<u8> {
     let mut info = BTreeMap::from([
         (

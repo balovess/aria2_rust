@@ -74,6 +74,25 @@ impl HttpResponseHead {
             headers,
         }
     }
+
+    /// Create a response head from externally parsed HTTP components.
+    /// Header names are normalized to lowercase and duplicates are preserved.
+    pub fn from_parts(
+        http_version: String,
+        status_code: u16,
+        reason_phrase: String,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self::new(
+            http_version,
+            status_code,
+            reason_phrase,
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                .collect(),
+        )
+    }
 }
 
 impl HttpResponseHead {

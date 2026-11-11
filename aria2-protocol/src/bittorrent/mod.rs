@@ -2,6 +2,7 @@ pub mod bencode;
 pub mod dht;
 pub mod extension;
 pub mod fast_set;
+pub mod lpd;
 pub mod magnet;
 pub mod message;
 pub mod peer;

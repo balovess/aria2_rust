@@ -24,6 +24,5 @@ mod execution;
 #[cfg(test)]
 mod tests;
 mod types;
-mod uri;
 
 pub use types::SftpDownloadCommand;

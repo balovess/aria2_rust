@@ -127,16 +127,16 @@ impl HttpProxyTunnel {
     /// Build the CONNECT request string.
     pub(crate) fn build_connect_request(&self, proxy_auth: Option<&str>) -> String {
         let target = self.config.target_host_port();
-        let mut req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", target, target);
-
+        let mut headers = vec![("Host", target.as_str())];
         if let Some(auth) = proxy_auth {
-            req.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
+            headers.push(("Proxy-Authorization", auth));
         }
-
         // Proxy-Connection: keep-alive is standard for CONNECT tunnels
-        req.push_str("Proxy-Connection: keep-alive\r\n");
-        req.push_str("\r\n");
-        req
+        headers.push(("Proxy-Connection", "keep-alive"));
+        String::from_utf8(aria2_protocol::http::request::serialize_http_request(
+            "CONNECT", &target, &headers, None,
+        ))
+        .expect("HTTP CONNECT fields are UTF-8")
     }
 
     /// Extract credentials or return an error.

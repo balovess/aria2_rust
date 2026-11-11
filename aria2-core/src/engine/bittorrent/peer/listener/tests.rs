@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod route_lifecycle;
+
 #[test]
 fn zero_incoming_handshake_timeout_keeps_one_second_minimum() {
     let manager = BtPeerListenerManager::new();

@@ -322,10 +322,15 @@ async fn websocket_tracker_announces_started_and_stopped_events() {
             assert_eq!(request["action"], "announce");
             assert_eq!(request["event"], expected_event);
             assert_eq!(request["port"], 51413);
+            let info_hash = request["info_hash"]
+                .as_str()
+                .expect("announce includes binary info hash");
 
             websocket
                 .send(Message::Text(
                     serde_json::json!({
+                        "action": "announce",
+                        "info_hash": info_hash,
                         "interval": 60,
                         "complete": 2,
                         "incomplete": 3,

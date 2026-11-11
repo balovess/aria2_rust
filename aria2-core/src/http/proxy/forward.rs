@@ -171,24 +171,21 @@ impl HttpProxyForward {
         path: &str,
         proxy_auth: Option<&str>,
     ) -> String {
-        let mut req = format!("{} {} HTTP/1.1\r\n", method, full_url);
-        req.push_str(&format!("Host: {}\r\n", self.config.target_host_port()));
-
-        if self.config.target_port != 80 {
-            // Already included in Host above if non-standard
-        }
-
+        let host = self.config.target_host_port();
+        let mut headers = vec![("Host", host.as_str())];
         if let Some(auth) = proxy_auth {
-            req.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
+            headers.push(("Proxy-Authorization", auth));
         }
-
-        req.push_str(&format!(
-            "User-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-            crate::constants::USER_AGENT
-        ));
-
+        headers.extend([
+            ("User-Agent", crate::constants::USER_AGENT),
+            ("Accept", "*/*"),
+            ("Connection", "close"),
+        ]);
         let _ = path; // Path is used by the caller for Digest auth URI computation
-        req
+        String::from_utf8(aria2_protocol::http::request::serialize_http_request(
+            method, full_url, &headers, None,
+        ))
+        .expect("HTTP request fields are UTF-8")
     }
 
     /// Extract credentials or return an error.
@@ -235,24 +232,20 @@ pub async fn forward_get_with_auth(
     let mut current_auth: Option<String> = None;
 
     loop {
-        let request = if let Some(ref auth) = current_auth {
-            format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-                full_url,
-                config.target_host_port(),
-                auth,
-                crate::constants::USER_AGENT
-            )
-        } else {
-            format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-                full_url,
-                config.target_host_port(),
-                crate::constants::USER_AGENT
-            )
-        };
+        let host = config.target_host_port();
+        let mut headers = vec![("Host", host.as_str())];
+        if let Some(auth) = current_auth.as_deref() {
+            headers.push(("Proxy-Authorization", auth));
+        }
+        headers.extend([
+            ("User-Agent", crate::constants::USER_AGENT),
+            ("Accept", "*/*"),
+            ("Connection", "close"),
+        ]);
+        let request =
+            aria2_protocol::http::request::serialize_http_request("GET", &full_url, &headers, None);
 
-        write_all_timeout(&mut stream, request.as_bytes(), config.write_timeout).await?;
+        write_all_timeout(&mut stream, &request, config.write_timeout).await?;
         let head = read_proxy_response(&mut stream, config.read_timeout).await?;
         let proxy_resp = ProxyResponse::from_head(head);
 

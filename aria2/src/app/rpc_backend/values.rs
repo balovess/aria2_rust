@@ -386,6 +386,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_http_adaptive_options_are_stored_from_rpc_updates() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, _receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+        let option_names = [
+            "http-adaptive-reduction-percent",
+            "http-adaptive-recovery-interval",
+            "http-adaptive-recovery-successes-min",
+            "http-adaptive-recovery-successes-max",
+            "http-adaptive-start-interval-ms",
+            "http-adaptive-backoff-base",
+            "http-adaptive-backoff-max",
+            "http-adaptive-capacity-start-interval-ms",
+            "http-adaptive-capacity-start-interval-max-ms",
+            "http-adaptive-rate-recovery-successes",
+            "http-adaptive-rate-min-interval-ms",
+            "http-adaptive-backoff-reset-after",
+        ];
+        let changes = option_names
+            .iter()
+            .map(|name| ((*name).to_string(), serde_json::json!(1)))
+            .collect();
+
+        backend.change_global_option(changes).await.unwrap();
+
+        let config = config.read().await;
+        for name in option_names {
+            assert_eq!(config.get_global_i64(name).await, Some(1), "{name}");
+        }
+    }
+
+    #[tokio::test]
     async fn global_tracker_source_timeout_updates_config_and_engine_command() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, mut receiver) = channel();

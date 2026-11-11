@@ -27,82 +27,14 @@ impl Aria2RustSession {
         })?;
 
         let request_man = Arc::new(RequestGroupMan::new());
-        let mut engine = DownloadEngine::new();
-        #[cfg(feature = "bittorrent")]
-        {
-            let utp_options = crate::config::utp_socket_options_from_values(
-                runtime.block_on(config.get_global_i64("bt-utp-max-connections")),
-                runtime.block_on(config.get_global_i64("bt-utp-connect-timeout")),
-                runtime.block_on(config.get_global_i64("bt-utp-idle-timeout")),
-                runtime.block_on(config.get_global_i64("bt-utp-keepalive-interval")),
-            );
-            engine.set_utp_socket_options(utp_options);
-            if let Some(incoming_handshake_timeout) = runtime
-                .block_on(config.get_global_i64("bt-incoming-peer-handshake-timeout"))
-                .and_then(|seconds| u64::try_from(seconds).ok())
-            {
-                engine.set_incoming_peer_handshake_timeout(Duration::from_secs(
-                    incoming_handshake_timeout,
-                ));
-            }
-            let sources = runtime.block_on(config.get_global_option("bt-tracker-source"));
-            let sources = match sources {
-                Some(OptionValue::List(values)) => values,
-                Some(OptionValue::Str(value)) => value
-                    .split([',', '\n'])
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                _ => Vec::new(),
-            };
-            let update_interval = runtime
-                .block_on(config.get_global_i64("bt-tracker-update-interval"))
-                .filter(|seconds| *seconds > 0)
-                .map(|seconds| Duration::from_secs(seconds as u64))
-                .unwrap_or(
-                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL,
-                );
-            let enabled = runtime
-                .block_on(config.get_global_bool("enable-public-trackers"))
-                .unwrap_or(true);
-            engine.set_public_tracker_config(
-                aria2_protocol::bittorrent::tracker::public_list::TrackerCatalogConfig {
-                    enabled,
-                    sources,
-                    update_interval,
-                },
-            );
-            let source_timeout = runtime
-                .block_on(config.get_global_i64("bt-tracker-source-timeout"))
-                .and_then(|seconds| u64::try_from(seconds).ok())
-                .filter(|seconds| *seconds > 0)
-                .map(Duration::from_secs)
-                .unwrap_or(
-                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE_TIMEOUT,
-                );
-            engine.set_public_tracker_source_timeout(source_timeout);
-        }
-        engine.set_request_group_man(Arc::clone(&request_man));
+        let process_options = runtime.block_on(config.get_all_global_options());
+        let mut engine = runtime.block_on(DownloadEngine::from_process_options(
+            &process_options,
+            Arc::clone(&request_man),
+        ));
         // The C API keeps the event loop alive between synchronous `run` calls,
         // matching the original library's RUN_ONCE mode.
         engine.set_keep_alive(true);
-
-        let max_concurrent = runtime.block_on(config.get_global_i64("max-concurrent-downloads"));
-        if let Some(max) = max_concurrent.filter(|value| *value >= 0) {
-            request_man.set_max_concurrent(max as u32);
-        }
-
-        let download_limit = runtime
-            .block_on(config.get_global_i64("max-overall-download-limit"))
-            .and_then(non_zero_limit);
-        let upload_limit = runtime
-            .block_on(config.get_global_i64("max-overall-upload-limit"))
-            .and_then(non_zero_limit);
-        if download_limit.is_some() || upload_limit.is_some() {
-            engine.set_global_rate_limiter(RateLimiterConfig::new(download_limit, upload_limit));
-            request_man.set_global_speed_limit(download_limit, upload_limit);
-        }
 
         let command_tx = engine.engine_command_sender();
         let shutdown_tx = engine.take_shutdown_sender();
@@ -404,6 +336,8 @@ impl Aria2RustSession {
         let mut download_limit_changed = false;
         let mut upload_limit_changed = false;
         let mut max_concurrent = None;
+        let mut keep_running = None;
+        let mut validated_options = Vec::with_capacity(options.len());
         #[cfg(feature = "bittorrent")]
         let mut public_tracker_sources = None;
         #[cfg(feature = "bittorrent")]
@@ -419,12 +353,12 @@ impl Aria2RustSession {
         for (name, value) in options {
             if name == "keep-running" {
                 match parse_bool(&value) {
-                    Ok(value) => self.keep_running = value,
+                    Ok(value) => keep_running = Some(value),
                     Err(error) => return self.fail(error, INVALID_ARGUMENT),
                 }
                 continue;
             }
-            if !self.config.registry().contains(&name) {
+            if !self.config.registry().contains(&name) || !is_global_option_changeable(&name) {
                 continue;
             }
             let parsed = match self
@@ -436,22 +370,12 @@ impl Aria2RustSession {
                 Some(value) => value,
                 None => return self.fail(format!("invalid option {name}"), INVALID_ARGUMENT),
             };
-            if self
-                .runtime
-                .block_on(
-                    self.config
-                        .set_global_option(&name, OptionValue::Str(value.clone())),
-                )
-                .is_err()
-            {
-                return self.fail(format!("invalid option {name}"), INVALID_ARGUMENT);
-            }
             match name.as_str() {
                 "max-concurrent-downloads" => max_concurrent = parsed.as_i64(),
                 "max-overall-download-limit" => download_limit_changed = true,
                 "max-overall-upload-limit" => upload_limit_changed = true,
                 #[cfg(feature = "bittorrent")]
-                "bt-tracker-source" => public_tracker_sources = Some(value),
+                "bt-tracker-source" => public_tracker_sources = Some(value.clone()),
                 #[cfg(feature = "bittorrent")]
                 "bt-tracker-update-interval" => public_tracker_update_interval = parsed.as_i64(),
                 #[cfg(feature = "bittorrent")]
@@ -469,6 +393,25 @@ impl Aria2RustSession {
                 | "bt-utp-keepalive-interval" => utp_options_changed = true,
                 _ => {}
             }
+            validated_options.push((name, value));
+        }
+
+        // Match aria2's batch semantics: parse every supplied value before
+        // mutating global configuration or dispatching runtime changes.
+        for (name, value) in validated_options {
+            if self
+                .runtime
+                .block_on(
+                    self.config
+                        .set_global_option(&name, OptionValue::Str(value)),
+                )
+                .is_err()
+            {
+                return self.fail(format!("invalid option {name}"), INVALID_ARGUMENT);
+            }
+        }
+        if let Some(value) = keep_running {
+            self.keep_running = value;
         }
 
         if let Some(max) = max_concurrent.filter(|value| *value >= 0) {

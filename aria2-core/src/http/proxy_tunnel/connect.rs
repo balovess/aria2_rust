@@ -8,8 +8,8 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::http::header_processor::HttpHeaderProcessor;
 use crate::http::request::basic_auth;
+use aria2_protocol::http::header_processor::{find_header_end, parse_response_head};
 
 use super::HttpProxyTunnelConfig;
 use super::auth;
@@ -113,9 +113,13 @@ impl HttpProxyTunnel {
                     let username = config.username.as_deref().unwrap_or("");
                     let password = config.password.as_deref().unwrap_or("");
                     let uri = format!("{}:{}", config.target_host, config.target_port);
-                    let auth_header = if proxy_authenticate.starts_with("Digest") {
+                    let scheme = proxy_authenticate
+                        .split_ascii_whitespace()
+                        .next()
+                        .unwrap_or_default();
+                    let auth_header = if scheme.eq_ignore_ascii_case("Digest") {
                         auth::build_digest_auth_header(username, password, proxy_authenticate, &uri)
-                    } else if proxy_authenticate.starts_with("Basic") {
+                    } else if scheme.eq_ignore_ascii_case("Basic") {
                         basic_auth(username, password)
                     } else {
                         warn!("Unsupported proxy auth scheme: {}", proxy_authenticate);
@@ -165,19 +169,18 @@ impl HttpProxyTunnel {
         config: &HttpProxyTunnelConfig,
         auth_header: Option<&str>,
     ) -> String {
-        let mut request = format!(
-            "CONNECT {}:{} HTTP/1.1\r\nUser-Agent: {}\r\nHost: {}:{}\r\n",
-            config.target_host,
-            config.target_port,
-            config.user_agent,
-            config.target_host,
-            config.target_port
-        );
+        let target = format!("{}:{}", config.target_host, config.target_port);
+        let mut headers = vec![
+            ("User-Agent", config.user_agent.as_str()),
+            ("Host", target.as_str()),
+        ];
         if let Some(auth) = auth_header {
-            request.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
+            headers.push(("Proxy-Authorization", auth));
         }
-        request.push_str("\r\n");
-        request
+        String::from_utf8(aria2_protocol::http::request::serialize_http_request(
+            "CONNECT", &target, &headers, None,
+        ))
+        .expect("HTTP CONNECT fields are UTF-8")
     }
 
     // -- I/O helpers -----------------------------------------------------------
@@ -206,21 +209,14 @@ impl HttpProxyTunnel {
 
     /// Read proxy response using streaming `HttpHeaderProcessor`.
     /// Skips 1xx informational responses (matching C++ behavior).
-    async fn read_proxy_response(
+    pub(crate) async fn read_proxy_response(
         stream: &mut TcpStream,
         read_timeout: Duration,
     ) -> Result<ProxyResponse> {
-        // Carry over unconsumed bytes between 1xx skips so that when a
-        // 1xx and the final response arrive in the same TCP segment, the
-        // second response is not lost.
-        let mut leftover: Vec<u8> = Vec::new();
         loop {
-            let response = timeout(
-                read_timeout,
-                Self::parse_with_processor(stream, &mut leftover),
-            )
-            .await
-            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))??;
+            let response = timeout(read_timeout, Self::read_response_head(stream))
+                .await
+                .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))??;
             if (100..200).contains(&response.status_code) {
                 debug!("Skipping 1xx informational: {}", response.status_code);
                 continue;
@@ -229,40 +225,26 @@ impl HttpProxyTunnel {
         }
     }
 
-    async fn parse_with_processor(
-        stream: &mut TcpStream,
-        leftover: &mut Vec<u8>,
-    ) -> Result<ProxyResponse> {
-        let mut processor = HttpHeaderProcessor::new();
-        let mut buf = [0u8; 4096];
-
-        // Feed any leftover bytes from a previous read first
-        if !leftover.is_empty() {
-            let state = processor.feed(leftover);
-            if state.is_complete() {
-                let bytes_used = processor.last_bytes_processed();
-                let remaining = leftover[bytes_used..].to_vec();
-                *leftover = remaining;
-                let head = processor.get_result()?;
-                let headers: Vec<(String, String)> = head
-                    .iter_headers()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                return Ok(ProxyResponse {
-                    status_code: head.status_code,
-                    reason_phrase: head.reason_phrase,
-                    headers,
-                });
-            }
-            leftover.clear();
-        }
+    async fn read_response_head(stream: &mut TcpStream) -> Result<ProxyResponse> {
+        const MAX_HEADER_BYTES: usize = 8 * 1024 + 4;
+        let mut header = Vec::with_capacity(512);
+        let mut peek_buffer = [0; MAX_HEADER_BYTES];
 
         loop {
-            let n = stream.read(&mut buf).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Failed to read proxy response: {}", e),
-                })
-            })?;
+            let remaining = MAX_HEADER_BYTES.saturating_sub(header.len());
+            if remaining == 0 {
+                return Err(Aria2Error::Parse(
+                    "Failed to parse proxy response: header too large".to_string(),
+                ));
+            }
+            let n = stream
+                .peek(&mut peek_buffer[..remaining])
+                .await
+                .map_err(|error| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("Failed to read proxy response: {error}"),
+                    })
+                })?;
             if n == 0 {
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
@@ -270,22 +252,27 @@ impl HttpProxyTunnel {
                     },
                 ));
             }
-            let state = processor.feed(&buf[..n]);
-            if state.is_complete() {
-                // Save any bytes beyond the header terminator for the next read
-                let bytes_used = processor.last_bytes_processed();
-                if bytes_used < n {
-                    *leftover = buf[bytes_used..n].to_vec();
-                }
+
+            let response_end = find_header_end(&peek_buffer[..n]).map(|index| index + 4);
+            let bytes_to_consume = response_end.unwrap_or(n);
+            let start = header.len();
+            header.resize(start + bytes_to_consume, 0);
+            stream
+                .read_exact(&mut header[start..])
+                .await
+                .map_err(|error| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("Failed to read proxy response: {error}"),
+                    })
+                })?;
+
+            if response_end.is_some() {
                 break;
             }
-            if state.is_error() {
-                return Err(Aria2Error::Parse(
-                    "Failed to parse proxy response".to_string(),
-                ));
-            }
         }
-        let head = processor.get_result()?;
+
+        let head = parse_response_head(&header)
+            .map_err(|_| Aria2Error::Parse("Failed to parse proxy response".to_string()))?;
         let headers: Vec<(String, String)> = head
             .iter_headers()
             .map(|(k, v)| (k.to_string(), v.to_string()))

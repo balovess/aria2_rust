@@ -11,7 +11,7 @@ use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 use super::types::SftpDownloadCommand;
-use super::uri::sftp_percent_decode;
+use aria2_protocol::sftp::uri::percent_decode as sftp_percent_decode;
 
 #[test]
 fn test_sftp_path_decoding() {

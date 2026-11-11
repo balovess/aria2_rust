@@ -439,8 +439,10 @@ impl SshConnection {
 }
 
 fn build_client_config(options: &SshOptions) -> Result<client::Config, SshError> {
-    let mut config = client::Config::default();
-    config.keepalive_interval = options.keepalive_interval;
+    let mut config = client::Config {
+        keepalive_interval: options.keepalive_interval,
+        ..Default::default()
+    };
     config.preferred.compression = if options.compression {
         Cow::Borrowed(&[compression::ZLIB_LEGACY, compression::NONE])
     } else {

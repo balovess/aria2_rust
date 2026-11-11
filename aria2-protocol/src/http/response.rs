@@ -135,12 +135,10 @@ pub struct ContentRange {
 impl ContentRange {
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
-        if !value.starts_with("bytes ") {
-            debug!("Content-Range format error: not 'bytes' unit");
-            return None;
-        }
-
-        let range_part = &value[6..];
+        let range_part = value
+            .strip_prefix("bytes")
+            .map(|rest| rest.trim_start_matches([' ', '\t', '=']))
+            .unwrap_or(value);
         let parts: Vec<&str> = range_part.split('/').collect();
         if parts.len() != 2 {
             debug!("Content-Range format error: split failed");
@@ -159,6 +157,10 @@ impl ContentRange {
             "*" => None,
             s => s.parse().ok(),
         };
+        if start > end || total_size.is_some_and(|total| end >= total) {
+            debug!(start, end, ?total_size, "Content-Range bounds are invalid");
+            return None;
+        }
 
         Some(Self {
             unit: "bytes".to_string(),
@@ -169,14 +171,55 @@ impl ContentRange {
     }
 
     pub fn size(&self) -> u64 {
-        self.end - self.start + 1
+        self.end
+            .checked_sub(self.start)
+            .map_or(0, |difference| difference.saturating_add(1))
     }
+}
+
+/// Parse an unsatisfied byte range such as `bytes */1234` and return its
+/// complete representation length.
+pub fn parse_unsatisfied_content_range_length(value: &str) -> Option<u64> {
+    value.trim().strip_prefix("bytes */")?.trim().parse().ok()
+}
+
+/// Parse the HTTP `Retry-After` value as delay-seconds or an HTTP date.
+///
+/// `now_epoch_secs` is supplied by the caller so the protocol parser remains
+/// deterministic; retry caps and scheduling policy stay with the caller.
+pub fn parse_retry_after(value: &str, now_epoch_secs: i64) -> Option<std::time::Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(std::time::Duration::from_secs(seconds));
+    }
+    let retry_at = crate::http::cookie::parsing::parse_http_date(value)?;
+    Some(std::time::Duration::from_secs(
+        u64::try_from(retry_at.saturating_sub(now_epoch_secs)).unwrap_or(0),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::header_processor::HttpResponseHead;
     use crate::http::request::HttpRequest;
+
+    #[test]
+    fn parses_retry_after_seconds_and_http_dates() {
+        assert_eq!(
+            parse_retry_after(" 42 ", 0),
+            Some(std::time::Duration::from_secs(42))
+        );
+        assert_eq!(parse_retry_after("not a date", 0), None);
+        assert_eq!(
+            parse_retry_after("Wed, 09 Jun 2021 10:18:14 GMT", 1_623_233_900),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after("Wed, 09 Jun 2021 10:18:14 GMT", 1_623_233_000),
+            Some(std::time::Duration::from_secs(894))
+        );
+    }
 
     #[test]
     fn test_response_status_checks() {
@@ -227,6 +270,22 @@ mod tests {
     }
 
     #[test]
+    fn response_head_from_parts_normalizes_header_names() {
+        let head = HttpResponseHead::from_parts(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            vec![("Content-Type".to_string(), "text/plain".to_string())],
+        );
+
+        assert_eq!(
+            head.iter_headers().next(),
+            Some(("content-type", "text/plain"))
+        );
+        assert_eq!(head.header("CONTENT-TYPE"), Some("text/plain"));
+    }
+
+    #[test]
     fn test_content_range_parse() {
         let cr = ContentRange::parse("bytes 0-499/1000").unwrap();
         assert_eq!(cr.start, 0);
@@ -239,6 +298,37 @@ mod tests {
 
         assert!(ContentRange::parse("invalid").is_none());
         assert!(ContentRange::parse("bits 0-499/1000").is_none());
+        assert_eq!(
+            ContentRange::parse("bytes=0-499/1000").map(|range| (range.start, range.end)),
+            Some((0, 499))
+        );
+        assert_eq!(
+            ContentRange::parse("0-499/1000").map(|range| (range.start, range.end)),
+            Some((0, 499))
+        );
+        assert!(ContentRange::parse("bytes 10-9/1000").is_none());
+        assert!(ContentRange::parse("bytes 0-1000/1000").is_none());
+        assert_eq!(ContentRange::parse("bytes 0-499/*").unwrap().size(), 500);
+        assert_eq!(
+            ContentRange {
+                unit: "bytes".to_string(),
+                start: 1,
+                end: 0,
+                total_size: None,
+            }
+            .size(),
+            0
+        );
+    }
+
+    #[test]
+    fn parses_unsatisfied_content_range_length() {
+        assert_eq!(
+            parse_unsatisfied_content_range_length("bytes */1234"),
+            Some(1234)
+        );
+        assert_eq!(parse_unsatisfied_content_range_length("bytes */*"), None);
+        assert_eq!(parse_unsatisfied_content_range_length("bytes 0-1/2"), None);
     }
 
     #[test]

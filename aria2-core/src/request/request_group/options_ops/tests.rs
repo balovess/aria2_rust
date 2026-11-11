@@ -1,10 +1,12 @@
-use super::rpc_update::apply_rpc_option;
+use super::runtime_update::apply_runtime_option_value;
 use crate::request::request_group::DownloadOptions;
 
 #[test]
 fn runtime_split_update_keeps_values_above_u16() {
     let mut options = DownloadOptions::default();
-    assert!(apply_rpc_option(&mut options, "split", &serde_json::json!("1000000")).unwrap());
+    assert!(
+        apply_runtime_option_value(&mut options, "split", &serde_json::json!("1000000")).unwrap()
+    );
     assert_eq!(options.split, Some(1_000_000));
 }
 
@@ -55,9 +57,13 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
 
     let mut options = DownloadOptions::default();
     assert!(
-        apply_rpc_option(&mut options, "sftp-connect-timeout", &serde_json::json!(41)).unwrap()
+        apply_runtime_option_value(&mut options, "sftp-connect-timeout", &serde_json::json!(41))
+            .unwrap()
     );
-    assert!(apply_rpc_option(&mut options, "sftp-read-timeout", &serde_json::json!(73)).unwrap());
+    assert!(
+        apply_runtime_option_value(&mut options, "sftp-read-timeout", &serde_json::json!(73))
+            .unwrap()
+    );
     assert_eq!(options.sftp_connect_timeout, Some(41));
     assert_eq!(options.sftp_read_timeout, Some(73));
 }
@@ -66,7 +72,7 @@ fn sftp_timeouts_are_valid_rpc_task_options() {
 fn http2_limits_can_be_updated_through_task_rpc_options() {
     let mut options = DownloadOptions::default();
     assert!(
-        apply_rpc_option(
+        apply_runtime_option_value(
             &mut options,
             "max-http2-sessions-per-server",
             &serde_json::json!("4")
@@ -74,7 +80,7 @@ fn http2_limits_can_be_updated_through_task_rpc_options() {
         .unwrap()
     );
     assert!(
-        apply_rpc_option(
+        apply_runtime_option_value(
             &mut options,
             "max-http2-streams-per-session",
             &serde_json::json!("32")
@@ -86,7 +92,7 @@ fn http2_limits_can_be_updated_through_task_rpc_options() {
     assert_eq!(options.max_http2_streams_per_session, Some(32));
 
     assert!(
-        apply_rpc_option(
+        apply_runtime_option_value(
             &mut options,
             "max-http2-sessions-per-server",
             &serde_json::json!("0")
@@ -94,7 +100,7 @@ fn http2_limits_can_be_updated_through_task_rpc_options() {
         .is_err()
     );
     assert!(
-        apply_rpc_option(
+        apply_runtime_option_value(
             &mut options,
             "max-http2-streams-per-session",
             &serde_json::json!("257")
@@ -120,7 +126,7 @@ fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
         ("http-adaptive-rate-min-interval-ms", "25"),
         ("http-adaptive-backoff-reset-after", "90"),
     ] {
-        assert!(apply_rpc_option(&mut options, name, &serde_json::json!(value)).unwrap());
+        assert!(apply_runtime_option_value(&mut options, name, &serde_json::json!(value)).unwrap());
     }
 
     assert_eq!(options.http_adaptive.reduction_percent, 30);
@@ -136,7 +142,7 @@ fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
     assert_eq!(options.http_adaptive.rate_min_interval_ms, 25);
     assert_eq!(options.http_adaptive.backoff_reset_after_secs, 90);
     assert!(
-        apply_rpc_option(
+        apply_runtime_option_value(
             &mut options,
             "http-adaptive-reduction-percent",
             &serde_json::json!("0")
@@ -168,7 +174,7 @@ fn string_options_reach_their_typed_fields() {
     for (key, value) in cases {
         let mut options = DownloadOptions::default();
         assert!(
-            apply_rpc_option(&mut options, key, &value).unwrap(),
+            apply_runtime_option_value(&mut options, key, &value).unwrap(),
             "{key}"
         );
     }

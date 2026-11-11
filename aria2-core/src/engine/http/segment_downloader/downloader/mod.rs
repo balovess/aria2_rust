@@ -63,19 +63,12 @@ pub(crate) fn parse_retry_after(
         .to_str()
         .ok()?
         .trim();
-    let delay = match value.parse::<u64>() {
-        Ok(seconds) => std::time::Duration::from_secs(seconds),
-        Err(_) => {
-            let at = crate::http::cookie::parsing::parse_http_date(value)?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-            let now = i64::try_from(now).ok()?;
-            std::time::Duration::from_secs(u64::try_from(at.saturating_sub(now)).unwrap_or(0))
-        }
-    };
-    Some(delay.min(MAX_RETRY_AFTER))
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let now = i64::try_from(now).ok()?;
+    aria2_protocol::http::parse_retry_after(value, now).map(|delay| delay.min(MAX_RETRY_AFTER))
 }
 
 pub struct HttpSegmentDownloader {

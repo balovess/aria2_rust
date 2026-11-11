@@ -18,11 +18,12 @@ use aria2_protocol::ftp::connection::{
 fn test_parse_uri_simple() {
     let uri = "ftp://example.com/file.txt";
     let result = FtpDownloadCommand::parse_uri(uri).unwrap();
-    assert_eq!(result.0, "example.com");
-    assert_eq!(result.1, 21);
-    assert_eq!(result.2, "anonymous");
-    assert_eq!(result.3, "aria2@");
-    assert_eq!(result.4, "/file.txt");
+    assert_eq!(result.host, "example.com");
+    assert_eq!(result.port, 21);
+    assert_eq!(result.username, "anonymous");
+    assert_eq!(result.password, "aria2@");
+    assert_eq!(result.remote_path, "/file.txt");
+    assert!(!result.secure);
 }
 
 #[test]
@@ -217,23 +218,30 @@ fn command_timeout_comes_from_download_options() {
 fn test_parse_uri_with_port() {
     let uri = "ftp://example.com:2121/file.txt";
     let result = FtpDownloadCommand::parse_uri(uri).unwrap();
-    assert_eq!(result.0, "example.com");
-    assert_eq!(result.1, 2121);
+    assert_eq!(result.host, "example.com");
+    assert_eq!(result.port, 2121);
 }
 
 #[test]
 fn test_parse_uri_with_auth() {
     let uri = "ftp://user:pass@example.com/file.txt";
     let result = FtpDownloadCommand::parse_uri(uri).unwrap();
-    assert_eq!(result.2, "user");
-    assert_eq!(result.3, "pass");
+    assert_eq!(result.username, "user");
+    assert_eq!(result.password, "pass");
 }
 
 #[test]
 fn test_parse_uri_with_encoded_chars() {
     let uri = "ftp://example.com/my%20file.txt";
     let result = FtpDownloadCommand::parse_uri(uri).unwrap();
-    assert_eq!(result.4, "/my file.txt");
+    assert_eq!(result.remote_path, "/my file.txt");
+}
+
+#[test]
+fn test_parse_uri_preserves_ftps_scheme_for_core_policy() {
+    let result = FtpDownloadCommand::parse_uri("FTPS://example.com:990/file.txt").unwrap();
+    assert!(result.secure);
+    assert_eq!(result.port, 990);
 }
 
 #[test]

@@ -89,3 +89,16 @@ pub(super) fn update_capacity(
         executor.set_active_h2_sessions(authority_key, adaptive.connection_target(is_http2));
     }
 }
+
+pub(super) fn update_connection_snapshot(
+    executor: &HttpSegmentRequestExecutor,
+    connection_guard: &ActiveConnectionGuard,
+) {
+    connection_guard.set(executor.in_flight());
+    let counts = executor.active_connection_counts();
+    connection_guard.set_http_counts(
+        counts.http1_connections,
+        counts.http2_sessions,
+        counts.http2_streams,
+    );
+}

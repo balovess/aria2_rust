@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::time::Instant;
+use std::{future::Future, time::Duration};
 
 use tracing::{debug, error, info, warn};
 
@@ -84,16 +85,19 @@ impl SftpDownloadCommand {
         // Phase 1: SSH Connection
         // -----------------------------------------------------------------
         let ssh_options = self.build_ssh_options();
-        let conn_result = match self
-            .outbound_network_policy
-            .connect_host(&self.host, self.port)
-            .await
-        {
-            Ok(stream) => SshConnection::connect_with_stream(ssh_options.clone(), stream).await,
-            Err(error) => Err(SshError::Handshake {
-                message: format!("SFTP TCP connection failed: {error}"),
-            }),
-        };
+        let connect_timeout = ssh_options.connect_timeout;
+        let host = self.host.as_str();
+        let port = self.port;
+        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
+        let conn_result = connect_with_timeout(host, port, connect_timeout, async move {
+            match outbound_network_policy.connect_host(host, port).await {
+                Ok(stream) => SshConnection::connect_with_stream(ssh_options, stream).await,
+                Err(error) => Err(SshError::Handshake {
+                    message: format!("SFTP TCP connection failed: {error}"),
+                }),
+            }
+        })
+        .await;
 
         let mut conn = match conn_result {
             Ok(c) => c,
@@ -541,5 +545,50 @@ impl SftpDownloadCommand {
         );
 
         Ok(())
+    }
+}
+
+async fn connect_with_timeout<T, F>(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    connection: F,
+) -> std::result::Result<T, SshError>
+where
+    F: Future<Output = std::result::Result<T, SshError>>,
+{
+    tokio::time::timeout(timeout, connection)
+        .await
+        .unwrap_or_else(|_| {
+            Err(SshError::ConnectTimeout {
+                host: host.to_string(),
+                port,
+                timeout_secs: timeout.as_secs(),
+            })
+        })
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_timeout_covers_a_pending_connection_and_keeps_target_context() {
+        let result = connect_with_timeout(
+            "sftp.example",
+            2222,
+            Duration::from_millis(1),
+            std::future::pending::<std::result::Result<(), SshError>>(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SshError::ConnectTimeout {
+                host,
+                port: 2222,
+                timeout_secs: 0,
+            }) if host == "sftp.example"
+        ));
     }
 }

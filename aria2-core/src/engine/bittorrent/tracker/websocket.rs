@@ -20,7 +20,7 @@ use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 use aria2_protocol::bittorrent::tracker::websocket::{
-    WebSocketAnnounceError, WebSocketAnnounceRequest, announce_over_stream,
+    WebSocketAnnounceError, WebSocketAnnounceRequest, announce_over_stream, parse_tracker_url,
 };
 
 /// Announce a magnet lookup to a WebSocket tracker.
@@ -75,19 +75,7 @@ pub(crate) async fn announce_with_policy(
     announce: AnnounceRequest<'_>,
     policy: &OutboundNetworkPolicy,
 ) -> Result<AnnounceResponse, AnnounceError> {
-    let url = reqwest::Url::parse(tracker_url).map_err(|error| {
-        AnnounceError::new(
-            TrackerFailureKind::Network,
-            format!("invalid WebSocket tracker URL: {error}"),
-        )
-    })?;
-    let scheme = url.scheme();
-    if !matches!(scheme, "ws" | "wss") {
-        return Err(AnnounceError::new(
-            TrackerFailureKind::Network,
-            format!("unsupported WebSocket tracker scheme '{scheme}'"),
-        ));
-    }
+    let url = parse_tracker_url(tracker_url).map_err(classify_websocket_announce_error)?;
     let host = url.host_str().ok_or_else(|| {
         AnnounceError::new(
             TrackerFailureKind::Network,
@@ -112,7 +100,7 @@ pub(crate) async fn announce_with_policy(
     let event = announce.event.as_event_string();
     let response = announce_over_stream(
         stream,
-        tracker_url,
+        url.as_str(),
         &WebSocketAnnounceRequest {
             info_hash: announce.info_hash,
             peer_id: announce.peer_id,
@@ -121,7 +109,7 @@ pub(crate) async fn announce_with_policy(
             uploaded: announce.uploaded,
             numwant: announce.numwant,
             port: announce.port,
-            event: Some(&event),
+            event: Some(event),
         },
         timeout,
     )
@@ -166,7 +154,7 @@ fn classify_websocket_announce_error(error: WebSocketAnnounceError) -> AnnounceE
 }
 
 async fn connect_socket(
-    url: &reqwest::Url,
+    url: &url::Url,
     target_host: &str,
     target_port: u16,
     options: &DownloadOptions,

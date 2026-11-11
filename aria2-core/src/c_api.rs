@@ -19,13 +19,12 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::config::{ConfigManager, OptionValue};
+use crate::config::{ConfigManager, OptionValue, is_global_option_changeable};
 use crate::engine::download_engine::DownloadEngine;
 use crate::engine::engine_command::{EngineCommand, EngineCommandSender};
 #[cfg(feature = "metalink")]
 use crate::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use crate::error::Result;
-use crate::rate_limiter::RateLimiterConfig;
 use crate::request::request_group::{
     DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
 };

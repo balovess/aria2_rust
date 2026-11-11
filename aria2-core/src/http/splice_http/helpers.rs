@@ -12,13 +12,22 @@ use std::io;
 /// sequence, or `None` if the sequence is not present.
 #[cfg(target_os = "linux")]
 pub(crate) fn find_header_end(buf: &[u8]) -> Option<usize> {
-    // We need at least 4 bytes to match \r\n\r\n.
-    if buf.len() < 4 {
-        return None;
-    }
-    // Search from the end of the previously-unsearched region. A simple
-    // sliding window is sufficient — headers are small (< 8 KB).
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
+    aria2_protocol::http::header_processor::find_header_end(buf)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_header(
+    header_str: &str,
+) -> io::Result<aria2_protocol::http::header_processor::HttpResponseHead> {
+    let complete_header = if header_str.ends_with("\r\n\r\n") {
+        header_str.to_owned()
+    } else if header_str.ends_with("\r\n") {
+        format!("{header_str}\r\n")
+    } else {
+        format!("{header_str}\r\n\r\n")
+    };
+    aria2_protocol::http::header_processor::parse_response_head(complete_header.as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Parse the HTTP status code from the first line of the response.
@@ -26,25 +35,7 @@ pub(crate) fn find_header_end(buf: &[u8]) -> Option<usize> {
 /// Expected format: `HTTP/1.1 206 Partial Content\r\n`
 #[cfg(target_os = "linux")]
 pub(crate) fn parse_status_code(header_str: &str) -> io::Result<u16> {
-    let first_line = header_str
-        .lines()
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty response"))?;
-
-    let mut parts = first_line.split_whitespace();
-    let _version = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing HTTP version"))?;
-    let code_str = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing status code"))?;
-
-    code_str.parse::<u16>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid status code: {code_str}"),
-        )
-    })
+    Ok(parse_header(header_str)?.status_code)
 }
 
 /// Check if the response uses `Transfer-Encoding: chunked`.
@@ -52,15 +43,10 @@ pub(crate) fn parse_status_code(header_str: &str) -> io::Result<u16> {
 /// Case-insensitive header name and value matching.
 #[cfg(target_os = "linux")]
 pub(crate) fn is_chunked(header_str: &str) -> bool {
-    for line in header_str.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':')
-            && name.trim().eq_ignore_ascii_case("transfer-encoding")
-            && value.trim().eq_ignore_ascii_case("chunked")
-        {
-            return true;
-        }
-    }
-    false
+    parse_header(header_str)
+        .ok()
+        .and_then(|head| head.header("transfer-encoding").map(str::to_owned))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("chunked"))
 }
 
 /// Parse the `Content-Length` header value.
@@ -68,20 +54,15 @@ pub(crate) fn is_chunked(header_str: &str) -> bool {
 /// Returns `Ok(Some(length))` if found, `Ok(None)` if not present.
 #[cfg(target_os = "linux")]
 pub(crate) fn parse_content_length(header_str: &str) -> io::Result<Option<u64>> {
-    for line in header_str.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':')
-            && name.trim().eq_ignore_ascii_case("content-length")
-        {
-            let value = value.trim();
-            return value.parse::<u64>().map(Some).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid Content-Length: {value}"),
-                )
-            });
-        }
-    }
-    Ok(None)
+    parse_header(header_str)?
+        .header("content-length")
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        })
+        .transpose()
 }
 
 /// Write all bytes at a specific offset in the file, looping to handle

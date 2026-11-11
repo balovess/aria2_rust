@@ -125,6 +125,34 @@ fn test_decode_partial_payload_returns_error() {
 }
 
 #[test]
+fn malformed_string_length_does_not_reserve_declared_size() {
+    // Outer packet: DATA, request id 1, string length u32::MAX, no string data.
+    let bytes = [
+        0, 0, 0, 9,   // packet payload length
+        103, // SSH_FXP_DATA
+        0, 0, 0, 1, // request id
+        0xff, 0xff, 0xff, 0xff, // impossible string length
+    ];
+
+    let error = SftpPacket::decode(&bytes).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn malformed_name_count_is_rejected_before_reserving_entries() {
+    // NAME packet with the maximum entry count and no entry payload.
+    let bytes = [
+        0, 0, 0, 9,   // packet payload length
+        104, // SSH_FXP_NAME
+        0, 0, 0, 1, // request id
+        0xff, 0xff, 0xff, 0xff, // count
+    ];
+
+    let error = SftpPacket::decode(&bytes).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
 fn test_packet_type_codes() {
     assert_eq!(SftpPacket::Init { version: 3 }.packet_type(), SSH_FXP_INIT);
     assert_eq!(

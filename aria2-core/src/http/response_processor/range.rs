@@ -5,6 +5,7 @@
 //! and chunked transfer-encoding detection.
 
 use crate::http::header_processor::HttpResponseHead;
+use aria2_protocol::http::ContentRange;
 
 /// Validate that the server's Content-Range satisfies the requested range.
 ///
@@ -68,20 +69,8 @@ pub(crate) fn parse_content_range(response_head: &HttpResponseHead) -> Option<(u
 ///
 /// Format: `bytes start-end/total` or `bytes */total`.
 pub(crate) fn parse_content_range_value(value: &str) -> Option<(u64, u64, u64)> {
-    let value = value.trim();
-    let range = value
-        .strip_prefix("bytes")
-        .map(|rest| rest.trim_start_matches([' ', '\t', '=']))
-        .unwrap_or(value);
-    let (range, total) = range.split_once('/')?;
-    if range.trim() == "*" || total.trim() == "*" {
-        return None;
-    }
-    let (start, end) = range.trim().split_once('-')?;
-    let start = start.trim().parse().ok()?;
-    let end = end.trim().parse().ok()?;
-    let total = total.trim().parse().ok()?;
-    Some((start, end, total))
+    let range = ContentRange::parse(value)?;
+    Some((range.start, range.end, range.total_size?))
 }
 
 /// Compute the entity length from response headers.
@@ -144,6 +133,8 @@ mod tests {
             Some((0, 499, 1000))
         );
         assert_eq!(parse_content_range_value("bytes 0-0/1"), Some((0, 0, 1)));
+        assert_eq!(parse_content_range_value("bytes 10-9/1000"), None);
+        assert_eq!(parse_content_range_value("bytes 0-1000/1000"), None);
     }
 
     #[test]

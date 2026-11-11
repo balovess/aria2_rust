@@ -1,5 +1,15 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::collections::HashMap;
+
+/// Build the HTTP Basic authentication field value for a credential pair.
+pub fn basic_authorization(username: &str, password: &str) -> String {
+    let credentials = format!("{username}:{password}");
+    format!("Basic {}", STANDARD.encode(credentials))
+}
+
+/// Build the HTTP Bearer authentication field value.
+pub fn bearer_authorization(token: &str) -> String {
+    format!("Bearer {token}")
+}
 
 #[derive(Debug, Clone)]
 pub enum AuthScheme {
@@ -32,9 +42,7 @@ impl AuthCredentials {
     }
 
     pub fn basic_auth_header(&self) -> String {
-        let credentials = format!("{}:{}", self.username, self.password);
-        let encoded = STANDARD.encode(credentials);
-        format!("Basic {}", encoded)
+        basic_authorization(&self.username, &self.password)
     }
 }
 
@@ -55,46 +63,21 @@ impl HttpAuth {
 
     pub fn parse_www_authenticate(header_value: &str) -> Option<AuthChallenge> {
         let header = header_value.trim();
-        if header.eq_ignore_ascii_case("basic") || header.starts_with("Basic ") {
+        let scheme = header.split_ascii_whitespace().next()?;
+        if scheme.eq_ignore_ascii_case("basic") {
             return Some(AuthChallenge::Basic);
         }
-
-        if !header.starts_with("Digest ") {
+        if !scheme.eq_ignore_ascii_case("digest") {
             return None;
         }
-
-        let params_str = &header[7..];
-        let mut params = HashMap::new();
-        for part in params_str.split(',') {
-            let part = part.trim();
-            if let Some((key, value)) = part.split_once('=') {
-                let key = key.trim().to_lowercase();
-                let mut value = value.trim();
-                if value.starts_with('"') && value.ends_with('"') {
-                    value = &value[1..value.len() - 1];
-                }
-                params.insert(key, value.to_string());
-            }
-
-            if let Some((key, _)) = part.split_once('=') {
-                let key = key.trim().to_lowercase();
-                params.entry(key).or_insert_with(String::new);
-            }
-        }
-
+        let challenge = crate::http::digest::DigestChallenge::parse(header).ok()?;
         Some(AuthChallenge::Digest(DigestChallenge {
-            realm: params.get("realm").cloned().unwrap_or_default(),
-            nonce: params.get("nonce").cloned().unwrap_or_default(),
-            qop: params.get("qop").cloned().unwrap_or_default(),
-            algorithm: params
-                .get("algorithm")
-                .cloned()
-                .unwrap_or_else(|| "MD5".to_string()),
-            opaque: params.get("opaque").cloned().unwrap_or_default(),
-            stale: params
-                .get("stale")
-                .map(|v: &String| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            realm: challenge.realm,
+            nonce: challenge.nonce,
+            qop: challenge.qop.unwrap_or_default(),
+            algorithm: challenge.algorithm,
+            opaque: challenge.opaque.unwrap_or_default(),
+            stale: challenge.stale,
         }))
     }
 
@@ -106,62 +89,25 @@ impl HttpAuth {
         nc: u32,
         cnonce: &str,
     ) -> String {
-        let ha1 = Self::compute_ha1(
-            &credentials.username,
-            &challenge.realm,
-            &credentials.password,
-            &challenge.algorithm,
-        );
-
-        let ha2 = Self::compute_ha2(method, uri);
-
-        let response = if challenge.qop.is_empty() {
-            md5_hex(format!("{}:{}{}", ha1, challenge.nonce, ha2))
-        } else {
-            md5_hex(format!(
-                "{}:{}:{:08x}:{}:{}:{}",
-                ha1, challenge.nonce, nc, cnonce, challenge.qop, ha2
-            ))
+        let protocol_challenge = crate::http::digest::DigestChallenge {
+            realm: challenge.realm.clone(),
+            nonce: challenge.nonce.clone(),
+            qop: (!challenge.qop.is_empty()).then(|| challenge.qop.clone()),
+            algorithm: challenge.algorithm.clone(),
+            opaque: (!challenge.opaque.is_empty()).then(|| challenge.opaque.clone()),
+            stale: challenge.stale,
         };
-
-        let mut parts = vec![
-            format!("username=\"{}\"", credentials.username),
-            format!("realm=\"{}\"", challenge.realm),
-            format!("nonce=\"{}\"", challenge.nonce),
-            format!("uri=\"{}\"", uri),
-            format!("response=\"{}\"", response),
-            format!("algorithm={}", challenge.algorithm),
-        ];
-
-        if !challenge.qop.is_empty() {
-            parts.push(format!("qop={}", challenge.qop));
-            parts.push(format!("nc={:08x}", nc));
-            parts.push(format!("cnonce=\"{}\"", cnonce));
-        }
-
-        if !challenge.opaque.is_empty() {
-            parts.push(format!("opaque=\"{}\"", challenge.opaque));
-        }
-
-        format!("Digest {}", parts.join(", "))
+        crate::http::digest::DigestResponse::compute_with_cnonce(
+            &credentials.username,
+            &credentials.password,
+            method,
+            uri,
+            &protocol_challenge,
+            nc,
+            cnonce,
+        )
+        .to_header_value()
     }
-
-    fn compute_ha1(username: &str, realm: &str, password: &str, _algorithm: &str) -> String {
-        md5_hex(format!("{}:{}:{}", username, realm, password))
-    }
-
-    fn compute_ha2(method: &str, uri: &str) -> String {
-        md5_hex(format!("{}:{}", method, uri))
-    }
-}
-
-/// Compute MD5 hash of input and return as lowercase hex string.
-/// Replaces `format!("{:x}", md5::compute(...))` from the old md5 0.7 API.
-fn md5_hex(input: impl AsRef<[u8]>) -> String {
-    use md5::Digest;
-    let mut hasher = md5::Md5::new();
-    hasher.update(input.as_ref());
-    hex::encode(hasher.finalize())
 }
 
 #[derive(Debug, Clone)]
@@ -191,12 +137,17 @@ mod tests {
         assert!(header.starts_with("Basic "));
         assert!(!header.contains("admin"));
         assert!(!header.contains("secret123"));
+        assert_eq!(bearer_authorization("token"), "Bearer token");
     }
 
     #[test]
     fn test_parse_basic_challenge() {
         let result = HttpAuth::parse_www_authenticate("Basic");
         assert!(matches!(result, Some(AuthChallenge::Basic)));
+        assert!(matches!(
+            HttpAuth::parse_www_authenticate("bAsIc realm=\"proxy\""),
+            Some(AuthChallenge::Basic)
+        ));
     }
 
     #[test]
@@ -209,6 +160,19 @@ mod tests {
             assert_eq!(d.nonce, "dcd98b7102dd2f0e8b11d0f600bfb0c093");
             assert_eq!(d.qop, "auth");
         }
+    }
+
+    #[test]
+    fn parses_digest_challenges_with_quoted_commas_and_supported_algorithms() {
+        let result = HttpAuth::parse_www_authenticate(
+            r#"dIgEsT realm="private, proxy", nonce="n1", qop="auth-int", algorithm=SHA-256-sess"#,
+        );
+        let Some(AuthChallenge::Digest(challenge)) = result else {
+            panic!("expected parsed Digest challenge");
+        };
+        assert_eq!(challenge.realm, "private, proxy");
+        assert_eq!(challenge.qop, "auth-int");
+        assert_eq!(challenge.algorithm, "SHA-256-sess");
     }
 
     #[test]
@@ -227,5 +191,37 @@ mod tests {
         assert!(response.starts_with("Digest "));
         assert!(response.contains("username=\"user\""));
         assert!(response.contains("realm=\"testrealm\""));
+    }
+
+    #[test]
+    fn computes_digest_with_explicit_cnonce_through_shared_protocol_engine() {
+        let challenge = DigestChallenge {
+            realm: "private, proxy".to_owned(),
+            nonce: "n1".to_owned(),
+            qop: "auth-int".to_owned(),
+            algorithm: "SHA-256-sess".to_owned(),
+            opaque: "opaque".to_owned(),
+            stale: false,
+        };
+        let credentials = AuthCredentials::new_digest("user", "pass");
+        let response = HttpAuth::build_digest_response(
+            &challenge,
+            &credentials,
+            "CONNECT",
+            "ftp.example.test:21",
+            1,
+            "fixed-cnonce",
+        );
+        assert!(response.contains("realm=\"private, proxy\""));
+        assert!(response.contains("qop=auth-int"));
+        assert!(response.contains("algorithm=SHA-256-sess"));
+        assert!(response.contains("cnonce=\"fixed-cnonce\""));
+        assert!(response.contains("opaque=\"opaque\""));
+        let digest = response
+            .split("response=\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("response hash is emitted");
+        assert_eq!(digest.len(), 64);
     }
 }

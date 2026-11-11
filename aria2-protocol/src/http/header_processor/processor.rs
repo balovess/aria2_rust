@@ -2,8 +2,7 @@
 
 use tracing::debug;
 
-use crate::error::{Aria2Error, Result};
-
+use super::error::{HttpHeaderError, Result};
 use super::types::{
     HttpHeaderParseState, HttpResponseHead, MAX_FIELD_NAME_LEN, MAX_FIELD_VALUE_LEN,
     MAX_HEADER_SIZE,
@@ -59,7 +58,12 @@ impl HttpHeaderProcessor {
         }
 
         let prev_len = self.buf.len();
-        self.buf.extend_from_slice(data);
+        // Permit the four-byte terminator beyond the configured header-body
+        // budget, matching the prior parser's complete-before-limit-check
+        // behavior while keeping allocation bounded.
+        let append_limit = MAX_HEADER_SIZE.saturating_add(4);
+        let append_len = data.len().min(append_limit.saturating_sub(prev_len));
+        self.buf.extend_from_slice(&data[..append_len]);
 
         // Check for header terminator \r\n\r\n
         if let Some(pos) = self.find_terminator() {
@@ -69,7 +73,8 @@ impl HttpHeaderProcessor {
             self.state = HttpHeaderParseState::Complete;
             debug!(header_bytes = header_end, "HTTP headers complete");
         } else {
-            // All supplied bytes are header bytes so far
+            // A terminal error consumes the input chunk even though only the
+            // bounded header prefix is retained.
             self.last_bytes_processed = data.len();
 
             // Advance state if we have at least the status line
@@ -80,7 +85,7 @@ impl HttpHeaderProcessor {
             }
 
             // Guard against unbounded buffer growth
-            if self.buf.len() > MAX_HEADER_SIZE {
+            if append_len < data.len() || self.buf.len() > MAX_HEADER_SIZE {
                 self.state = HttpHeaderParseState::Error("Too large HTTP header block".to_string());
                 debug!(buf_len = self.buf.len(), "Header block exceeds size limit");
             }
@@ -101,14 +106,11 @@ impl HttpHeaderProcessor {
     /// the header data is malformed.
     pub fn get_result(&self) -> Result<HttpResponseHead> {
         if !matches!(self.state, HttpHeaderParseState::Complete) {
-            return Err(Aria2Error::HttpProtocol(
-                "Headers not yet complete".to_string(),
-            ));
+            return Err(HttpHeaderError("Headers not yet complete".to_string()));
         }
 
-        let header_str = std::str::from_utf8(&self.buf).map_err(|e| {
-            Aria2Error::HttpProtocol(format!("Invalid UTF-8 in HTTP headers: {}", e))
-        })?;
+        let header_str = std::str::from_utf8(&self.buf)
+            .map_err(|e| HttpHeaderError(format!("Invalid UTF-8 in HTTP headers: {}", e)))?;
 
         Self::parse_header_block(header_str)
     }
@@ -152,7 +154,7 @@ impl HttpHeaderProcessor {
         // --- Status line ---
         let status_line = lines
             .next()
-            .ok_or_else(|| Aria2Error::HttpProtocol("Empty HTTP response".to_string()))?;
+            .ok_or_else(|| HttpHeaderError("Empty HTTP response".to_string()))?;
         let (http_version, status_code, reason_phrase) = Self::parse_status_line(status_line)?;
 
         // --- Headers with obs-fold support ---
@@ -187,26 +189,26 @@ impl HttpHeaderProcessor {
     fn parse_status_line(line: &str) -> Result<(String, u16, String)> {
         let mut parts = line.splitn(3, ' ');
 
-        let version = parts.next().ok_or_else(|| {
-            Aria2Error::HttpProtocol("Bad Status-Line: missing HTTP-version".to_string())
-        })?;
+        let version = parts
+            .next()
+            .ok_or_else(|| HttpHeaderError("Bad Status-Line: missing HTTP-version".to_string()))?;
 
         if !version.starts_with("HTTP/") {
-            return Err(Aria2Error::HttpProtocol(
+            return Err(HttpHeaderError(
                 "Bad Status-Line: missing HTTP-version".to_string(),
             ));
         }
 
-        let code_str = parts.next().ok_or_else(|| {
-            Aria2Error::HttpProtocol("Bad Status-Line: missing status-code".to_string())
-        })?;
+        let code_str = parts
+            .next()
+            .ok_or_else(|| HttpHeaderError("Bad Status-Line: missing status-code".to_string()))?;
 
-        let status_code: u16 = code_str.parse().map_err(|_| {
-            Aria2Error::HttpProtocol("Bad status code: invalid status-code".to_string())
-        })?;
+        let status_code: u16 = code_str
+            .parse()
+            .map_err(|_| HttpHeaderError("Bad status code: invalid status-code".to_string()))?;
 
         if status_code < 100 {
-            return Err(Aria2Error::HttpProtocol(
+            return Err(HttpHeaderError(
                 "Bad status code: status-code < 100".to_string(),
             ));
         }
@@ -230,7 +232,7 @@ impl HttpHeaderProcessor {
             // obs-fold: line starting with SP or HT is a continuation
             if line.starts_with(' ') || line.starts_with('\t') {
                 if current_name.is_none() {
-                    return Err(Aria2Error::HttpProtocol(
+                    return Err(HttpHeaderError(
                         "Bad HTTP header: field name starts with LWS".to_string(),
                     ));
                 }
@@ -252,7 +254,7 @@ impl HttpHeaderProcessor {
             // Parse "name: value"
             match line.find(':') {
                 Some(0) => {
-                    return Err(Aria2Error::HttpProtocol(
+                    return Err(HttpHeaderError(
                         "Bad HTTP header: field name starts with ':'".to_string(),
                     ));
                 }
@@ -263,9 +265,7 @@ impl HttpHeaderProcessor {
                     current_value = value;
                 }
                 None => {
-                    return Err(Aria2Error::HttpProtocol(
-                        "Bad HTTP header: missing ':'".to_string(),
-                    ));
+                    return Err(HttpHeaderError("Bad HTTP header: missing ':'".to_string()));
                 }
             }
         }
@@ -283,12 +283,12 @@ impl HttpHeaderProcessor {
     /// Validate header field sizes (matches C++ limits).
     fn validate_field_sizes(name: &str, value: &str) -> Result<()> {
         if name.len() > MAX_FIELD_NAME_LEN {
-            return Err(Aria2Error::HttpProtocol(
+            return Err(HttpHeaderError(
                 "Too large HTTP header: field name exceeds limit".to_string(),
             ));
         }
         if value.len() > MAX_FIELD_VALUE_LEN {
-            return Err(Aria2Error::HttpProtocol(
+            return Err(HttpHeaderError(
                 "Too large HTTP header: field value exceeds limit".to_string(),
             ));
         }

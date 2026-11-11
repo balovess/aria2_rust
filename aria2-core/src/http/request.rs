@@ -4,7 +4,6 @@
 //! headers, and authentication helpers. Mirrors C++ aria2's
 //! `HttpRequest::createRequest()` for header generation.
 
-use base64::{Engine, engine::general_purpose};
 use std::collections::HashMap;
 use url::Url;
 
@@ -58,33 +57,24 @@ impl HttpRequest {
     /// Serializes the request to a byte sequence according to the HTTP/1.1 specification.
     /// Format: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut result = String::new();
-
-        // Request line: METHOD /path HTTP/1.1
         let path = self.url.path();
-        let query = self.url.query();
-        if let Some(q) = query {
-            result.push_str(&format!("{} {}?{} HTTP/1.1\r\n", self.method, path, q));
+        let target = if let Some(query) = self.url.query() {
+            format!("{path}?{query}")
         } else {
-            result.push_str(&format!("{} {} HTTP/1.1\r\n", self.method, path));
-        }
-
-        // Headers
-        for (key, value) in &self.headers {
-            result.push_str(&format!("{}: {}\r\n", key, value));
-        }
-
-        // Empty line separating header and body
-        result.push_str("\r\n");
-
-        let mut bytes = result.into_bytes();
-
-        // Body
-        if let Some(ref body) = self.body {
-            bytes.extend_from_slice(body);
-        }
-
-        bytes
+            path.to_owned()
+        };
+        let method = self.method.to_string();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        aria2_protocol::http::request::serialize_http_request(
+            &method,
+            &target,
+            &headers,
+            self.body.as_deref(),
+        )
     }
 }
 
@@ -510,9 +500,7 @@ impl HttpRequestBuilder {
 /// assert_eq!(auth_header, "Basic dXNlcjpwYXNz");
 /// ```
 pub fn basic_auth(username: &str, password: &str) -> String {
-    let credentials = format!("{}:{}", username, password);
-    let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
-    format!("Basic {}", encoded)
+    aria2_protocol::http::auth::basic_authorization(username, password)
 }
 
 /// Generate Bearer Token header value
@@ -525,5 +513,5 @@ pub fn basic_auth(username: &str, password: &str) -> String {
 ///
 /// Complete Authorization header value (e.g., `Bearer my-token`)
 pub fn bearer_token(token: &str) -> String {
-    format!("Bearer {}", token)
+    aria2_protocol::http::auth::bearer_authorization(token)
 }

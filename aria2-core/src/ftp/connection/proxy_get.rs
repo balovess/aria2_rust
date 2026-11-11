@@ -403,33 +403,26 @@ impl FtpProxyGetRequestBuilder {
     /// Returns an error if the FTP URL cannot be serialized.
     pub fn build(self) -> Result<FtpProxyGetRequest> {
         let request_url = self.build_request_url();
-
-        // Build request line with full URL (proxy-style)
-        let mut request = format!("GET {} HTTP/1.1\r\n", request_url);
-
-        // Host header: FTP server host (mirrors C++ getHostText(getURIHost(), getPort()))
         let host_header = Self::build_host_header(&self.ftp_url);
-        request.push_str(&format!("Host: {}\r\n", host_header));
-
-        // User-Agent header
-        request.push_str(&format!("User-Agent: {}\r\n", self.proxy_config.user_agent));
-
-        // Accept header
-        request.push_str("Accept: */*\r\n");
+        let mut headers = vec![
+            ("Host".to_owned(), host_header),
+            ("User-Agent".to_owned(), self.proxy_config.user_agent),
+            ("Accept".to_owned(), "*/*".to_owned()),
+        ];
 
         // No-cache headers (mirrors C++ noCache_)
         if self.no_cache {
-            request.push_str("Pragma: no-cache\r\n");
-            request.push_str("Cache-Control: no-cache\r\n");
+            headers.push(("Pragma".to_owned(), "no-cache".to_owned()));
+            headers.push(("Cache-Control".to_owned(), "no-cache".to_owned()));
         }
 
         // Connection: Keep-Alive for proxy requests
         // Mirrors C++: if(proxyRequest_ && isKeepAliveEnabled())
-        request.push_str("Connection: Keep-Alive\r\n");
+        headers.push(("Connection".to_owned(), "Keep-Alive".to_owned()));
 
         // Range header for resume (mirrors C++ segment-based Range logic)
         if self.range_start > 0 {
-            request.push_str(&format!("Range: bytes={}-\r\n", self.range_start));
+            headers.push(("Range".to_owned(), format!("bytes={}-", self.range_start)));
         }
 
         // Proxy-Authorization header (mirrors C++ getProxyAuthString())
@@ -438,20 +431,20 @@ impl FtpProxyGetRequestBuilder {
                 &self.proxy_config.proxy_username,
                 &self.proxy_config.proxy_password,
             );
-            request.push_str(&format!("Proxy-Authorization: {}\r\n", auth_header));
+            headers.push(("Proxy-Authorization".to_owned(), auth_header));
         }
-
-        // End of headers
-        request.push_str("\r\n");
+        let request_bytes = aria2_protocol::http::request::HttpRequest::get(request_url.clone())
+            .with_headers(headers)
+            .to_bytes();
 
         debug!(
             "Built FTP proxy GET request ({} bytes) for {}",
-            request.len(),
+            request_bytes.len(),
             request_url
         );
 
         Ok(FtpProxyGetRequest {
-            request_bytes: request.into_bytes(),
+            request_bytes,
             request_url,
         })
     }
@@ -509,10 +502,7 @@ impl FtpProxyGetRequestBuilder {
 ///
 /// Mirrors C++ `HttpRequest::getProxyAuthString()`.
 fn build_basic_proxy_auth(username: &str, password: &str) -> String {
-    use base64::Engine;
-    let credentials = format!("{}:{}", username, password);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
-    format!("Basic {}", encoded)
+    aria2_protocol::http::auth::basic_authorization(username, password)
 }
 
 /// Percent-encode a username for embedding in a URL.

@@ -1,4 +1,5 @@
 mod lifecycle;
+mod process_options;
 mod progress;
 
 use std::path::PathBuf;

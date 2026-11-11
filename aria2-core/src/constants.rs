@@ -1,9 +1,9 @@
 // Protocol defaults
 pub const USER_AGENT: &str = aria2_protocol::identity::DEFAULT_USER_AGENT;
-pub const FTP_DEFAULT_PORT: u16 = 21;
+pub const FTP_DEFAULT_PORT: u16 = aria2_protocol::ftp::DEFAULT_PORT;
 pub const FTP_DEFAULT_USER: &str = "anonymous";
 pub const FTP_DEFAULT_PASSWORD: &str = "aria2@";
-pub const SFTP_DEFAULT_PORT: u16 = 22;
+pub const SFTP_DEFAULT_PORT: u16 = aria2_protocol::DEFAULT_SFTP_PORT;
 
 // HTTP defaults
 pub const HTTP_DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -165,8 +165,8 @@ pub const SFTP_DISK_WRITE_CHUNK_SIZE: usize = 64 * 1024;
 pub const SFTP_SPEED_UPDATE_INTERVAL_MS: u64 = 500;
 
 // LPD defaults
-pub const LPD_MULTICAST_ADDRESS: &str = "239.192.152.143";
-pub const LPD_PORT: u16 = 6771;
+pub const LPD_MULTICAST_ADDRESS: &str = aria2_protocol::DEFAULT_LPD_MULTICAST_ADDRESS;
+pub const LPD_PORT: u16 = aria2_protocol::DEFAULT_LPD_PORT;
 pub const LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 300;
 pub const LPD_RECEIVE_BUFFER_SIZE: usize = 1024;
 pub const LPD_DEFAULT_RECEIVE_TIMEOUT_MS: u64 = 2000;

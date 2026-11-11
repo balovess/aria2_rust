@@ -193,8 +193,8 @@ impl SequentialDownloader {
         let mut current = sorted[0];
 
         for &(offset, length) in sorted.iter().skip(1) {
-            let current_end = current.0 + current.1;
-            let next_end = offset + length;
+            let current_end = current.0.saturating_add(current.1);
+            let next_end = offset.saturating_add(length);
 
             if offset <= current_end {
                 current = (current.0, std::cmp::max(current_end, next_end) - current.0);
@@ -219,10 +219,15 @@ impl SequentialDownloader {
 
         let mut current = 0;
         for &(offset, length) in &merged_ranges {
-            if offset > current {
-                gaps.push((current, offset - current));
+            if current >= total_length {
+                break;
             }
-            current = std::cmp::max(current, offset + length);
+            let start = offset.min(total_length);
+            let end = offset.saturating_add(length).min(total_length);
+            if start > current {
+                gaps.push((current, start - current));
+            }
+            current = std::cmp::max(current, end);
         }
         if current < total_length {
             gaps.push((current, total_length - current));
@@ -663,5 +668,12 @@ mod tests {
         let ranges = &[(0, 200), (100, 150), (300, 50)];
         let gaps = SequentialDownloader::find_all_gaps(ranges, 500);
         assert_eq!(gaps, vec![(250, 50), (350, 150)]);
+    }
+
+    #[test]
+    fn test_find_all_gaps_clips_ranges_to_file_length() {
+        let ranges = &[(u64::MAX - 1, 8)];
+        let gaps = SequentialDownloader::find_all_gaps(ranges, 100);
+        assert_eq!(gaps, vec![(0, 100)]);
     }
 }

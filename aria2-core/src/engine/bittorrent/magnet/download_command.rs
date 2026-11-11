@@ -296,13 +296,21 @@ impl Command for MagnetDownloadCommand {
         };
 
         let torrent_bytes =
-            Self::normalize_magnet_metadata(&ml, &torrent_bytes).map_err(|error| {
+            aria2_protocol::bittorrent::torrent::metainfo::normalize_magnet_metadata(
+                &torrent_bytes,
+                &ml.trackers,
+            )
+            .map_err(|error| {
                 Aria2Error::Fatal(FatalError::Config(format!(
                     "Fetched magnet metadata is invalid: {error}"
                 )))
             })?;
 
-        let torrent_bytes = Self::merge_magnet_web_seeds(&ml, &torrent_bytes).map_err(|error| {
+        let torrent_bytes = aria2_protocol::bittorrent::torrent::metainfo::merge_magnet_web_seeds(
+            &torrent_bytes,
+            &ml.ws,
+        )
+        .map_err(|error| {
             Aria2Error::Fatal(FatalError::Config(format!(
                 "Fetched metadata could not include magnet web seeds: {error}"
             )))

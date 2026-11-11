@@ -282,37 +282,37 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
             use md5::Digest;
             let mut hasher = md5::Md5::new();
             hasher.update(data);
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }
         HashAlgorithm::Sha1 => {
             use sha1::Digest;
             let mut hasher = sha1::Sha1::new();
             hasher.update(data);
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }
         HashAlgorithm::Sha224 => {
             use sha2::Digest;
             let mut hasher = sha2::Sha224::new();
             hasher.update(data);
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }
         HashAlgorithm::Sha256 => {
             use sha2::Digest;
             let mut hasher = sha2::Sha256::new();
             hasher.update(data);
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }
         HashAlgorithm::Sha384 => {
             use sha2::Digest;
             let mut hasher = sha2::Sha384::new();
             hasher.update(data);
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }
         HashAlgorithm::Sha512 => {
             use sha2::Digest;
             let mut hasher = sha2::Sha512::new();
             hasher.update(data);
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }
     }
 }

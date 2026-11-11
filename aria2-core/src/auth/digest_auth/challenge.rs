@@ -29,7 +29,10 @@ use super::{AuthChallenge, AuthScheme, DigestAlgorithm};
 pub fn parse_www_authenticate(header_value: &str) -> Result<AuthChallenge> {
     let header = header_value.trim();
 
-    if header.starts_with("Basic ") {
+    let (scheme, _) = header
+        .split_once(char::is_whitespace)
+        .unwrap_or((header, ""));
+    if scheme.eq_ignore_ascii_case("Basic") {
         return Ok(AuthChallenge {
             scheme: AuthScheme::Basic,
             realm: String::new(),
@@ -40,54 +43,32 @@ pub fn parse_www_authenticate(header_value: &str) -> Result<AuthChallenge> {
         });
     }
 
-    if !header.starts_with("Digest ") {
+    if !scheme.eq_ignore_ascii_case("Digest") {
         return Err(Aria2Error::Parse(format!(
             "Unsupported auth scheme: {}",
             header
         )));
     }
-
-    // Parse Digest parameters
-    let params_str = header.trim_start_matches("Digest").trim();
-    let mut realm = String::new();
-    let mut nonce = None;
-    let mut opaque = None;
-    let mut qop = None;
-    let mut stale = false;
-    let mut algorithm = DigestAlgorithm::Md5;
-
-    // Simple parser for key="value" or key=value pairs
-    let re = regex::Regex::new(r#"(?i)(\w+)\s*=\s*"([^"]*)"|(\w+)\s*=\s*(\w+)"#)
-        .map_err(|e| Aria2Error::Parse(format!("Failed to compile regex: {}", e)))?;
-
-    for cap in re.captures_iter(params_str) {
-        let key = cap.get(1).or(cap.get(3)).map(|m| m.as_str()).unwrap_or("");
-        let value = cap.get(2).or(cap.get(4)).map(|m| m.as_str()).unwrap_or("");
-
-        match key.to_lowercase().as_str() {
-            "realm" => realm = value.to_string(),
-            "nonce" => nonce = Some(value.to_string()),
-            "opaque" => opaque = Some(value.to_string()),
-            "qop" => qop = Some(value.to_string()),
-            "stale" => stale = value.eq_ignore_ascii_case("true"),
-            "algorithm" => {
-                algorithm = match value.to_uppercase().as_str() {
-                    "MD5" | "MD5-SESS" => DigestAlgorithm::Md5,
-                    "SHA-256" | "SHA-256-SESS" => DigestAlgorithm::Sha256,
-                    "SHA-512-256" | "SHA-512-256-SESS" => DigestAlgorithm::Sha512_256,
-                    _ => DigestAlgorithm::Md5, // Default fallback
-                };
-            }
-            _ => {}
-        }
-    }
+    let parameters = aria2_protocol::http::digest::parse_challenge_parameters(header)
+        .map_err(|error| Aria2Error::Parse(error.to_string()))?;
+    let algorithm = match parameters
+        .algorithm
+        .as_deref()
+        .unwrap_or("MD5")
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "SHA-256" | "SHA-256-SESS" => DigestAlgorithm::Sha256,
+        "SHA-512-256" | "SHA-512-256-SESS" => DigestAlgorithm::Sha512_256,
+        _ => DigestAlgorithm::Md5,
+    };
 
     Ok(AuthChallenge {
         scheme: AuthScheme::Digest { algorithm },
-        realm,
-        nonce,
-        opaque,
-        qop,
-        stale,
+        realm: parameters.realm.unwrap_or_default(),
+        nonce: parameters.nonce,
+        opaque: parameters.opaque,
+        qop: parameters.qop,
+        stale: parameters.stale,
     })
 }

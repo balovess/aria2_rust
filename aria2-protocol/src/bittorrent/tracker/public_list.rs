@@ -10,6 +10,13 @@ use tracing::{debug, info, warn};
 
 use crate::http::client::ensure_ring_provider;
 
+mod parse;
+
+#[cfg(test)]
+mod tests;
+
+use parse::EMBEDDED_TRACKER_LIST;
+
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
 pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(604_800);
 pub const DEFAULT_TRACKER_SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -18,82 +25,6 @@ pub const DEFAULT_TRACKER_SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const MAX_TRACKER_SOURCE_CONCURRENCY: usize = 4;
 const MAX_BACKOFF: Duration = Duration::from_secs(3_600);
 const REMOTE_TEMPORARY_BACKOFF: Duration = Duration::from_secs(30);
-
-const EMBEDDED_TRACKER_LIST: &str = "http://1337.abcvg.info:80/announce
-http://lucke.fenesisu.moe:6969/announce
-http://nyaa.tracker.wf:7777/announce
-http://open.acgtracker.com:1096/announce
-http://torrentsmd.com:8080/announce
-http://tracker.dhitechnical.com:6969/announce
-http://tracker.exe.in.th:6969/announce
-http://tracker.mywaifu.best:6969/announce
-http://tracker.renfei.net:8080/announce
-http://tracker.skyts.net:6969/announce
-http://tracker.tritan.gg:8080/announce
-http://tracker.xn--djrq4gl4hvoi.top:80/announce
-http://tracker3.ctix.cn:8080/announce
-https://1337.abcvg.info:443/announce
-https://cny.fan:443/announce
-https://pybittrack.retiolus.net:443/announce
-https://shahidrazi.online:443/announce
-https://t.213891.xyz:443/announce
-https://torrent.tracker.durukanbal.com:443/announce
-https://tr.abiir.top:443/announce
-https://tr.nyacat.pw:443/announce
-https://tracker-zhuqiy.xn--1r3au8b.space:443/announce
-https://tracker.7471.top:443/announce
-https://tracker.bt4g.com:443/announce
-https://tracker.gcrenwp.top:443/announce
-https://tracker.ghostchu-services.top:443/announce
-https://tracker.kuroy.me:443/announce
-https://tracker.manager.v6.navy:443/announce
-https://tracker.moeking.me:443/announce
-https://tracker.nekomi.cn:443/announce
-https://tracker.pmman.tech:443/announce
-https://tracker.qingwapt.org:443/announce
-https://tracker.yemekyedim.com:443/announce
-https://tracker.yggleak.top:443/announce
-https://tracker.zhuqiy.com:443/announce
-https://tracker1.520.jp:443/announce
-udp://admin.52ywp.com:6969/announce
-udp://bittorrent-tracker.e-n-c-r-y-p-t.net:1337/announce
-udp://bt.rer.lol:6969/announce
-udp://evan.im:6969/announce
-udp://martin-gebhardt.eu:25/announce
-udp://ns575949.ip-51-222-82.net:6969/announce
-udp://open.demonii.com:1337/announce
-udp://open.stealth.si:80/announce
-udp://opentor.org:2710/announce
-udp://p4p.arenabg.com:1337/announce
-udp://t.overflow.biz:6969/announce
-udp://tracker.004430.xyz:1337/announce
-udp://tracker.1h.is:1337/announce
-udp://tracker.bluefrog.pw:2710/announce
-udp://tracker.breizh.pm:6969/announce
-udp://tracker.corpscorp.online:80/announce
-udp://tracker.darkness.services:6969/announce
-udp://tracker.dler.com:6969/announce
-udp://tracker.flatuslifir.is:6969/announce
-udp://tracker.fnix.net:6969/announce
-udp://tracker.gmi.gd:6969/announce
-udp://tracker.ixuexi.click:6969/announce
-udp://tracker.opentorrent.top:6969/announce
-udp://tracker.opentrackr.org:1337/announce
-udp://tracker.playground.ru:6969/announce
-udp://tracker.plx.im:6969/announce
-udp://tracker.qu.ax:6969/announce
-udp://tracker.skyts.net:6969/announce
-udp://tracker.srv00.com:6969/announce
-udp://tracker.t-1.org:6969/announce
-udp://tracker.theoks.net:6969/announce
-udp://tracker.torrent.eu.org:451/announce
-udp://tracker.torrust-demo.com:6969/announce
-udp://tracker.tryhackx.org:6969/announce
-udp://uabits.today:6990/announce
-udp://udp.tracker.projectk.org:23333/announce
-udp://wepzone.net:6969/announce
-udp://www.nartlof.com:6969/announce
-wss://tracker.openwebtorrent.com:443/announce";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackerProtocol {
@@ -135,10 +66,10 @@ impl TrackerFailureKind {
 impl TrackerProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
-            TrackerProtocol::Http => "http",
-            TrackerProtocol::Https => "https",
-            TrackerProtocol::Udp => "udp",
-            TrackerProtocol::Wss => "wss",
+            Self::Http => "http",
+            Self::Https => "https",
+            Self::Udp => "udp",
+            Self::Wss => "wss",
         }
     }
 }
@@ -168,14 +99,6 @@ impl Default for TrackerCatalogConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct TrackerHealth {
-    consecutive_failures: u32,
-    next_retry: Option<Instant>,
-    successes: u64,
-    failures: u64,
-}
-
 pub struct PublicTrackerListStats {
     pub total_entries: usize,
     pub http_count: usize,
@@ -185,6 +108,14 @@ pub struct PublicTrackerListStats {
     pub last_updated: Option<Duration>,
     pub sources: Vec<String>,
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrackerHealth {
+    consecutive_failures: u32,
+    next_retry: Option<Instant>,
+    successes: u64,
+    failures: u64,
 }
 
 pub struct PublicTrackerList {
@@ -249,22 +180,7 @@ impl PublicTrackerList {
     }
 
     pub fn parse(text: &str) -> Vec<TrackerEntry> {
-        let mut result = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains("://") {
-                continue;
-            }
-
-            if let Some(entry) =
-                normalize_tracker_url(trimmed).and_then(|url| parse_single_tracker_url(&url))
-                && seen.insert(entry.url.clone())
-            {
-                result.push(entry);
-            }
-        }
-        result
+        parse::parse_tracker_list(text)
     }
 
     pub async fn config(&self) -> TrackerCatalogConfig {
@@ -650,404 +566,4 @@ fn normalize_sources(sources: Vec<String>) -> Vec<String> {
         })
         .filter(|source| !source.is_empty() && seen.insert(source.clone()))
         .collect()
-}
-
-fn normalize_tracker_url(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    let parsed = url::Url::parse(raw).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https" | "udp" | "wss") {
-        return None;
-    }
-    if parsed.host_str()?.is_empty() {
-        return None;
-    }
-    if !parsed.path().is_empty() && parsed.path() != "/announce" && parsed.path() != "/announce/" {
-        return None;
-    }
-    let without_fragment = raw.split('#').next().unwrap_or(raw);
-    if parsed.path().is_empty() {
-        Some(format!("{without_fragment}/announce"))
-    } else if parsed.path() == "/announce/" {
-        Some(without_fragment.trim_end_matches('/').to_string())
-    } else {
-        Some(without_fragment.to_string())
-    }
-}
-
-fn parse_single_tracker_url(url: &str) -> Option<TrackerEntry> {
-    let parsed = url::Url::parse(url).ok()?;
-    let protocol = if parsed.scheme() == "https" {
-        TrackerProtocol::Https
-    } else if parsed.scheme() == "http" {
-        TrackerProtocol::Http
-    } else if parsed.scheme() == "udp" {
-        TrackerProtocol::Udp
-    } else if parsed.scheme() == "wss" {
-        TrackerProtocol::Wss
-    } else {
-        return None;
-    };
-
-    let default_port = match protocol {
-        TrackerProtocol::Http => 80,
-        TrackerProtocol::Https | TrackerProtocol::Wss => 443,
-        TrackerProtocol::Udp => 6969,
-    };
-    let host = parsed.host_str()?.to_string();
-    let port = parsed.port().unwrap_or(default_port);
-    if host.is_empty() || port == 0 || parsed.path() != "/announce" {
-        return None;
-    }
-
-    Some(TrackerEntry {
-        url: url.to_string(),
-        protocol,
-        host,
-        port,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn source_request_timeout_covers_the_complete_response_body() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request).await.unwrap();
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nhttp://slow.test/announce\n",
-                )
-                .await
-                .unwrap();
-            stream.flush().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        });
-
-        let catalog = PublicTrackerList::new();
-        assert_eq!(
-            catalog.source_request_timeout().await,
-            DEFAULT_TRACKER_SOURCE_TIMEOUT
-        );
-        catalog
-            .set_source_request_timeout(Duration::from_millis(40))
-            .await;
-        let error = catalog
-            .fetch_and_update(&format!("http://{address}/trackers.txt"))
-            .await
-            .expect_err("an incomplete response body should time out");
-        assert!(error.contains("timed out"), "unexpected error: {error}");
-        server.await.unwrap();
-
-        catalog.set_source_request_timeout(Duration::ZERO).await;
-        assert_eq!(
-            catalog.source_request_timeout().await,
-            DEFAULT_TRACKER_SOURCE_TIMEOUT
-        );
-    }
-
-    #[test]
-    fn tracker_failure_kind_names_are_stable() {
-        assert_eq!(TrackerFailureKind::Network.as_str(), "network");
-        assert_eq!(TrackerFailureKind::Timeout.as_str(), "timeout");
-        assert_eq!(
-            TrackerFailureKind::RemoteTemporary.as_str(),
-            "remoteTemporary"
-        );
-        assert_eq!(
-            TrackerFailureKind::TrackerRejected.as_str(),
-            "trackerRejected"
-        );
-        assert_eq!(
-            TrackerFailureKind::MalformedResponse.as_str(),
-            "malformedResponse"
-        );
-    }
-
-    #[test]
-    fn test_parse_embedded_list() {
-        let entries = PublicTrackerList::parse(EMBEDDED_TRACKER_LIST);
-        assert!(
-            entries.len() >= 50,
-            "embedded list should have at least 50 trackers, got {}",
-            entries.len()
-        );
-    }
-
-    #[test]
-    fn test_parse_empty_input() {
-        let entries = PublicTrackerList::parse("");
-        assert!(entries.is_empty(), "empty input should produce empty list");
-    }
-
-    #[test]
-    fn test_parse_whitespace_only() {
-        let entries = PublicTrackerList::parse("\n\n   \n\t\n");
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn test_parse_mixed_protocols() {
-        let text = "http://a.com:80/announce\nhttps://b.com:443/announce\nudp://c.com:6969/announce\nwss://d.com:443/announce";
-        let entries = PublicTrackerList::parse(text);
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].protocol, TrackerProtocol::Http);
-        assert_eq!(entries[1].protocol, TrackerProtocol::Https);
-        assert_eq!(entries[2].protocol, TrackerProtocol::Udp);
-        assert_eq!(entries[3].protocol, TrackerProtocol::Wss);
-    }
-
-    #[test]
-    fn test_parse_invalid_lines_skipped() {
-        let text = "http://valid.com:80/announce\nnot a url\n\nhttp://another.com/announce";
-        let entries = PublicTrackerList::parse(text);
-        assert_eq!(entries.len(), 2);
-    }
-
-    #[test]
-    fn test_get_http_trackers_filters_correctly() {
-        let ptl = PublicTrackerList::new();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let http = ptl.get_http_trackers().await;
-            for url in &http {
-                assert!(
-                    url.starts_with("http://") || url.starts_with("https://"),
-                    "{} should be http or https",
-                    url
-                );
-                assert!(!url.starts_with("udp://"), "{} should not be udp", url);
-            }
-            assert!(!http.is_empty(), "should have at least some HTTP trackers");
-        });
-    }
-
-    #[test]
-    fn test_get_udp_trackers_filters_correctly() {
-        let ptl = PublicTrackerList::new();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let udp = ptl.get_udp_trackers().await;
-            for url in &udp {
-                assert!(url.starts_with("udp://"), "{} should be udp", url);
-            }
-            assert!(!udp.is_empty(), "should have at least some UDP trackers");
-        });
-    }
-
-    #[tokio::test]
-    async fn test_stats_returns_reasonable_values() {
-        let ptl = PublicTrackerList::new();
-        let stats = ptl.stats().await;
-        assert!(stats.total_entries >= 50);
-        assert!(stats.http_count > 0);
-        assert!(stats.udp_count > 0);
-        assert!(
-            stats.is_embedded_fallback,
-            "default instance uses embedded list"
-        );
-        assert!(stats.last_updated.is_some());
-    }
-
-    #[tokio::test]
-    async fn catalog_subscribers_observe_configuration_and_entry_changes() {
-        let ptl = PublicTrackerList::new();
-        let mut updates = ptl.subscribe_updates();
-        let mut revision = *updates.borrow_and_update();
-
-        ptl.set_config(TrackerCatalogConfig {
-            enabled: false,
-            sources: Vec::new(),
-            update_interval: Duration::from_secs(60),
-        })
-        .await;
-        tokio::time::timeout(Duration::from_secs(1), updates.changed())
-            .await
-            .expect("configuration changes should wake subscribers")
-            .expect("catalog update sender should remain open");
-        let next_revision = *updates.borrow_and_update();
-        assert_eq!(next_revision, revision.wrapping_add(1));
-        revision = next_revision;
-
-        let tracker = PublicTrackerList::parse("http://new.example/announce")
-            .into_iter()
-            .collect();
-        ptl.replace_snapshot(tracker)
-            .await
-            .expect("test catalog snapshot should be valid");
-        tokio::time::timeout(Duration::from_secs(1), updates.changed())
-            .await
-            .expect("entry changes should wake subscribers")
-            .expect("catalog update sender should remain open");
-        assert_eq!(*updates.borrow_and_update(), revision.wrapping_add(1));
-    }
-
-    #[tokio::test]
-    async fn test_default_instance_uses_embedded() {
-        let ptl = PublicTrackerList::new();
-        let all = ptl.get_all().await;
-        let embedded_count = PublicTrackerList::parse(EMBEDDED_TRACKER_LIST).len();
-        assert_eq!(
-            all.len(),
-            embedded_count,
-            "default instance should use all embedded entries"
-        );
-    }
-
-    #[tokio::test]
-    async fn disabled_catalog_has_no_available_trackers() {
-        let ptl = PublicTrackerList::new();
-        ptl.set_config(TrackerCatalogConfig {
-            enabled: false,
-            sources: Vec::new(),
-            update_interval: Duration::from_secs(60),
-        })
-        .await;
-
-        assert!(ptl.available_snapshot().await.is_empty());
-        assert!(ptl.get_http_trackers().await.is_empty());
-        assert!(ptl.get_udp_trackers().await.is_empty());
-        assert!(
-            !ptl.get_all().await.is_empty(),
-            "disabling availability must not erase the catalog snapshot"
-        );
-    }
-
-    #[tokio::test]
-    async fn reenabled_catalog_exposes_existing_snapshot() {
-        let ptl = PublicTrackerList::new();
-        ptl.set_config(TrackerCatalogConfig {
-            enabled: false,
-            sources: Vec::new(),
-            update_interval: Duration::from_secs(60),
-        })
-        .await;
-        ptl.set_config(TrackerCatalogConfig {
-            enabled: true,
-            sources: Vec::new(),
-            update_interval: Duration::from_secs(60),
-        })
-        .await;
-
-        assert!(!ptl.available_snapshot().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn tracker_backoff_preserves_catalog_and_success_recovers() {
-        let ptl = PublicTrackerList::new();
-        let entry = PublicTrackerList::parse("http://unhealthy.example/announce")
-            .into_iter()
-            .next()
-            .expect("test tracker should parse");
-        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
-
-        ptl.record_failure(&entry.url).await;
-        ptl.record_failure(&entry.url).await;
-        assert!(ptl.contains(&entry.url).await);
-        ptl.record_failure(&entry.url).await;
-
-        assert!(ptl.contains(&entry.url).await);
-        assert!(ptl.available_snapshot().await.is_empty());
-
-        ptl.record_success(&entry.url).await;
-        assert!(!ptl.available_snapshot().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn local_failures_do_not_cool_or_remove_tracker() {
-        let ptl = PublicTrackerList::new();
-        let entry = PublicTrackerList::parse("http://local-network.example/announce")
-            .into_iter()
-            .next()
-            .expect("test tracker should parse");
-        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
-
-        ptl.record_failure_kind(&entry.url, TrackerFailureKind::Network)
-            .await;
-        ptl.record_failure_kind(&entry.url, TrackerFailureKind::Timeout)
-            .await;
-
-        assert!(ptl.contains(&entry.url).await);
-        assert!(
-            ptl.available_snapshot()
-                .await
-                .iter()
-                .any(|candidate| candidate.url == entry.url)
-        );
-    }
-
-    #[tokio::test]
-    async fn remote_temporary_failure_is_retriable_and_preserves_catalog() {
-        let ptl = PublicTrackerList::new();
-        let entry = PublicTrackerList::parse("http://temporary.example/announce")
-            .into_iter()
-            .next()
-            .expect("test tracker should parse");
-        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
-
-        ptl.record_failure_kind(&entry.url, TrackerFailureKind::RemoteTemporary)
-            .await;
-
-        assert!(ptl.contains(&entry.url).await);
-        assert!(ptl.available_snapshot().await.is_empty());
-        ptl.record_success(&entry.url).await;
-        assert!(!ptl.available_snapshot().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn explicit_tracker_failure_does_not_hide_or_remove_tracker() {
-        let ptl = PublicTrackerList::new();
-        let entry = PublicTrackerList::parse("http://rejected.example/announce")
-            .into_iter()
-            .next()
-            .expect("test tracker should parse");
-        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
-
-        ptl.record_failure_kind(&entry.url, TrackerFailureKind::TrackerRejected)
-            .await;
-
-        assert!(ptl.contains(&entry.url).await);
-        assert!(
-            ptl.available_snapshot()
-                .await
-                .iter()
-                .any(|candidate| candidate.url == entry.url)
-        );
-    }
-
-    #[test]
-    fn test_parse_non_announce_path_rejected() {
-        let text = "http://valid.com:80/scrape\nhttp://valid.com:80/announce";
-        let entries = PublicTrackerList::parse(text);
-        assert_eq!(entries.len(), 1, "non-announce paths should be rejected");
-        assert_eq!(entries[0].url, "http://valid.com:80/announce");
-    }
-
-    #[tokio::test]
-    async fn test_shutdown_sets_flag() {
-        let ptl = PublicTrackerList::new();
-        assert!(ptl.running.load(Ordering::Relaxed));
-        ptl.shutdown();
-        assert!(!ptl.running.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn test_start_auto_update_starts_task() {
-        use std::time::Duration as StdDuration;
-        let ptl = Arc::new(PublicTrackerList::new());
-        ptl.start_auto_update(
-            "https://example.com/fake.txt".to_string(),
-            StdDuration::from_secs(999999),
-        );
-        sleep(Duration::from_millis(50)).await;
-        assert!(ptl.running.load(Ordering::Relaxed));
-        ptl.shutdown();
-    }
 }

@@ -287,6 +287,8 @@ async fn truncate_output(path: &Path) -> Result<()> {
         .map_err(|error| Aria2Error::FileIo(error.to_string()))
 }
 
-fn parse_content_range_total(value: &str) -> Option<u64> {
-    value.rsplit_once('/')?.1.parse().ok()
+pub(super) fn parse_content_range_total(value: &str) -> Option<u64> {
+    aria2_protocol::http::response::ContentRange::parse(value)
+        .and_then(|range| range.total_size)
+        .or_else(|| aria2_protocol::http::response::parse_unsatisfied_content_range_length(value))
 }

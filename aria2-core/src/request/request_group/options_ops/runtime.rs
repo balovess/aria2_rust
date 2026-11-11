@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::rate_limiter::RateLimiter;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::rpc_update::{RuntimeOptionChanges, apply_rpc_option};
+use super::runtime_update::{RuntimeOptionChanges, apply_runtime_option_value};
 
 impl super::super::RequestGroup {
     pub(crate) fn bt_max_peers_limit(&self) -> Arc<std::sync::atomic::AtomicUsize> {
@@ -119,10 +119,10 @@ impl super::super::RequestGroup {
                 .map_err(|error| format!("Option '{}': {}", key, error))?;
         }
         let mut options = super::super::DownloadOptions::default();
-        apply_rpc_option(&mut options, key, value)
+        apply_runtime_option_value(&mut options, key, value)
     }
 
-    /// Apply a runtime option while preserving parse failures for RPC callers.
+    /// Apply a runtime option while preserving parse failures for adapters.
     pub fn try_update_option(
         &mut self,
         key: &str,
@@ -133,7 +133,7 @@ impl super::super::RequestGroup {
         }
 
         let opts = Arc::make_mut(&mut self.options);
-        let applied = apply_rpc_option(opts, key, &value)?;
+        let applied = apply_runtime_option_value(opts, key, &value)?;
         if key == "bt-max-peers" {
             self.bt_max_peers_limit
                 .store(opts.bt_max_peers, std::sync::atomic::Ordering::Release);

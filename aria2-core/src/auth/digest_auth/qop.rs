@@ -30,7 +30,7 @@ impl DigestAuthProvider {
             realm,
             self.password.expose_secret()
         );
-        self.hash(&input)
+        self.hash(input.as_bytes())
     }
 
     /// Computes HA2 = H(method:uri) or H(method:uri:H(entity-body)).
@@ -53,15 +53,12 @@ impl DigestAuthProvider {
         entity_body: Option<&[u8]>,
     ) -> String {
         let input = if qop == Some("auth-int") {
-            let body_hash = match entity_body {
-                Some(body) => self.hash_from_bytes(body),
-                None => self.hash(""),
-            };
+            let body_hash = self.hash(entity_body.unwrap_or_default());
             format!("{}:{}:{}", method, uri, body_hash)
         } else {
             format!("{}:{}", method, uri)
         };
-        self.hash(&input)
+        self.hash(input.as_bytes())
     }
 
     /// Computes the final response = KD(HA1, nonce:nc:cnonce:qop:HA2).
@@ -92,7 +89,7 @@ impl DigestAuthProvider {
             None => format!("{}:{}", nonce, ha2),
         };
 
-        self.hash_kd(ha1, &kd_input)
+        self.hash(format!("{ha1}:{kd_input}").as_bytes())
     }
 
     /// Builds a complete Digest Authorization header value.
@@ -123,83 +120,36 @@ impl DigestAuthProvider {
             .as_deref()
             .ok_or_else(|| Aria2Error::Parse("Missing nonce in Digest challenge".to_string()))?;
 
-        // Compute HA1
-        let ha1 = self.compute_ha1(&challenge.realm);
-
         // Generate cnonce (client nonce) - in production, use crypto-random
         let cnonce = format!("{:016x}", rand::random::<u64>());
 
         // Increment and get nonce count
         let nc_raw = self.nc_count.fetch_add(1, Ordering::SeqCst);
-        let nc = format!("{:08x}", nc_raw);
 
-        // Determine QoP
-        let qop = challenge.qop.as_deref();
-
-        // Compute HA2
-        let ha2 = self.compute_ha2(method, uri, qop, entity_body);
-
-        // Compute response
-        let response = self.compute_response(&ha1, nonce, &nc, &cnonce, qop, &ha2);
-
-        // Build the authorization header
-        let mut parts = vec![
-            format!("username=\"{}\"", self.username.expose_secret()),
-            format!("realm=\"{}\"", challenge.realm),
-            format!("nonce=\"{}\"", nonce),
-            format!("uri=\"{}\"", uri),
-            format!("algorithm={}", self.algorithm),
-            format!("response=\"{}\"", response),
-        ];
-
-        if let Some(q) = qop {
-            parts.push(format!("qop={}", q));
-            parts.push(format!("nc={}", nc));
-            parts.push(format!("cnonce=\"{}\"", cnonce));
-        }
-
-        if let Some(ref opaque) = challenge.opaque {
-            parts.push(format!("opaque=\"{}\"", opaque));
-        }
-
-        Ok(format!("Digest {}", parts.join(", ")))
+        let protocol_challenge = aria2_protocol::http::digest::DigestChallenge {
+            realm: challenge.realm.clone(),
+            nonce: nonce.to_owned(),
+            qop: challenge.qop.clone(),
+            algorithm: self.algorithm.to_string(),
+            opaque: challenge.opaque.clone(),
+            stale: challenge.stale,
+        };
+        let response = aria2_protocol::http::digest::DigestResponse::compute_with_body_and_cnonce(
+            self.username.expose_secret(),
+            self.password.expose_secret(),
+            method,
+            uri,
+            &protocol_challenge,
+            nc_raw,
+            &cnonce,
+            entity_body,
+        );
+        Ok(response.to_header_value())
     }
 
     /// Hashes a string using the configured algorithm.
-    pub(crate) fn hash(&self, input: &str) -> String {
-        self.hash_from_bytes(input.as_bytes())
-    }
-
-    /// Hashes bytes using the configured algorithm.
-    pub(crate) fn hash_from_bytes(&self, input: &[u8]) -> String {
-        match self.algorithm {
-            DigestAlgorithm::Md5 => {
-                use md5::Digest;
-                let mut hasher = md5::Md5::new();
-                hasher.update(input);
-                let digest = hasher.finalize();
-                hex::encode(digest)
-            }
-            DigestAlgorithm::Sha256 => {
-                use sha2::{Digest as _, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(input);
-                let result = hasher.finalize();
-                hex::encode(result)
-            }
-            DigestAlgorithm::Sha512_256 => {
-                use sha2::{Digest as _, Sha512_256};
-                let mut hasher = Sha512_256::new();
-                hasher.update(input);
-                let result = hasher.finalize();
-                hex::encode(result)
-            }
-        }
-    }
-
-    /// Computes KD(secret, data) = H(secret ":" data)
-    pub(crate) fn hash_kd(&self, secret: &str, data: &str) -> String {
-        let kd_input = format!("{}:{}", secret, data);
-        self.hash(&kd_input)
+    pub(crate) fn hash(&self, input: &[u8]) -> String {
+        aria2_protocol::http::digest::hash_value(&self.algorithm.to_string(), input)
+            .expect("configured Digest algorithm is supported")
     }
 }

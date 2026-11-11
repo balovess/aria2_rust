@@ -83,7 +83,7 @@ impl super::super::RequestGroup {
         let snapshot = crate::config::project_initial_options(options);
         let typed_options = Arc::make_mut(&mut self.options);
         for (key, value) in &snapshot {
-            let _ = super::rpc_update::apply_rpc_option(typed_options, key, value);
+            let _ = super::runtime_update::apply_runtime_option_value(typed_options, key, value);
         }
         self.bt_max_peers_limit.store(
             typed_options.bt_max_peers,

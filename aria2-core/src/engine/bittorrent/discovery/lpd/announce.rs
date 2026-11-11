@@ -200,23 +200,11 @@ impl LpdAnnouncer {
             return Ok(()); // Silently succeed when disabled
         }
 
-        // Validate info hash format (should be 40 hex chars)
-        if info_hash.len() != 40 || !info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!(
-                "Invalid info_hash format: expected 40 hex chars, got {} chars",
-                info_hash.len()
-            ));
-        }
-
-        // Format LPD announcement per BEP 14 spec.
-        // C++: `fmt("BT-SEARCH * HTTP/1.1\r\nHost: %s:%u\r\nPort: %u\r\nInfohash: %s\r\n\r\n\r\n", ...)`
-        let msg = format!(
-            "BT-SEARCH * HTTP/1.1\r\nHost: {}:{}\r\nPort: {}\r\nInfohash: {}\r\n\r\n\r\n",
-            constants::LPD_MULTICAST_ADDRESS,
-            self.multicast_addr.port(),
+        let message = aria2_protocol::bittorrent::lpd::encode_announcement(
+            self.multicast_addr,
             port,
-            info_hash
-        );
+            info_hash,
+        )?;
 
         debug!(
             info_hash = %&info_hash[..8],
@@ -225,7 +213,7 @@ impl LpdAnnouncer {
         );
 
         self.socket
-            .send_to(msg.as_bytes(), self.multicast_addr)
+            .send_to(&message, self.multicast_addr)
             .map_err(|e| format!("LPD announce send failed: {}", e))?;
 
         Ok(())

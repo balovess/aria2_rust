@@ -1,0 +1,274 @@
+use super::{ChangeableKind, INITIAL_REQUEST_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS};
+use std::collections::HashMap;
+
+/// Returns whether an option belongs to a request-group's initial state.
+pub fn is_initial_option(option_name: &str) -> bool {
+    is_option_available(option_name) && INITIAL_REQUEST_OPTIONS.contains(&option_name)
+}
+
+/// Keep only the options that may be stored and reported by a request group.
+///
+/// The input is intentionally owned so each adapter can pass its raw option
+/// state without exposing a second allowlist or accidentally retaining
+/// process-only/session metadata in a task snapshot.
+pub fn project_initial_options<I>(options: I) -> HashMap<String, serde_json::Value>
+where
+    I: IntoIterator<Item = (String, serde_json::Value)>,
+{
+    let mut projected = HashMap::new();
+    for (name, value) in options {
+        let canonical_name = crate::config::OptionRegistry::canonical_name(&name).to_string();
+        if !is_initial_option(&canonical_name) {
+            continue;
+        }
+        if name == canonical_name || !projected.contains_key(&canonical_name) {
+            projected.insert(canonical_name, value);
+        }
+    }
+    projected
+}
+
+/// Returns whether a name is accepted by `changeGlobalOption`.
+pub fn is_global_option_changeable(option_name: &str) -> bool {
+    is_option_available(option_name) && RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&option_name)
+}
+
+/// Options that `aria2.changeOption` applies immediately to active downloads.
+///
+/// These are the options marked with `setChangeOption(true)` by the original
+/// `OptionHandlerFactory`. The reserved-download set below is deliberately a
+/// separate policy axis: an option may be accepted for a waiting download but
+/// only become effective after an active download is restarted.
+pub const RUNTIME_CHANGEABLE_OPTIONS: &[&str] = &[
+    "force-save",
+    "save-not-found",
+    "max-download-limit",
+    "bt-max-peers",
+    "bt-remove-unselected-file",
+    "bt-request-peer-speed-limit",
+    "max-upload-limit",
+];
+
+/// Options accepted by `aria2.changeOption` for reserved or waiting
+/// downloads.
+///
+/// Original aria2 reserved-task options plus supported Rust task extensions.
+/// For an active download these options are queued as pending; for a reserved
+/// download they take effect immediately.
+pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
+    // General
+    "allow-overwrite",
+    "allow-piece-length-change",
+    "always-resume",
+    "async-dns",
+    "auto-file-renaming",
+    "check-integrity",
+    "conditional-get",
+    "continue",
+    "dir",
+    "enable-mmap",
+    "file-allocation",
+    "force-save",
+    "save-not-found",
+    "hash-check-only",
+    "max-connection-per-server",
+    "max-download-limit",
+    "max-http2-sessions-per-server",
+    "max-mmap-limit",
+    "max-http2-streams-per-session",
+    "http-version",
+    "http-adaptive-reduction-percent",
+    "http-adaptive-recovery-interval",
+    "http-adaptive-recovery-successes-min",
+    "http-adaptive-recovery-successes-max",
+    "http-adaptive-start-interval-ms",
+    "http-adaptive-backoff-base",
+    "http-adaptive-backoff-max",
+    "http-adaptive-capacity-start-interval-ms",
+    "http-adaptive-capacity-start-interval-max-ms",
+    "http-adaptive-rate-recovery-successes",
+    "http-adaptive-rate-min-interval-ms",
+    "http-adaptive-backoff-reset-after",
+    "max-resume-failure-tries",
+    "min-http-range-size",
+    "min-split-size",
+    "no-file-allocation-limit",
+    "pause-metadata",
+    "realtime-chunk-checksum",
+    "remove-control-file",
+    "checksum",
+    // HTTP/FTP
+    "connect-timeout",
+    "lowest-speed-limit",
+    "max-file-not-found",
+    "max-tries",
+    "no-netrc",
+    "out",
+    "remote-time",
+    "retry-wait",
+    "reuse-uri",
+    "split",
+    "stream-piece-selector",
+    "timeout",
+    "uri-selector",
+    "content-disposition-default-utf8",
+    "enable-http-keep-alive",
+    "enable-http-pipelining",
+    "header",
+    "http-accept-gzip",
+    "http-auth-challenge",
+    "http-no-cache",
+    "http-passwd",
+    "http-user",
+    "metalink-location",
+    "referer",
+    "use-head",
+    "no-want-digest-header",
+    "user-agent",
+    "ftp-passwd",
+    "ftp-pasv",
+    "ftp-reuse-connection",
+    "ftp-type",
+    "ftp-user",
+    "ssh-host-key-md",
+    "sftp-connect-timeout",
+    "sftp-read-timeout",
+    "sftp-compression",
+    "sftp-keepalive-interval",
+    "sftp-preferred-ciphers",
+    // Proxy
+    "http-proxy",
+    "http-proxy-passwd",
+    "http-proxy-user",
+    "https-proxy",
+    "https-proxy-passwd",
+    "https-proxy-user",
+    "ftp-proxy",
+    "ftp-proxy-passwd",
+    "ftp-proxy-user",
+    "all-proxy",
+    "all-proxy-passwd",
+    "all-proxy-user",
+    "no-proxy",
+    "proxy-method",
+    // Metalink
+    "select-file",
+    "follow-metalink",
+    "metalink-enable-unique-protocol",
+    "metalink-language",
+    "metalink-os",
+    "metalink-preferred-protocol",
+    "metalink-version",
+    // BitTorrent
+    "bt-enable-hook-after-hash-check",
+    "bt-enable-lpd",
+    "bt-exclude-tracker",
+    "bt-external-ip",
+    "bt-force-encryption",
+    "bt-hash-check-seed",
+    "bt-load-saved-metadata",
+    "bt-max-peers",
+    "bt-max-upload-slots",
+    "bt-optimistic-unchoke-interval",
+    "bt-snubbed-timeout",
+    "bt-metadata-only",
+    "bt-min-crypto-level",
+    "bt-prioritize-piece",
+    "bt-remove-unselected-file",
+    "bt-request-peer-speed-limit",
+    "bt-require-crypto",
+    "bt-seed-unverified",
+    "bt-save-metadata",
+    "bt-stop-timeout",
+    "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "enable-public-trackers",
+    "bt-tracker-connect-timeout",
+    "bt-tracker-interval",
+    "bt-tracker-timeout",
+    "enable-dht",
+    "enable-dht6",
+    "dht-listen-port",
+    "dht-listen-addr",
+    "dht-listen-addr6",
+    "dht-entry-point",
+    "dht-entry-point-host",
+    "dht-entry-point-port",
+    "dht-entry-point6",
+    "dht-entry-point-host6",
+    "dht-entry-point-port6",
+    "dht-file-path",
+    "dht-file-path6",
+    "dht-message-timeout",
+    "dht-refresh-check-interval",
+    "dht-token-rotation-interval",
+    "dht-node-contact-interval",
+    "dht-cleanup-interval",
+    "dht-save-interval",
+    "dht-bootstrap-timeout",
+    "dht-max-concurrent-lookups",
+    "dht-persistence-max-age",
+    "enable-peer-exchange",
+    "follow-torrent",
+    "index-out",
+    "max-upload-limit",
+    "seed-time",
+    "seed-ratio",
+];
+
+/// Return whether an option belongs to a feature available in this build.
+/// The policy tables retain the complete aria2 wire vocabulary, but a build
+/// without BitTorrent must not expose those names as usable runtime options.
+pub fn is_option_available(option_name: &str) -> bool {
+    #[cfg(feature = "bittorrent")]
+    {
+        let _ = option_name;
+        true
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
+    {
+        !is_bittorrent_option(option_name)
+    }
+}
+
+#[cfg(not(feature = "bittorrent"))]
+fn is_bittorrent_option(option_name: &str) -> bool {
+    option_name.starts_with("bt-")
+        || option_name.starts_with("dht-")
+        || matches!(
+            option_name,
+            "enable-dht"
+                | "enable-dht6"
+                | "enable-peer-exchange"
+                | "follow-torrent"
+                | "index-out"
+                | "listen-port"
+                | "lpd-listen-port"
+                | "bt-lpd-interface"
+                | "seed-ratio"
+                | "seed-time"
+                | "select-file"
+                | "enable-public-trackers"
+                | "enable-utp"
+                | "utp-listen-port"
+        )
+}
+
+/// Classifies how `aria2.changeOption` applies an option for a download.
+pub fn is_option_changeable(option_name: &str, is_active: bool) -> ChangeableKind {
+    if !is_option_available(option_name) {
+        return ChangeableKind::NotChangeable;
+    }
+    if RUNTIME_CHANGEABLE_OPTIONS.contains(&option_name) {
+        ChangeableKind::Immediate
+    } else if RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.contains(&option_name) {
+        if is_active {
+            ChangeableKind::Pending
+        } else {
+            ChangeableKind::Immediate
+        }
+    } else {
+        ChangeableKind::NotChangeable
+    }
+}

@@ -310,21 +310,20 @@ async fn test_tunnel_1xx_then_200() {
         let (mut sock, _) = listener.accept().await.unwrap();
         let mut buf = vec![0u8; 4096];
         let _ = AsyncReadExt::read(&mut sock, &mut buf).await;
-        // Send both responses; the client's read_proxy_response must
-        // handle them even if they arrive in the same TCP segment.
-        AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 100 Continue\r\n\r\n")
-            .await
-            .unwrap();
-        AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        // The final response and the first tunneled bytes may share a packet.
+        AsyncWriteExt::write_all(
+            &mut sock,
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 Connection Established\r\n\r\n220 FTP ready\r\n",
+        )
             .await
             .unwrap();
     });
-    let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
-    assert!(
-        result.is_ok(),
-        "Expected success after 1xx skip, got: {:?}",
-        result
-    );
+    let mut result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel)
+        .await
+        .expect("success after skipping 1xx response");
+    let mut greeting = [0; 15];
+    result.stream.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(&greeting, b"220 FTP ready\r\n");
     server.await.unwrap();
 }
 

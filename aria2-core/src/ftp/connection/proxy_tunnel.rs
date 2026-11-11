@@ -16,12 +16,13 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::proxy_tunnel::connect::{HttpProxyTunnel, ProxyResponse};
 use crate::network::OutboundNetworkPolicy;
 
 /// Configuration for establishing an FTP-over-HTTP-proxy tunnel.
@@ -217,10 +218,14 @@ impl FtpProxyTunnel {
             .map(|(_, v)| v.as_str())
             .unwrap_or("");
 
-        let auth_header = if proxy_authenticate.starts_with("Basic") {
+        let scheme = proxy_authenticate
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        let auth_header = if scheme.eq_ignore_ascii_case("Basic") {
             // Basic authentication
             Self::build_basic_auth_header(&config.proxy_username, &config.proxy_password)
-        } else if proxy_authenticate.starts_with("Digest") {
+        } else if scheme.eq_ignore_ascii_case("Digest") {
             // Digest authentication
             Self::build_digest_auth_header(
                 &config.proxy_username,
@@ -282,23 +287,18 @@ impl FtpProxyTunnel {
 
     /// Build the HTTP CONNECT request string.
     fn build_connect_request(config: &FtpProxyTunnelConfig, auth_header: Option<&str>) -> String {
-        let mut request = format!(
-            "CONNECT {}:{} HTTP/1.1\r\n\
-             Host: {}:{}\r\n\
-             User-Agent: {}\r\n",
-            config.target_host,
-            config.target_port,
-            config.target_host,
-            config.target_port,
-            config.user_agent
-        );
-
+        let target = format!("{}:{}", config.target_host, config.target_port);
+        let mut headers = vec![
+            ("Host", target.as_str()),
+            ("User-Agent", config.user_agent.as_str()),
+        ];
         if let Some(auth) = auth_header {
-            request.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
+            headers.push(("Proxy-Authorization", auth));
         }
-
-        request.push_str("\r\n");
-        request
+        String::from_utf8(aria2_protocol::http::request::serialize_http_request(
+            "CONNECT", &target, &headers, None,
+        ))
+        .expect("HTTP CONNECT fields are UTF-8")
     }
 
     /// Send the CONNECT request to the proxy.
@@ -329,71 +329,7 @@ impl FtpProxyTunnel {
         stream: &mut TcpStream,
         read_timeout: Duration,
     ) -> Result<ProxyResponse> {
-        let mut buf_reader = tokio::io::BufReader::new(stream);
-        let response = timeout(read_timeout, Self::parse_response(&mut buf_reader))
-            .await
-            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))??;
-
-        // We need to get the stream back from buf_reader
-        // Since we borrowed it, the buffered data is already consumed
-        Ok(response)
-    }
-
-    /// Parse an HTTP response from the proxy.
-    async fn parse_response<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<ProxyResponse> {
-        // Parse status line
-        let mut status_line = String::new();
-        reader.read_line(&mut status_line).await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Failed to read proxy response: {}", e),
-            })
-        })?;
-
-        let status_line = status_line.trim_end();
-        debug!("Proxy response status: {}", status_line);
-
-        // Parse: HTTP/x.x status_code reason_phrase
-        let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
-        if parts.len() < 2 {
-            return Err(Aria2Error::Parse(format!(
-                "Malformed proxy response: {}",
-                status_line
-            )));
-        }
-
-        let status_code: u16 = parts[1]
-            .parse()
-            .map_err(|_| Aria2Error::Parse(format!("Invalid proxy status code: {}", parts[1])))?;
-
-        let reason_phrase = parts.get(2).unwrap_or(&"").to_string();
-
-        // Parse headers
-        let mut headers = Vec::new();
-        loop {
-            let mut header_line = String::new();
-            reader.read_line(&mut header_line).await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Failed to read proxy headers: {}", e),
-                })
-            })?;
-
-            let trimmed = header_line.trim_end();
-            if trimmed.is_empty() {
-                break; // End of headers
-            }
-
-            if let Some(colon_pos) = trimmed.find(':') {
-                let name = trimmed[..colon_pos].trim().to_string();
-                let value = trimmed[colon_pos + 1..].trim().to_string();
-                headers.push((name, value));
-            }
-        }
-
-        Ok(ProxyResponse {
-            status_code,
-            reason_phrase,
-            headers,
-        })
+        HttpProxyTunnel::read_proxy_response(stream, read_timeout).await
     }
 
     /// Consume any response body data (for 407 responses).
@@ -434,65 +370,9 @@ impl FtpProxyTunnel {
         challenge: &str,
         uri: &str,
     ) -> String {
-        // Parse digest challenge parameters
-        let realm = extract_digest_param(challenge, "realm").unwrap_or("unknown");
-        let nonce = extract_digest_param(challenge, "nonce").unwrap_or("");
-        let opaque = extract_digest_param(challenge, "opaque");
-        let qop = extract_digest_param(challenge, "qop");
-        let algorithm = extract_digest_param(challenge, "algorithm")
-            .unwrap_or("MD5")
-            .to_uppercase();
-
-        if nonce.is_empty() {
-            return Self::build_basic_auth_header(username, password);
-        }
-
-        // Compute digest response
-        let ha1 = if algorithm == "MD5-SESS" {
-            let ha1_base = md5_hex(&format!("{}:{}:{}", username, realm, password));
-            md5_hex(&format!("{}:{}:{}", ha1_base, nonce, "00000001"))
-        } else {
-            md5_hex(&format!("{}:{}:{}", username, realm, password))
-        };
-
-        let (ha2, qop_value) = if qop == Some("auth") || qop == Some("auth-int") {
-            let ha2 = md5_hex(&format!("CONNECT:{}", uri));
-            (ha2, "auth")
-        } else {
-            let ha2 = md5_hex(&format!("CONNECT:{}", uri));
-            (ha2, "")
-        };
-
-        let response = if qop_value.is_empty() {
-            md5_hex(&format!("{}:{}:{}", ha1, nonce, ha2))
-        } else {
-            let cnonce = "aria2rustcnonce";
-            let nc = "00000001";
-            md5_hex(&format!(
-                "{}:{}:{}:{}:{}:{}",
-                ha1, nonce, nc, cnonce, qop_value, ha2
-            ))
-        };
-
-        let mut header = format!(
-            "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\"",
-            username, realm, nonce, uri, response
-        );
-
-        if let Some(opaque) = opaque {
-            header.push_str(&format!(", opaque=\"{}\"", opaque));
-        }
-
-        if !qop_value.is_empty() {
-            header.push_str(&format!(
-                ", qop={}, nc=00000001, cnonce=\"{}\"",
-                qop_value, "aria2rustcnonce"
-            ));
-        }
-
-        header.push_str(&format!(", algorithm={}", algorithm));
-
-        header
+        crate::http::proxy_tunnel::auth::build_digest_auth_header(
+            username, password, challenge, uri,
+        )
     }
 }
 
@@ -501,56 +381,6 @@ impl FtpProxyTunnelConfig {
     fn write_timeout(&self) -> Duration {
         self.connect_timeout
     }
-}
-
-/// Parsed HTTP response from the proxy.
-#[derive(Debug)]
-struct ProxyResponse {
-    /// HTTP status code (e.g., 200, 407)
-    status_code: u16,
-    /// Reason phrase (e.g., "Connection Established")
-    reason_phrase: String,
-    /// Response headers as (name, value) pairs
-    headers: Vec<(String, String)>,
-}
-
-/// Extract a parameter value from a Digest challenge string.
-///
-/// Parses strings like: `Digest realm="example.com", nonce="abc123"`
-fn extract_digest_param<'a>(challenge: &'a str, param: &str) -> Option<&'a str> {
-    let search = format!("{}=", param);
-    // Split on commas, skipping the "Digest" scheme prefix
-    let params_section = if let Some(pos) = challenge.find(' ') {
-        &challenge[pos + 1..]
-    } else {
-        challenge
-    };
-
-    for part in params_section.split(',') {
-        let part = part.trim();
-        if let Some(rest) = part.strip_prefix(&search) {
-            // Handle quoted values
-            if let Some(stripped) = rest.strip_prefix('"') {
-                if let Some(end) = stripped.find('"') {
-                    return Some(&stripped[..end]);
-                }
-            } else {
-                // Unquoted value - take until comma or end
-                let end = rest.find(',').unwrap_or(rest.len());
-                return Some(&rest[..end]);
-            }
-        }
-    }
-    None
-}
-
-/// Compute MD5 hex digest.
-fn md5_hex(input: &str) -> String {
-    use md5::{Digest, Md5};
-    let mut hasher = Md5::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(result)
 }
 
 #[cfg(test)]
@@ -613,6 +443,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ftp_proxy_tunnel_uses_shared_http_response_parser() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy fixture should bind");
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let n = stream.read(&mut request).await.unwrap();
+            assert!(request[..n].starts_with(b"CONNECT ftp.example.com:21 HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 Connection Established\r\n\r\n220 FTP ready\r\n")
+                .await
+                .unwrap();
+        });
+
+        let config = FtpProxyTunnelConfig {
+            proxy_host: "127.0.0.1".into(),
+            proxy_port: address.port(),
+            target_host: "ftp.example.com".into(),
+            target_port: 21,
+            ..Default::default()
+        };
+        let mut stream = FtpProxyTunnel::establish(&config)
+            .await
+            .expect("the informational response should be skipped");
+        let mut greeting = [0; 15];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"220 FTP ready\r\n");
+        assert!(stream.peer_addr().is_ok());
+        server.await.unwrap();
+    }
+
     #[test]
     fn test_build_connect_request_without_auth() {
         let config = FtpProxyTunnelConfig {
@@ -653,29 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_digest_param() {
-        let challenge = r#"Digest realm="testrealm", nonce="abc123", qop="auth""#;
-        assert_eq!(extract_digest_param(challenge, "realm"), Some("testrealm"));
-        assert_eq!(extract_digest_param(challenge, "nonce"), Some("abc123"));
-        assert_eq!(extract_digest_param(challenge, "qop"), Some("auth"));
-        assert_eq!(extract_digest_param(challenge, "opaque"), None);
-    }
-
-    #[test]
-    fn test_extract_digest_param_unquoted() {
-        let challenge = "Digest algorithm=MD5, realm=\"test\"";
-        assert_eq!(extract_digest_param(challenge, "algorithm"), Some("MD5"));
-        assert_eq!(extract_digest_param(challenge, "realm"), Some("test"));
-    }
-
-    #[test]
-    fn test_md5_hex() {
-        // Known MD5 value
-        assert_eq!(md5_hex(""), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(md5_hex("hello"), "5d41402abc4b2a76b9719d911017c592");
-    }
-
-    #[test]
     fn test_proxy_tunnel_config_default() {
         let config = FtpProxyTunnelConfig::default();
         assert_eq!(config.proxy_port, 8080);
@@ -686,8 +530,7 @@ mod tests {
 
     #[test]
     fn test_build_digest_auth_header() {
-        let challenge =
-            r#"Digest realm="test@example.com", nonce="abc123", qop="auth", algorithm=MD5"#;
+        let challenge = r#"Digest realm="test, private", nonce="abc123", qop="auth-int", algorithm=SHA-256-sess"#;
         let header = FtpProxyTunnel::build_digest_auth_header(
             "user",
             "pass",
@@ -696,8 +539,10 @@ mod tests {
         );
         assert!(header.starts_with("Digest"));
         assert!(header.contains("username=\"user\""));
-        assert!(header.contains("realm=\"test@example.com\""));
+        assert!(header.contains("realm=\"test, private\""));
         assert!(header.contains("nonce=\"abc123\""));
+        assert!(header.contains("qop=auth-int"));
+        assert!(header.contains("algorithm=SHA-256-sess"));
         assert!(header.contains("response=\""));
     }
 }

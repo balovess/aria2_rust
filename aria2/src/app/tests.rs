@@ -608,6 +608,32 @@ async fn test_server_stat_configuration_reaches_engine_owner() {
 }
 
 #[tokio::test]
+async fn test_process_scheduler_and_rate_limits_reach_core_engine() {
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option("max-concurrent-downloads", OptionValue::Int(3))
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-overall-download-limit", OptionValue::Int(1024))
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-overall-upload-limit", OptionValue::Int(2048))
+            .await
+            .unwrap();
+    }
+
+    app.initialize_engine().await;
+
+    assert_eq!(app.request_man.max_concurrent(), 3);
+    assert_eq!(app.request_man.global_download_limit(), Some(1024));
+    assert_eq!(app.request_man.global_upload_limit(), Some(2048));
+}
+
+#[tokio::test]
 async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
     let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=head=512K,tail"])
         .expect("clap should parse the original piece-priority syntax");

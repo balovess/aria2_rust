@@ -130,10 +130,10 @@ retry admission.
 
 | Input | Core command path | Protocol implementation | Result path |
 |---|---|---|---|
-| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-core::http` owns HTTP request/response policy, cookies, TLS identity, and client pools. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_all` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
-| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. Core composes DNS/address policy, proxies, FTPS negotiation, data sockets, active bind/accept policy, task lifecycle, and filesystem state. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
+| HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-protocol::http` owns reusable HTTP response types, HTTP/1.1 request serialization and incremental response-header parsing, Content-Disposition parsing, Basic/Bearer/Digest authentication syntax and header generation, Cookie and Set-Cookie wire syntax, Retry-After value parsing, and Metalink/HTTP Link/Digest parsing. Core's public HTTP request/response structs map through the protocol request serializer and response-head parser while retaining their historical API shapes. `aria2-core::http` owns cookie acceptance, scope, expiry, persistence and matching policy; request/response task policy; credential resolution and challenge retry state; filename destination policy; TLS identity; and client pools. Both HTTP and FTP CONNECT paths reuse the protocol Digest implementation. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_all` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
+| FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. `aria2-protocol::ftp::tls::FtpsClient` owns reusable TLS configuration, TLS handshakes, and RFC 4217 protection negotiation. Core composes DNS/address policy, proxies, data sockets, active bind/accept policy, task lifecycle, and filesystem state. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and remote read offsets. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
-| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, wire messages, TCP plain/MSE peer handshakes, DHT, tracker primitives, WebSocket tracker handshake/framing/announce exchange, uTP packet/connection state machines, and BitTorrent peer handshake/framing. Core owns tracker URL selection, DNS/socket/proxy setup under outbound-address policy, process-level TCP/uTP listeners and the async uTP socket actor, shared info-hash routes, address/port binding policy, handshake admission limits, and peer-storage admission. The core uTP peer adapter bridges actor handles to the protocol `PeerTransport` interface and maps errors; it does not implement BitTorrent handshake or frame parsing. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
+| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, LPD announcement encoding/parsing, wire messages, TCP plain/MSE peer handshakes, DHT, tracker primitives, WebSocket tracker URL parsing/validation and handshake/framing/announce exchange, uTP packet/connection state machines, and BitTorrent peer handshake/framing. Core owns tracker URL selection, DNS/socket/proxy setup under outbound-address policy, process-level TCP/uTP listeners and the async uTP socket actor, shared info-hash routes, address/port binding policy, handshake admission limits, and peer-storage admission. The core LPD adapter attaches the observed sender and applies local-address classification; the core uTP peer adapter bridges actor handles to the protocol `PeerTransport` interface and maps errors without parsing BitTorrent handshakes or frames. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
 | Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
 
 ### HTTP assembly and transfer path
@@ -175,20 +175,23 @@ retry admission.
    address refresh, cancellation, and checkpoint cleanup. Each attempt enters
    `execute_single_attempt`.
 3. An HTTP proxy configured for FTP can take the direct proxy-GET path. Other
-   proxy requests establish an HTTP CONNECT tunnel; direct requests resolve
-   origin addresses and connect through `OutboundNetworkPolicy`. Plain FTP,
-   explicit FTPS, and implicit FTPS share `RawFtpControl`; both it and the
-   standalone client pass their established control streams through
-   `aria2-protocol::ftp::connection::FtpControlSession`, which owns FTP
-   command semantics, command framing, and response parsing. FTPS upgrades use
-   `aria2-protocol::ftp::tls`.
+   proxy requests establish an HTTP CONNECT tunnel using the shared core
+   CONNECT response reader and protocol-layer HTTP header parser; direct
+   requests resolve origin addresses and connect through
+   `OutboundNetworkPolicy`. Plain FTP, explicit FTPS, and implicit FTPS share
+   `RawFtpControl`; both it and the standalone client pass their established
+   control streams through `aria2-protocol::ftp::connection::FtpControlSession`,
+   which owns FTP command semantics, command framing, and response parsing.
+   FTPS upgrades and RFC 4217 negotiation use `aria2-protocol::ftp::tls::FtpsClient`;
+   the client is created once per attempt and reuses its TLS connector for
+   control and data channels.
 4. The protocol session authenticates, selects TYPE, traverses the URI
    directory with PWD/CWD, and queries optional MDTM and SIZE metadata. Before
-   RETR, core reconciles the remote size with the local file, continuation state, and
-   checkpoint; dry-run and already-complete targets can finish here.
+   RETR, core reconciles the remote size with the local file, continuation
+   state, and checkpoint; dry-run and already-complete targets can finish here.
 5. The protocol session negotiates EPSV/PASV or EPRT/PORT, applies REST when
    resuming, and sends RETR. Core establishes the data socket under its outbound
-   policy and upgrades FTPS data TLS when configured. Active-mode listening and acceptance use the shared
+   policy and asks the FTPS client to upgrade data TLS when configured. Active-mode listening and acceptance use the shared
    `FtpActiveDataListener`; the core still controls bind address and advertised
    endpoint selection.
 6. `receive_data_transfer` passes source chunks through the core
@@ -212,7 +215,8 @@ boundaries; the standalone client is not an adapter around the engine command.
 2. The command parses the SFTP URI, resolves credentials and output state, and
    builds SSH options including the configured host-key fingerprint policy.
 3. The engine asks `OutboundNetworkPolicy` to create the target TCP stream and
-   passes that stream to `SshConnection::connect_with_stream`. The protocol
+   applies `sftp-connect-timeout` across that connection and
+   `SshConnection::connect_with_stream`. The protocol
    module owns the SSH handshake, host-key check against the configured
    fingerprint or OpenSSH-format `known_hosts`, authentication, and subsystem
    channel. `AcceptNew` records only previously unseen host keys and rejects
@@ -255,11 +259,11 @@ local source address to select, so the request client owns DNS and proxy
 routing. Host resolution is needed for source-family matching only when an
 explicit outbound address/interface is configured; pre-resolving in direct
 mode can reject an announce before the HTTP client starts it.
-Local Peer Discovery is implemented as a BitTorrent discovery module in core:
-its BEP 14 framing, multicast socket, receive loop, and peer-registry updates
-are currently coupled to torrent activity, so they stay together under
-`engine::bittorrent::discovery::lpd` rather than adding an unused lower-layer
-facade.
+Local Peer Discovery is composed across the protocol and engine layers:
+`aria2-protocol::bittorrent::lpd` encodes and parses BEP 14 and the legacy
+announcement format; core owns the multicast socket, receive loop, sender-address
+classification, peer-registry updates, and torrent-activity lifecycle under
+`engine::bittorrent::discovery::lpd`.
 
 ### BitTorrent assembly and transfer path
 
@@ -270,8 +274,10 @@ facade.
    resolves metadata in this order: a saved torrent when enabled, an `xs`
    exact source, tracker-discovered peers, then DHT-discovered peers and BEP 9
    metadata exchange. `metadata_source` coordinates those sources;
-   `discovery` owns tracker/DHT peer lookup; `metadata` owns saved files,
-   BEP 9 normalization, WebSeed merging, and info-hash checks.
+   `discovery` owns tracker/DHT peer lookup; core `metadata` owns saved files
+   and info-hash checks. `aria2-protocol::bittorrent::torrent::metainfo` owns
+   the pure bencode transformations that wrap BEP 9 info dictionaries and
+   merge magnet WebSeeds into torrent metainfo.
 3. Before payload transfer, the command enforces the private-torrent DHT rule,
    optionally saves the complete torrent metadata, and completes immediately
    for metadata-only requests. Otherwise it constructs `BtDownloadCommand`
@@ -470,7 +476,8 @@ also exposes `aria2-core::http::connection`, `aria2-core::ftp::connection`, and
 `aria2-core::ftp::connection_pool` as public library interfaces. These APIs
 remain at their existing boundaries: the HTTP task path composes reqwest with
 pooling, address binding, request policy, and task lifecycle, while the FTP
-task path composes its control/data flow with core policy and FTPS primitives.
+task path composes its control/data flow with core network policy and
+protocol-layer FTP/FTPS behavior.
 Do not add pass-through engine clients around these public interfaces.
 
 ## Module audit
@@ -494,23 +501,117 @@ Do not add pass-through engine clients around these public interfaces.
   owns target/proxy DNS resolution, and `client_config` owns reqwest setup.
   Generic task dispatch no longer assembles HTTP-specific addresses or client
   options.
+- **Narrow** the core HTTP header-processor module to a compatibility adapter.
+  The incremental HTTP/1.x parser and response-head model now live in
+  `aria2-protocol::http::header_processor`; core keeps its historic entrypoint
+  and maps protocol parse errors to `Aria2Error`.
+- **Narrow** Linux splice HTTP parsing to the shared protocol header parser.
+  The splice path retains its Linux socket/file I/O and fallback decisions;
+  header framing and response syntax use `aria2-protocol::http::header_processor`.
+- **Narrow** raw HTTP request framing in proxy and splice paths to
+  `aria2-protocol::http::request`. Core keeps proxy routing, auth retries,
+  Range policy, outbound networking and zero-copy transfer decisions.
+- **Narrow** the core Metalink/HTTP module to compatibility exports. Link and
+  Digest header parsing and its values live in
+  `aria2-protocol::http::metalink_http`; task integration remains in the core
+  HTTP response processor.
+- **Narrow** Content-Disposition parsing into
+  `aria2-protocol::http::content_disposition`. Core retains the historical
+  module path and applies filename destination and filesystem policy after
+  decoding the protocol field.
+- **Narrow** HTTP cookie wire parsing into
+  `aria2-protocol::http::cookie::parsing`: date parsing/formatting, host/domain
+  matching, numeric-host recognition, path matching, request Cookie pairs, and
+  Set-Cookie fields. Core keeps the historical helper path as a re-export,
+  along with cookie acceptance, persistence, selection, expiration scheduling,
+  and request attachment policy.
+- **Narrow** HTTP Digest challenge parsing and parameter validation into
+  `aria2-protocol::http::digest`. Core keeps the established challenge type and
+  error mapping for library compatibility, plus credential resolution and
+  challenge retry state. The engine-facing Digest response hashing and header
+  serialization use the protocol implementation.
+- **Narrow** the protocol crate's legacy `HttpAuth` API and core Basic/Bearer
+  header helpers to compatibility wrappers over the protocol authentication
+  parser and serializers. The public helper signatures remain stable.
+- **Keep** the public core `HttpResponse` shape while delegating complete
+  response-head parsing to the protocol HTTP parser; core converts the parsed
+  header model and preserves the body as opaque bytes.
+- **Narrow** HTTP/1.1 request-line, header, and body framing into
+  `aria2-protocol::http::request::HttpRequest::to_bytes`. Core retains its
+  option-driven request construction and FTP-proxy GET policy, then uses the
+  protocol serializer. Public core request types keep their existing APIs.
+- **Keep** the public `aria2_core::auth::digest_auth::DigestAuthProvider`
+  extension API, including its provider abstraction and nonce-counter
+  semantics. The HTTP engine uses the protocol Digest value and serializer;
+  removing the standalone core API would be a separate compatibility change.
+- **Narrow** HTTP `Retry-After` syntax into the protocol response module.
+  Core supplies the current time and keeps the five-minute retry cap and
+  scheduler behavior.
 - **Narrow** range probing to `HttpSegmentDownloader::probe_range_metadata`.
   The former `RangeProber` only forwarded configuration and the probe call, so
   its tests now exercise the downloader interface directly.
+- **Keep** HTTP adaptive concurrency in the core engine: it owns admission,
+  per-source feedback, pacing and recovery policy; the protocol client only
+  performs the HTTP requests. Keep its policy tests in an adjacent test module.
+- **Improve** sequential HTTP gap filling: derive completed progress from the
+  normalized missing ranges so overlapping input ranges cannot be double
+  counted, clip out-of-file coverage while planning gaps, and cross
+  `SeekableDiskWriter::sync_all` before recording gap completion in a control
+  file or completing the task. Keep redirect handling, cancellation, rate
+  limiting, and checkpoint lifecycle in the core downloader. Move its direct
+  tests into the adjacent `gap_download/tests.rs` module.
+- **Narrow** active-range bookkeeping in
+  `engine::http::concurrent_download::segment`: replace the positional
+  `(offset, length, started_at, task_id)` tuple with a named `ActiveSegment`
+  record, and register it only after the executor accepts the request. The
+  single-mirror event loop remains the owner of scheduling, completion,
+  cancellation and checkpoint ordering; `concurrent_download::mod` is its only
+  production caller. Bounded admission and stall/slow-outlier lease recovery
+  live in `segment::admission` and `segment::stall`, respectively; both update
+  executor connection snapshots through `segment::executor`. Success
+  checkpointing, Range-size rejection, capacity retry, ordinary retry, and 416
+  fallback decisions live in `segment::completion`; it returns an action while
+  the event loop retains executor cancellation and lifecycle ownership.
+- **Narrow** multi-mirror HTTP Range result handling into
+  `concurrent_download::pipeline::completion`. It owns successful range
+  checkpoint transitions, authority-scoped Range-size adaptation, capacity
+  retries, mirror failover decisions, retry accounting, and 416 fallback
+  detection. The pipeline event loop retains executor task reaping, terminal
+  cancellation/persistence, shared progress publication, and lifecycle control.
 - **Narrow** FTP download source layout: public options/results are grouped in
   `aria2-protocol/src/ftp/download/types.rs`, transfer behavior stays in
   `download.rs`, and its direct tests live beside them. The module exports its
   canonical public types at the owning module boundary.
+- **Narrow** FTP/FTPS and SFTP URI syntax into `aria2-protocol::ftp::uri` and
+  `aria2-protocol::sftp::uri`. The protocol crate parses scheme, authority,
+  credentials, port, and remote path; core maps protocol parse outcomes into
+  task errors and applies anonymous FTP defaults, SFTP credential precedence,
+  FTPS configuration, output naming, and task lifecycle. The parsed secure-scheme
+  flag is carried into core policy without reparsing the URI. FTP and SFTP
+  default ports are defined by their protocol modules; the public core constants
+  remain aliases for compatibility. FTP percent decoding is owned by its URI
+  parser and re-exported through the historical connection module path; SFTP
+  decoding remains in its URI parser rather than the engine.
 - **Narrow** FTP engine parser access: `download_command` imports the core FTP
   parsers directly instead of re-exporting them through its control module.
   Remove the unused private FTP error classifier; live response handling stays
   in the control commands and attempt retry path.
 - **Narrow** FTP duplication by sharing injected control-stream line I/O and
   active data listener acceptance between the standalone protocol client and
-  task engine. Keep each caller's response and PASV/EPSV parsing policy local;
-  the core retains address binding, proxy selection, FTPS setup, and task
-  lifecycle. The standalone client remains a distinct public client rather
-  than a forwarding stage in the engine route.
+  task engine. PASV/EPSV response syntax has one parser in the protocol crate;
+  callers retain their command-status handling, EPSV fallback, endpoint trust,
+  and connection policy. The core retains address binding, proxy selection,
+  data-socket policy, and task lifecycle. FTPS TLS and RFC 4217 negotiation
+  live in the protocol crate. The standalone client remains a distinct
+  public client rather than a forwarding stage in the engine route.
+- **Improve** FTPS TLS setup with a protocol-layer `FtpsClient` that builds one
+  rustls connector per attempt and reuses it for control and data-channel
+  handshakes. The engine selects direct/proxy and explicit/implicit connection
+  paths; it does not construct TLS connectors or issue RFC 4217 commands.
+- **Narrow** FTP response input to the upstream 64 KiB limit in both the
+  standalone client and injected control session. The shared bounded line
+  reader checks the remaining response budget before growing the line buffer,
+  including for a single oversized line.
 - **Narrow** SFTP source layout into connection options/lifecycle,
   packet constants/types/attributes/codec/wire helpers, session request
   tracking, file-operation values, and separate standalone download/upload
@@ -548,6 +649,15 @@ Do not add pass-through engine clients around these public interfaces.
   tracker entry points; remove direct-connect shortcuts, duplicate encrypted
   connection forwarding, and redundant incoming constructors. Core retains
   torrent-specific peer state at the engine seam.
+- **Narrow** BitTorrent metainfo responsibilities: the protocol crate owns
+  parsing and pure bencode transformations, including `url-list` extraction,
+  BEP 9 info-dictionary wrapping, and magnet WebSeed merging. Core retains
+  metadata-source selection, saved-file I/O, expected-info-hash validation,
+  and download lifecycle decisions.
+- **Narrow** BitTorrent Local Peer Discovery defaults into the protocol crate:
+  the BEP 14 multicast address and UDP port have protocol-library definitions,
+  while public core constants remain aliases. Core retains announce cadence,
+  socket lifecycle, local-address classification, and peer admission policy.
 - **Narrow** UDP tracker ownership: protocol contains only BEP 15 packet
   encoding and decoding; core owns policy-based DNS and binding, one-shot
   announce/scrape exchanges, transaction state, and timeout/retry handling.
@@ -556,23 +666,34 @@ Do not add pass-through engine clients around these public interfaces.
   manager; remove only the duplicate synchronous client and UDP-specific
   execution manager. Resolve the selected URL once and reuse its address; DNS
   failures stay inside the outbound-policy boundary.
+- **Narrow** WebSocket tracker URL handling: the protocol crate owns URL syntax
+  and `ws`/`wss` validation, while core uses the parsed endpoint for
+  policy-controlled DNS, proxy, and socket setup.
+- **Narrow** `PublicTrackerList` source organization: keep catalog state,
+  refresh lifecycle, health backoff, and the existing public types at their
+  original module paths; move URL parsing and embedded tracker data to a private
+  parser submodule and unit tests to `public_list/tests.rs`.
+- **Narrow** HTTP client and protocol test source layout: retain the HTTP
+  request/response client interface while moving its tests beside the client;
+  group Content-Disposition compatibility cases and DHT UDP pressure coverage
+  in separate test modules so each source file remains focused and bounded.
 - **Narrow** DHT peer task composition: one `PeerLookupTask` performs the
   iterative `get_peers` traversal and can announce with tokens from that same
   traversal. Remove the duplicate `PeerAnnounceTask`; both peer discovery and
   explicit `announce_peer` use the same task path.
-- Remove `DhtTaskFactory`, which only forwarded the shared context to task
+- **Delete** `DhtTaskFactory`, which only forwarded the shared context to task
   constructors. The engine now constructs the scheduled task directly, making
   task selection and its inputs visible at the scheduling point.
-- Remove `NodeLookupTask`: it duplicated the public result-returning
+- **Delete** `NodeLookupTask`: it duplicated the public result-returning
   `lookup::iterative_find_node`, discarded its `NodeLookupResult`, and had no
   production callers. `BucketRefreshTask` keeps bounded fan-out while selecting
   stale bucket targets; callers that need one lookup can call the lookup API.
-- Split DHT iterative queries by responsibility (`find_node`, `get_peers`,
+- **Narrow** DHT iterative queries by responsibility (`find_node`, `get_peers`,
   BEP 44 items, BEP 51 sampling, and announce) while keeping candidate
   ordering and query batching in the shared lookup module. Keep transaction
   matching in one RAII response-wait path; remove unused per-transaction
   `info_hash` and token storage.
-- Encode outbound KRPC messages directly to bytes: the bencode writer is
+- **Narrow** outbound KRPC encoding to bytes: the bencode writer is
   infallible, so `DhtMessage::encode` returns its buffer without a redundant
   `Result` layer. Keep parsing errors at the `decode` boundary and pass
   announce tokens as opaque bytes.
@@ -584,19 +705,19 @@ Do not add pass-through engine clients around these public interfaces.
   that could restore evicted nodes, and collect good nodes at the routing-table
   boundary. The binary serializer is infallible; parse errors and filesystem
   failures remain at their respective decode and I/O boundaries.
-- Split inbound DHT query handling by protocol responsibility: shared sender
+- **Narrow** inbound DHT query handling by protocol responsibility: shared sender
   validation and dispatch stay in `DhtQueryHandler`; BEP 44 item operations and
   BEP 51 sampling live in focused submodules. Keep one handler entry point with
   an optional item store, and remove its former no-store forwarding overload.
-- The unregistered `peer_choke_command.rs` file had no `engine` module
+- **Delete** the unregistered `peer_choke_command.rs` file, which had no `engine` module
   declaration, call sites, or reachable public API. It was removed as dead
   source; active choking state and execution remain with BitTorrent peer
   storage and its choke manager.
-- Retain public interfaces when they provide a documented standalone protocol
+- **Keep** public interfaces when they provide a documented standalone protocol
   capability or a useful ownership boundary. Remove aliases and forwarding
   variants that duplicate the canonical entry point. The `engine` module
   layout follows internal ownership.
-- `aria2_protocol::bittorrent::peer::listener::PeerListener` is a public
+- **Keep** `aria2_protocol::bittorrent::peer::listener::PeerListener`, a public
   standalone TCP accept helper. It binds one wildcard IPv4 socket and forwards
   raw accepted streams; it performs no handshake or torrent routing, and the
   built-in engine does not use it. Keep this public helper for callers that want
@@ -609,6 +730,43 @@ Do not add pass-through engine clients around these public interfaces.
   per-download handle, and engine-lifecycle handle. Keep the crate-root
   re-exports and observable behavior unchanged; organize its interface tests by
   waiting, lifecycle, queries, and submissions.
+- **Narrow** download event-hook source organization: keep public event,
+  listener, and hook-manager types at their existing module paths; place the
+  bus registration/dispatch implementation in a private child module, with
+  tests separate. The shell-command and observer sinks remain independent, and
+  RPC notification adaptation remains above `aria2-core`.
+- **Narrow** runtime option policy into public compatibility tables and a
+  private classification/projection module. Re-export the existing policy
+  functions at `config::runtime`, keeping CLI, RPC, and C API adapters on the
+  same core-owned rules and preserving their existing paths.
+- **Narrow** session option serialization by option domain (basic,
+  integrity/Metalink, BitTorrent, network, and lifecycle). Keep the public
+  `download_options_to_map` boundary as the single coordinator and retain the
+  existing session keys and snapshot-preservation path.
+- **Keep** `ConfigParser` as the core-owned source-precedence and validation
+  boundary shared by CLI/config-file/environment adapters; move its tests to an
+  adjacent module while preserving the parser interface.
+- **Keep** runtime option application and lifecycle classification in core.
+  RPC normalizes wire values in `aria2`, while the C API converts its string
+  pairs at its own boundary; both converge on the public core option-update
+  contract. Core owns immediate versus pending application and active-task
+  restart semantics, which depend on request-group state.
+- **Narrow** SFTP session option restoration to the shared
+  `DownloadOptions::from_option_strings` parser. Do not manually reparse
+  selected persisted SFTP fields after construction, which bypasses shared
+  value handling and can restore invalid timeout values.
+- **Improve** SFTP connection timeout and cancellation handling: bound the
+  policy-based DNS/TCP connection plus SSH setup with the configured timeout,
+  and release outbound-source in-flight accounting through RAII when the
+  timed connection future is cancelled.
+- **Keep** process-engine option assembly in core at
+  `engine::download_engine::DownloadEngine::from_process_options`.
+  CLI and C API pass typed option snapshots through this single boundary for
+  outbound networking, DNS, server statistics, scheduler/rate limits, and
+  BitTorrent tracker/uTP/LPD setup. Application-only save-session policy stays
+  in the CLI. Global runtime updates continue to use explicit `EngineCommand`
+  variants, preserving original aria2's dispatch model and Rust's documented
+  runtime extensions.
 - **Keep** the BitTorrent process listener as the shared TCP/uTP info-hash
   router. Its clones share one listener lifecycle, which is cancelled only when
   the final manager owner is dropped; route handles still independently remove

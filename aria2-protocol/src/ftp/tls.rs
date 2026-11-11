@@ -61,6 +61,54 @@ pub enum TlsVersion {
     Tls13,
 }
 
+/// Reusable FTPS TLS client for one download attempt.
+///
+/// The connector is built once so control and data-channel handshakes share
+/// the same certificate roots and TLS policy.
+#[derive(Clone)]
+pub struct FtpsClient {
+    connector: tokio_rustls::TlsConnector,
+}
+
+impl FtpsClient {
+    /// Build a client from the caller's FTPS transport configuration.
+    pub fn new(config: &FtpsConfig) -> Result<Self, String> {
+        Ok(Self {
+            connector: build_tls_connector(config)?,
+        })
+    }
+
+    /// Perform a TLS handshake on an FTP control or implicit-FTPS connection.
+    pub async fn perform_tls_handshake(
+        &self,
+        stream: TcpStream,
+        host: &str,
+    ) -> Result<TlsStream<TcpStream>, String> {
+        perform_tls_handshake_with_connector(stream, host, &self.connector).await
+    }
+
+    /// Perform `AUTH TLS`, the TLS handshake, `PBSZ 0`, and `PROT P`.
+    pub async fn upgrade_control_stream(
+        &self,
+        stream: TcpStream,
+        host: &str,
+    ) -> Result<TlsStream<TcpStream>, String> {
+        upgrade_control_stream_with_connector(stream, host, &self.connector).await
+    }
+
+    /// Upgrade a `PROT P` FTP data connection to TLS.
+    pub async fn upgrade_data_stream(
+        &self,
+        stream: TcpStream,
+        host: &str,
+    ) -> Result<TlsStream<TcpStream>, String> {
+        debug!("Upgrading FTP data connection to TLS for {}", host);
+        let tls_stream = self.perform_tls_handshake(stream, host).await?;
+        info!("FTPS data connection TLS handshake completed with {}", host);
+        Ok(tls_stream)
+    }
+}
+
 /// FTP control stream which can be plain TCP or TLS-protected.
 #[derive(Debug)]
 pub enum FtpControlStream {
@@ -322,9 +370,18 @@ where
 
 /// Perform `AUTH TLS`, the TLS handshake, `PBSZ 0`, and `PROT P`.
 pub async fn upgrade_control_stream(
-    mut stream: TcpStream,
+    stream: TcpStream,
     host: &str,
     config: &FtpsConfig,
+) -> Result<TlsStream<TcpStream>, String> {
+    let connector = build_tls_connector(config)?;
+    upgrade_control_stream_with_connector(stream, host, &connector).await
+}
+
+async fn upgrade_control_stream_with_connector(
+    mut stream: TcpStream,
+    host: &str,
+    connector: &tokio_rustls::TlsConnector,
 ) -> Result<TlsStream<TcpStream>, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -357,7 +414,7 @@ pub async fn upgrade_control_stream(
     info!("AUTH TLS accepted (234) — proceeding with TLS handshake");
 
     let stream = reader.into_inner();
-    let mut tls_stream = perform_tls_handshake(stream, host, config).await?;
+    let mut tls_stream = perform_tls_handshake_with_connector(stream, host, connector).await?;
     let mut reader = tokio::io::BufReader::new(&mut tls_stream);
     negotiate_protected_data_channel(&mut reader).await?;
     Ok(tls_stream)
@@ -370,6 +427,14 @@ pub async fn perform_tls_handshake(
     config: &FtpsConfig,
 ) -> Result<TlsStream<TcpStream>, String> {
     let connector = build_tls_connector(config)?;
+    perform_tls_handshake_with_connector(stream, host, &connector).await
+}
+
+async fn perform_tls_handshake_with_connector(
+    stream: TcpStream,
+    host: &str,
+    connector: &tokio_rustls::TlsConnector,
+) -> Result<TlsStream<TcpStream>, String> {
     let server_name: ServerName<'static> = ServerName::try_from(host.to_string())
         .map_err(|e| format!("Invalid FTPS server name '{}': {:?}", host, e))?;
 
@@ -388,10 +453,9 @@ pub async fn upgrade_data_stream(
     host: &str,
     config: &FtpsConfig,
 ) -> Result<TlsStream<TcpStream>, String> {
-    debug!("Upgrading FTP data connection to TLS for {}", host);
-    let tls_stream = perform_tls_handshake(stream, host, config).await?;
-    info!("FTPS data connection TLS handshake completed with {}", host);
-    Ok(tls_stream)
+    FtpsClient::new(config)?
+        .upgrade_data_stream(stream, host)
+        .await
 }
 
 impl AsyncRead for FtpControlStream {
@@ -475,131 +539,4 @@ impl AsyncWrite for FtpDataStream {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ftps_config_default() {
-        let config = FtpsConfig::default();
-        assert!(!config.enabled);
-        assert!(config.check_certificate);
-        assert!(config.ca_certificate.is_none());
-        assert_eq!(config.min_tls_version, TlsVersion::Tls12);
-    }
-
-    #[test]
-    fn tls_version_default() {
-        assert_eq!(TlsVersion::default(), TlsVersion::Tls12);
-    }
-
-    #[test]
-    fn response_code_requires_ascii_three_digit_prefix() {
-        assert_eq!(parse_response_code("200 OK", "TEST").unwrap(), 200);
-        assert!(parse_response_code("20", "TEST").is_err());
-        assert!(parse_response_code("é00 OK", "TEST").is_err());
-        assert!(parse_response_code("ABC OK", "TEST").is_err());
-    }
-
-    #[test]
-    fn connector_builds_with_check_enabled() {
-        let config = FtpsConfig {
-            enabled: true,
-            check_certificate: true,
-            ca_certificate: None,
-            min_tls_version: TlsVersion::Tls12,
-        };
-        assert!(build_tls_connector(&config).is_ok());
-    }
-
-    #[test]
-    fn connector_builds_with_check_disabled() {
-        let config = FtpsConfig {
-            enabled: true,
-            check_certificate: false,
-            ca_certificate: None,
-            min_tls_version: TlsVersion::Tls12,
-        };
-        assert!(build_tls_connector(&config).is_ok());
-    }
-
-    #[test]
-    fn connector_rejects_missing_ca_file() {
-        let config = FtpsConfig {
-            enabled: true,
-            check_certificate: true,
-            ca_certificate: Some(PathBuf::from("/nonexistent/ca.pem")),
-            min_tls_version: TlsVersion::Tls12,
-        };
-        assert!(build_tls_connector(&config).is_err());
-    }
-
-    #[test]
-    fn connector_builds_with_tls13() {
-        let config = FtpsConfig {
-            enabled: true,
-            check_certificate: true,
-            ca_certificate: None,
-            min_tls_version: TlsVersion::Tls13,
-        };
-        assert!(build_tls_connector(&config).is_ok());
-    }
-
-    #[tokio::test]
-    async fn protected_data_channel_negotiation_requires_both_responses() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-        let (client, server) = tokio::io::duplex(256);
-        let server = tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(server);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert_eq!(line, "PBSZ 0\r\n");
-            reader
-                .get_mut()
-                .write_all(b"200 PBSZ ok\r\n")
-                .await
-                .unwrap();
-            line.clear();
-            reader.read_line(&mut line).await.unwrap();
-            assert_eq!(line, "PROT P\r\n");
-            reader
-                .get_mut()
-                .write_all(b"200 PROT ok\r\n")
-                .await
-                .unwrap();
-        });
-
-        let mut client = tokio::io::BufReader::new(client);
-        negotiate_protected_data_channel(&mut client).await.unwrap();
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn protected_data_channel_negotiation_fails_closed_on_prot_rejection() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-        let (client, server) = tokio::io::duplex(256);
-        let server = tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(server);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            reader
-                .get_mut()
-                .write_all(b"200 PBSZ ok\r\n")
-                .await
-                .unwrap();
-            line.clear();
-            reader.read_line(&mut line).await.unwrap();
-            reader
-                .get_mut()
-                .write_all(b"534 PROT rejected\r\n")
-                .await
-                .unwrap();
-        });
-
-        let mut client = tokio::io::BufReader::new(client);
-        let result = negotiate_protected_data_channel(&mut client).await;
-        assert!(result.is_err());
-        server.await.unwrap();
-    }
-}
+mod tests;

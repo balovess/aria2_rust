@@ -1333,6 +1333,110 @@ async fn test_concurrent_http_500_fails_over_to_next_mirror() {
     good_server.shutdown().await;
 }
 
+#[tokio::test]
+async fn test_multi_mirror_416_falls_back_to_gap_download() {
+    let first_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start first mirror");
+    let second_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start second mirror");
+    let data = Arc::new(generate_test_data(2 * 1024 * 1024, 91));
+    let rejected_ranges = Arc::new(AtomicUsize::new(0));
+    let fallback_ranges = Arc::new(AtomicUsize::new(0));
+
+    let make_handler = |body: Arc<Vec<u8>>,
+                        rejected_ranges: Arc<AtomicUsize>,
+                        fallback_ranges: Arc<AtomicUsize>| {
+        move |request: &Request<Incoming>| -> Response<Body> {
+            if request.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", body.len())
+                    .body(empty_body())
+                    .unwrap();
+            }
+
+            let range = request
+                .headers()
+                .get("Range")
+                .and_then(|value| value.to_str().ok());
+            if range == Some("bytes=0-0") {
+                return range_response(request, &body);
+            }
+            let full_range = format!("bytes=0-{}", body.len() - 1);
+            if range == Some(full_range.as_str()) {
+                fallback_ranges.fetch_add(1, Ordering::AcqRel);
+                return range_response(request, &body);
+            }
+            if range.is_some() {
+                rejected_ranges.fetch_add(1, Ordering::AcqRel);
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("Content-Range", format!("bytes=*/{}", body.len()))
+                    .body(empty_body())
+                    .unwrap();
+            }
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Length", body.len())
+                .body(full_body(Bytes::copy_from_slice(&body)))
+                .unwrap()
+        }
+    };
+
+    first_server.on_get(
+        "/multi-mirror-416",
+        make_handler(
+            Arc::clone(&data),
+            Arc::clone(&rejected_ranges),
+            Arc::clone(&fallback_ranges),
+        ),
+    );
+    second_server.on_get(
+        "/multi-mirror-416",
+        make_handler(
+            Arc::clone(&data),
+            Arc::clone(&rejected_ranges),
+            Arc::clone(&fallback_ranges),
+        ),
+    );
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "multi-mirror-416.bin";
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.max_retries = 1;
+    let urls = vec![
+        make_url(&first_server.base_url(), "/multi-mirror-416"),
+        make_url(&second_server.base_url(), "/multi-mirror-416"),
+    ];
+    let mut command = make_multi_mirror_command(
+        GroupId::new(420),
+        urls,
+        &options,
+        &dir.path().to_string_lossy(),
+        output_name,
+    );
+
+    command
+        .execute()
+        .await
+        .expect("multi-mirror 416 should fall back and complete");
+    assert_eq!(
+        tokio::fs::read(dir.path().join(output_name)).await.unwrap(),
+        *data
+    );
+    assert!(rejected_ranges.load(Ordering::Acquire) > 0);
+    assert!(
+        fallback_ranges.load(Ordering::Acquire) > 0,
+        "fallback should request the full missing file range"
+    );
+    first_server.shutdown().await;
+    second_server.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Test 7: Multi-mirror concurrent resume restores the control-file bitfield
 // ---------------------------------------------------------------------------
@@ -1679,6 +1783,11 @@ async fn test_engine_resumed_ranges_exhaust_capacity_retries_instead_of_stalling
     options.continue_download = true;
     options.allow_overwrite = true;
     options.max_retries = 1;
+    options.http_adaptive.start_interval_ms = 0;
+    options.http_adaptive.backoff_base_secs = 1;
+    options.http_adaptive.backoff_max_secs = 1;
+    options.http_adaptive.capacity_start_interval_ms = 1;
+    options.http_adaptive.capacity_start_interval_max_ms = 1;
 
     let gid = GroupId::new(413);
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
@@ -2080,6 +2189,9 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
 
     let mut options = make_options(Some(4), Some(4), &tmp_dir, &out_name);
     options.retry_wait = 0;
+    // This test verifies overload feedback, so remove normal request pacing
+    // to make the initial four-request burst deterministic.
+    options.http_adaptive.start_interval_ms = 0;
     let mut cmd = make_concurrent_command(
         GroupId::new(5),
         &url,

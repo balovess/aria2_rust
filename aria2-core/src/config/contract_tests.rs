@@ -488,12 +488,14 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
                         name, error
                     )
                 });
-        let rpc_session =
-            crate::session::session_entry::download_options_to_map(&rpc_download_options);
         let snapshot = crate::config::project_initial_options(
             options
                 .iter()
                 .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone()))),
+        );
+        let rpc_session = crate::session::session_entry::download_options_to_map_with_snapshot(
+            &rpc_download_options,
+            Some(&snapshot),
         );
         let serialized = crate::session::session_entry::download_options_to_map_with_snapshot(
             &download_options,
@@ -960,7 +962,22 @@ fn bittorrent_execution_options_round_trip_through_task_session() {
 fn initial_option_snapshot_is_reserved_for_wire_fidelity_only() {
     assert_eq!(
         super::runtime::INITIAL_SNAPSHOT_WIRE_OPTIONS,
-        &["min-http-range-size", "min-split-size"],
+        &[
+            "http-adaptive-reduction-percent",
+            "http-adaptive-recovery-interval",
+            "http-adaptive-recovery-successes-min",
+            "http-adaptive-recovery-successes-max",
+            "http-adaptive-start-interval-ms",
+            "http-adaptive-backoff-base",
+            "http-adaptive-backoff-max",
+            "http-adaptive-capacity-start-interval-ms",
+            "http-adaptive-capacity-start-interval-max-ms",
+            "http-adaptive-rate-recovery-successes",
+            "http-adaptive-rate-min-interval-ms",
+            "http-adaptive-backoff-reset-after",
+            "min-http-range-size",
+            "min-split-size",
+        ],
         "raw snapshot preservation must not become an execution fallback"
     );
 }

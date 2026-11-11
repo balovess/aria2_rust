@@ -232,124 +232,90 @@ impl Cookie {
         request_host: &str,
         default_path: &str,
     ) -> Option<Self> {
-        let header = header.trim();
-        if header.is_empty() {
-            return None;
-        }
-
-        // Split into name=value and attributes.
-        // Fix: bare "SID=abc" (no semicolon) must work per RFC 6265.
-        let (name_value, attrs_part) = match header.split_once(';') {
-            Some((nv, attrs)) => (nv, Some(attrs)),
-            None => (header, None), // No attributes — entire string is name=value
-        };
-
-        let nv = name_value.trim();
-        let eq_pos = nv.find('=')?;
-        let name = nv[..eq_pos].trim();
-        let mut value = nv[eq_pos + 1..].trim();
-
-        // Strip surrounding double-quotes from value per RFC 6265 Section 5.2
-        if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-            value = &value[1..value.len() - 1];
-        }
-
-        if name.is_empty() {
-            return None;
-        }
-
-        let mut cookie = Self::new(name, value, request_host);
+        let parsed = aria2_protocol::http::cookie::parsing::parse_set_cookie_header(header)?;
+        let mut cookie = Self::new(&parsed.name, &parsed.value, request_host);
         cookie.path = default_path.to_string();
 
         // Whether the Domain attribute was explicitly provided
         let mut domain_attr_provided = false;
 
-        if let Some(attrs) = attrs_part {
-            for attr in attrs.split(';') {
-                let attr = attr.trim();
-                if attr.is_empty() {
-                    continue;
-                }
-                if let Some((k, v)) = attr.split_once('=') {
-                    match k.trim().to_lowercase().as_str() {
-                        "domain" => {
-                            let domain_val = v.trim();
-                            // Strip leading dot per RFC 6265 Section 5.2.3
-                            let domain_val = domain_val.trim_start_matches('.');
-                            if domain_val.is_empty() {
-                                // Empty domain after stripping → reject
-                                warn!("Set-Cookie with empty Domain attribute, rejecting");
-                                return None;
-                            }
-                            cookie.domain = domain_val.to_string();
-                            domain_attr_provided = true;
-                        }
-                        "path" => {
-                            let path_val = v.trim();
-                            // Path must start with / per RFC 6265 Section 5.2.4
-                            if path_val.starts_with('/') {
-                                cookie.path = path_val.to_string();
-                            } else {
-                                // If path doesn't start with /, ignore it and use default
-                                warn!(
-                                    path = path_val,
-                                    "Set-Cookie Path doesn't start with /, using default"
-                                );
-                            }
-                        }
-                        "max-age" => {
-                            if let Ok(secs) = v.trim().parse::<i64>() {
-                                if secs <= 0 {
-                                    // Max-Age ≤ 0 → cookie should be deleted immediately
-                                    cookie.expiry_time = 0;
-                                    cookie.persistent = true;
-                                } else {
-                                    cookie.expiry_time = now_secs() + secs;
-                                    cookie.persistent = true;
-                                }
-                            } else {
-                                // Non-numeric Max-Age → reject the cookie per C++ behavior
-                                warn!(value = v.trim(), "Non-numeric Max-Age, rejecting cookie");
-                                return None;
-                            }
-                        }
-                        "expires" => {
-                            // Max-Age takes precedence over Expires per RFC 6265 Section 5.3
-                            if !cookie.persistent
-                                && let Some(ep) = parse_http_date(v.trim())
-                            {
-                                cookie.expiry_time = ep;
-                                cookie.persistent = true;
-                            }
-                            // If Expires is unparseable, C++ rejects the cookie.
-                            // We are more lenient: we just ignore the Expires attribute.
-                        }
-                        "samesite" => {
-                            // SameSite attribute per RFC 6265bis Section 5.4.7
-                            // Value is case-insensitive
-                            match v.trim().to_lowercase().as_str() {
-                                "strict" => cookie.same_site = SameSite::Strict,
-                                "lax" => cookie.same_site = SameSite::Lax,
-                                "none" => cookie.same_site = SameSite::None,
-                                _ => {
-                                    // Per RFC 6265bis: unknown SameSite value MUST be ignored
-                                    // (cookie stays at default SameSite::None)
-                                    warn!(
-                                        value = v.trim(),
-                                        "Unknown SameSite value, ignoring attribute"
-                                    );
-                                }
-                            }
-                        }
-                        _ => {}
+        for attr in parsed.attributes {
+            if attr.value.is_none() && !matches!(attr.name.as_str(), "secure" | "httponly") {
+                continue;
+            }
+            match attr.name.as_str() {
+                "domain" => {
+                    let domain_val = attr.value.as_deref().unwrap_or_default();
+                    // Strip leading dot per RFC 6265 Section 5.2.3
+                    let domain_val = domain_val.trim_start_matches('.');
+                    if domain_val.is_empty() {
+                        // Empty domain after stripping → reject
+                        warn!("Set-Cookie with empty Domain attribute, rejecting");
+                        return None;
                     }
-                } else {
-                    match attr.to_lowercase().as_str() {
-                        "secure" => cookie.secure = true,
-                        "httponly" => cookie.http_only = true,
-                        _ => {}
+                    cookie.domain = domain_val.to_string();
+                    domain_attr_provided = true;
+                }
+                "path" => {
+                    let path_val = attr.value.as_deref().unwrap_or_default();
+                    // Path must start with / per RFC 6265 Section 5.2.4
+                    if path_val.starts_with('/') {
+                        cookie.path = path_val.to_string();
+                    } else {
+                        // If path doesn't start with /, ignore it and use default
+                        warn!(
+                            path = path_val,
+                            "Set-Cookie Path doesn't start with /, using default"
+                        );
                     }
                 }
+                "max-age" => {
+                    let value = attr.value.as_deref().unwrap_or_default();
+                    if let Ok(secs) = value.parse::<i64>() {
+                        if secs <= 0 {
+                            // Max-Age ≤ 0 → cookie should be deleted immediately
+                            cookie.expiry_time = 0;
+                            cookie.persistent = true;
+                        } else {
+                            cookie.expiry_time = now_secs() + secs;
+                            cookie.persistent = true;
+                        }
+                    } else {
+                        // Non-numeric Max-Age → reject the cookie per C++ behavior
+                        warn!(value, "Non-numeric Max-Age, rejecting cookie");
+                        return None;
+                    }
+                }
+                "expires" => {
+                    let value = attr.value.as_deref().unwrap_or_default();
+                    // Max-Age takes precedence over Expires per RFC 6265 Section 5.3
+                    if !cookie.persistent
+                        && let Some(ep) = parse_http_date(value)
+                    {
+                        cookie.expiry_time = ep;
+                        cookie.persistent = true;
+                    }
+                    // If Expires is unparseable, C++ rejects the cookie.
+                    // We are more lenient: we just ignore the Expires attribute.
+                }
+                "samesite" => {
+                    let value = attr.value.as_deref().unwrap_or_default();
+                    // SameSite attribute per RFC 6265bis Section 5.4.7
+                    // Value is case-insensitive
+                    match value.to_lowercase().as_str() {
+                        "strict" => cookie.same_site = SameSite::Strict,
+                        "lax" => cookie.same_site = SameSite::Lax,
+                        "none" => cookie.same_site = SameSite::None,
+                        _ => {
+                            // Per RFC 6265bis: unknown SameSite value MUST be ignored
+                            // (cookie stays at default SameSite::None)
+                            warn!(value, "Unknown SameSite value, ignoring attribute");
+                        }
+                    }
+                }
+                "secure" if attr.value.is_none() => cookie.secure = true,
+                "httponly" if attr.value.is_none() => cookie.http_only = true,
+                _ => {}
             }
         }
 
