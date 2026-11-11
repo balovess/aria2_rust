@@ -140,6 +140,59 @@ async fn test_cli_metalink_options_reach_download_options() {
     assert_eq!(options.select_file.as_deref(), Some("2"));
 }
 
+#[tokio::test]
+async fn test_cli_ftp_proxy_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--ftp-proxy=http://proxy.example:3128",
+        "--ftp-proxy-user=proxy-user",
+        "--ftp-proxy-passwd=proxy-password",
+        "--proxy-method=tunnel",
+        "--user-agent=task-agent/1.0",
+        "--ftp-user=download-user",
+        "ftp://example.test/file.bin",
+    ])
+    .expect("FTP proxy CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(
+        options.ftp_proxy.as_deref(),
+        Some("http://proxy.example:3128")
+    );
+    assert_eq!(options.ftp_proxy_user.as_deref(), Some("proxy-user"));
+    assert_eq!(options.ftp_proxy_passwd.as_deref(), Some("proxy-password"));
+    assert_eq!(options.proxy_method, "tunnel");
+    assert_eq!(options.user_agent.as_deref(), Some("task-agent/1.0"));
+    assert_eq!(options.ftp_user.as_deref(), Some("download-user"));
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_cli_empty_tracker_sources_remain_an_empty_list() {
+    let cli =
+        CliArgs::try_parse_from(["aria2", "--bt-tracker-source=", "http://example.test/file"])
+            .expect("empty tracker source list should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("empty tracker source list should load");
+
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_option("bt-tracker-source")
+            .await,
+        Some(OptionValue::List(Vec::new()))
+    );
+}
+
 #[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {

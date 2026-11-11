@@ -2,6 +2,8 @@ use super::*;
 use std::ffi::CString;
 use std::sync::Mutex;
 
+#[path = "tests/ftp_proxy_options.rs"]
+mod ftp_proxy_options;
 #[path = "tests/http_adaptive_options.rs"]
 mod http_adaptive_options;
 #[path = "tests/public_tracker_sources.rs"]

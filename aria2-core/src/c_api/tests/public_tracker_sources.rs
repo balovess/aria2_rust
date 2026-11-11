@@ -1,4 +1,6 @@
+#[cfg(feature = "bittorrent")]
 use super::*;
+#[cfg(feature = "bittorrent")]
 use std::ptr;
 
 #[cfg(feature = "bittorrent")]
@@ -22,7 +24,7 @@ fn c_api_accepts_an_empty_public_tracker_source_list() {
         session_ref
             .runtime
             .block_on(session_ref.config.get_global_option("bt-tracker-source")),
-        Some(OptionValue::List(vec![String::new()]))
+        Some(OptionValue::List(Vec::new()))
     );
 
     drop((name, value));

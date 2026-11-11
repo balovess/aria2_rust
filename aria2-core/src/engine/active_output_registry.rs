@@ -39,7 +39,7 @@ impl Default for OutputPathPolicy {
         Self {
             allow_overwrite: false,
             auto_file_renaming: true,
-            continue_download: false,
+            continue_download: true,
             check_integrity: false,
             total_length: None,
         }

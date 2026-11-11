@@ -100,8 +100,17 @@ impl App {
 
             // Keep the persisted request options separate from Rust-only
             // session metadata before reconstructing execution settings.
-            let option_snapshot = Self::session_option_snapshot(&entry.options);
-            let opts = Self::map_entry_to_download_options(&entry.options);
+            let mut restored_options = entry.options.clone();
+            // Older session entries omit false/default values. Use the current
+            // global resume policy so those entries can consume their control
+            // files after a restart.
+            if !restored_options.contains_key("continue") {
+                if let Some(continue_option) = self.get_opt_str("continue").await {
+                    restored_options.insert("continue".to_string(), continue_option);
+                }
+            }
+            let option_snapshot = Self::session_option_snapshot(&restored_options);
+            let opts = Self::map_entry_to_download_options(&restored_options);
 
             #[cfg(all(feature = "metalink", feature = "bittorrent"))]
             if let Some(payload_gid) = standard_graph_payload_gid(entry) {

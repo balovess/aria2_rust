@@ -44,7 +44,7 @@ pub struct DownloadOptions {
     /// Enable the asynchronous DNS cache for this task.
     pub async_dns: bool,
     /// Resume an existing output file when no control file is available.
-    /// This is the C++ `--continue` option and defaults to `false`.
+    /// This is the C++ `--continue` option; this implementation defaults to `true`.
     pub continue_download: bool,
     /// Allow replacing an existing output file. C++ default: `false`.
     pub allow_overwrite: bool,

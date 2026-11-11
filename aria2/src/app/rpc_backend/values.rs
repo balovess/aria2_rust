@@ -472,6 +472,14 @@ mod tests {
                 .unwrap();
 
             assert!(matches!(
+                config
+                    .read()
+                    .await
+                    .get_global_option("bt-tracker-source")
+                    .await,
+                Some(aria2_core::config::OptionValue::List(sources)) if sources.is_empty()
+            ));
+            assert!(matches!(
                 receiver.recv().await.unwrap(),
                 EngineCommand::SetPublicTrackerSources { sources } if sources.is_empty()
             ));

@@ -1,6 +1,7 @@
 pub mod connection;
 pub mod download;
 pub mod listing;
+pub mod proxy;
 pub mod tls;
 pub mod uri;
 

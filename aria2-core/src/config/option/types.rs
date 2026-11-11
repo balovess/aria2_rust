@@ -546,9 +546,11 @@ impl OptionDef {
                 "false" => Ok(OptionValue::Bool(false)),
                 _ => Err(format!("invalid boolean '{}'", s)),
             },
-            OptionType::List => Ok(OptionValue::List(
-                s.split([',', '\n']).map(|x| x.trim().to_string()).collect(),
-            )),
+            OptionType::List => Ok(OptionValue::List(if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split([',', '\n']).map(|x| x.trim().to_string()).collect()
+            })),
         }
     }
 }

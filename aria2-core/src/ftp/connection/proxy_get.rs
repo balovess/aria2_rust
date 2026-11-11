@@ -398,112 +398,25 @@ impl FtpProxyGetRequestBuilder {
     /// - Conditional headers (Range, Cache-Control)
     /// - FTP auth embedded in URI if needed
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the FTP URL cannot be serialized.
+    /// The `Result` return type is retained for compatibility with the public
+    /// core API; request serialization currently has no fallible step.
     pub fn build(self) -> Result<FtpProxyGetRequest> {
-        let request_url = self.build_request_url();
-        let host_header = Self::build_host_header(&self.ftp_url);
-        let mut headers = vec![
-            ("Host".to_owned(), host_header),
-            ("User-Agent".to_owned(), self.proxy_config.user_agent),
-            ("Accept".to_owned(), "*/*".to_owned()),
-        ];
-
-        // No-cache headers (mirrors C++ noCache_)
-        if self.no_cache {
-            headers.push(("Pragma".to_owned(), "no-cache".to_owned()));
-            headers.push(("Cache-Control".to_owned(), "no-cache".to_owned()));
-        }
-
-        // Connection: Keep-Alive for proxy requests
-        // Mirrors C++: if(proxyRequest_ && isKeepAliveEnabled())
-        headers.push(("Connection".to_owned(), "Keep-Alive".to_owned()));
-
-        // Range header for resume (mirrors C++ segment-based Range logic)
-        if self.range_start > 0 {
-            headers.push(("Range".to_owned(), format!("bytes={}-", self.range_start)));
-        }
-
-        // Proxy-Authorization header (mirrors C++ getProxyAuthString())
-        if !self.proxy_config.proxy_username.is_empty() {
-            let auth_header = build_basic_proxy_auth(
-                &self.proxy_config.proxy_username,
-                &self.proxy_config.proxy_password,
-            );
-            headers.push(("Proxy-Authorization".to_owned(), auth_header));
-        }
-        let request_bytes = aria2_protocol::http::request::HttpRequest::get(request_url.clone())
-            .with_headers(headers)
-            .to_bytes();
-
-        debug!(
-            "Built FTP proxy GET request ({} bytes) for {}",
-            request_bytes.len(),
-            request_url
+        let request = aria2_protocol::ftp::proxy::build_get_request(
+            &self.ftp_url,
+            &aria2_protocol::ftp::proxy::ProxyGetRequestOptions {
+                ftp_username: &self.proxy_config.ftp_username,
+                proxy_username: &self.proxy_config.proxy_username,
+                proxy_password: &self.proxy_config.proxy_password,
+                user_agent: &self.proxy_config.user_agent,
+                range_start: self.range_start,
+                no_cache: self.no_cache,
+            },
         );
-
         Ok(FtpProxyGetRequest {
-            request_bytes,
-            request_url,
+            request_bytes: request.request_bytes,
+            request_url: request.request_url,
         })
     }
-
-    /// Build the request URL, possibly embedding FTP username.
-    ///
-    /// Mirrors C++ `HttpRequest::createRequest()` lines 149-160:
-    /// - If proxy is set and protocol is FTP and URL has no username
-    ///   but FTP auth credentials exist, insert `USER@` into the URI.
-    /// - Otherwise, use the URL as-is.
-    fn build_request_url(&self) -> String {
-        // Check if the FTP URL already has a username embedded
-        let has_embedded_username = !self.ftp_url.username().is_empty();
-
-        if !has_embedded_username && !self.proxy_config.ftp_username.is_empty() {
-            // C++: Insert user into URI, like ftp://USER@host/
-            // Percent-encode the username per RFC 3986
-            let encoded_user =
-                aria2_protocol::ftp::uri::percent_encode_userinfo(&self.proxy_config.ftp_username);
-            let url_str = self.ftp_url.to_string();
-            // Insert after "ftp://"
-            if let Some(pos) = url_str.find("://") {
-                let scheme_end = pos + 3;
-                let mut result = String::with_capacity(url_str.len() + encoded_user.len() + 1);
-                result.push_str(&url_str[..scheme_end]);
-                result.push_str(&encoded_user);
-                result.push('@');
-                result.push_str(&url_str[scheme_end..]);
-                return result;
-            }
-        }
-
-        self.ftp_url.to_string()
-    }
-
-    /// Build the Host header value from the FTP URL.
-    ///
-    /// Mirrors C++ `getHostText(getURIHost(), getPort())`:
-    /// - Omits port 21 for FTP (default port)
-    /// - Includes port for non-default ports
-    fn build_host_header(url: &Url) -> String {
-        let host = url.host_str().unwrap_or("");
-        let port = url.port();
-        match port {
-            Some(21) | None => host.to_string(),
-            Some(p) => format!("{}:{}", host, p),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper functions
-// ---------------------------------------------------------------------------
-
-/// Build a Basic Proxy-Authorization header value.
-///
-/// Mirrors C++ `HttpRequest::getProxyAuthString()`.
-fn build_basic_proxy_auth(username: &str, password: &str) -> String {
-    aria2_protocol::http::auth::basic_authorization(username, password)
 }
 
 // ---------------------------------------------------------------------------
@@ -624,14 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_basic_proxy_auth() {
-        let header = build_basic_proxy_auth("proxyuser", "proxypass");
-        assert!(header.starts_with("Basic "));
-        // Base64 of "proxyuser:proxypass"
-        assert_eq!(header, "Basic cHJveHl1c2VyOnByb3h5cGFzcw==");
-    }
-
-    #[test]
     fn test_build_request_simple() {
         let ftp_url = Url::parse("ftp://ftp.example.com/pub/file.tar.gz").unwrap();
         let proxy_config = FtpProxyConfig {
@@ -706,24 +611,6 @@ mod tests {
         let s = String::from_utf8(result.request_bytes).unwrap();
         assert!(s.contains("Pragma: no-cache\r\n"));
         assert!(s.contains("Cache-Control: no-cache\r\n"));
-    }
-
-    #[test]
-    fn test_build_host_header_default_port() {
-        let url = Url::parse("ftp://ftp.example.com/pub/file").unwrap();
-        assert_eq!(
-            FtpProxyGetRequestBuilder::build_host_header(&url),
-            "ftp.example.com"
-        );
-    }
-
-    #[test]
-    fn test_build_host_header_non_default_port() {
-        let url = Url::parse("ftp://ftp.example.com:2121/pub/file").unwrap();
-        assert_eq!(
-            FtpProxyGetRequestBuilder::build_host_header(&url),
-            "ftp.example.com:2121"
-        );
     }
 
     #[test]

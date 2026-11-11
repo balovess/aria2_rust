@@ -3,6 +3,16 @@
 This file records compatibility evidence for externally observable download
 behavior. An unlisted behavior has not been audited here.
 
+## Continue default
+
+- **User-directed difference:** `continue` defaults to `true`, so an existing
+  output file can be reused for a resume attempt without explicitly passing
+  `-c`. This differs from original aria2's default of `false`; `--no-continue`
+  or `continue=false` still disables it.
+- **Verification:** default and explicit override behavior is covered by the
+  task option conversion regression test. CLI/config/RPC contract verification
+  for the changed default has not been run.
+
 ## HTTP split and piece geometry
 
 - **Supported scope:** `split` is the task-wide HTTP segment budget and has no
@@ -258,14 +268,17 @@ behavior. An unlisted behavior has not been audited here.
   `TrackerCatalogConfig` layout remains source-compatible; the protocol library
   exposes separate timeout accessors.
 - **Empty source list:** An empty `bt-tracker-source` list is valid through
-  startup configuration, the C API, and RPC. The catalog skips source fetching
-  and retains its current snapshot as a fallback.
+  startup configuration, the C API, and RPC. Empty list input is represented as
+  `List([])` in configuration instead of a one-element list containing an empty
+  string. The catalog skips source fetching and retains its current snapshot as
+  a fallback.
 - **Compatibility impact:** this is a Rust extension; original aria2 does not
   provide a public tracker-list source timeout option. The default preserves
   the previous 15-second limit.
 - **Verification:** protocol tests delay an HTTP response body and assert the
-  configured deadline aborts the complete fetch; CLI and RPC propagation have
-  focused tests. C API paths are compile-checked.
+  configured deadline aborts the complete fetch; CLI, RPC, and C API tests
+  verify empty tracker sources remain an empty list through their configuration
+  boundaries.
 
 ## BitTorrent DHT outbound source binding
 
@@ -336,10 +349,16 @@ behavior. An unlisted behavior has not been audited here.
   FTPS TLS policy, and engine error mapping. Existing focused FTP URI tests and
   protocol SFTP parser tests pass; the SFTP engine URI compatibility tests are
   run with the optional `sftp` feature.
-- FTP proxy GET username escaping uses the same protocol FTP URI module's RFC
-  3986 user-info encoder. Output remains uppercase hexadecimal with only
-  unreserved bytes left literal; protocol and FTP proxy builder tests cover
-  non-ASCII and reserved characters.
+- FTP proxy GET request serialization now lives in
+  `aria2-protocol::ftp::proxy`, including the absolute FTP request target,
+  Host/Range/cache headers, Basic proxy authentication, and FTP username
+  escaping. Core retains proxy selection, socket policy, and response/task
+  handling; its public builder delegates to the protocol serializer. Username
+  escaping follows RFC 3986 with uppercase hexadecimal and only unreserved
+  bytes literal. Verification covers CLI fields through `DownloadOptions`,
+  RPC values through the core proxy configuration, C API global options through
+  newly created request groups, and the protocol serializer plus core public
+  builder output.
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
   SFTP connection-establishment and SFTP I/O read timeouts independently, in seconds.
@@ -399,6 +418,9 @@ behavior. An unlisted behavior has not been audited here.
   and tunnel lifecycle. Informational 1xx responses are skipped consistently
   with the HTTP CONNECT path. Header reads stop exactly after the terminator so
   tunneled bytes coalesced with the final 200 response remain available to FTP.
+  The FTP 407 path now uses the protocol HTTP Basic-auth serializer instead of
+  maintaining a second Base64 implementation; Digest formatting continues
+  through the core compatibility facade backed by the protocol implementation.
 - **Verification:** HTTP proxy tests and FTP CONNECT loopback tests cover 1xx
   responses followed by 200 in one write and confirm the immediate FTP 220
   greeting remains readable from the returned tunnel stream.

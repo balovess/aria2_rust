@@ -21,7 +21,7 @@ impl Default for DownloadOptions {
             file_allocation: None,
             allow_piece_length_change: false,
             async_dns: true,
-            continue_download: false,
+            continue_download: true,
             allow_overwrite: false,
             auto_file_renaming: true,
             always_resume: true,

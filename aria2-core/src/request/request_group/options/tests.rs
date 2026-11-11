@@ -234,12 +234,12 @@ fn rpc_option_map_rejects_invalid_registered_values() {
 }
 
 #[test]
-fn continue_option_defaults_to_false_and_accepts_explicit_true() {
-    assert!(!DownloadOptions::from_option_strings(&HashMap::new()).continue_download);
+fn continue_option_defaults_to_true_and_accepts_explicit_false() {
+    assert!(DownloadOptions::from_option_strings(&HashMap::new()).continue_download);
 
     let mut values = HashMap::new();
-    values.insert("continue".to_string(), "true".to_string());
-    assert!(DownloadOptions::from_option_strings(&values).continue_download);
+    values.insert("continue".to_string(), "false".to_string());
+    assert!(!DownloadOptions::from_option_strings(&values).continue_download);
 }
 
 #[cfg(feature = "bittorrent")]

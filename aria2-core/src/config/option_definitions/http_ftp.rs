@@ -412,7 +412,7 @@ impl crate::config::OptionRegistry {
             name: "continue".into(),
             opt_type: OptionType::Boolean,
             short_name: Some('c'),
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Resume partial downloads".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

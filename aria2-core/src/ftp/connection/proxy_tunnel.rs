@@ -223,8 +223,10 @@ impl FtpProxyTunnel {
             .next()
             .unwrap_or_default();
         let auth_header = if scheme.eq_ignore_ascii_case("Basic") {
-            // Basic authentication
-            Self::build_basic_auth_header(&config.proxy_username, &config.proxy_password)
+            aria2_protocol::http::auth::basic_authorization(
+                &config.proxy_username,
+                &config.proxy_password,
+            )
         } else if scheme.eq_ignore_ascii_case("Digest") {
             // Digest authentication
             Self::build_digest_auth_header(
@@ -350,14 +352,6 @@ impl FtpProxyTunnel {
                 Ok(())
             }
         }
-    }
-
-    /// Build a Basic proxy-auth header value.
-    fn build_basic_auth_header(username: &str, password: &str) -> String {
-        use base64::Engine;
-        let credentials = format!("{}:{}", username, password);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
-        format!("Basic {}", encoded)
     }
 
     /// Build a Digest proxy-auth header value.
@@ -513,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_build_basic_auth_header() {
-        let header = FtpProxyTunnel::build_basic_auth_header("user", "pass");
+        let header = aria2_protocol::http::auth::basic_authorization("user", "pass");
         assert!(header.starts_with("Basic "));
         // Base64 of "user:pass" is "dXNlcjpwYXNz"
         assert_eq!(header, "Basic dXNlcjpwYXNz");
