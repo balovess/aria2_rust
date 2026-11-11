@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(mgr.get_global_i64("split").await, Some(16));
         assert_eq!(
             mgr.get_global_i64("max-connection-per-server").await,
-            Some(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as i64)
+            Some(10)
         );
         assert_eq!(
             mgr.get_global_i64("min-split-size").await,

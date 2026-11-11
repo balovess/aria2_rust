@@ -28,7 +28,7 @@ fn test_default_construction() {
     assert!(entry.content_type().is_empty());
     assert!(entry.original_name().is_empty());
     assert!(entry.suffix_path().is_empty());
-    assert_eq!(entry.max_connection_per_server(), 1);
+    assert_eq!(entry.max_connection_per_server(), 10);
 }
 
 #[test]
@@ -396,7 +396,7 @@ fn test_remove_request_not_found() {
 #[test]
 fn test_max_connection_per_server() {
     let mut entry = FileEntry::default();
-    assert_eq!(entry.max_connection_per_server(), 1);
+    assert_eq!(entry.max_connection_per_server(), 10);
     entry.set_max_connection_per_server(4);
     assert_eq!(entry.max_connection_per_server(), 4);
 }

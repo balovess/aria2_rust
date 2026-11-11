@@ -353,6 +353,57 @@ pub(super) async fn handle_jsonrpc(
     into_jsonrpc_http_response(response, "application/json-rpc")
 }
 
+fn xml_rpc_params_to_json(
+    method: &str,
+    params: &[crate::xml_rpc::XmlRpcValue],
+) -> Result<Vec<serde_json::Value>, crate::xml_rpc::XmlRpcError> {
+    use base64::Engine;
+
+    let binary_payload_method = matches!(method, "aria2.addTorrent" | "aria2.addMetalink");
+    params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            if index == 0
+                && binary_payload_method
+                && let Some(value) = param.as_str()
+            {
+                // XML-RPC <string> values are raw payload bytes in aria2,
+                // unlike JSON-RPC's base64 string contract. Re-encode here so
+                // the shared engine can decode exactly once across transports.
+                return Ok(serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(value.as_bytes()),
+                ));
+            }
+            param.to_json_value()
+        })
+        .collect()
+}
+
+fn xml_rpc_result_for_method(method: &str, mut result: serde_json::Value) -> serde_json::Value {
+    if method != "system.multicall" {
+        return result;
+    }
+
+    if let Some(entries) = result.as_array_mut() {
+        for entry in entries {
+            let Some(object) = entry.as_object_mut() else {
+                continue;
+            };
+            let Some(code) = object.remove("code") else {
+                continue;
+            };
+            let Some(message) = object.remove("message") else {
+                object.insert("code".to_string(), code);
+                continue;
+            };
+            object.insert("faultCode".to_string(), code);
+            object.insert("faultString".to_string(), message);
+        }
+    }
+    result
+}
+
 /// Handle the original aria2 XML-RPC endpoint at `/rpc`.
 pub(super) async fn handle_xmlrpc(
     axum::extract::State(state): axum::extract::State<RpcState>,
@@ -364,26 +415,27 @@ pub(super) async fn handle_xmlrpc(
 
     let (status, content_type, response_body) = match parse_request(&body) {
         Ok(request) => {
-            let params = request
-                .params
-                .iter()
-                .map(XmlRpcValue::to_json_value)
-                .collect::<Result<Vec<_>, _>>();
-            match params {
+            match xml_rpc_params_to_json(&request.method_name, &request.params) {
                 Ok(params) => {
-                    let json_request =
-                        JsonRpcRequest::new(request.method_name, serde_json::Value::Array(params))
-                            .with_id(serde_json::Value::String("xmlrpc".into()));
-                    let json_response = state.engine.handle_request(&json_request).await;
+                    let json_request = JsonRpcRequest::new(
+                        request.method_name.clone(),
+                        serde_json::Value::Array(params),
+                    )
+                    .with_id(serde_json::Value::String("xmlrpc".into()));
+                    let json_response = state.engine.handle_request_owned(json_request).await;
                     let response = match json_response.result {
-                        Some(result) => XmlRpcValue::from_json_value(result)
-                            .map(XmlRpcResponse::single)
-                            .unwrap_or_else(|error| {
-                                // Once XML-RPC parsing has succeeded, aria2
-                                // reports method-side failures as faultCode=1
-                                // regardless of the JSON-RPC adapter code.
-                                XmlRpcResponse::fault(1, &error.to_string())
-                            }),
+                        Some(result) => {
+                            let result = xml_rpc_result_for_method(&request.method_name, result);
+                            XmlRpcValue::from_json_value(result)
+                                .map(XmlRpcResponse::single)
+                                .unwrap_or_else(|error| {
+                                    // Once XML-RPC parsing has succeeded, aria2
+                                    // reports method-side failures as
+                                    // faultCode=1 regardless of the JSON-RPC
+                                    // adapter code.
+                                    XmlRpcResponse::fault(1, &error.to_string())
+                                })
+                        }
                         None => {
                             let message = json_response
                                 .error
@@ -501,5 +553,47 @@ mod tests {
     fn test_json_get_callback_is_not_normalized() {
         let parsed = parse_json_get_query("jsoncallback=bad;alert(1)//");
         assert_eq!(parsed.callback.as_deref(), Some("bad;alert(1)//"));
+    }
+
+    #[test]
+    fn xml_rpc_string_payload_is_reencoded_for_the_shared_decoder() {
+        use crate::xml_rpc::XmlRpcValue;
+        use base64::Engine;
+
+        let raw = "d8:announce...";
+        let params = vec![XmlRpcValue::string(raw)];
+        let json = xml_rpc_params_to_json("aria2.addTorrent", &params).unwrap();
+        assert_eq!(
+            json[0],
+            serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+            )
+        );
+
+        let uris = vec![XmlRpcValue::string("https://example.test/file")];
+        let json = xml_rpc_params_to_json("aria2.addUri", &uris).unwrap();
+        assert_eq!(
+            json[0],
+            serde_json::Value::String(uris[0].as_str().unwrap().into())
+        );
+    }
+
+    #[test]
+    fn xml_rpc_multicall_errors_use_fault_field_names() {
+        let result = xml_rpc_result_for_method(
+            "system.multicall",
+            serde_json::json!([
+                [{"version": "1.0"}],
+                {"code": 1, "message": "No such method"}
+            ]),
+        );
+        assert_eq!(result[0], serde_json::json!([{"version": "1.0"}]));
+        assert_eq!(
+            result[1],
+            serde_json::json!({
+                "faultCode": 1,
+                "faultString": "No such method"
+            })
+        );
     }
 }

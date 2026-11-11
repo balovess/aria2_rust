@@ -167,7 +167,7 @@ async fn queue_position_and_uri_changes_return_wire_contracts() {
             json!([gid.clone(), 1, [], ["http://example.test/two"]]),
         ))
         .await;
-    assert_eq!(uris.result.unwrap(), json!(["0", "1"]));
+    assert_eq!(uris.result.unwrap(), json!([0, 1]));
 
     let listed = engine
         .handle_request(&request("aria2.getUris", json!([gid])))

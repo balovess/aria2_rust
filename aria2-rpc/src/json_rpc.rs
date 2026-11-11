@@ -131,27 +131,15 @@ impl JsonRpcRequest {
     ) -> Result<T, JsonRpcError> {
         match &self.params {
             serde_json::Value::Array(arr) if index < arr.len() => {
-                serde_json::from_value(arr[index].clone()).map_err(|e| {
-                    JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, e))
-                })
+                serde_json::from_value(arr[index].clone()).map_err(|_| parameter_wrong_type(index))
             }
-            serde_json::Value::Object(map) => {
-                let key = format!("p{}", index);
-                map.get(&key)
-                    .ok_or_else(|| JsonRpcError::InvalidParams(format!("param[{}] missing", index)))
-                    .and_then(|v| {
-                        serde_json::from_value(v.clone()).map_err(|e| {
-                            JsonRpcError::InvalidParams(format!(
-                                "param[{}] type error: {}",
-                                index, e
-                            ))
-                        })
-                    })
-            }
-            _ => Err(JsonRpcError::InvalidParams(format!(
-                "param[{}] not found",
-                index
-            ))),
+            serde_json::Value::Object(map) => map
+                .get(&format!("p{index}"))
+                .ok_or_else(|| parameter_missing(index))
+                .and_then(|value| {
+                    serde_json::from_value(value.clone()).map_err(|_| parameter_wrong_type(index))
+                }),
+            _ => Err(parameter_missing(index)),
         }
     }
 
@@ -169,21 +157,12 @@ impl JsonRpcRequest {
             }
             serde_json::Value::Object(map) => {
                 let key = format!("p{index}");
-                map.remove(&key).ok_or_else(|| {
-                    JsonRpcError::InvalidParams(format!("param[{}] missing", index))
-                })?
+                map.remove(&key).ok_or_else(|| parameter_missing(index))?
             }
-            _ => {
-                return Err(JsonRpcError::InvalidParams(format!(
-                    "param[{}] not found",
-                    index
-                )));
-            }
+            _ => return Err(parameter_missing(index)),
         };
 
-        serde_json::from_value(value).map_err(|error| {
-            JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
-        })
+        serde_json::from_value(value).map_err(|_| parameter_wrong_type(index))
     }
 
     /// Return a positional parameter without changing its wire type.
@@ -211,9 +190,7 @@ impl JsonRpcRequest {
     ) -> Result<Option<T>, JsonRpcError> {
         self.optional_param_value(index)
             .map(|value| {
-                serde_json::from_value(value.clone()).map_err(|error| {
-                    JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
-                })
+                serde_json::from_value(value.clone()).map_err(|_| parameter_wrong_type(index))
             })
             .transpose()
     }
@@ -240,9 +217,9 @@ impl JsonRpcRequest {
             _ => return Ok(None),
         };
 
-        serde_json::from_value(value).map(Some).map_err(|error| {
-            JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
-        })
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|_| parameter_wrong_type(index))
     }
 
     pub fn get_param_or_default<T: serde::de::DeserializeOwned + Default>(
@@ -270,6 +247,14 @@ impl JsonRpcRequest {
             )),
         }
     }
+}
+
+fn parameter_missing(index: usize) -> JsonRpcError {
+    JsonRpcError::RpcExecution(format!("The parameter at {index} is required but missing."))
+}
+
+fn parameter_wrong_type(index: usize) -> JsonRpcError {
+    JsonRpcError::RpcExecution(format!("The parameter at {index} has wrong type."))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

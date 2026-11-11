@@ -473,16 +473,12 @@ async fn e2e_change_uri_returns_counts() {
 
     assert_jsonrpc_format(&resp, "aria2-changeUri");
     assert_success(&resp);
-    // Returns [delCount, addCount] — wire format converts numbers to strings
+    // aria2 returns [delCount, addCount] as native JSON numbers.
     let result = resp["result"]
         .as_array()
         .expect("changeUri should return array");
     assert_eq!(result.len(), 2, "changeUri result should have 2 elements");
-    // addCount should be 1 (we added 1 URI) — may be number or string in wire format
-    let add_count = result[1]
-        .as_i64()
-        .or_else(|| result[1].as_str().and_then(|s| s.parse::<i64>().ok()))
-        .unwrap_or(-1);
+    let add_count = result[1].as_i64().unwrap_or(-1);
     assert_eq!(add_count, 1, "addCount should be 1");
 }
 
@@ -1286,14 +1282,16 @@ async fn e2e_add_uri_invalid_params() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    // No URIs provided
-    let resp = rpc_call(&client, &base, "aria2.addUri", json!([[]])).await;
-    // This should succeed (empty URI array is accepted but the download will be empty)
-    // or return an error depending on the handler implementation
-    assert!(
-        resp.get("result").is_some() || resp.get("error").is_some(),
-        "addUri with empty array should return result or error"
-    );
+    let resp = rpc_error_call(
+        &client,
+        &base,
+        "aria2.addUri",
+        json!([[]]),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_error_code(&resp, 1);
+    assert_eq!(resp["error"]["message"], "URI is not provided.");
 }
 
 #[tokio::test]

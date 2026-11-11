@@ -358,7 +358,7 @@ impl BackendResponse {
             Self::DhtStatus(status) => serde_json::to_value(status),
             Self::Options(options) => serde_json::to_value(options),
             Self::Position(position) => serde_json::to_value(position),
-            Self::Counts(counts) => serde_json::to_value(counts.map(|count| count.to_string())),
+            Self::Counts(counts) => serde_json::to_value(counts),
         }
         .map_err(|error| BackendError::Internal(format!("Serialization failed: {error}")))
     }

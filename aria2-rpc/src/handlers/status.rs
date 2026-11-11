@@ -20,9 +20,7 @@ pub(crate) fn status_key_filter(keys: &[String]) -> Option<StatusKeyFilter> {
 
 pub(crate) fn parse_tell_active(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     Ok(BackendRequest::TellActive {
-        keys: req
-            .take_optional_param::<Vec<String>>(0)?
-            .unwrap_or_default(),
+        keys: super::take_optional_string_list(req, 0)?,
     })
 }
 
@@ -36,9 +34,7 @@ fn parse_pagination(req: &mut JsonRpcRequest) -> Result<(i64, usize, Vec<String>
     }
     let num = usize::try_from(num)
         .map_err(|_| JsonRpcError::RpcExecution("num is out of range".into()))?;
-    let keys = req
-        .take_optional_param::<Vec<String>>(2)?
-        .unwrap_or_default();
+    let keys = super::take_optional_string_list(req, 2)?;
     Ok((offset, num, keys))
 }
 

@@ -335,6 +335,15 @@ fn test_option_def_parse_list() {
     let def = OptionDef::new("header", OptionType::List);
     let v = def.parse_value("X-Custom:foo,X-Bar:baz").unwrap();
     assert_eq!(v.as_list().unwrap().len(), 2);
+    assert_eq!(
+        def.parse_value("").unwrap().as_list().unwrap(),
+        &vec![String::new()]
+    );
+}
+
+#[test]
+fn test_empty_tracker_source_parses_as_empty_list() {
+    let def = OptionDef::new("bt-tracker-source", OptionType::List);
     assert!(def.parse_value("").unwrap().as_list().unwrap().is_empty());
 }
 

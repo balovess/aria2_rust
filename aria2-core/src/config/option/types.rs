@@ -546,11 +546,17 @@ impl OptionDef {
                 "false" => Ok(OptionValue::Bool(false)),
                 _ => Err(format!("invalid boolean '{}'", s)),
             },
-            OptionType::List => Ok(OptionValue::List(if s.is_empty() {
-                Vec::new()
-            } else {
-                s.split([',', '\n']).map(|x| x.trim().to_string()).collect()
-            })),
+            OptionType::List => {
+                // This extension treats an empty tracker-source value as an
+                // empty source list. Preserve existing empty-item parsing for
+                // other list options.
+                let values = if self.name == "bt-tracker-source" && s.is_empty() {
+                    Vec::new()
+                } else {
+                    s.split([',', '\n']).map(|x| x.trim().to_string()).collect()
+                };
+                Ok(OptionValue::List(values))
+            }
         }
     }
 }

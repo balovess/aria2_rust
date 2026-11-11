@@ -22,11 +22,11 @@ behavior. An unlisted behavior has not been audited here.
   aria2. `piece-length` defaults to `1M` and defines durable HTTP parent-piece
   boundaries for new downloads. A compatible control-file layout wins on
   resume.
-- **Known difference:** `max-connection-per-server` defaults to `1`, matching
-  original aria2, and remains the per-download, per-authority HTTP/1.1
-  connection ceiling with the aria2-compatible range `1..=16`. `split` also
-  has no registry ceiling but defaults to `16`, while original aria2 defaults
-  to `5`.
+- **User-directed difference:** `max-connection-per-server` defaults to `10`,
+  while original aria2 defaults to `1`. It remains the per-download,
+  per-authority HTTP/1.1 connection ceiling with the aria2-compatible range
+  `1..=16`. `split` also has no registry ceiling but defaults to `16`, while
+  original aria2 defaults to `5`.
   With `-x=1`, an HTTP/1.1 source permits one active Range request even when
   `split` is larger. HTTP/2 session pools and multiplexed Range streams use
   their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
@@ -45,9 +45,12 @@ behavior. An unlisted behavior has not been audited here.
   for active tasks, taking effect when they are restarted. `getGlobalOption`
   and task option projections expose the registered values. These option names
   are Rust extensions and are not part of original aria2.
-- **Verification:** focused tests cover values above the old `split=128`
-  ceiling, the `20M` default, configured 4 MiB HTTP Range boundaries, and
-  reuse of the control-file piece layout ahead of a new configuration.
+- **Verification:** focused tests cover the `max-connection-per-server=10`
+  default in `ConfigManager` and `FileEntry`, and the `--init` generated
+  configuration. CLI help was checked manually. Additional focused tests cover
+  values above the old `split=128` ceiling, the `20M` default, configured 4 MiB
+  HTTP Range boundaries, and reuse of the control-file piece layout ahead of a
+  new configuration.
 
 ## HTTP Range capacity retries
 
@@ -572,3 +575,34 @@ behavior. An unlisted behavior has not been audited here.
   Metalink tests cover task-option use and its legacy fallback. CLI, RPC option
   parsing/runtime update, and C API global-option tests cover propagation into
   `DownloadOptions`.
+
+## RPC interface
+
+- **External contract:** `/jsonrpc` serves aria2's JSON-RPC 2.0 envelope,
+  legacy GET/JSONP form, and WebSocket notifications. `/rpc` serves XML-RPC.
+  Original `aria2.*` and `system.*` methods retain their documented parameter
+  positions, result field names, wire scalar types, notification payloads,
+  authentication behavior, multicall nesting, HTTP status mapping, and error
+  messages. JSON-RPC envelope errors still use `-32600`, `-32602`, or
+  `-32700`; errors raised while executing a valid method use aria2's code `1`.
+- **Wire quirks:** the JSON `jsonrpc` member is ignored, named/object params
+  are rejected before dispatch, non-object batch entries are ignored, URI and
+  status-key arrays ignore non-string members, JSON torrent/Metalink payloads
+  use aria2's permissive Base64 decoder, and XML-RPC string payloads remain raw
+  while XML `<base64>` values are decoded. XML multicall error entries expose
+  `faultCode` and `faultString`. `changeUri` returns its two counts as JSON
+  numbers, matching the original examples.
+- **Extensions:** Rust-only methods such as `aria2.getPeerStats`,
+  `aria2.getPeerDetails`, `aria2.getTrackers`, `aria2.getDhtStatus`,
+  `aria2.saveDhtState`, `aria2.evictDhtNodes`, `aria2.removeDownloadFiles`,
+  `aria2.updateBrowserContext`, and `aria2.clearBrowserContext` are additional
+  entries in `system.listMethods`. Extra status fields are additive; no
+  original field is renamed or removed.
+- **Verification:** `cargo test -p aria2-rpc --lib --tests` passes the full
+  RPC unit and integration suite, including fixed JSON/XML wire fixtures,
+  HTTP/TLS/WebSocket transports, authentication, multicall, lifecycle methods,
+  notifications, and concurrent stress coverage. The core-backed regression
+  suite verifies the application adapter for the original method surface.
+  Upstream source and manual examples were used as the reference. A live
+  cross-binary differential run against an original `aria2c` executable remains
+  a verification gap because no original binary is available in this workspace.

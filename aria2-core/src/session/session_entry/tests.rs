@@ -675,7 +675,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("no-proxy").unwrap(), "localhost,127.0.0.1");
 
     // HTTP headers
-    assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
+    assert_eq!(map.get("header").unwrap(), "X-Custom: foo\nX-Other: bar");
     assert_eq!(map.get("user-agent").unwrap(), "test-client/1.0");
     assert_eq!(map.get("referer").unwrap(), "http://example.com");
     assert_eq!(map.get("enable-http-keep-alive").unwrap(), "false");

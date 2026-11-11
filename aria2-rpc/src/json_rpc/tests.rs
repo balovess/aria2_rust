@@ -153,8 +153,8 @@ fn test_take_param_reports_type_error_like_borrowed_accessor() {
 
     let error = req.take_param::<String>(0).unwrap_err();
 
-    assert_eq!(error.code(), -32602);
-    assert!(error.to_string().contains("param[0] type error"));
+    assert_eq!(error.code(), 1);
+    assert_eq!(error.message(), "The parameter at 0 has wrong type.");
 }
 
 #[test]

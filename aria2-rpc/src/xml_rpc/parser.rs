@@ -248,10 +248,8 @@ pub fn parse_request(data: &[u8]) -> Result<XmlRpcRequest, XmlRpcError> {
             _ => {}
         }
     }
-    let method_name =
-        method_name.ok_or_else(|| XmlRpcError::InvalidRequest("methodName is required".into()))?;
-    if method_name.is_empty() {
-        return Err(XmlRpcError::InvalidRequest("methodName is required".into()));
-    }
+    // aria2's state machine leaves methodName empty when it is omitted and
+    // then dispatches that value through the normal no-such-method path.
+    let method_name = method_name.unwrap_or_default();
     Ok(XmlRpcRequest::new(method_name, params))
 }

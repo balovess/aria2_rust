@@ -436,6 +436,66 @@ async fn e2e_xmlrpc_execution_errors_use_aria2_fault_code_one() {
 }
 
 #[tokio::test]
+async fn e2e_xmlrpc_multicall_errors_use_fault_field_names() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let body = r#"<?xml version="1.0"?>
+<methodCall>
+  <methodName>system.multicall</methodName>
+  <params>
+    <param>
+      <value>
+        <array>
+          <data>
+            <value>
+              <struct>
+                <member>
+                  <name>methodName</name>
+                  <value><string>aria2.getVersion</string></value>
+                </member>
+                <member>
+                  <name>params</name>
+                  <value><array><data/></array></value>
+                </member>
+              </struct>
+            </value>
+            <value>
+              <struct>
+                <member>
+                  <name>methodName</name>
+                  <value><string>aria2.nonexistentMethod</string></value>
+                </member>
+                <member>
+                  <name>params</name>
+                  <value><array><data/></array></value>
+                </member>
+              </struct>
+            </value>
+          </data>
+        </array>
+      </value>
+    </param>
+  </params>
+</methodCall>"#;
+
+    let response = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("<name>version</name>"));
+    assert!(text.contains("<name>faultCode</name>"));
+    assert!(text.contains("<name>faultString</name>"));
+    assert!(!text.contains("<name>code</name>"));
+    assert!(!text.contains("<name>message</name>"));
+}
+
+#[tokio::test]
 async fn e2e_xmlrpc_invalid_scalar_keeps_original_execution_fault_contract() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();

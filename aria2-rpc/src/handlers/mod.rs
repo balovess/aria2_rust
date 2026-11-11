@@ -13,24 +13,59 @@ use crate::backend::{BackendError, BackendEvent};
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest};
 use crate::websocket::{DownloadEvent, EventType};
 
+pub(crate) fn take_string_list(
+    req: &mut JsonRpcRequest,
+    index: usize,
+) -> Result<Vec<String>, JsonRpcError> {
+    let values = req.take_param::<Vec<serde_json::Value>>(index)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match value {
+            serde_json::Value::String(value) => Some(value),
+            _ => None,
+        })
+        .collect())
+}
+
+pub(crate) fn take_optional_string_list(
+    req: &mut JsonRpcRequest,
+    index: usize,
+) -> Result<Vec<String>, JsonRpcError> {
+    let values = req
+        .take_optional_param::<Vec<serde_json::Value>>(index)?
+        .unwrap_or_default();
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match value {
+            serde_json::Value::String(value) => Some(value),
+            _ => None,
+        })
+        .collect())
+}
+
 /// Parse a GID parameter accepting either one string or a list of strings.
 pub(crate) fn parse_gids(
     req: &mut JsonRpcRequest,
     index: usize,
 ) -> Result<Vec<String>, JsonRpcError> {
-    if let Ok(gids) = req.get_param::<Vec<String>>(index) {
-        return Ok(gids);
+    match req.optional_param_value(index) {
+        Some(serde_json::Value::Array(_)) => take_string_list(req, index),
+        Some(serde_json::Value::String(_)) => Ok(vec![req.take_param(index)?]),
+        Some(_) => Err(JsonRpcError::RpcExecution(format!(
+            "The parameter at {index} has wrong type."
+        ))),
+        None => Err(JsonRpcError::RpcExecution(format!(
+            "The parameter at {index} is required but missing."
+        ))),
     }
-    Ok(vec![req.get_param(index)?])
 }
 
 /// Convert a backend-domain error into the wire layer's error taxonomy.
 pub(crate) fn backend_error(error: BackendError) -> JsonRpcError {
     match error {
-        BackendError::InvalidParams(message) => JsonRpcError::InvalidParams(message),
-        BackendError::Execution(message) | BackendError::Unsupported(message) => {
-            JsonRpcError::RpcExecution(message)
-        }
+        BackendError::InvalidParams(message)
+        | BackendError::Execution(message)
+        | BackendError::Unsupported(message) => JsonRpcError::RpcExecution(message),
         BackendError::Internal(message) => JsonRpcError::InternalError(message),
     }
 }

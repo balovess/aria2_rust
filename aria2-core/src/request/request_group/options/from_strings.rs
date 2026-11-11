@@ -83,10 +83,7 @@ impl DownloadOptions {
                 .get("async-dns")
                 .map(|v| v != "false")
                 .unwrap_or(true),
-            continue_download: options
-                .get("continue")
-                .map(|v| v == "true")
-                .unwrap_or(true),
+            continue_download: options.get("continue").map(|v| v == "true").unwrap_or(true),
             allow_overwrite: options
                 .get("allow-overwrite")
                 .map(|v| v == "true")

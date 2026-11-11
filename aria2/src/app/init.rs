@@ -27,7 +27,8 @@ impl Default for InitPerformance {
         Self {
             disk_cache: "256M".to_string(),
             split: 16,
-            max_connection_per_server: 1,
+            max_connection_per_server: aria2_core::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+                as u16,
             max_concurrent_downloads: 5,
         }
     }
@@ -174,8 +175,8 @@ fn prompt_performance() -> Result<InitPerformance, String> {
         Ok(value.to_string())
     })?;
     let split = prompt_u64_min("Split segment budget", defaults.split, 1)?;
-    // The wizard uses aria2's documented per-server ceiling while still
-    // allowing the task-wide split budget to be larger.
+    // The generated per-server limit follows the split budget without exceeding
+    // the configured default.
     let max_connection_per_server =
         split.min(aria2_core::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u64) as u16;
     let max_concurrent_downloads = prompt_u16(
@@ -318,7 +319,7 @@ mod tests {
         assert!(config.contains("continue=true"));
         assert!(config.contains("disk-cache=256M"));
         assert!(config.contains("split=16"));
-        assert!(config.contains("max-connection-per-server=1"));
+        assert!(config.contains("max-connection-per-server=10"));
         assert!(config.contains("max-http2-sessions-per-server=4"));
         assert!(config.contains("max-concurrent-downloads=5"));
         assert!(!config.contains("save-session="));

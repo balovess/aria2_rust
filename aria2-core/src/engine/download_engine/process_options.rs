@@ -6,8 +6,10 @@ use std::time::Duration;
 use super::DownloadEngine;
 use crate::config::OptionValue;
 use crate::dns::dns_cache::DnsCache;
+use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiterConfig;
+use crate::request::request_group::DownloadOptions;
 use crate::request::request_group_man::RequestGroupMan;
 
 impl DownloadEngine {
@@ -39,9 +41,6 @@ impl DownloadEngine {
         let mut engine = Self::new();
         engine.set_outbound_network_policy(Arc::clone(&outbound_policy));
 
-        #[cfg(feature = "bittorrent")]
-        engine.configure_bittorrent_process_options(options);
-
         let dns_timeout = option_i64(options, "dns-timeout")
             .filter(|seconds| *seconds > 0)
             .map(|seconds| Duration::from_secs(seconds as u64))
@@ -56,6 +55,9 @@ impl DownloadEngine {
             }
         });
         engine.set_dns_config(dns_timeout, dns_servers);
+
+        #[cfg(feature = "bittorrent")]
+        engine.configure_bittorrent_process_options(options);
 
         let server_stat_timeout = option_i64(options, "server-stat-timeout")
             .filter(|seconds| *seconds >= 0)
@@ -91,6 +93,7 @@ impl DownloadEngine {
 
     #[cfg(feature = "bittorrent")]
     fn configure_bittorrent_process_options(&mut self, options: &HashMap<String, OptionValue>) {
+        use crate::engine::bittorrent::tracker::source_fetcher::CoreTrackerSourceFetcher;
         use aria2_protocol::bittorrent::tracker::public_list::{
             DEFAULT_TRACKER_SOURCE_TIMEOUT, DEFAULT_TRACKER_UPDATE_INTERVAL, TrackerCatalogConfig,
         };
@@ -126,11 +129,27 @@ impl DownloadEngine {
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_TRACKER_SOURCE_TIMEOUT);
-        self.set_public_tracker_config(TrackerCatalogConfig {
+        let tracker_config = TrackerCatalogConfig {
             enabled: option_bool(options, "enable-public-trackers").unwrap_or(true),
             sources,
             update_interval,
-        });
+        };
+        let option_strings = options
+            .iter()
+            .map(|(name, value)| (name.clone(), value.to_string()))
+            .collect();
+        let download_options = DownloadOptions::from_option_strings(&option_strings);
+        let source_fetcher = Arc::new(CoreTrackerSourceFetcher::new(
+            Arc::clone(&self.dns_cache),
+            Arc::clone(&self.outbound_network_policy),
+            ClientTlsConfig::from_download_options(&download_options),
+        ));
+        self.public_tracker_catalog = Arc::new(
+            aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new_with_config_and_fetcher(
+                tracker_config,
+                source_fetcher,
+            ),
+        );
         self.set_public_tracker_source_timeout(source_timeout);
     }
 }

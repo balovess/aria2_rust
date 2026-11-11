@@ -22,17 +22,19 @@ fn optional_position(
         .map_err(|_| JsonRpcError::RpcExecution("Position is out of range.".into()))
 }
 
-fn decode_rpc_payload(input: String) -> Result<Vec<u8>, JsonRpcError> {
+fn decode_rpc_payload(input: &str) -> Vec<u8> {
     let encoded = input
         .strip_prefix("data:")
         .and_then(|value| value.split_once(',').map(|(_, payload)| payload))
-        .unwrap_or(&input);
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-        .map_err(|error| JsonRpcError::InvalidParams(format!("base64 decode failed: {error}")))
+        .unwrap_or(input);
+    crate::rpc_helpers::decode_aria2_base64(encoded)
 }
 
 pub(crate) fn parse_add_uri(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
-    let uris = req.take_param::<Vec<String>>(0)?;
+    let uris = super::take_string_list(req, 0)?;
+    if uris.is_empty() {
+        return Err(JsonRpcError::RpcExecution("URI is not provided.".into()));
+    }
     let options = req
         .take_optional_param::<HashMap<String, serde_json::Value>>(1)?
         .unwrap_or_default();
@@ -46,14 +48,12 @@ pub(crate) fn parse_add_uri(req: &mut JsonRpcRequest) -> Result<BackendRequest, 
 
 pub(crate) fn parse_add_torrent(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     let encoded = req.take_param::<String>(0)?;
-    let additional_uris = req
-        .take_optional_param::<Vec<String>>(1)?
-        .unwrap_or_default();
+    let additional_uris = super::take_optional_string_list(req, 1)?;
     let options = req
         .take_optional_param::<HashMap<String, serde_json::Value>>(2)?
         .unwrap_or_default();
     let position = optional_position(req, 3)?;
-    let data = decode_rpc_payload(encoded)?;
+    let data = decode_rpc_payload(&encoded);
     // Torrent syntax is domain data; the backend owns parsing and validation.
     Ok(BackendRequest::AddTorrent {
         data,
@@ -69,7 +69,7 @@ pub(crate) fn parse_add_metalink(req: &mut JsonRpcRequest) -> Result<BackendRequ
         .take_optional_param::<HashMap<String, serde_json::Value>>(1)?
         .unwrap_or_default();
     let position = optional_position(req, 2)?;
-    let data = decode_rpc_payload(encoded)?;
+    let data = decode_rpc_payload(&encoded);
     // Metalink syntax is domain data; the backend owns parsing and validation.
     Ok(BackendRequest::AddMetalink {
         data,
@@ -104,9 +104,7 @@ pub(crate) fn parse_unpause(req: &mut JsonRpcRequest) -> Result<BackendRequest, 
 
 pub(crate) fn parse_tell_status(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     let gid = req.take_param(0)?;
-    let keys = req
-        .take_optional_param::<Vec<String>>(1)?
-        .unwrap_or_default();
+    let keys = super::take_optional_string_list(req, 1)?;
     Ok(BackendRequest::TellStatus { gid, keys })
 }
 
@@ -120,12 +118,13 @@ pub(crate) fn parse_change_uri(req: &mut JsonRpcRequest) -> Result<BackendReques
     let gid = req.take_param(0)?;
     let file_index = req.take_param::<i64>(1)?;
     if file_index < 1 {
-        return Err(JsonRpcError::InvalidParams(
-            "fileIndex must be at least 1".into(),
+        return Err(JsonRpcError::RpcExecution(
+            "The integer parameter at 1 has invalid value: the value must be greater than or equal to 1."
+                .into(),
         ));
     }
-    let delete_uris = req.take_param(2)?;
-    let add_uris = req.take_param(3)?;
+    let delete_uris = super::take_string_list(req, 2)?;
+    let add_uris = super::take_string_list(req, 3)?;
     let position = optional_position(req, 4)?;
     Ok(BackendRequest::ChangeUri {
         gid,
@@ -146,7 +145,7 @@ pub(crate) fn parse_change_position(
         "POS_SET" => PositionMode::SetFromStart,
         "POS_CUR" => PositionMode::MoveFromStart,
         "POS_END" => PositionMode::SetFromEnd,
-        _ => return Err(JsonRpcError::InvalidParams("Invalid position mode".into())),
+        _ => return Err(JsonRpcError::RpcExecution("Illegal argument.".into())),
     };
     Ok(BackendRequest::ChangePosition {
         gid,
@@ -193,5 +192,35 @@ mod tests {
             parsed,
             BackendRequest::AddMetalink { data: parsed, .. } if parsed == data
         ));
+    }
+
+    #[test]
+    fn json_payload_uses_aria2_permissive_base64_rules() {
+        let mut request =
+            JsonRpcRequest::new("aria2.addTorrent", json!(["!!bm90IGEgdG9ycmVudA=="]));
+        let parsed = parse_add_torrent(&mut request).expect("payload should decode");
+        assert!(matches!(
+            parsed,
+            BackendRequest::AddTorrent { data, .. } if data == b"not a torrent"
+        ));
+    }
+
+    #[test]
+    fn uri_lists_ignore_non_strings_and_empty_lists_fail() {
+        let mut request = JsonRpcRequest::new(
+            "aria2.addUri",
+            json!([["https://example.test/file", 42, null]]),
+        );
+        let parsed = parse_add_uri(&mut request).expect("string entries should remain");
+        assert!(matches!(
+            parsed,
+            BackendRequest::AddUri { uris, .. }
+                if uris == ["https://example.test/file".to_string()]
+        ));
+
+        let mut empty = JsonRpcRequest::new("aria2.addUri", json!([[42, false]]));
+        let error = parse_add_uri(&mut empty).unwrap_err();
+        assert_eq!(error.code(), 1);
+        assert_eq!(error.message(), "URI is not provided.");
     }
 }

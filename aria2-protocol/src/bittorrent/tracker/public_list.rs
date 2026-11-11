@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -25,6 +27,19 @@ pub const DEFAULT_TRACKER_SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const MAX_TRACKER_SOURCE_CONCURRENCY: usize = 4;
 const MAX_BACKOFF: Duration = Duration::from_secs(3_600);
 const REMOTE_TEMPORARY_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Fetches the body of a configured public tracker-list source.
+///
+/// The catalog owns source scheduling and parsing. Callers embedding it in an
+/// engine can provide the transport so process network policy is applied at
+/// the layer that owns that policy.
+pub trait TrackerSourceFetcher: Send + Sync {
+    fn fetch<'a>(
+        &'a self,
+        source: &'a str,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackerProtocol {
@@ -121,7 +136,7 @@ struct TrackerHealth {
 pub struct PublicTrackerList {
     entries: tokio::sync::RwLock<Arc<Vec<TrackerEntry>>>,
     source_entries: tokio::sync::RwLock<HashMap<String, Vec<TrackerEntry>>>,
-    http_client: reqwest::Client,
+    source_fetcher: tokio::sync::RwLock<Arc<dyn TrackerSourceFetcher>>,
     config: tokio::sync::RwLock<TrackerCatalogConfig>,
     source_request_timeout: tokio::sync::RwLock<Duration>,
     health: Mutex<HashMap<String, TrackerHealth>>,
@@ -145,16 +160,20 @@ impl PublicTrackerList {
     }
 
     pub fn new_with_config(config: TrackerCatalogConfig) -> Self {
+        Self::new_with_config_and_fetcher(config, Arc::new(ReqwestTrackerSourceFetcher::new()))
+    }
+
+    /// Construct a catalog using a caller-owned HTTP source transport.
+    pub fn new_with_config_and_fetcher(
+        config: TrackerCatalogConfig,
+        source_fetcher: Arc<dyn TrackerSourceFetcher>,
+    ) -> Self {
         let entries = Self::parse(EMBEDDED_TRACKER_LIST);
         let (updates, _) = watch::channel(0);
-        ensure_ring_provider();
-        let http_client = reqwest::Client::builder()
-            .build()
-            .expect("public tracker HTTP client should be constructible");
         Self {
             entries: tokio::sync::RwLock::new(Arc::new(entries)),
             source_entries: tokio::sync::RwLock::new(HashMap::new()),
-            http_client,
+            source_fetcher: tokio::sync::RwLock::new(source_fetcher),
             config: tokio::sync::RwLock::new(config),
             source_request_timeout: tokio::sync::RwLock::new(DEFAULT_TRACKER_SOURCE_TIMEOUT),
             health: Mutex::new(HashMap::new()),
@@ -305,7 +324,8 @@ impl PublicTrackerList {
 
     pub async fn fetch_and_update(&self, url: &str) -> Result<usize, String> {
         let timeout = self.source_request_timeout().await;
-        let entries = fetch_tracker_source(&self.http_client, url, timeout).await?;
+        let fetcher = self.source_fetcher.read().await.clone();
+        let entries = fetch_tracker_source(fetcher.as_ref(), url, timeout).await?;
         self.source_entries
             .write()
             .await
@@ -357,12 +377,12 @@ impl PublicTrackerList {
             return Ok(0);
         }
 
-        let client = self.http_client.clone();
+        let fetcher = self.source_fetcher.read().await.clone();
         let request_timeout = self.source_request_timeout().await;
         let results = stream::iter(sources.iter().cloned().map(|source| {
-            let client = client.clone();
+            let fetcher = Arc::clone(&fetcher);
             async move {
-                let result = fetch_tracker_source(&client, &source, request_timeout).await;
+                let result = fetch_tracker_source(fetcher.as_ref(), &source, request_timeout).await;
                 (source, result)
             }
         }))
@@ -521,37 +541,62 @@ impl PublicTrackerList {
 }
 
 async fn fetch_tracker_source(
-    client: &reqwest::Client,
+    fetcher: &dyn TrackerSourceFetcher,
     source: &str,
     request_timeout: Duration,
 ) -> Result<Vec<TrackerEntry>, String> {
     debug!("Fetching public tracker list from {}", source);
-    let body = tokio::time::timeout(request_timeout, async {
-        let response = client
-            .get(source)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP GET failed: {}", e))?;
-        if !response.status().is_success() {
-            return Err(format!("HTTP error: {}", response.status()));
-        }
-        response
-            .text()
-            .await
-            .map_err(|e| format!("Read body failed: {}", e))
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "Tracker source request timed out after {} seconds",
-            request_timeout.as_secs_f64()
-        )
-    })??;
+    let body = tokio::time::timeout(request_timeout, fetcher.fetch(source, request_timeout))
+        .await
+        .map_err(|_| {
+            format!(
+                "Tracker source request timed out after {} seconds",
+                request_timeout.as_secs_f64()
+            )
+        })??;
     let entries = PublicTrackerList::parse(&body);
     if entries.is_empty() {
         return Err("Parsed 0 entries from response".to_string());
     }
     Ok(entries)
+}
+
+struct ReqwestTrackerSourceFetcher {
+    client: reqwest::Client,
+}
+
+impl ReqwestTrackerSourceFetcher {
+    fn new() -> Self {
+        ensure_ring_provider();
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("public tracker HTTP client should be constructible");
+        Self { client }
+    }
+}
+
+impl TrackerSourceFetcher for ReqwestTrackerSourceFetcher {
+    fn fetch<'a>(
+        &'a self,
+        source: &'a str,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .get(source)
+                .send()
+                .await
+                .map_err(|error| format!("HTTP GET failed: {error}"))?;
+            if !response.status().is_success() {
+                return Err(format!("HTTP error: {}", response.status()));
+            }
+            response
+                .text()
+                .await
+                .map_err(|error| format!("Read body failed: {error}"))
+        })
+    }
 }
 
 fn normalize_sources(sources: Vec<String>) -> Vec<String> {

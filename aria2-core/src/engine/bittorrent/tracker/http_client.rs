@@ -25,6 +25,23 @@ pub(crate) fn build_tracker_client_with_source(
     tls: &ClientTlsConfig,
     local_address: Option<IpAddr>,
 ) -> Result<reqwest::Client, String> {
+    build_tracker_client_with_source_and_resolution(
+        request_timeout_secs,
+        connect_timeout_secs,
+        tls,
+        local_address,
+        None,
+    )
+}
+
+/// Build a tracker client pinned to a local source and resolved destination.
+pub(crate) fn build_tracker_client_with_source_and_resolution(
+    request_timeout_secs: u64,
+    connect_timeout_secs: u64,
+    tls: &ClientTlsConfig,
+    local_address: Option<IpAddr>,
+    resolved_destination: Option<(&str, &[std::net::SocketAddr])>,
+) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(request_timeout_secs))
@@ -34,6 +51,9 @@ pub(crate) fn build_tracker_client_with_source(
         .gzip(false);
     if let Some(address) = local_address {
         builder = builder.local_address(address);
+    }
+    if let Some((host, addresses)) = resolved_destination {
+        builder = builder.resolve_to_addrs(host, addresses);
     }
     let builder =
         crate::http::client_identity::apply(builder, tls).map_err(|error| error.to_string())?;

@@ -105,6 +105,14 @@ fn test_parse_simple_request() {
 }
 
 #[test]
+fn test_parse_without_method_name_keeps_aria2_dispatch_shape() {
+    let xml = r#"<methodCall><params></params></methodCall>"#;
+    let request = parse_request(xml.as_bytes()).expect("aria2 accepts an empty method name");
+    assert!(request.method_name.is_empty());
+    assert!(request.params.is_empty());
+}
+
+#[test]
 fn test_parse_nested_array_and_struct_without_parameter_leakage() {
     let xml = r#"<methodCall><methodName>aria2.addUri</methodName><params><param><value><array><data>
             <value><string>one</string></value>

@@ -78,7 +78,7 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
 
     // --- HTTP headers ---
     if !opts.header.is_empty() {
-        map.insert("header".to_string(), opts.header.join(","));
+        map.insert("header".to_string(), opts.header.join("\n"));
     }
     if let Some(ref v) = opts.user_agent {
         map.insert("user-agent".to_string(), v.clone());

@@ -100,9 +100,10 @@ pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
 pub const DEFAULT_SECURE_FALLOC: bool = false;
 pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
-/// Default HTTP/1.1 per-download, per-authority connection ceiling, matching
-/// aria2's default.
-pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 1;
+/// Default HTTP/1.1 per-download, per-authority connection ceiling.
+///
+/// This is a user-directed difference from aria2's default of 1.
+pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 10;
 /// Maximum accepted HTTP/1.1 per-download, per-authority connection ceiling.
 pub const MAX_CONNECTION_PER_SERVER: usize = 16;
 /// Default count of independent HTTP/2 client pools for concurrent Range traffic.
