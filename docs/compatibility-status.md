@@ -257,6 +257,9 @@ behavior. An unlisted behavior has not been audited here.
   fetch keeps the timeout captured when it started. The public
   `TrackerCatalogConfig` layout remains source-compatible; the protocol library
   exposes separate timeout accessors.
+- **Empty source list:** An empty `bt-tracker-source` list is valid through
+  startup configuration, the C API, and RPC. The catalog skips source fetching
+  and retains its current snapshot as a fallback.
 - **Compatibility impact:** this is a Rust extension; original aria2 does not
   provide a public tracker-list source timeout option. The default preserves
   the previous 15-second limit.

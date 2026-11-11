@@ -210,6 +210,23 @@ async fn disabled_catalog_has_no_available_trackers() {
 }
 
 #[tokio::test]
+async fn empty_source_list_skips_refresh_and_preserves_current_catalog() {
+    let ptl = PublicTrackerList::new();
+    let initial_snapshot = ptl.snapshot().await;
+
+    ptl.set_config(TrackerCatalogConfig {
+        enabled: true,
+        sources: Vec::new(),
+        update_interval: Duration::from_secs(60),
+    })
+    .await;
+
+    assert_eq!(ptl.refresh().await.unwrap(), 0);
+    assert_eq!(ptl.snapshot().await.as_ref(), initial_snapshot.as_ref());
+    assert_eq!(ptl.last_refresh_error().await, None);
+}
+
+#[tokio::test]
 async fn reenabled_catalog_exposes_existing_snapshot() {
     let ptl = PublicTrackerList::new();
     ptl.set_config(TrackerCatalogConfig {

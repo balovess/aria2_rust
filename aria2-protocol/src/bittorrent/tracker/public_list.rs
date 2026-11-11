@@ -353,7 +353,8 @@ impl PublicTrackerList {
         }
         let sources = normalize_sources(config.sources);
         if sources.is_empty() {
-            return Err("No public tracker sources configured".to_string());
+            *self.last_refresh_error.write().await = None;
+            return Ok(0);
         }
 
         let client = self.http_client.clone();

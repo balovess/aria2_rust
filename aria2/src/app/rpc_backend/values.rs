@@ -467,10 +467,7 @@ mod tests {
 
         for value in [serde_json::json!(""), serde_json::json!([])] {
             backend
-                .change_global_option(HashMap::from([(
-                    "bt-tracker-source".to_string(),
-                    value,
-                )]))
+                .change_global_option(HashMap::from([("bt-tracker-source".to_string(), value)]))
                 .await
                 .unwrap();
 
