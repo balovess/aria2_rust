@@ -795,6 +795,14 @@ Do not add pass-through engine clients around these public interfaces.
   pairs at its own boundary; both converge on the public core option-update
   contract. Core owns immediate versus pending application and active-task
   restart semantics, which depend on request-group state.
+- **Narrow** `aria2-rpc::engine`: method policy and ordered read-only batch
+  dispatch live in private child modules. Keep the existing crate-internal
+  `engine::dispatch_wire_entries` path used by HTTP and WebSocket servers; the
+  batch snapshot and mutation ordering remain unchanged.
+- **Narrow** `aria2-rpc::json_rpc`: the streaming aria2 wire-envelope parser
+  lives in a private child module, while request/response models and parser
+  functions retain their existing public paths. Keep parser compatibility tests
+  adjacent to the JSON-RPC module.
 - **Narrow** SFTP session option restoration to the shared
   `DownloadOptions::from_option_strings` parser. Do not manually reparse
   selected persisted SFTP fields after construction, which bypasses shared
@@ -815,13 +823,25 @@ Do not add pass-through engine clients around these public interfaces.
   pool/index lifecycle, component access, DHT lifecycle, completion/torrent
   attributes, ports, and peer blocklist live in private child modules. The
   `BtRegistry` public method paths and caller contract remain unchanged.
+- **Narrow** BitTorrent piece-session coordination: peer discovery updates,
+  task lifecycle finalization, work-lease transitions, and WebSeed task handling
+  live in private modules beside the coordinator. The loop preserves the order
+  in which tracker/DHT/PEX events, piece work, checkpointing, and writer closure
+  are processed.
+- **Narrow** BitTorrent seeding coordination: the event/deadline loop remains
+  the coordinator, while tracker announce lifecycle, peer admission, and peer
+  choke/state transitions live in private child modules. Existing tests retain
+  access to the seed-manager-internal helpers they exercise; runtime behavior
+  and public interfaces are unchanged.
 - **Keep** LPD multicast sockets, receive/announce task lifecycle, active-torrent
   filtering, and peer admission in core. `aria2-protocol` owns BEP 14 message
   encoding/parsing; core enriches received peers with sender address policy and
   stores engine-facing discovery state. Keep the `LpdPeer` public module path
-  while placing its data model in the private `lpd::peer` child module.- **Narrow** tracker announce source organization: UDP event/response adaptation
+  while placing its data model in the private `lpd::peer` child module.
+- **Narrow** tracker announce source organization: UDP event/response adaptation
   lives beside the announce state machine in a private child module; tracker
-  state and its existing public API remain owned by `BtAnnounce`.- **Keep** the BitTorrent process listener as the shared TCP/uTP info-hash
+  state and its existing public API remain owned by `BtAnnounce`.
+- **Keep** the BitTorrent process listener as the shared TCP/uTP info-hash
   router. Its clones share one listener lifecycle, which is cancelled only when
   the final manager owner is dropped; route handles still independently remove
   their torrent registration. Each accept/dispatch loop owns and drains its

@@ -68,15 +68,6 @@ impl CoreRpcBackend {
                 let sources = rpc_value_to_string(value).ok_or_else(|| {
                     Self::execution("Option 'bt-tracker-source' must be a string or array")
                 })?;
-                if sources
-                    .split([',', '\n'])
-                    .map(str::trim)
-                    .all(|source| source.is_empty())
-                {
-                    return Err(Self::execution(
-                        "Option 'bt-tracker-source' must contain at least one source",
-                    ));
-                }
                 Ok(sources)
             })
             .transpose()?;
@@ -460,5 +451,33 @@ mod tests {
             receiver.recv().await.unwrap(),
             EngineCommand::SetPublicTrackerSourceTimeout { seconds: 47 }
         ));
+    }
+
+    #[tokio::test]
+    async fn empty_public_tracker_sources_are_accepted_and_applied() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        for value in [serde_json::json!(""), serde_json::json!([])] {
+            backend
+                .change_global_option(HashMap::from([(
+                    "bt-tracker-source".to_string(),
+                    value,
+                )]))
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                receiver.recv().await.unwrap(),
+                EngineCommand::SetPublicTrackerSources { sources } if sources.is_empty()
+            ));
+        }
     }
 }

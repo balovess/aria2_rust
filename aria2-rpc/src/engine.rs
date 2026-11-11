@@ -4,10 +4,18 @@
 //! batch ordering, and WebSocket event publication. Domain state and all
 //! download operations live behind [`RpcBackend`].
 
+mod batch;
+mod policy;
+
+pub(crate) use batch::dispatch_wire_entries;
+pub(crate) use policy::{
+    rpc_method_is_mutating, rpc_method_is_read_only, rpc_method_requires_auth,
+    rpc_method_uses_read_snapshot,
+};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use futures::StreamExt;
 use tokio::sync::Notify;
 
 use crate::backend::{
@@ -15,176 +23,12 @@ use crate::backend::{
     UnsupportedBackend,
 };
 use crate::handlers::{self, backend_error};
-use crate::json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcWireEntry};
+use crate::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use crate::server::{AuthConfig, RpcAuthMiddleware};
 use crate::types::SessionInfo;
 use crate::websocket::EventPublisher;
 
-pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
-    !matches!(method, "system.listMethods" | "system.listNotifications")
-}
-
-pub(crate) const MAX_RPC_BATCH_CONCURRENCY: usize = 64;
-
-pub(crate) fn rpc_method_is_read_only(method: &str) -> bool {
-    matches!(
-        method,
-        "aria2.tellStatus"
-            | "aria2.tellActive"
-            | "aria2.tellWaiting"
-            | "aria2.tellStopped"
-            | "aria2.getGlobalStat"
-            | "aria2.getUris"
-            | "aria2.getFiles"
-            | "aria2.getServers"
-            | "aria2.getGlobalOption"
-            | "aria2.getOption"
-            | "aria2.getPeers"
-            | "aria2.getPeerStats"
-            | "aria2.getPeerDetails"
-            | "aria2.getVersion"
-            | "aria2.getSessionInfo"
-            | "system.listMethods"
-            | "system.listNotifications"
-    )
-}
-
-pub(crate) fn rpc_method_is_mutating(method: &str) -> bool {
-    matches!(
-        method,
-        "aria2.addUri"
-            | "aria2.addTorrent"
-            | "aria2.addMetalink"
-            | "aria2.remove"
-            | "aria2.pause"
-            | "aria2.forcePause"
-            | "aria2.unpause"
-            | "aria2.purgeDownloadResult"
-            | "aria2.removeDownloadResult"
-            | "aria2.removeDownloadFiles"
-            | "aria2.changeGlobalOption"
-            | "aria2.changeOption"
-            | "aria2.pauseAll"
-            | "aria2.forcePauseAll"
-            | "aria2.unpauseAll"
-            | "aria2.changeUri"
-            | "aria2.saveSession"
-            | "aria2.changePosition"
-            | "aria2.forceRemove"
-            | "aria2.shutdown"
-            | "aria2.forceShutdown"
-            | "aria2.updateBrowserContext"
-            | "aria2.clearBrowserContext"
-    )
-}
-
-pub(crate) fn rpc_method_uses_read_snapshot(method: &str) -> bool {
-    matches!(
-        method,
-        "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" | "aria2.getGlobalStat"
-    )
-}
-
-fn multicall_requires_mutation(params: &serde_json::Value) -> bool {
-    let Some(calls) = params
-        .as_array()
-        .and_then(|params| params.first())
-        .and_then(serde_json::Value::as_array)
-    else {
-        return true;
-    };
-    calls.iter().any(|call| {
-        call.get("methodName")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(rpc_method_is_mutating)
-    })
-}
-
-fn read_run_needs_snapshot(entries: &[JsonRpcWireEntry]) -> bool {
-    entries
-        .iter()
-        .filter_map(|entry| match entry {
-            JsonRpcWireEntry::Request(request) => Some(request.method.as_str()),
-            JsonRpcWireEntry::Error(_) => None,
-        })
-        .filter(|method| rpc_method_uses_read_snapshot(method))
-        .count()
-        > 1
-}
-
-async fn dispatch_wire_entry(
-    engine: &RpcEngine,
-    entry: JsonRpcWireEntry,
-    snapshot: Option<Arc<BackendReadSnapshot>>,
-) -> JsonRpcResponse {
-    match entry {
-        JsonRpcWireEntry::Request(request) => {
-            engine
-                .handle_request_owned_with_snapshot(request, snapshot)
-                .await
-        }
-        JsonRpcWireEntry::Error(response) => response,
-    }
-}
-
-async fn dispatch_read_only_run(
-    engine: &RpcEngine,
-    entries: Vec<JsonRpcWireEntry>,
-) -> Vec<JsonRpcResponse> {
-    let snapshot = if read_run_needs_snapshot(&entries) {
-        match engine.backend.capture_read_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return entries
-                    .into_iter()
-                    .map(|entry| {
-                        let id = match entry {
-                            JsonRpcWireEntry::Request(request) => request.id,
-                            JsonRpcWireEntry::Error(response) => Some(response.id),
-                        };
-                        backend_error(error.clone()).into_response(id)
-                    })
-                    .collect();
-            }
-        }
-    } else {
-        None
-    };
-
-    futures::stream::iter(entries)
-        .map(|entry| dispatch_wire_entry(engine, entry, snapshot.clone()))
-        .buffered(MAX_RPC_BATCH_CONCURRENCY)
-        .collect()
-        .await
-}
-
-pub(crate) async fn dispatch_wire_entries(
-    engine: &RpcEngine,
-    entries: Vec<JsonRpcWireEntry>,
-) -> Vec<JsonRpcResponse> {
-    let mut responses = Vec::with_capacity(entries.len());
-    let mut read_only_run = Vec::new();
-    for entry in entries {
-        let read_only = match &entry {
-            JsonRpcWireEntry::Request(request) => rpc_method_is_read_only(&request.method),
-            JsonRpcWireEntry::Error(_) => true,
-        };
-        if read_only {
-            read_only_run.push(entry);
-        } else {
-            if !read_only_run.is_empty() {
-                responses.extend(
-                    dispatch_read_only_run(engine, std::mem::take(&mut read_only_run)).await,
-                );
-            }
-            responses.push(dispatch_wire_entry(engine, entry, None).await);
-        }
-    }
-    if !read_only_run.is_empty() {
-        responses.extend(dispatch_read_only_run(engine, read_only_run).await);
-    }
-    responses
-}
+use policy::multicall_requires_mutation;
 
 pub struct RpcEngine {
     pub(crate) backend: Arc<dyn RpcBackend>,

@@ -10,7 +10,7 @@ use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::info;
 
-use super::piece_storage::{in_flight_snapshot, stage_received_block};
+use super::piece_storage::stage_received_block;
 use super::{PieceDownloadSession, PieceLoopAction};
 
 impl PieceDownloadSession<'_> {
@@ -199,39 +199,10 @@ impl PieceDownloadSession<'_> {
                     let group = self.command.group.recover();
                     group.is_force_halt_requested() || group.is_halt_requested()
                 };
-                self.command
-                    .sync_checkpoint_payload(&mut self.writer)
-                    .await
-                    .map_err(|error| {
-                        Aria2Error::FileIo(format!(
-                            "Failed to sync halted BT output before checkpoint: {error}"
-                        ))
-                    })?;
-                if let Some(checkpoint) = self.command.checkpoint.as_mut() {
-                    let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
-                        &self.completed_bitfield,
-                    );
-                    checkpoint
-                        .save_with_in_flight_pieces(
-                            &bitfield,
-                            self.command.completed_bytes,
-                            &in_flight_snapshot(&self.in_flight_pieces),
-                        )
-                        .await
-                        .map_err(|error| {
-                            Aria2Error::FileIo(format!(
-                                "Failed to save halted BT checkpoint: {error}"
-                            ))
-                        })?;
-                    self.command
-                        .group
-                        .recover()
-                        .take_save_control_file_request();
-                }
+                self.sync_checkpoint_payload().await?;
+                self.save_checkpoint_snapshot().await?;
                 if halt_requested {
-                    self.writer.close().await.map_err(|error| {
-                        Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
-                    })?;
+                    self.close_halted_writer().await?;
                     return Err(Aria2Error::DownloadFailed(
                         "BitTorrent download halted".into(),
                     ));
@@ -366,39 +337,10 @@ impl PieceDownloadSession<'_> {
                     let group = self.command.group.recover();
                     group.is_force_halt_requested() || group.is_halt_requested()
                 };
-                self.command
-                    .sync_checkpoint_payload(&mut self.writer)
-                    .await
-                    .map_err(|error| {
-                        Aria2Error::FileIo(format!(
-                            "Failed to sync halted BT output before checkpoint: {error}"
-                        ))
-                    })?;
-                if let Some(checkpoint) = self.command.checkpoint.as_mut() {
-                    let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
-                        &self.completed_bitfield,
-                    );
-                    checkpoint
-                        .save_with_in_flight_pieces(
-                            &bitfield,
-                            self.command.completed_bytes,
-                            &in_flight_snapshot(&self.in_flight_pieces),
-                        )
-                        .await
-                        .map_err(|error| {
-                            Aria2Error::FileIo(format!(
-                                "Failed to save halted BT checkpoint: {error}"
-                            ))
-                        })?;
-                    self.command
-                        .group
-                        .recover()
-                        .take_save_control_file_request();
-                }
+                self.sync_checkpoint_payload().await?;
+                self.save_checkpoint_snapshot().await?;
                 if halt_requested {
-                    self.writer.close().await.map_err(|error| {
-                        Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
-                    })?;
+                    self.close_halted_writer().await?;
                     return Err(Aria2Error::DownloadFailed(
                         "BitTorrent download halted".into(),
                     ));

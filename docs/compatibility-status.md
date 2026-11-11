@@ -465,7 +465,7 @@ behavior. An unlisted behavior has not been audited here.
   timeout and explicit DNS servers, server-stat freshness and persistence,
   scheduler and global rate limits, plus BitTorrent tracker, uTP, handshake,
   and LPD settings when that feature is enabled. CLI and C API use the same
-  `DownloadEngine::configure_process_options` core boundary.
+  `DownloadEngine::from_process_options` core boundary.
 - **Verification:** a focused unit test inspects the constructed engine's
   outbound policy, DNS cache, and server-stat configuration with custom values;
   it passes both with and without the BitTorrent feature.
