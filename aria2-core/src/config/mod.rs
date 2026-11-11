@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(mgr.get_global_bool("use-head").await, Some(true));
         assert_eq!(
             mgr.get_global_bool("http-adaptive-enabled").await,
-            Some(true)
+            Some(false)
         );
         assert_eq!(mgr.get_global_i64("split").await, Some(16));
         assert_eq!(

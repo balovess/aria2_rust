@@ -1253,6 +1253,13 @@ fn regression_registry_default_values() {
         &OptionValue::Bool(false)
     );
     assert_eq!(
+        registry
+            .get("http-adaptive-enabled")
+            .unwrap()
+            .default_value(),
+        &OptionValue::Bool(false)
+    );
+    assert_eq!(
         registry.get("enable-rpc").unwrap().default_value(),
         &OptionValue::Bool(false)
     );

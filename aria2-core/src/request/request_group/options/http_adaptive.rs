@@ -32,7 +32,7 @@ impl HttpAdaptiveOptions {
             enabled: options
                 .get("http-adaptive-enabled")
                 .and_then(|value| value.parse::<bool>().ok())
-                .unwrap_or(true),
+                .unwrap_or(false),
             reduction_percent: parse("http-adaptive-reduction-percent", 25).clamp(1, 90) as u8,
             recovery_interval_secs: parse("http-adaptive-recovery-interval", 10).clamp(1, 3600),
             recovery_successes_min: parse("http-adaptive-recovery-successes-min", 8)
@@ -83,7 +83,7 @@ impl HttpAdaptiveOptions {
 impl Default for HttpAdaptiveOptions {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             reduction_percent: 25,
             recovery_interval_secs: 10,
             recovery_successes_min: 8,

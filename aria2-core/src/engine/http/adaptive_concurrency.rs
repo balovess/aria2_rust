@@ -116,7 +116,10 @@ impl HttpAdaptiveConcurrency {
             http2_session_limit,
             http2_streams_per_session,
             retry_wait_secs,
-            HttpAdaptiveOptions::default(),
+            HttpAdaptiveOptions {
+                enabled: true,
+                ..HttpAdaptiveOptions::default()
+            },
         )
     }
 
@@ -234,7 +237,14 @@ impl HttpAdaptiveConcurrency {
     }
 
     /// Freeze new admissions after an explicit server capacity rejection.
-    pub(crate) fn record_capacity_failure(&mut self, is_http2: bool) {
+    ///
+    /// Adaptive mode applies exponential capacity cooldown. Disabled mode
+    /// keeps the configured target and only uses ordinary retry timing.
+    pub(crate) fn record_capacity_failure(
+        &mut self,
+        is_http2: bool,
+        retry_after: Option<Duration>,
+    ) {
         let settings = self.settings;
         let now = Instant::now();
         let in_cooldown = self
@@ -253,22 +263,27 @@ impl HttpAdaptiveConcurrency {
                 self.backoff_steps = 0;
             }
             self.last_capacity_rejection = Some(now);
-            self.backoff_steps = self.backoff_steps.saturating_add(1);
-            self.note_capacity_feedback(is_http2);
-            let wait = self
-                .retry_wait
-                .max(capacity_backoff_with(self.backoff_steps, &settings));
-            let until = now.checked_add(wait).unwrap_or(now);
-            let protocol = self.protocol_target_mut(is_http2);
-            protocol.cooldown_until =
-                Some(protocol.cooldown_until.map_or(until, |old| old.max(until)));
+            let wait = if settings.enabled {
+                self.backoff_steps = self.backoff_steps.saturating_add(1);
+                self.note_capacity_feedback(is_http2);
+                self.retry_wait
+                    .max(capacity_backoff_with(self.backoff_steps, &settings))
+            } else {
+                retry_after.unwrap_or(self.retry_wait)
+            };
+            if !wait.is_zero() {
+                let until = now.checked_add(wait).unwrap_or(now);
+                let protocol = self.protocol_target_mut(is_http2);
+                protocol.cooldown_until =
+                    Some(protocol.cooldown_until.map_or(until, |old| old.max(until)));
+            }
         }
     }
 
-    /// A 429/503 pauses new work, lowers concurrency by about 25% per rejection
-    /// episode (at least one Range), and slows subsequent request starts.
-    /// Ranges in flight continue.
-    /// Returns a conservative backoff, extended by Retry-After when present.
+    /// With adaptive mode enabled, a 429/503 lowers concurrency by about 25%
+    /// per rejection episode and slows subsequent request starts. With it
+    /// disabled, the target stays fixed and only explicit Retry-After applies.
+    /// Returns the required wait.
     pub(crate) fn record_capacity_rejection(
         &mut self,
         is_http2: bool,
@@ -284,10 +299,10 @@ impl HttpAdaptiveConcurrency {
         self.last_capacity_rejection = Some(now);
         let protocol = self.protocol_target_mut(is_http2);
         let in_cooldown = protocol.cooldown_until.is_some_and(|until| now < until);
-        if !in_cooldown {
-            if settings.enabled {
-                protocol.target = Self::reduce_target(protocol.target, settings.reduction_percent);
-            }
+        if !in_cooldown && settings.enabled {
+            protocol.target = Self::reduce_target(protocol.target, settings.reduction_percent);
+        }
+        if !in_cooldown && settings.enabled {
             self.note_capacity_feedback(is_http2);
         }
         let protocol = self.protocol_target_mut(is_http2);
@@ -296,15 +311,22 @@ impl HttpAdaptiveConcurrency {
         protocol.last_target_adjustment = now;
         // One backoff step per episode: the other ranges of the same burst
         // are rejected inside the cooldown it started.
-        if !in_cooldown {
+        if !in_cooldown && settings.enabled {
             self.backoff_steps = self.backoff_steps.saturating_add(1);
         }
-        let wait = retry_after
-            .unwrap_or_default()
-            .max(capacity_backoff_with(self.backoff_steps, &self.settings));
-        let until = now.checked_add(wait).unwrap_or(now);
-        let protocol = self.protocol_target_mut(is_http2);
-        protocol.cooldown_until = Some(protocol.cooldown_until.map_or(until, |old| old.max(until)));
+        let wait = if settings.enabled {
+            retry_after
+                .unwrap_or_default()
+                .max(capacity_backoff_with(self.backoff_steps, &self.settings))
+        } else {
+            retry_after.unwrap_or_default()
+        };
+        if !wait.is_zero() {
+            let until = now.checked_add(wait).unwrap_or(now);
+            let protocol = self.protocol_target_mut(is_http2);
+            protocol.cooldown_until =
+                Some(protocol.cooldown_until.map_or(until, |old| old.max(until)));
+        }
         wait
     }
 
@@ -313,6 +335,11 @@ impl HttpAdaptiveConcurrency {
     pub(crate) fn record_success(&mut self, is_http2: bool) {
         let settings = self.settings;
         let protocol = self.protocol_target_mut(is_http2);
+        if !settings.enabled {
+            protocol.successful_ranges_since_adjustment = 0;
+            protocol.successful_ranges_since_rate_adjustment = 0;
+            return;
+        }
         protocol.successful_ranges_since_adjustment = protocol
             .successful_ranges_since_adjustment
             .saturating_add(1);
@@ -345,13 +372,14 @@ impl HttpAdaptiveConcurrency {
     }
 
     /// Capacity rejections can be retried without consuming ordinary retry
-    /// budget while there is still a lower Range target to try.
+    /// budget while another Range can still be admitted.
     pub(crate) fn preserve_retry_budget(&self, is_http2: bool) -> bool {
         self.range_target(is_http2) > 1
     }
 
-    /// Close the current round after all requests have drained. Capacity
-    /// rejection lowers the Range target by about 25% and returns the new target.
+    /// Close the current round after all requests have drained. When adaptive
+    /// mode is enabled, capacity rejection lowers the Range target and returns
+    /// the new target.
     pub(crate) fn finish_round(&mut self, is_http2: bool) -> AdaptiveUpdate {
         let retry_wait = self.retry_wait;
         let settings = self.settings;

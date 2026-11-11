@@ -314,9 +314,9 @@ async fn test_cli_connect_timeout_reaches_download_options() {
 }
 
 #[tokio::test]
-async fn test_cli_http_adaptive_enabled_reaches_download_options() {
-    let cli = CliArgs::try_parse_from(["aria2", "--http-adaptive-enabled=false"])
-        .expect("adaptive HTTP concurrency switch should parse");
+async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
+    let cli = CliArgs::try_parse_from(["aria2"])
+        .expect("CLI without an adaptive HTTP concurrency switch should parse");
 
     let mut app = App::new();
     app.load_cli_args(cli)
@@ -325,6 +325,17 @@ async fn test_cli_http_adaptive_enabled_reaches_download_options() {
     let (options, _) = app.download_options_with_snapshot().await;
 
     assert!(!options.http_adaptive.enabled);
+
+    let cli = CliArgs::try_parse_from(["aria2", "--http-adaptive-enabled=true"])
+        .expect("adaptive HTTP concurrency override should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI override should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert!(options.http_adaptive.enabled);
 }
 
 #[cfg(feature = "bittorrent")]

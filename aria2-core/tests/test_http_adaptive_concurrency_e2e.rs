@@ -117,6 +117,10 @@ fn options(split: u64, max_connection_per_server: u16) -> DownloadOptions {
     DownloadOptions {
         split: Some(split),
         max_connection_per_server: Some(max_connection_per_server),
+        http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
+            enabled: true,
+            ..Default::default()
+        },
         file_allocation: Some("none".into()),
         max_retries: 5,
         retry_wait: 0,
@@ -673,6 +677,44 @@ async fn rate_limited_ranges_back_off_without_spending_retries() {
 }
 
 #[tokio::test]
+async fn disabled_adaptive_mode_reconnects_after_capacity_rejection() {
+    let server = MockHttpServer::start().await.unwrap();
+    let body = data();
+    let log = register_rate_limited_server(
+        &server,
+        "/disabled-reconnect",
+        Arc::clone(&body),
+        RequestLimit::First(4),
+        None,
+    );
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let mut options = options(8, 4);
+    options.http_adaptive.enabled = false;
+    options.retry_wait = 0;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        execute_download(
+            &format!("{}/disabled-reconnect", server.base_url()),
+            output_dir.path(),
+            "disabled-reconnect.bin",
+            options,
+            body.len() as u64,
+        ),
+    )
+    .await
+    .expect("disabled adaptive mode must reconnect instead of waiting for adaptive cooldown")
+    .expect("disabled adaptive mode must finish after a temporary rate limit");
+
+    assert!(rejections(&log) >= 4);
+    assert_eq!(
+        std::fs::read(output_dir.path().join("disabled-reconnect.bin")).unwrap(),
+        *body
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn retry_after_pauses_new_ranges() {
     let server = MockHttpServer::start().await.unwrap();
     let body = data();
@@ -734,6 +776,8 @@ async fn rate_limited_range_probe_backs_off_without_spending_retries() {
     let output_dir = tempfile::tempdir().unwrap();
     let mut options = options(8, 4);
     options.max_retries = 1;
+    options.http_adaptive.backoff_base_secs = 1;
+    options.http_adaptive.backoff_max_secs = 1;
     execute_download(
         &format!("{}/probe-rate-limited", server.base_url()),
         output_dir.path(),

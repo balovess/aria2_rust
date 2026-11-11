@@ -126,7 +126,7 @@ pub struct HttpFtpArgs {
     #[arg(long = "max-http2-streams-per-session")]
     pub max_http2_streams_per_session: Option<u64>,
 
-    /// Enable adaptive HTTP Range concurrency target adjustments
+    /// Enable adaptive HTTP Range concurrency target adjustments and capacity cooldown (default: false)
     #[arg(
         long = "http-adaptive-enabled",
         num_args(0..=1),

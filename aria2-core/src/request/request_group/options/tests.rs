@@ -1,4 +1,4 @@
-use super::{DownloadOptions, FollowMode};
+use super::{DownloadOptions, FollowMode, HttpAdaptiveOptions};
 use std::collections::HashMap;
 
 #[test]
@@ -63,6 +63,16 @@ fn adaptive_http_options_parse_and_normalize_external_values() {
     assert_eq!(options.start_interval_ms, 250);
     assert_eq!(options.backoff_base_secs, 15);
     assert_eq!(options.backoff_max_secs, 15);
+}
+
+#[test]
+fn adaptive_http_concurrency_defaults_to_disabled() {
+    assert!(!HttpAdaptiveOptions::default().enabled);
+    assert!(
+        !DownloadOptions::from_option_strings(&HashMap::new())
+            .http_adaptive
+            .enabled
+    );
 }
 
 #[test]

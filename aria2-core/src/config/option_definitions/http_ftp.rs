@@ -279,8 +279,8 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "http-adaptive-enabled".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(true),
-            description: "Enable adaptive HTTP Range concurrency target adjustments; server capacity backoff remains active".into(),
+            default_value: OptionValue::Bool(false),
+            description: "Enable adaptive HTTP Range concurrency target adjustments and adaptive capacity cooldown".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

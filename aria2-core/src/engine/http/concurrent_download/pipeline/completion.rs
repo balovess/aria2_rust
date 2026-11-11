@@ -71,6 +71,7 @@ pub(super) async fn handle(
         started_at,
         ..
     } = completion.active_work;
+    let retry_after = completion.result.retry_after;
 
     match completion.result.result {
         Ok(bytes_downloaded) => {
@@ -252,7 +253,7 @@ pub(super) async fn handle(
             let is_http2 = context.executor.is_http2(&authority_key);
             if let Some(controller) = context.adaptive.get_mut(&authority_key) {
                 if is_capacity_limited {
-                    controller.record_capacity_failure(is_http2);
+                    controller.record_capacity_failure(is_http2, retry_after);
                 } else {
                     controller.record_failure(is_http2);
                 }

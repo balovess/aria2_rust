@@ -25,13 +25,13 @@ fn starts_at_each_effective_ceiling_and_success_does_not_raise_it() {
 #[test]
 fn capacity_rejection_lowers_only_the_affected_protocol_target() {
     let mut controller = controller();
-    controller.record_capacity_failure(false);
+    controller.record_capacity_failure(false, None);
     assert!(!controller.can_start(0, false));
     assert_eq!(controller.finish_round(false).range_target, Some(12));
     assert_eq!(controller.connection_target(false), 12);
     assert_eq!(controller.connection_target(true), 4);
 
-    controller.record_capacity_failure(true);
+    controller.record_capacity_failure(true, None);
     assert_eq!(controller.finish_round(true).range_target, Some(12));
     assert_eq!(controller.range_target(true), 12);
 }
@@ -44,7 +44,7 @@ fn retry_budget_is_preserved_until_single_range() {
 
     for expected in [12, 9, 7, 6, 5, 4, 3, 2, 1] {
         controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
-        controller.record_capacity_failure(false);
+        controller.record_capacity_failure(false, None);
         assert_eq!(controller.finish_round(false).range_target, Some(expected));
     }
     assert_eq!(controller.connection_target(false), 1);
@@ -52,7 +52,7 @@ fn retry_budget_is_preserved_until_single_range() {
 
     for expected in [12, 9, 7, 6, 5, 4, 3, 2, 1] {
         controller.http2.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
-        controller.record_capacity_failure(true);
+        controller.record_capacity_failure(true, None);
         controller.finish_round(true);
         assert_eq!(controller.range_target(true), expected);
     }
@@ -90,6 +90,7 @@ fn capacity_rejection_reduces_target_and_paces_future_starts() {
 #[test]
 fn configured_reduction_and_backoff_reach_the_controller() {
     let settings = HttpAdaptiveOptions {
+        enabled: true,
         reduction_percent: 50,
         backoff_base_secs: 3,
         backoff_max_secs: 5,
@@ -103,7 +104,7 @@ fn configured_reduction_and_backoff_reach_the_controller() {
 }
 
 #[test]
-fn disabled_adaptive_mode_keeps_connection_target_fixed_while_backoff_remains() {
+fn disabled_adaptive_mode_keeps_target_fixed_without_adaptive_backoff() {
     let settings = HttpAdaptiveOptions {
         enabled: false,
         ..HttpAdaptiveOptions::default()
@@ -113,14 +114,14 @@ fn disabled_adaptive_mode_keeps_connection_target_fixed_while_backoff_remains() 
     let first_wait = controller.record_capacity_rejection(false, None);
     assert_eq!(controller.connection_target(false), 16);
     assert_eq!(controller.range_target(false), 16);
-    assert!(first_wait >= Duration::from_secs(20));
-    assert!(!controller.can_start(0, false));
+    assert!(first_wait.is_zero());
+    assert!(controller.can_start(0, false));
 
-    controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
-    controller.record_capacity_failure(false);
+    controller.record_capacity_failure(false, None);
     let update = controller.finish_round(false);
     assert_eq!(update, AdaptiveUpdate::default());
     assert_eq!(controller.connection_target(false), 16);
+    assert!(controller.can_start(0, false));
 
     controller.record_failure(false);
     controller.http1.last_target_adjustment =
@@ -130,6 +131,28 @@ fn disabled_adaptive_mode_keeps_connection_target_fixed_while_backoff_remains() 
     }
     assert_eq!(controller.finish_round(false), AdaptiveUpdate::default());
     assert_eq!(controller.connection_target(false), 16);
+}
+
+#[test]
+fn disabled_adaptive_mode_honors_explicit_retry_after() {
+    let settings = HttpAdaptiveOptions {
+        enabled: false,
+        ..HttpAdaptiveOptions::default()
+    };
+    let mut controller = HttpAdaptiveConcurrency::new_with_settings(16, 16, 4, 4, 0, settings);
+
+    let wait = controller.record_capacity_rejection(false, Some(Duration::from_secs(3)));
+
+    assert_eq!(wait, Duration::from_secs(3));
+    assert!(!controller.can_start(0, false));
+    controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+    assert!(controller.can_start(0, false));
+
+    let mut multi_round = HttpAdaptiveConcurrency::new_with_settings(16, 16, 4, 4, 0, settings);
+    multi_round.record_capacity_failure(false, Some(Duration::from_secs(3)));
+    assert!(!multi_round.can_start(0, false));
+    assert_eq!(multi_round.finish_round(false), AdaptiveUpdate::default());
+    assert_eq!(multi_round.connection_target(false), 16);
 }
 
 #[test]
@@ -169,7 +192,7 @@ fn backoff_persists_across_successes_and_resets_after_a_quiet_window() {
 #[test]
 fn recovery_probe_waits_for_stability_and_cooldown_then_adds_one_range() {
     let mut controller = controller();
-    controller.record_capacity_failure(false);
+    controller.record_capacity_failure(false, None);
     assert_eq!(controller.finish_round(false).range_target, Some(12));
     controller.http1.last_target_adjustment =
         Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);

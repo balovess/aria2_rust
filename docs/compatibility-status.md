@@ -30,42 +30,49 @@ behavior. An unlisted behavior has not been audited here.
   With `-x=1`, an HTTP/1.1 source permits one active Range request even when
   `split` is larger. HTTP/2 session pools and multiplexed Range streams use
   their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
-  HTTP Range concurrency starts at the configured effective ceiling, backs off
-  on explicit server capacity feedback, then probes upward by one Range after
-  a 10-second cooldown and a target-scaled 8..=32 successful ranges without an
-  intervening failure. Capacity feedback reduces the target by 25%, starts
-  subsequent Ranges at 1-second intervals (doubling to 4 seconds on repeated
-  feedback), and uses jittered exponential backoff from 20 seconds to 300
-  seconds. These are Rust extension defaults and can be adjusted per download
-  with the `http-adaptive-*` options. `http-adaptive-enabled=false` fixes each
-  protocol's Range target at its configured effective ceiling; capacity
-  rejection backoff, Retry-After handling, and request pacing remain active.
+  Adaptive HTTP Range concurrency target adjustment is disabled by default.
+  When explicitly enabled, concurrency starts at the configured effective
+  ceiling, backs off on explicit server capacity feedback, then probes upward
+  by one Range after a 10-second cooldown and a target-scaled 8..=32 successful
+  ranges without an intervening failure. Capacity feedback reduces the target
+  by 25%, starts subsequent Ranges at 1-second intervals (doubling to 4 seconds
+  on repeated feedback), and uses jittered exponential backoff from 20 seconds
+  to 300 seconds. These are Rust extension defaults and can be adjusted per
+  download with the `http-adaptive-*` options. The default
+  `http-adaptive-enabled=false` fixes each protocol's Range target at its
+  configured effective ceiling and disables the adaptive exponential
+  capacity cooldown. Explicit `Retry-After` and ordinary `retry-wait` behavior
+  remain active.
 - **External configuration:** all adaptive controller parameters are available
   through CLI flags, configuration files, and JSON-RPC/XML-RPC option maps.
   `changeGlobalOption` changes the defaults used for future tasks;
   `changeOption` applies immediately to waiting tasks and is queued as pending
   for active tasks, taking effect when they are restarted. `getGlobalOption`
   and task option projections expose the registered values. Individual
-  `addUri`/`addTorrent` option maps may set `http-adaptive-enabled=false`
+  `addUri`/`addTorrent` option maps may set `http-adaptive-enabled=true`
   without changing the process-wide default. These option names are Rust
   extensions and are not part of original aria2.
 - **Verification:** focused tests cover the `max-connection-per-server=10`
   default in `ConfigManager` and `FileEntry`, and the `--init` generated
   configuration. CLI help was checked manually. Additional focused tests cover
   values above the old `split=128` ceiling, the `20M` default, configured 4 MiB
-  HTTP Range boundaries, and reuse of the control-file piece layout ahead of a
-  new configuration.
+  HTTP Range boundaries, the adaptive-disabled default, and reuse of the
+  control-file piece layout ahead of a new configuration.
 
 ## HTTP Range capacity retries
 
-- **Engine policy:** HTTP 429/503 responses back off exponentially up to
-  300 seconds by default, honoring longer `Retry-After` values when present.
-  The base and cap are configurable with `http-adaptive-backoff-base` and
-  `http-adaptive-backoff-max`. Consecutive capacity
-  rejection episodes are bounded by `max-retries` even if other ranges in the
-  resumed attempt have completed. Successful ranges do not clear the backoff
-  streak; it resets after 60 seconds without a 429. A five-minute no-progress
-  limit remains as a final bound when retries are unlimited.
+- **Engine policy:** When adaptive concurrency is enabled, HTTP 429/503
+  responses back off exponentially up to 300 seconds by default, honoring
+  longer `Retry-After` values when present. The base and cap are configurable
+  with `http-adaptive-backoff-base` and `http-adaptive-backoff-max`.
+  Consecutive capacity rejection episodes are bounded by `max-retries` even if
+  other ranges in the resumed attempt have completed. Successful ranges do not
+  clear the backoff streak; it resets after 60 seconds without a 429. When
+  adaptive concurrency is disabled, the Range target remains fixed and the
+  adaptive exponential cooldown is not applied; ordinary `retry-wait` and
+  explicit `Retry-After` behavior remain active. A five-minute no-progress
+  limit remains as the final bound for the probe and single-mirror retry
+  paths.
 - **Configuration:** all `http-adaptive-*` controls are exposed through the
   option registry, CLI, global RPC option updates, and C API global-option
   entry points. They configure subsequently created download tasks. Session

@@ -222,6 +222,10 @@ fn options(split: u64, max_connection_per_server: u16) -> DownloadOptions {
     DownloadOptions {
         split: Some(split),
         max_connection_per_server: Some(max_connection_per_server),
+        http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
+            enabled: true,
+            ..Default::default()
+        },
         file_allocation: Some("none".into()),
         max_retries: 12,
         retry_wait: 0,

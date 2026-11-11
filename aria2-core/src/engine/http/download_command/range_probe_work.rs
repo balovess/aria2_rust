@@ -46,10 +46,19 @@ impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
                     ) && started.elapsed() < CAPACITY_PROBE_LIMIT =>
                 {
                     capacity_waits = capacity_waits.saturating_add(1);
-                    let wait = crate::engine::http::adaptive_concurrency::capacity_backoff_with(
-                        capacity_waits,
-                        &self.adaptive_options,
-                    );
+                    let wait = if self.adaptive_options.enabled {
+                        crate::engine::http::adaptive_concurrency::capacity_backoff_with(
+                            capacity_waits,
+                            &self.adaptive_options,
+                        )
+                    } else {
+                        self.retry_policy
+                            .compute_wait(capacity_waits)
+                            .unwrap_or_default()
+                            .max(Duration::from_millis(
+                                self.adaptive_options.start_interval_ms,
+                            ))
+                    };
                     debug!(
                         waits = capacity_waits,
                         wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
