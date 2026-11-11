@@ -75,6 +75,23 @@ behavior. An unlisted behavior has not been audited here.
   complete, then rate-limits subsequent ranges and verifies the command exits
   with an error instead of remaining active.
 
+## HTTP mirror circuit-breaker recovery
+
+- **Engine policy:** repeated non-capacity HTTP Range failures temporarily
+  disable a mirror for the configured mirror cooldown instead of disabling it
+  permanently. A successful in-flight Range clears the circuit breaker, and the
+  segment scheduler waits for an expired cooldown rather than reporting that no
+  mirror is available while pending work remains.
+- **Capacity errors:** HTTP 429/503 remain owned by the adaptive Range
+  controller. They trigger its backoff and pacing policy but do not trip the
+  independent mirror circuit breaker, avoiding two sequential 60-second waits.
+- **Verification:** focused segment-manager tests cover cooldown recovery,
+  recovery after a successful in-flight Range, and the exclusion of 429/503
+  from the mirror circuit breaker. The concurrent HTTP end-to-end suite was
+  run, but its existing capacity-peak assertions failed because the dedicated
+  test servers did not observe the expected 429 responses; this fix is not
+  claimed as end-to-end acceptance for that separate scheduling behavior.
+
 ## HTTP/2 Range session and stream limits
 
 - **Engine policy:** HTTP/2 Range concurrency is bounded by the effective

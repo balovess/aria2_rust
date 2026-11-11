@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::ConcurrentSegmentManager;
 use super::mirror_selection::extract_host_from_url;
@@ -199,6 +200,66 @@ fn test_max_retries_exhausted() {
     mgr.fail_segment(0);
     assert!(mgr.has_failed_segments());
     assert!(!mgr.has_pending_segments());
+}
+
+#[test]
+fn disabled_mirror_reopens_after_cooldown() {
+    let mut mgr = ConcurrentSegmentManager::new(300, vec!["http://a.com/f".to_string()], Some(100));
+    mgr.set_max_connections_per_mirror(3);
+    mgr.set_mirror_cooldown(Duration::from_secs(60));
+    mgr.allocate_segments();
+
+    assert!(mgr.fail_segment(0).is_none());
+    assert!(mgr.fail_segment(1).is_none());
+    assert!(mgr.fail_segment(2).is_none());
+    assert!(!mgr.any_mirror_available());
+    assert!(mgr.mirror_cooldown_remaining().is_some());
+
+    mgr.mirror_disabled_until[0] = Some(Instant::now() - Duration::from_millis(1));
+    mgr.refresh_mirror_availability();
+
+    assert!(mgr.any_mirror_available());
+    assert_eq!(mgr.mirror_cooldown_remaining(), None);
+}
+
+#[test]
+fn successful_inflight_range_reopens_disabled_mirror() {
+    let mut mgr = ConcurrentSegmentManager::new(400, vec!["http://a.com/f".to_string()], Some(100));
+    mgr.set_max_connections_per_mirror(4);
+    mgr.allocate_segments();
+
+    assert!(mgr.fail_segment(0).is_none());
+    assert!(mgr.fail_segment(1).is_none());
+    assert!(mgr.fail_segment(2).is_none());
+    assert!(!mgr.any_mirror_available());
+
+    assert!(mgr.complete_segment(3, 100));
+    assert!(mgr.any_mirror_available());
+    assert_eq!(mgr.mirror_cooldown_remaining(), None);
+}
+
+#[test]
+fn capacity_failures_do_not_trip_the_mirror_circuit_breaker() {
+    use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
+    use crate::selector::server_stat_man::ServerStatMan;
+
+    let stat_man = Arc::new(ServerStatMan::new());
+    let urls = vec!["http://a.com/f".to_string()];
+    let selector = Box::new(AdaptiveUriSelector::new_with_uris(
+        Arc::clone(&stat_man),
+        urls.clone(),
+    ));
+    let mut mgr =
+        ConcurrentSegmentManager::new_with_selector(300, urls, Some(100), stat_man, selector);
+    mgr.set_max_connections_per_mirror(3);
+    mgr.allocate_segments();
+
+    assert!(mgr.report_segment_failed(0, 429).is_none());
+    assert!(mgr.report_segment_failed(1, 503).is_none());
+    assert!(mgr.report_segment_failed(2, 429).is_none());
+
+    assert!(mgr.any_mirror_available());
+    assert!(!mgr.mirrors[0].disabled);
 }
 
 #[test]

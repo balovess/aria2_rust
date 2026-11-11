@@ -5,6 +5,7 @@
 // a unified API for intelligent multi-mirror download coordination.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::selector::feedback_uri_selector::extract_host_and_protocol;
@@ -79,12 +80,7 @@ impl MirrorCoordinator {
             selector,
         );
 
-        Self {
-            stat_man,
-            segment_manager,
-            config,
-            urls,
-        }
+        Self::with_segment_manager(stat_man, segment_manager, config, urls)
     }
 
     /// Create a mirror coordinator with a pre-configured segment manager.
@@ -93,10 +89,11 @@ impl MirrorCoordinator {
     /// configuration.
     pub fn with_segment_manager(
         stat_man: Arc<ServerStatMan>,
-        segment_manager: ConcurrentSegmentManager,
+        mut segment_manager: ConcurrentSegmentManager,
         config: MirrorConfig,
         urls: Vec<String>,
     ) -> Self {
+        segment_manager.set_mirror_cooldown(Duration::from_secs(config.cooldown_secs));
         Self {
             stat_man,
             segment_manager,
@@ -413,6 +410,14 @@ impl MirrorCoordinator {
     /// Whether at least one mirror can accept another segment immediately.
     pub fn any_mirror_available(&self) -> bool {
         self.segment_manager.any_mirror_available()
+    }
+
+    pub(crate) fn refresh_mirror_availability(&mut self) {
+        self.segment_manager.refresh_mirror_availability();
+    }
+
+    pub(crate) fn mirror_cooldown_remaining(&self) -> Option<Duration> {
+        self.segment_manager.mirror_cooldown_remaining()
     }
 
     /// Get download progress as a percentage.

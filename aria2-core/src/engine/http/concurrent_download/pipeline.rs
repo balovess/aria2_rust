@@ -101,6 +101,7 @@ pub async fn execute_with_coordinator(
             .map_err(|error| http_work_scheduler_error("enqueue", error))?;
     }
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
+        coordinator.refresh_mirror_availability();
         let lifecycle_changed = lifecycle_notify.notified();
         tokio::pin!(lifecycle_changed);
         lifecycle_changed.as_mut().enable();
@@ -289,6 +290,13 @@ pub async fn execute_with_coordinator(
                 ));
             }
             if coordinator.has_pending_segments() {
+                coordinator.refresh_mirror_availability();
+                if !coordinator.any_mirror_available()
+                    && let Some(wait) = coordinator.mirror_cooldown_remaining()
+                {
+                    dl.wait_for_retry(wait).await?;
+                    continue;
+                }
                 let message = if coordinator.any_mirror_available() {
                     "HTTP segment scheduler made no progress"
                 } else {
