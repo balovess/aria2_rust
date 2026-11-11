@@ -4,6 +4,7 @@ mod finalize;
 mod in_memory;
 mod lifecycle;
 mod metadata_request;
+mod range_probe_work;
 mod tail_reclaim;
 #[cfg(test)]
 mod tests;

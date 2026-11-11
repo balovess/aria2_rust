@@ -7,7 +7,7 @@ use crate::engine::http::concurrent_download::{ConcurrentDownloadResult, Concurr
 use crate::engine::http::segment_downloader::HttpSegmentDownloader;
 use crate::engine::http::sequential_download::SequentialDownloader;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
+use crate::engine::work_runner::run_single_work_item;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::file_allocation;
 use crate::filesystem::file_allocation_man;
@@ -16,10 +16,7 @@ use crate::http::response_processor::determine_filename_from_response;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
-
-/// How long a rate-limited (429/503) range probe keeps backing off before
-/// the download fails.
-const CAPACITY_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+use super::range_probe_work::HttpRangeProbeWork;
 
 impl DownloadCommand {
     pub(super) async fn execute_attempt(&mut self, uri: &str) -> Result<()> {
@@ -571,82 +568,5 @@ impl DownloadCommand {
         self.group
             .recover()
             .set_resolved_output_path(self.output_path.to_string_lossy());
-    }
-}
-
-struct HttpRangeProbeWork<'a> {
-    command: &'a mut DownloadCommand,
-    prober: &'a HttpSegmentDownloader,
-    uri: &'a str,
-    cookie_header: Option<&'a str>,
-    retry_policy: RetryPolicy,
-    adaptive_options: crate::request::request_group::HttpAdaptiveOptions,
-}
-
-#[async_trait::async_trait]
-impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
-    type Output = crate::engine::http::segment_downloader::RangeProbeResult;
-
-    fn max_attempts(&self) -> u32 {
-        self.retry_policy.max_tries()
-    }
-
-    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
-        // A rate-limited server (429/503, often without Retry-After) is
-        // waited out with a backoff that does not spend the probe's retries;
-        // with retry_wait 0 they would all be used up at once.
-        let started = std::time::Instant::now();
-        let mut capacity_waits = 0u32;
-        loop {
-            match self
-                .prober
-                .probe_range_metadata(self.uri, self.cookie_header)
-                .await
-            {
-                Err(error)
-                    if crate::engine::http::concurrent_download::is_capacity_limited_error(
-                        &error,
-                    ) && started.elapsed() < CAPACITY_PROBE_LIMIT =>
-                {
-                    capacity_waits = capacity_waits.saturating_add(1);
-                    let wait = crate::engine::http::adaptive_concurrency::capacity_backoff_with(
-                        capacity_waits,
-                        &self.adaptive_options,
-                    );
-                    debug!(
-                        waits = capacity_waits,
-                        wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
-                        error = %error,
-                        "HTTP Range capability probe rate-limited; backing off"
-                    );
-                    self.command.wait_for_retry(wait).await?;
-                }
-                result => return result,
-            }
-        }
-    }
-
-    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<std::time::Duration> {
-        if !self
-            .retry_policy
-            .should_retry(attempt.saturating_sub(1), error)
-        {
-            return None;
-        }
-        let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
-        debug!(
-            attempt,
-            wait_ms = wait.as_millis() as u64,
-            error = %error,
-            "Retrying transient HTTP Range capability probe"
-        );
-        Some(wait)
-    }
-
-    async fn wait_for_retry(&mut self, wait: std::time::Duration) -> Result<()> {
-        if wait.is_zero() {
-            return Ok(());
-        }
-        self.command.wait_for_retry(wait).await
     }
 }

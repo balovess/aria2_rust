@@ -567,6 +567,14 @@ Do not add pass-through engine clients around these public interfaces.
 - **Narrow** range probing to `HttpSegmentDownloader::probe_range_metadata`.
   The former `RangeProber` only forwarded configuration and the probe call, so
   its tests now exercise the downloader interface directly.
+- **Narrow** HTTP command execution by moving rate-limited Range probe retry
+  handling into `download_command::range_probe_work`; the command executor
+  retains request selection, output policy, and transfer orchestration while
+  the adapter owns the shared `SingleWorkAdapter` retry contract. Move
+  sequential-downloader unit tests to the adjacent `tests.rs` module and move
+  the prepared-GET and sequential-checkpoint cases into a focused resume test
+  module; these source-layout changes preserve interfaces and transfer
+  behavior.
 - **Keep** HTTP adaptive concurrency in the core engine: it owns admission,
   per-source feedback, pacing and recovery policy; the protocol client only
   performs the HTTP requests. Keep its policy tests in an adjacent test module.
@@ -677,6 +685,13 @@ Do not add pass-through engine clients around these public interfaces.
   BEP 9 info-dictionary wrapping, and magnet WebSeed merging. Core retains
   metadata-source selection, saved-file I/O, expected-info-hash validation,
   and download lifecycle decisions.
+- **Keep** `aria2_protocol::bittorrent::message::factory` as the public typed
+  frame parser. It owns length-prefix validation, message-specific payload
+  parsing, incremental byte-buffer parsing, and the zero-copy `Piece` payload
+  path; `message::serializer` remains the independent outbound encoder. Core
+  and protocol peer sessions consume these parser entry points. Move the
+  factory tests to its adjacent `factory/tests.rs` module without changing
+  public paths or parse behavior.
 - **Narrow** BitTorrent Local Peer Discovery defaults into the protocol crate:
   the BEP 14 multicast address and UDP port have protocol-library definitions,
   while public core constants remain aliases. Core retains announce cadence,
@@ -689,6 +704,12 @@ Do not add pass-through engine clients around these public interfaces.
   manager; remove only the duplicate synchronous client and UDP-specific
   execution manager. Resolve the selected URL once and reuse its address; DNS
   failures stay inside the outbound-policy boundary.
+- **Keep** `bittorrent::utp::packet` and
+  `bittorrent::tracker::udp_tracker_protocol` as protocol-owned wire codecs.
+  The former validates uTP packet fields and extensions; the latter encodes
+  and decodes BEP 15 messages. Socket actors, tracker exchange lifecycle,
+  policy, and retry timing stay in their existing owning modules. Move their
+  codec tests to adjacent submodules without changing the public codec paths.
 - **Narrow** WebSocket tracker URL handling: the protocol crate owns URL syntax
   and `ws`/`wss` validation, while core uses the parsed endpoint for
   policy-controlled DNS, proxy, and socket setup.
@@ -790,7 +811,17 @@ Do not add pass-through engine clients around these public interfaces.
   in the CLI. Global runtime updates continue to use explicit `EngineCommand`
   variants, preserving original aria2's dispatch model and Rust's documented
   runtime extensions.
-- **Keep** the BitTorrent process listener as the shared TCP/uTP info-hash
+- **Narrow** `BtRegistry` implementation by responsibility: info-hash lookup,
+  pool/index lifecycle, component access, DHT lifecycle, completion/torrent
+  attributes, ports, and peer blocklist live in private child modules. The
+  `BtRegistry` public method paths and caller contract remain unchanged.
+- **Keep** LPD multicast sockets, receive/announce task lifecycle, active-torrent
+  filtering, and peer admission in core. `aria2-protocol` owns BEP 14 message
+  encoding/parsing; core enriches received peers with sender address policy and
+  stores engine-facing discovery state. Keep the `LpdPeer` public module path
+  while placing its data model in the private `lpd::peer` child module.- **Narrow** tracker announce source organization: UDP event/response adaptation
+  lives beside the announce state machine in a private child module; tracker
+  state and its existing public API remain owned by `BtAnnounce`.- **Keep** the BitTorrent process listener as the shared TCP/uTP info-hash
   router. Its clones share one listener lifecycle, which is cancelled only when
   the final manager owner is dropped; route handles still independently remove
   their torrent registration. Each accept/dispatch loop owns and drains its
