@@ -252,6 +252,12 @@ pub struct RequestGroup {
     pub metalink_data: std::sync::RwLock<Option<Vec<u8>>>,
     #[cfg(feature = "metalink")]
     pub metalink_file_index: std::sync::RwLock<Option<usize>>,
+    /// Parsed, normalized Metalink file for the current in-memory generation.
+    /// Restored groups leave this empty and reconstruct the file from the
+    /// persisted source document and index.
+    #[cfg(feature = "metalink")]
+    pub(crate) parsed_metalink_file:
+        std::sync::RwLock<Option<Arc<aria2_protocol::metalink::parser::MetalinkFile>>>,
     /// Base URI used when the Metalink source was parsed.
     #[cfg(feature = "metalink")]
     pub metalink_base_uri: std::sync::RwLock<Option<String>>,
@@ -324,6 +330,8 @@ impl RequestGroup {
             metalink_data: std::sync::RwLock::new(None),
             #[cfg(feature = "metalink")]
             metalink_file_index: std::sync::RwLock::new(None),
+            #[cfg(feature = "metalink")]
+            parsed_metalink_file: std::sync::RwLock::new(None),
             #[cfg(feature = "metalink")]
             metalink_base_uri: std::sync::RwLock::new(None),
         }

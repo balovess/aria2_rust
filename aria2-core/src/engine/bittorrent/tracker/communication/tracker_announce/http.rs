@@ -29,11 +29,24 @@ impl TrackerAnnouncer {
 
         // Send HTTP request
         let parsed_url = reqwest::Url::parse(&url).ok();
-        let tracker_port = parsed_url
+        let origin_port = parsed_url
             .as_ref()
             .and_then(reqwest::Url::port_or_known_default)
             .unwrap_or(80);
-        let local_address = match parsed_url.as_ref().and_then(reqwest::Url::host_str) {
+        let proxy = crate::engine::bittorrent::tracker::http_client::configured_tracker_proxy(
+            &url,
+            &self.websocket_options,
+        );
+        let (tracker_host, tracker_port) = proxy
+            .as_ref()
+            .map(|(host, port, _)| (Some(host.as_str()), *port))
+            .unwrap_or_else(|| {
+                (
+                    parsed_url.as_ref().and_then(reqwest::Url::host_str),
+                    origin_port,
+                )
+            });
+        let local_address = match tracker_host {
             Some(host) => {
                 match self
                     .outbound_network_policy
@@ -58,14 +71,22 @@ impl TrackerAnnouncer {
             }
         };
 
-        let client = if let Some(client) = self.http_clients.get(&local_address) {
+        let client_key = (
+            local_address,
+            proxy
+                .as_ref()
+                .and_then(|_| parsed_url.as_ref().map(|url| url.scheme().to_string())),
+        );
+        let client = if let Some(client) = self.http_clients.get(&client_key) {
             client.clone()
         } else {
-            let client = match crate::engine::bittorrent::tracker::http_client::build_tracker_client_with_source(
+            let client = match crate::engine::bittorrent::tracker::http_client::build_tracker_client_with_source_and_resolution(
                 self.tracker_timeout_secs,
                 self.tracker_connect_timeout_secs,
                 &self.http_tls,
                 local_address,
+                None,
+                proxy.map(|(_, _, proxy)| proxy),
             ) {
                 Ok(client) => client,
                 Err(error) => {
@@ -75,7 +96,7 @@ impl TrackerAnnouncer {
                     return None;
                 }
             };
-            self.http_clients.insert(local_address, client.clone());
+            self.http_clients.insert(client_key, client.clone());
             client
         };
 

@@ -16,60 +16,24 @@ impl MetalinkDownloadCommand {
         #[cfg(not(feature = "bittorrent"))]
         let _ = allow_torrent_fallback;
 
-        // Resolve file info: either from pre-parsed file_info (multi-file mode)
-        // or by re-parsing the raw metalink_data (single-file mode).
-        // We extract owned data to avoid lifetime/borrow issues.
-        let sorted_urls_owned: Vec<aria2_protocol::metalink::parser::UrlEntry>;
-        let expected_size: Option<u64>;
-        let hash_entry_owned: Option<aria2_protocol::metalink::parser::HashEntry>;
-        let pieces_owned: Option<aria2_protocol::metalink::parser::PieceInfo>;
-        let torrent_metaurls_owned: Vec<aria2_protocol::metalink::parser::MetaUrlEntry>;
+        // Constructors parse the protocol document once and hand execution an
+        // owned file projection. Grouped commands create per-file commands
+        // with the same projection before entering this path.
+        let info = self.file_info.as_ref().ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config(
+                "Metalink file execution has no parsed file data".into(),
+            ))
+        })?;
+        let sorted_urls_owned = info.sorted_urls.clone();
+        let expected_size = info.expected_size;
+        let hash_entry_owned = info.hash_entry.clone();
+        let pieces_owned = info.pieces.clone();
+        let torrent_metaurls_owned = info.torrent_metaurls.clone();
 
-        match &self.file_info {
-            Some(info) => {
-                sorted_urls_owned = info.sorted_urls.clone();
-                expected_size = info.expected_size;
-                hash_entry_owned = info.hash_entry.clone();
-                pieces_owned = info.pieces.clone();
-                torrent_metaurls_owned = info.torrent_metaurls.clone();
-            }
-            None => {
-                let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(
-                    &self.metalink_data,
-                    None,
-                )
-                .map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
-                })?;
-
-                let file = if doc.files.len() == 1 {
-                    &doc.files[0]
-                } else {
-                    // Multi-file Metalink in single-file mode: use first file
-                    &doc.files[0]
-                };
-
-                sorted_urls_owned = file
-                    .get_sorted_urls()
-                    .iter()
-                    .map(|u| (*u).clone())
-                    .collect();
-                expected_size = file.size;
-                hash_entry_owned = file.strongest_hash().cloned();
-                pieces_owned = file.pieces.clone();
-                torrent_metaurls_owned = file
-                    .meta_urls
-                    .iter()
-                    .filter(|m| m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent)
-                    .cloned()
-                    .collect();
-
-                if sorted_urls_owned.is_empty() && torrent_metaurls_owned.is_empty() {
-                    return Err(Aria2Error::Fatal(FatalError::Config(
-                        "No download mirrors available".into(),
-                    )));
-                }
-            }
+        if sorted_urls_owned.is_empty() && torrent_metaurls_owned.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "No download mirrors available".into(),
+            )));
         }
 
         if sorted_urls_owned.is_empty() {

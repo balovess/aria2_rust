@@ -30,7 +30,6 @@ impl MetalinkDownloadCommand {
                 started: true,
                 completed: false,
                 completed_bytes: 0,
-                metalink_data: Vec::new(),
                 file_info: Some(info.clone()),
                 grouped_file_infos: Vec::new(),
                 checkpoint: None,

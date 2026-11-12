@@ -74,6 +74,20 @@ impl MetalinkDownloadCommand {
             .iter()
             .map(|u| u.url.clone())
             .collect();
+        let file_info = FileDownloadInfo {
+            expected_size: file.size,
+            hash_entry: file.strongest_hash().cloned(),
+            sorted_urls: file.get_sorted_urls().into_iter().cloned().collect(),
+            pieces: file.pieces.clone(),
+            torrent_metaurls: file
+                .meta_urls
+                .iter()
+                .filter(|metaurl| {
+                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                })
+                .cloned()
+                .collect(),
+        };
         let group = RequestGroup::new(gid, urls, options.clone());
         group.set_output_name(file.name.clone());
 
@@ -104,8 +118,7 @@ impl MetalinkDownloadCommand {
             started: false,
             completed: false,
             completed_bytes: 0,
-            metalink_data: metalink_bytes.to_vec(),
-            file_info: None,
+            file_info: Some(file_info),
             grouped_file_infos: Vec::new(),
             checkpoint: None,
             global_limiter: None,
@@ -240,7 +253,6 @@ impl MetalinkDownloadCommand {
                     started: false,
                     completed: false,
                     completed_bytes: 0,
-                    metalink_data: Vec::new(),
                     file_info: Some(file_info),
                     grouped_file_infos: Vec::new(),
                     checkpoint: None,
@@ -355,7 +367,6 @@ impl MetalinkDownloadCommand {
                 started: false,
                 completed: false,
                 completed_bytes: 0,
-                metalink_data: Vec::new(),
                 file_info: Some(file_info),
                 grouped_file_infos: Vec::new(),
                 checkpoint: None,
@@ -475,7 +486,6 @@ impl MetalinkDownloadCommand {
             started: false,
             completed: false,
             completed_bytes: 0,
-            metalink_data: Vec::new(),
             file_info: None,
             grouped_file_infos,
             checkpoint: None,
@@ -518,6 +528,19 @@ impl MetalinkDownloadCommand {
         // silently lost at execution time.
         crate::engine::metalink::to_request_group::MetalinkToRequestGroup::new()
             .normalize_file_for_runtime(&mut file, options);
+        Self::new_with_group_file(group, &file, options, policy)
+    }
+
+    /// Create a manager-owned command from a file parsed during initial
+    /// Metalink expansion. The file is already normalized by the shared
+    /// selection pass; restored groups use `new_with_group_source` instead.
+    #[cfg(feature = "metalink")]
+    pub(crate) fn new_with_group_file(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        file: &aria2_protocol::metalink::parser::MetalinkFile,
+        options: &DownloadOptions,
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
         let dir = options.dir.as_deref().unwrap_or(".");
         let output_name = group
             .recover()
@@ -547,7 +570,6 @@ impl MetalinkDownloadCommand {
             started: false,
             completed: false,
             completed_bytes: 0,
-            metalink_data: Vec::new(),
             file_info: Some(file_info),
             grouped_file_infos: Vec::new(),
             checkpoint: None,

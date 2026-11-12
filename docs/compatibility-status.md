@@ -298,6 +298,17 @@ behavior. An unlisted behavior has not been audited here.
   fetch keeps the timeout captured when it started. The public
   `TrackerCatalogConfig` layout remains source-compatible; the protocol library
   exposes separate timeout accessors.
+- **Transport ownership:** `PublicTrackerList` accepts an injected source
+  fetcher. The process engine supplies one using its DNS cache, configured
+  outbound source-address policy, and TLS verification/identity options;
+  standalone protocol users retain the default reqwest transport. The engine
+  fetcher applies scheme-specific HTTP/HTTPS proxy options, `all-proxy`, proxy
+  credentials, and `no-proxy`; DNS resolution and source binding target the
+  proxy endpoint when selected.
+- **Announce proxying:** HTTP tracker announces use the same per-download
+  scheme-specific proxy options and bind the outbound source to the proxy
+  endpoint. WebSocket announce proxying already uses the shared proxy options;
+  UDP tracker traffic remains direct UDP and does not use HTTP proxies.
 - **Empty source list:** An empty `bt-tracker-source` list is valid through
   startup configuration, the C API, and RPC. Empty list input is represented as
   `List([])` in configuration instead of a one-element list containing an empty
@@ -309,7 +320,13 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol tests delay an HTTP response body and assert the
   configured deadline aborts the complete fetch; CLI, RPC, and C API tests
   verify empty tracker sources remain an empty list through their configuration
-  boundaries.
+  boundaries. A core loopback test verifies that the engine fetcher reaches the
+  tracker source using the selected local source address. A second loopback
+  test verifies HTTP proxy absolute-form requests and Basic proxy credentials.
+  An announce-specific loopback test verifies the tracker request traverses
+  the configured proxy, carries the configured proxy credentials, and binds to
+  the selected outbound source address. A second announce test verifies one
+  tracker announcer does not reuse a direct client for a later proxied tracker.
 
 ## BitTorrent DHT outbound source binding
 
@@ -371,6 +388,25 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** a local TCP listener test sets the internal cap to one,
   confirms the active handshake remains open, and confirms the excess peer is
   closed promptly. A multi-peer external network stress run has not been done.
+
+## Incoming BitTorrent listener ownership
+
+- **Protocol library interface:** `aria2-protocol::bittorrent::peer::listener::PeerListener`
+  binds one wildcard IPv4 TCP socket and forwards raw accepted streams. It does
+  not parse handshakes, select torrent routes, or admit peers into engine state;
+  standalone library users can use it when they need only TCP acceptance.
+- **Engine interface:** `BtPeerListenerManager` owns process-wide TCP listener
+  sockets, info-hash routes, TCP/uTP handshake admission, peer-storage
+  admission, and shutdown/draining. It shares the listening port across torrent
+  routes and uses protocol-owned handshake parsers and connection types. Keeping
+  this manager in core avoids moving task lifecycle and peer-storage policy
+  into the protocol crate.
+- **Verification:** protocol loopback tests cover port binding and raw stream
+  delivery. Core loopback tests cover shared multi-torrent routing, IPv4 peers
+  through IPv6 registration, route removal, blocked-delivery cancellation,
+  handshake limits, accept-error recovery, and socket release on shutdown.
+  These tests do not establish interoperability against an upstream aria2
+  binary or a remote peer swarm.
 
 ## SFTP connection and transport options
 
@@ -484,6 +520,21 @@ behavior. An unlisted behavior has not been audited here.
   are unchanged. Focused local FTPS tests verify protected control and data
   channels; public remote-server interoperability remains unverified.
 
+## Metalink parsed execution data
+
+- **Ownership:** Metalink XML parsing and file metadata remain in
+  `aria2-protocol`. Core constructors pass the parsed per-file projection into
+  task execution; an execution command no longer retains and reparses the same
+  raw XML. Request-group source bytes remain available separately for session
+  reconstruction.
+- **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
+  BitTorrent metaurls use the same parser output as before. Parsing errors are
+  still surfaced by command construction, before task execution.
+- **Verification:** focused Metalink constructor and execution tests cover
+  direct mirrors, torrent-metaurl-only inputs, integrity data, grouped files,
+  and manager-restored source handling. No upstream binary comparison was run
+  for this internal ownership change.
+
 ## Pause and unpause lifecycle status
 
 - **Compatibility:** `active` means the download is currently running;
@@ -530,8 +581,14 @@ behavior. An unlisted behavior has not been audited here.
   snapshot without rebuilding engine-owned objects. This is consistent with
   original aria2's explicit dispatch model in `RpcMethodImpl.cc` and
   `aria2api.cc`. Rust additionally dispatches its supported tracker, handshake,
-  and uTP runtime extensions. A focused startup mapping test does not claim
-  runtime reconfiguration or end-to-end C ABI interoperability.
+  and uTP runtime extensions. RPC and C API now use the same core
+  `runtime_commands_for_global_option_changes` projection after their respective
+  parsing and configuration commit steps. Focused RPC tests verify command
+  updates; this does not claim end-to-end C ABI interoperability.
+- **Concurrency range:** `max-concurrent-downloads` accepts `0..=u32::MAX`,
+  matching the engine command's `u32` representation and the existing RPC
+  conversion boundary. Other entry points reject values above that bound
+  instead of wrapping them during startup or runtime updates.
 - **C API batch validation:** `changeGlobalOption` validates the entire list
   before mutating configuration, matching upstream `apiGatherChangeableGlobalOption`.
   Invalid values leave earlier valid entries and the `keep-running` extension

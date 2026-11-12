@@ -1,11 +1,10 @@
 //! Shared lifecycle for single-item protocol work.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::engine::work_scheduler::{RetryOutcome, WorkId, WorkItem, WorkScheduler};
-use crate::error::{Aria2Error, FatalError, Result};
+use crate::error::{Aria2Error, Result};
 
 #[allow(clippy::double_must_use)]
 #[async_trait]
@@ -34,59 +33,28 @@ pub(crate) trait SingleWorkAdapter: Send {
 pub(crate) async fn run_single_work_item<A: SingleWorkAdapter>(
     adapter: &mut A,
 ) -> Result<A::Output> {
-    let mut scheduler = WorkScheduler::new();
-    scheduler
-        .enqueue(WorkItem::new(WorkId::new(0), (), adapter.max_attempts()))
-        .map_err(|error| scheduler_error("queue the single work item", error))?;
-
+    let max_attempts = adapter.max_attempts();
+    let mut attempt = 1u32;
     loop {
-        let lease = scheduler
-            .admit(1, Instant::now())
-            .pop()
-            .ok_or_else(|| scheduler_error("admit the single work item", "no ready lease"))?;
-        let attempt = lease.attempt();
         match adapter.execute_attempt(attempt).await {
-            Ok(output) => {
-                scheduler
-                    .complete(lease)
-                    .map_err(|error| scheduler_error("complete the work item", error))?;
-                return Ok(output);
-            }
+            Ok(output) => return Ok(output),
             Err(error) => {
-                let wait = adapter.retry_wait(attempt, &error);
-                let retry_at = wait.map(|wait| {
-                    let now = Instant::now();
-                    now.checked_add(wait).unwrap_or(now)
-                });
-                match scheduler
-                    .fail(lease, retry_at)
-                    .map_err(|error| scheduler_error("record the failed attempt", error))?
-                {
-                    RetryOutcome::Scheduled => {
-                        let deadline = scheduler.next_retry_deadline().ok_or_else(|| {
-                            scheduler_error("read the retry deadline", "no delayed work")
-                        })?;
-                        let wait = deadline.saturating_duration_since(Instant::now());
-                        if let Err(wait_error) = adapter.wait_for_retry(wait).await {
-                            scheduler.cancel();
-                            return Err(wait_error);
-                        }
-                        if let Err(retry_error) = adapter.prepare_retry().await {
-                            scheduler.cancel();
-                            return Err(retry_error);
-                        }
-                    }
-                    RetryOutcome::Exhausted(()) => return Err(error),
+                let Some(wait) = adapter.retry_wait(attempt, &error) else {
+                    return Err(error);
+                };
+                if max_attempts != 0 && attempt >= max_attempts {
+                    return Err(error);
                 }
+                if let Err(wait_error) = adapter.wait_for_retry(wait).await {
+                    return Err(wait_error);
+                }
+                if let Err(retry_error) = adapter.prepare_retry().await {
+                    return Err(retry_error);
+                }
+                attempt = attempt.saturating_add(1);
             }
         }
     }
-}
-
-fn scheduler_error(context: &str, error: impl std::fmt::Display) -> Aria2Error {
-    Aria2Error::Fatal(FatalError::Config(format!(
-        "Core work runner could not {context}: {error}"
-    )))
 }
 
 #[cfg(test)]

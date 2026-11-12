@@ -67,7 +67,7 @@ pub struct TrackerAnnouncer {
     last_failure_kind: Option<TrackerFailureKind>,
     http_tls: ClientTlsConfig,
     outbound_network_policy: Arc<OutboundNetworkPolicy>,
-    http_clients: HashMap<Option<std::net::IpAddr>, reqwest::Client>,
+    http_clients: HashMap<(Option<std::net::IpAddr>, Option<String>), reqwest::Client>,
     websocket_options: DownloadOptions,
     tracker_timeout_secs: u64,
     tracker_connect_timeout_secs: u64,
@@ -120,9 +120,10 @@ impl TrackerAnnouncer {
         self.http_clients.clear();
     }
 
-    /// Apply per-download proxy and timeout options to WebSocket trackers.
+    /// Apply per-download proxy and timeout options to tracker transports.
     pub fn set_websocket_options(&mut self, options: &DownloadOptions) {
         self.websocket_options = options.clone();
+        self.http_clients.clear();
     }
 
     /// Set the per-download tracker request and connection timeouts.

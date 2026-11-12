@@ -30,7 +30,7 @@ impl MetalinkCommandAdapter {
 #[async_trait]
 impl ProtocolCommandAdapter for MetalinkCommandAdapter {
     fn supports(&self, request: &ProtocolCommandRequest) -> bool {
-        request.group.recover().metalink_source().is_some()
+        request.group.recover().has_metalink_source()
     }
 
     async fn create(
@@ -38,13 +38,21 @@ impl ProtocolCommandAdapter for MetalinkCommandAdapter {
         request: ProtocolCommandRequest,
         services: &ProtocolServices,
     ) -> Result<Box<dyn Command>> {
-        let (metalink_data, file_index) = request
-            .group
-            .recover()
-            .metalink_source()
-            .expect("the registry calls this adapter only for Metalink groups");
-        let base_uri = request.group.recover().metalink_base_uri();
-        let mut command =
+        let parsed_file = request.group.recover().take_parsed_metalink_file();
+        let mut command = if let Some(file) = parsed_file {
+            crate::engine::metalink::download_command::MetalinkDownloadCommand::new_with_group_file(
+                Arc::clone(&request.group),
+                file.as_ref(),
+                &request.options,
+                &services.outbound_network_policy,
+            )?
+        } else {
+            let (metalink_data, file_index) = request
+                .group
+                .recover()
+                .metalink_source()
+                .expect("the registry calls this adapter only for Metalink groups");
+            let base_uri = request.group.recover().metalink_base_uri();
             crate::engine::metalink::download_command::MetalinkDownloadCommand::new_with_group_source(
                 request.group,
                 &metalink_data,
@@ -52,7 +60,8 @@ impl ProtocolCommandAdapter for MetalinkCommandAdapter {
                 &request.options,
                 base_uri.as_deref(),
                 &services.outbound_network_policy,
-            )?;
+            )?
+        };
         if let Some(limiter) = services.global_limiter.clone() {
             command.set_global_limiter(limiter);
         }

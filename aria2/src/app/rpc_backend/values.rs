@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use aria2_core::config::{OptionRegistry, is_global_option_changeable};
-use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::engine::runtime_option_updates::runtime_commands_for_global_option_changes;
 use aria2_rpc::{BackendError, BackendResponse, BackendResult};
 
 use super::CoreRpcBackend;
@@ -27,7 +27,7 @@ impl CoreRpcBackend {
         // Complete all adapter-specific validation before touching the shared
         // configuration. This keeps a rejected request from partially
         // applying an unrelated option in the same RPC batch.
-        let max_concurrent = parsed
+        let _max_concurrent = parsed
             .iter()
             .find(|(key, _)| key == "max-concurrent-downloads")
             .map(|(_, value)| {
@@ -39,7 +39,7 @@ impl CoreRpcBackend {
             })
             .transpose()?;
 
-        let runtime_rate_limits = if changes.contains_key("max-overall-download-limit")
+        let _runtime_rate_limits = if changes.contains_key("max-overall-download-limit")
             || changes.contains_key("max-overall-upload-limit")
         {
             let options = self.global_options().await;
@@ -62,7 +62,7 @@ impl CoreRpcBackend {
         };
 
         #[cfg(feature = "bittorrent")]
-        let tracker_sources = changes
+        let _tracker_sources = changes
             .get("bt-tracker-source")
             .map(|value| {
                 let sources = rpc_value_to_string(value).ok_or_else(|| {
@@ -73,7 +73,7 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let tracker_update_interval = changes
+        let _tracker_update_interval = changes
             .get("bt-tracker-update-interval")
             .map(|value| {
                 let seconds = parse_u64(value, "bt-tracker-update-interval")?;
@@ -87,7 +87,7 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let tracker_source_timeout = changes
+        let _tracker_source_timeout = changes
             .get("bt-tracker-source-timeout")
             .map(|value| {
                 let seconds = parse_u64(value, "bt-tracker-source-timeout")?;
@@ -101,7 +101,7 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let public_trackers_enabled = parsed
+        let _public_trackers_enabled = parsed
             .iter()
             .find(|(key, _)| key == "enable-public-trackers")
             .map(|(_, value)| {
@@ -112,7 +112,7 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let incoming_peer_handshake_timeout = parsed
+        let _incoming_peer_handshake_timeout = parsed
             .iter()
             .find(|(key, _)| key == "bt-incoming-peer-handshake-timeout")
             .map(|(_, value)| {
@@ -130,7 +130,7 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let utp_options_changed = [
+        let _utp_options_changed = [
             "bt-utp-max-connections",
             "bt-utp-connect-timeout",
             "bt-utp-idle-timeout",
@@ -139,6 +139,7 @@ impl CoreRpcBackend {
         .iter()
         .any(|name| changes.contains_key(*name));
 
+        let changed_options = changes.keys().cloned().collect();
         {
             let mut config = self.config.write().await;
             for (key, value) in &parsed {
@@ -148,45 +149,11 @@ impl CoreRpcBackend {
                     .map_err(Self::execution)?;
             }
         }
-
-        if let Some(max) = max_concurrent {
-            self.send(EngineCommand::SetMaxConcurrent { max })?;
-        }
-        if let Some((download_limit, upload_limit)) = runtime_rate_limits {
-            self.send(EngineCommand::SetGlobalRateLimit {
-                download_limit,
-                upload_limit,
-            })?;
-        }
-
-        #[cfg(feature = "bittorrent")]
+        let effective_options = self.config.read().await.get_all_global_options().await;
+        for command in
+            runtime_commands_for_global_option_changes(&changed_options, &effective_options)
         {
-            if let Some(sources) = tracker_sources {
-                self.send(EngineCommand::SetPublicTrackerSources { sources })?;
-            }
-            if let Some(seconds) = tracker_update_interval {
-                self.send(EngineCommand::SetPublicTrackerUpdateInterval { seconds })?;
-            }
-            if let Some(seconds) = tracker_source_timeout {
-                self.send(EngineCommand::SetPublicTrackerSourceTimeout { seconds })?;
-            }
-            if let Some(enabled) = public_trackers_enabled {
-                self.send(EngineCommand::SetPublicTrackersEnabled { enabled })?;
-            }
-            if let Some(seconds) = incoming_peer_handshake_timeout {
-                self.send(EngineCommand::SetIncomingPeerHandshakeTimeout { seconds })?;
-            }
-            if utp_options_changed {
-                let config = self.config.read().await;
-                let options = aria2_core::config::utp_socket_options_from_values(
-                    config.get_global_i64("bt-utp-max-connections").await,
-                    config.get_global_i64("bt-utp-connect-timeout").await,
-                    config.get_global_i64("bt-utp-idle-timeout").await,
-                    config.get_global_i64("bt-utp-keepalive-interval").await,
-                );
-                drop(config);
-                self.send(EngineCommand::SetUtpSocketOptions { options })?;
-            }
+            self.send(command)?;
         }
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
     }

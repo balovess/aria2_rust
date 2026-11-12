@@ -6,7 +6,7 @@
 //! opaque handle and caller-owned buffers. It is a source-level migration
 //! interface, not a binary-compatible replacement for the C++ classes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -24,6 +24,7 @@ use crate::engine::download_engine::DownloadEngine;
 use crate::engine::engine_command::{EngineCommand, EngineCommandSender};
 #[cfg(feature = "metalink")]
 use crate::engine::metalink::to_request_group::MetalinkToRequestGroup;
+use crate::engine::runtime_option_updates::runtime_commands_for_global_option_changes;
 use crate::error::Result;
 use crate::request::request_group::{
     DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
@@ -218,10 +219,6 @@ fn parse_bool(value: &str) -> std::result::Result<bool, String> {
         "false" | "no" | "0" | "off" => Ok(false),
         _ => Err(format!("invalid boolean '{value}'")),
     }
-}
-
-fn non_zero_limit(value: i64) -> Option<u64> {
-    (value > 0).then_some(value as u64)
 }
 
 fn write_c_string(value: &str, output: *mut c_char, capacity: usize) -> usize {

@@ -32,6 +32,22 @@ fn manager_resource_groups_apply_select_file_and_location_priority() {
             .collect::<Vec<_>>(),
         ["https://us.example/second", "https://de.example/second"]
     );
+    let parsed_file = group
+        .take_parsed_metalink_file()
+        .expect("initial manager group retains the selected parsed file");
+    assert_eq!(parsed_file.name, "second.bin");
+    assert_eq!(
+        parsed_file
+            .get_sorted_urls()
+            .into_iter()
+            .map(|url| url.url.as_str())
+            .collect::<Vec<_>>(),
+        ["https://us.example/second", "https://de.example/second"]
+    );
+    assert!(
+        group.take_parsed_metalink_file().is_none(),
+        "the parsed file is transferred once to command construction"
+    );
 }
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]

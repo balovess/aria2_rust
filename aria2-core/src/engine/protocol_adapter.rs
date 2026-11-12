@@ -202,4 +202,82 @@ mod tests {
         assert_eq!(command.status(), CommandStatus::Pending);
         assert_eq!(command.gid(), GroupId::new(730));
     }
+
+    #[cfg(all(feature = "metalink", not(feature = "bittorrent")))]
+    #[tokio::test]
+    async fn metalink_adapter_uses_parsed_file_before_session_source_fallback() {
+        let options = Arc::new(DownloadOptions::default());
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(731),
+            vec!["https://mirror.test/payload.bin".to_string()],
+            (*options).clone(),
+        )));
+        group
+            .recover()
+            .set_metalink_source(b"not valid XML".to_vec(), 0);
+        let document = aria2_protocol::metalink::parser::MetalinkDocument::parse(
+            br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://mirror.test/payload.bin</url></file></metalink>"#,
+            None,
+        )
+        .expect("fixture should parse");
+        group
+            .recover()
+            .set_parsed_metalink_file(Arc::new(document.files.into_iter().next().unwrap()));
+
+        let registry = ProtocolAdapterRegistry::new(vec![Box::new(
+            crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(),
+        )]);
+        let request = ProtocolCommandRequest {
+            group,
+            first_uri: "https://mirror.test/payload.bin".to_string(),
+            options,
+        };
+        let services = ProtocolServices {
+            dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            global_limiter: None,
+        };
+
+        let command = registry
+            .create(request, &services)
+            .await
+            .expect("cached protocol metadata should avoid reparsing the invalid source bytes");
+
+        assert_eq!(command.gid(), GroupId::new(731));
+    }
+
+    #[cfg(all(feature = "metalink", not(feature = "bittorrent")))]
+    #[tokio::test]
+    async fn metalink_adapter_reconstructs_parsed_file_from_restored_source() {
+        let options = Arc::new(DownloadOptions::default());
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(732),
+            vec!["https://mirror.test/restored.bin".to_string()],
+            (*options).clone(),
+        )));
+        group.recover().set_metalink_source(
+            br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="restored.bin"><url>https://mirror.test/restored.bin</url></file></metalink>"#.to_vec(),
+            0,
+        );
+        let request = ProtocolCommandRequest {
+            group,
+            first_uri: "https://mirror.test/restored.bin".to_string(),
+            options,
+        };
+        let registry = ProtocolAdapterRegistry::new(vec![Box::new(
+            crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(),
+        )]);
+        let services = ProtocolServices {
+            dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            global_limiter: None,
+        };
+
+        let command = registry
+            .create(request, &services)
+            .await
+            .expect("restored source should be parsed into command input");
+
+        assert_eq!(command.gid(), GroupId::new(732));
+    }
 }

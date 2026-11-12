@@ -333,23 +333,9 @@ impl Aria2RustSession {
     }
 
     pub(super) fn change_global_options(&mut self, options: Vec<(String, String)>) -> i32 {
-        let mut download_limit_changed = false;
-        let mut upload_limit_changed = false;
-        let mut max_concurrent = None;
         let mut keep_running = None;
         let mut validated_options = Vec::with_capacity(options.len());
-        #[cfg(feature = "bittorrent")]
-        let mut public_tracker_sources = None;
-        #[cfg(feature = "bittorrent")]
-        let mut public_tracker_update_interval = None;
-        #[cfg(feature = "bittorrent")]
-        let mut public_tracker_source_timeout = None;
-        #[cfg(feature = "bittorrent")]
-        let mut public_trackers_enabled = None;
-        #[cfg(feature = "bittorrent")]
-        let mut incoming_peer_handshake_timeout = None;
-        #[cfg(feature = "bittorrent")]
-        let mut utp_options_changed = false;
+        let mut changed_options = HashSet::new();
         for (name, value) in options {
             if name == "keep-running" {
                 match parse_bool(&value) {
@@ -361,7 +347,7 @@ impl Aria2RustSession {
             if !self.config.registry().contains(&name) || !is_global_option_changeable(&name) {
                 continue;
             }
-            let parsed = match self
+            let _parsed = match self
                 .config
                 .registry()
                 .get(&name)
@@ -370,29 +356,7 @@ impl Aria2RustSession {
                 Some(value) => value,
                 None => return self.fail(format!("invalid option {name}"), INVALID_ARGUMENT),
             };
-            match name.as_str() {
-                "max-concurrent-downloads" => max_concurrent = parsed.as_i64(),
-                "max-overall-download-limit" => download_limit_changed = true,
-                "max-overall-upload-limit" => upload_limit_changed = true,
-                #[cfg(feature = "bittorrent")]
-                "bt-tracker-source" => public_tracker_sources = Some(value.clone()),
-                #[cfg(feature = "bittorrent")]
-                "bt-tracker-update-interval" => public_tracker_update_interval = parsed.as_i64(),
-                #[cfg(feature = "bittorrent")]
-                "bt-tracker-source-timeout" => public_tracker_source_timeout = parsed.as_i64(),
-                #[cfg(feature = "bittorrent")]
-                "enable-public-trackers" => public_trackers_enabled = parsed.as_bool(),
-                #[cfg(feature = "bittorrent")]
-                "bt-incoming-peer-handshake-timeout" => {
-                    incoming_peer_handshake_timeout = parsed.as_i64()
-                }
-                #[cfg(feature = "bittorrent")]
-                "bt-utp-max-connections"
-                | "bt-utp-connect-timeout"
-                | "bt-utp-idle-timeout"
-                | "bt-utp-keepalive-interval" => utp_options_changed = true,
-                _ => {}
-            }
+            changed_options.insert(name.clone());
             validated_options.push((name, value));
         }
 
@@ -414,73 +378,11 @@ impl Aria2RustSession {
             self.keep_running = value;
         }
 
-        if let Some(max) = max_concurrent.filter(|value| *value >= 0) {
-            let _ = self
-                .command_tx
-                .send(EngineCommand::SetMaxConcurrent { max: max as u32 });
-        }
-        if download_limit_changed || upload_limit_changed {
-            let download_limit = self
-                .runtime
-                .block_on(self.config.get_global_i64("max-overall-download-limit"))
-                .and_then(non_zero_limit);
-            let upload_limit = self
-                .runtime
-                .block_on(self.config.get_global_i64("max-overall-upload-limit"))
-                .and_then(non_zero_limit);
-            let _ = self.command_tx.send(EngineCommand::SetGlobalRateLimit {
-                download_limit,
-                upload_limit,
-            });
-        }
-        #[cfg(feature = "bittorrent")]
+        let effective_options = self.runtime.block_on(self.config.get_all_global_options());
+        for command in
+            runtime_commands_for_global_option_changes(&changed_options, &effective_options)
         {
-            if let Some(sources) = public_tracker_sources {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackerSources { sources });
-            }
-            if let Some(seconds) = public_tracker_update_interval.filter(|seconds| *seconds > 0) {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackerUpdateInterval {
-                        seconds: seconds as u64,
-                    });
-            }
-            if let Some(seconds) = public_tracker_source_timeout.filter(|seconds| *seconds > 0) {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackerSourceTimeout {
-                        seconds: seconds as u64,
-                    });
-            }
-            if let Some(enabled) = public_trackers_enabled {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackersEnabled { enabled });
-            }
-            if let Some(seconds) = incoming_peer_handshake_timeout.filter(|seconds| *seconds > 0) {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetIncomingPeerHandshakeTimeout {
-                        seconds: seconds as u64,
-                    });
-            }
-            if utp_options_changed {
-                let options = crate::config::utp_socket_options_from_values(
-                    self.runtime
-                        .block_on(self.config.get_global_i64("bt-utp-max-connections")),
-                    self.runtime
-                        .block_on(self.config.get_global_i64("bt-utp-connect-timeout")),
-                    self.runtime
-                        .block_on(self.config.get_global_i64("bt-utp-idle-timeout")),
-                    self.runtime
-                        .block_on(self.config.get_global_i64("bt-utp-keepalive-interval")),
-                );
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetUtpSocketOptions { options });
-            }
+            let _ = self.command_tx.send(command);
         }
         0
     }

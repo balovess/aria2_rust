@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 #[cfg(feature = "bittorrent")]
 #[test]

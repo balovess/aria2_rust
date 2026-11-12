@@ -685,7 +685,13 @@ fn max_concurrent_zero_is_valid_unlimited_value() {
         .expect("max-concurrent-downloads must be registered");
 
     assert_eq!(definition.min, Some(0));
+    assert_eq!(definition.max, Some(u32::MAX as u64));
     assert_eq!(definition.parse_value("0").unwrap().as_i64(), Some(0));
+    assert!(
+        definition
+            .parse_value(&(u64::from(u32::MAX) + 1).to_string())
+            .is_err()
+    );
     assert_eq!(
         registry
             .parse_rpc_value("max-concurrent-downloads", &serde_json::json!(0))

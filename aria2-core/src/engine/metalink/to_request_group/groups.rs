@@ -98,6 +98,7 @@ impl MetalinkToRequestGroup {
     ) -> Result<Vec<Arc<RwLock<crate::request::request_group::RequestGroup>>>> {
         let mut groups = Vec::new();
         for (index, file) in prepared {
+            let file = Arc::new(file);
             let urls: Vec<String> = file
                 .get_sorted_urls()
                 .into_iter()
@@ -115,6 +116,7 @@ impl MetalinkToRequestGroup {
             let group = Arc::new(RwLock::new(
                 crate::request::request_group::RequestGroup::new(gid, urls, options.clone()),
             ));
+            group.recover().set_parsed_metalink_file(Arc::clone(&file));
             group
                 .recover()
                 .set_metalink_source(metalink_data.to_vec(), index);

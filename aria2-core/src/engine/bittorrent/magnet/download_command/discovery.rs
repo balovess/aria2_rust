@@ -272,6 +272,7 @@ impl MagnetDownloadCommand {
             let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
             announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
             announcer.set_http_tls_config(tracker_tls.clone());
+            announcer.set_websocket_options(options);
             announcer.set_timeouts(max_tracker_timeout, connect_timeout);
             announcer.set_tcp_port(announce_port);
 

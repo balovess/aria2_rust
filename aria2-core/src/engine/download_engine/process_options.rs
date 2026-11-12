@@ -6,9 +6,9 @@ use std::time::Duration;
 use super::DownloadEngine;
 use crate::config::OptionValue;
 use crate::dns::dns_cache::DnsCache;
-use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiterConfig;
+#[cfg(feature = "bittorrent")]
 use crate::request::request_group::DownloadOptions;
 use crate::request::request_group_man::RequestGroupMan;
 
@@ -78,7 +78,9 @@ impl DownloadEngine {
         if let Some(max) =
             option_i64(options, "max-concurrent-downloads").filter(|value| *value >= 0)
         {
-            request_man.set_max_concurrent(max as u32);
+            if let Ok(max) = u32::try_from(max) {
+                request_man.set_max_concurrent(max);
+            }
         }
         let download_limit =
             option_i64(options, "max-overall-download-limit").and_then(non_zero_limit);
@@ -142,7 +144,7 @@ impl DownloadEngine {
         let source_fetcher = Arc::new(CoreTrackerSourceFetcher::new(
             Arc::clone(&self.dns_cache),
             Arc::clone(&self.outbound_network_policy),
-            ClientTlsConfig::from_download_options(&download_options),
+            download_options,
         ));
         self.public_tracker_catalog = Arc::new(
             aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new_with_config_and_fetcher(

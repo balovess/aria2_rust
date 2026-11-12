@@ -33,12 +33,8 @@ pub struct MetalinkDownloadCommand {
     pub(crate) started: bool,
     pub(crate) completed: bool,
     pub(crate) completed_bytes: u64,
-    /// Raw Metalink data for re-parsing during execute().
-    /// Only used for single-file mode. Empty in multi-file mode
-    /// (each per-file command stores only its own file's data).
-    pub(crate) metalink_data: Vec<u8>,
-    /// Parsed file info for per-file mode (set by create_multi_file).
-    /// When present, execute() uses this instead of re-parsing metalink_data.
+    /// Parsed file info for single-file and per-file execution.
+    /// Grouped commands keep one entry per file in `grouped_file_infos`.
     pub(crate) file_info: Option<FileDownloadInfo>,
     /// Parsed files for a grouped Metalink payload. A single command owns
     /// the group so the request context can schedule all selected files.

@@ -175,6 +175,7 @@ impl<T> WorkScheduler<T> {
     }
 
     /// Admit queued work up to the caller's current concurrency ceiling.
+    #[cfg(test)]
     pub(crate) fn admit(&mut self, max_in_flight: usize, now: Instant) -> Vec<WorkLease<T>> {
         if self.cancelled || max_in_flight == 0 {
             return Vec::new();
