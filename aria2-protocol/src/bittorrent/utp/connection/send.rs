@@ -5,12 +5,20 @@ use super::*;
 impl UtpConnection {
     /// Initiate a connection (client-side) - creates SYN packet
     pub fn connect(&mut self, remote_addr: SocketAddr) -> Result<UtpPacket, ConnectionError> {
+        self.connect_with_local_id(remote_addr, super::rand_connection_id())
+    }
+
+    pub(in crate::bittorrent::utp) fn connect_with_local_id(
+        &mut self,
+        remote_addr: SocketAddr,
+        local_connection_id: u16,
+    ) -> Result<UtpPacket, ConnectionError> {
         if self.state != ConnectionState::Closed {
             return Err(ConnectionError::AlreadyExists);
         }
 
         self.remote_addr = Some(remote_addr);
-        self.local_conn_id = super::rand_connection_id();
+        self.local_conn_id = local_connection_id;
         self.remote_conn_id = self.local_conn_id.wrapping_add(1);
         self.seq_nr = 1;
         self.syn_seq_nr = self.seq_nr;

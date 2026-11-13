@@ -3,6 +3,31 @@ use std::time::Duration;
 
 use super::*;
 
+struct TestRng;
+
+impl keys::ssh_key::rand_core::TryRng for TestRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_ne_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_ne_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        getrandom::fill(dest).expect("OS random source failed");
+        Ok(())
+    }
+}
+
+impl keys::ssh_key::rand_core::TryCryptoRng for TestRng {}
+
 #[test]
 fn test_ssh_options_defaults() {
     let opts = SshOptions::default();
@@ -222,6 +247,104 @@ async fn connect_with_stream_times_out_when_the_ssh_peer_stalls() {
             timeout_secs: 0,
         }) if host == "127.0.0.1"
     ));
+}
+
+struct StalledAuthenticationServer {
+    authentication_started: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+struct StalledAuthenticationSession {
+    authentication_started: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl russh::server::Server for StalledAuthenticationServer {
+    type Handler = StalledAuthenticationSession;
+
+    fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
+        StalledAuthenticationSession {
+            authentication_started: self.authentication_started.take(),
+        }
+    }
+}
+
+impl russh::server::Handler for StalledAuthenticationSession {
+    type Error = anyhow::Error;
+
+    async fn auth_password(
+        &mut self,
+        _user: &str,
+        _password: &str,
+    ) -> Result<russh::server::Auth, Self::Error> {
+        if let Some(started) = self.authentication_started.take() {
+            let _ = started.send(());
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn connect_with_stream_times_out_when_authentication_stalls() {
+    use russh::server::{self, Server as _};
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind stalled authentication peer");
+    let address = listener.local_addr().expect("read listener address");
+    let (authentication_started, authentication_started_rx) = oneshot::channel();
+    let mut server = StalledAuthenticationServer {
+        authentication_started: Some(authentication_started),
+    };
+    let mut rng = TestRng;
+    let mut config = server::Config::default();
+    config.keys.push(
+        keys::PrivateKey::random(&mut rng, keys::ssh_key::Algorithm::Ed25519)
+            .expect("generate SSH server key"),
+    );
+    config.auth_rejection_time_initial = Some(Duration::from_millis(1));
+    let config = Arc::new(config);
+    let server_task = tokio::spawn(async move {
+        let (socket, peer_addr) = listener.accept().await.expect("accept SSH client");
+        let handler = server.new_client(Some(peer_addr));
+        let running = server::run_stream(config, socket, handler)
+            .await
+            .expect("start stalled authentication server");
+        let _ = running.await;
+    });
+
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect to stalled authentication peer");
+    let connect_timeout = Duration::from_millis(300);
+    let options = SshOptions::new("127.0.0.1", "user")
+        .with_port(address.port())
+        .with_password("password")
+        .with_host_key_mode(HostKeyCheckingMode::Disable)
+        .with_timeouts(connect_timeout, Duration::from_secs(1));
+    let started_at = std::time::Instant::now();
+    let client_task = tokio::spawn(SshConnection::connect_with_stream(options, stream));
+
+    tokio::time::timeout(Duration::from_secs(2), authentication_started_rx)
+        .await
+        .expect("client did not reach password authentication")
+        .expect("authentication server stopped before receiving credentials");
+    let result = tokio::time::timeout(Duration::from_secs(2), client_task)
+        .await
+        .expect("connection timeout did not finish")
+        .expect("client task panicked");
+    server_task.abort();
+    let _ = server_task.await;
+
+    assert!(matches!(
+        result,
+        Err(SshError::ConnectTimeout {
+            host,
+            port,
+            timeout_secs: 0,
+        }) if host == "127.0.0.1" && port == address.port()
+    ));
+    assert!(started_at.elapsed() < Duration::from_secs(2));
 }
 
 #[test]

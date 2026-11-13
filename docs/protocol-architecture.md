@@ -754,7 +754,7 @@ Do not add pass-through engine clients around these public interfaces.
   tracker and unpaired public send/receive methods are removed. Each completed
   exchange is counted once. The standalone transfer returns typed errors with
   low-level sources intact; the engine maps session and file-operation failures
-  into task errors.
+  into task errors while retaining the engine's existing retry classification.
 - **Narrow** Metalink expansion to one parse and selection pass that produces
   direct-resource groups and, when enabled, torrent metadata graphs from the
   same normalized entries and GID sequence. Remove the unused mirror types and
@@ -781,6 +781,19 @@ Do not add pass-through engine clients around these public interfaces.
   `PeerState`, `PeerSessionResource`, and torrent-geometry/capability message
   validation. Core owns actor lifecycle, peer identity and statistics, peer
   selection/admission, upload policy, piece scheduling, and bad-peer feedback.
+- **Keep** `PeerWireSession` as the shared protocol owner of peer handshakes
+  and length-prefixed message framing over an injected ordered byte transport.
+  It preserves bytes received beyond the handshake, checks outgoing info-hash
+  matches, and enforces the maximum message size before waiting for a body.
+  Core TCP/uTP adapters supply transport lifecycle and network policy; session
+  tests cover handshake buffering, hybrid response hashes, and oversized
+  frames.
+- **Keep** `peer::incoming::IncomingHandshake` as the TCP plain/MSE handshake
+  seam before torrent routing. MSE exposes the info-hash only after matching
+  the obfuscated hash against registered routes; the selected route supplies
+  encryption policy and response capabilities. The incoming handshake timeout
+  remains a maximum wait per required read, while core owns route lookup and
+  admission.
 - **Narrow** the BitTorrent WebSeed client: protocol owns HTTP Range request
   construction, accepted status handling, body-size enforcement, and read
   deadlines through `WebSeedHttpClient`. Core retains the configured reqwest
@@ -832,6 +845,19 @@ Do not add pass-through engine clients around these public interfaces.
   port policy.
 - **Keep** `bittorrent::utp::packet` as a protocol-owned uTP wire codec; it
   validates packet fields and extensions.
+- **Narrow** outbound uTP connection ID allocation: choose a random starting
+  ID, scan the complete 16-bit space for an unused ID, and only then allocate
+  connection state. This preserves random IDs in the normal case and avoids
+  false capacity errors plus repeated connection-buffer allocations when the
+  configured endpoint is near its 65,536-ID ceiling.
+- **Improve** uTP idle lifecycle: establish an idle timer for every connected
+  endpoint and refresh it on received peer traffic. Keepalive transmissions
+  alone do not extend peer activity; unresponsive connections are retired even
+  when there is no outstanding retransmission timer.
+- **Keep** uTP inbound connection-ID collision handling in the protocol socket:
+  only a matching retransmitted SYN from the owning endpoint replays SYN-ACK;
+  a colliding SYN from another endpoint is dropped without replacing the live
+  connection or sending a response that could disturb it.
 - **Narrow** `bittorrent::tracker::udp_tracker_protocol` ownership to all BEP 15
   wire decoding, including the common response header. Core uses the decoded
   action and transaction ID for response correlation; socket actors, tracker
@@ -921,8 +947,10 @@ Do not add pass-through engine clients around these public interfaces.
   the main listener test module.
 - **Keep** the public standalone `PeerListener` API for callers that want
   channel-driven raw TCP accepts; preserve its existing wildcard IPv4 binding
-  behavior. The new `PeerTcpListener` interface supports engine-selected bind
-  addresses without moving engine routing or admission policy into protocol.
+  behavior. Its bounded-channel forwarding and pending-accept drain must both
+  remain interruptible by the caller's shutdown signal. The `PeerTcpListener`
+  interface supports engine-selected bind addresses without moving engine
+  routing or admission policy into protocol.
 - **Narrow** `DownloadManager` source organization into its submission/query facade,
   per-download handle, and engine-lifecycle handle. Keep the crate-root
   re-exports and observable behavior unchanged; organize its interface tests by
@@ -981,10 +1009,12 @@ Do not add pass-through engine clients around these public interfaces.
   `DownloadOptions::from_option_strings` parser. Do not manually reparse
   selected persisted SFTP fields after construction, which bypasses shared
   value handling and can restore invalid timeout values.
-- **Narrow** SFTP connection deadlines by layer: core bounds policy-based
-  DNS/TCP establishment and the complete connection operation; the protocol
-  library independently bounds SSH handshake and authentication for callers
-  using `SshConnection::connect_with_stream`. Outbound-source in-flight
+- **Narrow** SFTP connection deadlines by phase: core bounds policy-based
+  DNS/TCP establishment and SSH negotiation/authentication together; the
+  protocol library also bounds SSH negotiation/authentication for direct
+  `connect_with_stream` callers and bounds session-channel opening by the
+  configured connect timeout. The first SFTP INIT response is bounded by
+  `sftp-read-timeout`, as are later SFTP packet reads. Outbound-source in-flight
   accounting is released through RAII when the TCP connection future is
   cancelled.
 - **Keep** process-engine option assembly in core at

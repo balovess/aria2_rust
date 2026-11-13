@@ -436,23 +436,30 @@ impl SshConnection {
         &mut self,
     ) -> Result<russh::Channel<russh::client::Msg>, SshError> {
         debug!("[SFTP] Opening SFTP subsystem channel");
-
-        // Open a session channel
+        let timeout = self.options.connect_timeout;
+        let target = self.options.target();
+        // russh sends the subsystem request without waiting for its reply. The
+        // SFTP INIT response is read by `SftpSession::open` under read_timeout.
         let channel =
-            self.handle
-                .channel_open_session()
-                .await
-                .map_err(|e| SshError::SubsystemInit {
-                    message: format!("Failed to open session channel: {}", e),
+            tokio::time::timeout(timeout, async {
+                let channel = self.handle.channel_open_session().await.map_err(|e| {
+                    SshError::SubsystemInit {
+                        message: format!("Failed to open session channel: {}", e),
+                    }
                 })?;
 
-        // Request the SFTP subsystem on this channel
-        channel
-            .request_subsystem(true, "sftp")
+                channel.request_subsystem(true, "sftp").await.map_err(|e| {
+                    SshError::SubsystemInit {
+                        message: format!("Failed to request SFTP subsystem: {}", e),
+                    }
+                })?;
+
+                Ok::<_, SshError>(channel)
+            })
             .await
-            .map_err(|e| SshError::SubsystemInit {
-                message: format!("Failed to request SFTP subsystem: {}", e),
-            })?;
+            .map_err(|_| SshError::ConnectionLost {
+                message: format!("Opening SFTP channel for {target} timed out after {timeout:?}"),
+            })??;
 
         debug!("[SFTP] SFTP subsystem channel opened successfully");
         Ok(channel)

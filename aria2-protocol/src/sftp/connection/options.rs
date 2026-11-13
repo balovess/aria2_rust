@@ -40,7 +40,7 @@ pub struct SshOptions {
     pub private_key_path: Option<String>,
     /// Passphrase for encrypted private keys
     pub private_key_passphrase: Option<String>,
-    /// Timeout for TCP connection establishment
+    /// Timeout for connection establishment, SSH negotiation, authentication, and SFTP channel opening.
     pub connect_timeout: Duration,
     /// Timeout for read operations on the SSH channel
     pub read_timeout: Duration,

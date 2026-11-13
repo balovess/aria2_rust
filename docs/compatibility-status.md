@@ -284,8 +284,13 @@ behavior. An unlisted behavior has not been audited here.
   starts. `changeGlobalOption` updates the timeout for newly accepted peers;
   handshakes already in progress retain the value captured when accepted.
 - **Verification:** protocol-level timeout behavior and core shared-listener
-  timeout propagation are covered by focused tests. Original aria2 has no
-  corresponding process-wide option, so this is a Rust extension.
+  application are covered by focused tests. CLI parsing, RPC updates and invalid
+  values, and C API global-option propagation also have focused coverage. The
+  startup `process_options` path and runtime `EngineCommand` path each have a
+  loopback behavior test through an accepted TCP connection. CLI, RPC, and C API
+  projection tests remain separate; no single test spans those entry points
+  through to a live peer. Original aria2 has no corresponding process-wide
+  option, so this is a Rust extension.
 
 ## BitTorrent peer connection state
 
@@ -309,11 +314,23 @@ behavior. An unlisted behavior has not been audited here.
 - **Compatibility impact:** these are Rust extensions; original aria2 does
   not expose the corresponding process-level settings. Defaults match the
   protocol library's existing socket defaults.
+- **Capacity behavior:** when the configured endpoint is below its connection
+  limit and a 16-bit ID is free, outbound setup searches the entire ID space
+  from a random start before reporting capacity exhaustion. This fixes a
+  collision-probability false rejection without changing the limit or wire
+  format.
+- **Idle cleanup:** established connections now have an independent idle
+  deadline, refreshed by valid packets from the peer. This closes unresponsive
+  peers even when no packet retransmission timer is active, so the configured
+  idle timeout also bounds keepalive-only connections.
 - **Verification:** a core test confirms the configured connection cap is
   enforced by the shared transport socket; CLI parsing and RPC option-to-engine
   command propagation have focused tests. A C API FFI regression verifies that
   runtime handshake-timeout and uTP-cap changes produce the corresponding
-  engine commands.
+  engine commands. Protocol unit tests cover ID-space wraparound, the sole
+  free-ID case, complete exhaustion, idle retirement without pending
+  retransmissions, and preservation of a live connection after an inbound
+  connection-ID collision.
 
 ## Public BitTorrent tracker source timeout
 
@@ -528,9 +545,10 @@ behavior. An unlisted behavior has not been audited here.
   intended; the engine now consumes the protocol library's TCP listener
   primitive instead of binding Tokio sockets directly.
 - **Verification:** protocol loopback tests cover endpoint binding and raw
-  accept; core loopback tests cover shared multi-torrent routing, IPv4 peers
-  through IPv6 registration, route removal, blocked-delivery cancellation,
-  handshake limits, accept-error recovery, and socket release on shutdown.
+  accept and standalone-listener shutdown under receiver backpressure; core
+  loopback tests cover shared multi-torrent routing, IPv4 peers through IPv6
+  registration, route removal, blocked-delivery cancellation, handshake
+  limits, accept-error recovery, and socket release on shutdown.
   These tests do not establish interoperability against an upstream aria2
   binary or a remote peer swarm.
 - Incoming route registration precedes initial DHT startup. After discovery,
@@ -577,10 +595,12 @@ behavior. An unlisted behavior has not been audited here.
   builder output.
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
-  SFTP connection-establishment and SFTP I/O read timeouts independently, in seconds.
-  The connect timeout covers outbound DNS/TCP establishment and SSH negotiation
-  and authentication. Defaults
-  remain 15 and 30 seconds; each accepts 1 through 600 seconds.
+  SFTP connection-establishment and SFTP I/O read timeouts independently, in
+  seconds.
+  The connect timeout covers outbound DNS/TCP establishment, SSH negotiation
+  and authentication, and opening the SFTP session channel. SFTP packet
+  exchanges, including the initial response to INIT, use `sftp-read-timeout`.
+  Defaults remain 15 and 30 seconds; each accepts 1 through 600 seconds.
   `sftp-compression` enables SSH compression (default `false`),
   `sftp-keepalive-interval` defaults to 60 seconds and accepts 0 through 600
   (`0` disables keepalives), and `sftp-preferred-ciphers` sets the ordered
@@ -597,13 +617,19 @@ behavior. An unlisted behavior has not been audited here.
   propagation, protocol option construction, and session restore tests cover
   the path, including rejection of a persisted zero connect timeout and
   timeout of a pending core connection future. The protocol `connect_with_stream`
-  path now applies its configured deadline to both SSH handshake and
-  authentication, while the core deadline still includes policy-based DNS/TCP.
-  `cargo check -p aria2-protocol --features sftp` and `cargo check -p aria2-core
-  --features sftp` pass; this authentication-timeout extension was compile
-  checked but not independently exercised against a stalled authentication
-  peer in this pass. Original aria2 has no matching SFTP-specific timeout
-  options; these are Rust extensions.
+  path applies its configured deadline to both SSH handshake and authentication,
+  and SFTP channel opening uses that timeout. The initial SFTP packet exchange
+  uses the separately configured read timeout. The core deadline includes
+  policy-based DNS/TCP and SSH negotiation/authentication. A loopback server
+  test verifies that a stalled channel open and stalled SFTP INIT response
+  time out. A separate protocol loopback test confirms the server has entered
+  password authentication before stalling, then verifies
+  `connect_with_stream` returns `ConnectTimeout` within the configured
+  connection deadline.
+  `cargo check -p aria2-protocol --features sftp` and
+  `cargo check -p aria2-core --features "bittorrent metalink sftp"` pass.
+  Original aria2 has no matching SFTP-specific timeout options; these are Rust
+  extensions.
 - **Host-key verification:** the protocol library now enforces the documented
   `Strict`, `AcceptNew`, and `Disable` modes using OpenSSH-format
   `~/.ssh/known_hosts` by default; library callers can supply another file.

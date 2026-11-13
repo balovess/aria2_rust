@@ -25,6 +25,15 @@ pub use options::{
 /// Maximum receive buffer size for UDP
 const MAX_UDP_RECV_BUFFER: usize = 65535;
 
+fn find_available_connection_id(
+    start: u16,
+    mut is_occupied: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    (0..=u16::MAX)
+        .map(|offset| start.wrapping_add(offset))
+        .find(|connection_id| !is_occupied(*connection_id))
+}
+
 /// Errors that can occur during socket operations
 #[derive(Debug, thiserror::Error)]
 pub enum UtpSocketError {
@@ -212,19 +221,12 @@ impl UtpSocket {
             return Err(UtpSocketError::MaxConnectionsReached);
         }
 
-        let mut attempts = 0;
-        let (conn, syn_packet, conn_id) = loop {
-            attempts += 1;
-            if attempts > self.options.max_connections().saturating_add(1) {
-                return Err(UtpSocketError::MaxConnectionsReached);
-            }
-            let mut conn = UtpConnection::new();
-            let syn_packet = conn.connect(remote_addr)?;
-            let conn_id = conn.local_connection_id();
-            if !self.connections.contains_key(&conn_id) {
-                break (conn, syn_packet, conn_id);
-            }
-        };
+        let conn_id = find_available_connection_id(rand::random(), |connection_id| {
+            self.connections.contains_key(&connection_id)
+        })
+        .ok_or(UtpSocketError::MaxConnectionsReached)?;
+        let mut conn = UtpConnection::new();
+        let syn_packet = conn.connect_with_local_id(remote_addr, conn_id)?;
 
         self.send_packet(&syn_packet, remote_addr)?;
 
@@ -419,6 +421,11 @@ impl UtpSocket {
                                 TimerType::Keepalive,
                                 keepalive_interval,
                             );
+                            self.timers.set_timer(
+                                conn_id,
+                                TimerType::IdleTimeout,
+                                self.options.idle_timeout(),
+                            );
                         }
                         ConnectionState::Closing => {
                             self.timers.set_timer(
@@ -473,6 +480,8 @@ impl UtpSocket {
             TimerType::Keepalive,
             self.options.keepalive_interval(),
         );
+        self.timers
+            .set_timer(conn_id, TimerType::IdleTimeout, self.options.idle_timeout());
 
         Ok(())
     }

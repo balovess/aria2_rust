@@ -158,6 +158,62 @@ async fn bt_max_open_files_command_updates_the_shared_budget() {
     assert_eq!(ctx.open_file_budget.max_open_files(), 17);
 }
 
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn incoming_handshake_timeout_command_updates_live_listener_behavior() {
+    use crate::engine::bittorrent::peer::listener::BtPeerRouteConfig;
+    use crate::engine::bittorrent::peer::storage::DefaultPeerStorage;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut ctx = test_ctx(false);
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = ctx
+        .bt_listener
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [102; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 102,
+            max_peers: 1,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let (tx, mut rx) = crate::engine::engine_command::channel();
+    tx.send(EngineCommand::SetIncomingPeerHandshakeTimeout { seconds: 1 })
+        .unwrap();
+    let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+    process_engine_commands(
+        &mut ctx,
+        &mut rx,
+        &mut Vec::new(),
+        &mut false,
+        &mut false,
+        &completion_tx,
+    )
+    .await;
+
+    let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    stream.write_all(b"x").await.unwrap();
+    let mut byte = [0; 1];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+    ctx.bt_listener.shutdown().await;
+    assert_eq!(
+        read.expect("runtime timeout command should close the incomplete handshake")
+            .unwrap(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn external_task_completed_command_does_not_mark_session_dirty() {
     let mut ctx = test_ctx(false);

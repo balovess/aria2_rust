@@ -127,14 +127,14 @@ impl PeerListener {
                             let addr = peer.addr;
                             retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
                             debug!(addr = %addr, "Accepted incoming peer connection");
-                            if self.tx.send(peer).await.is_err() {
-                                warn!("Peer receiver dropped, stopping listener");
+                            if !self.forward_peer(peer, &mut shutdown).await {
+                                debug!("Peer forwarding stopped, exiting listener");
                                 break;
                             }
                             // Drain additional pending connections up to the
                             // batch limit, matching C++ PeerListenCommand which
                             // accepts up to 3 per execute() cycle.
-                            if !self.drain_pending().await {
+                            if !self.drain_pending(&mut shutdown).await {
                                 if self.tx.is_closed()
                                     || !wait_for_retry(&mut shutdown, retry_delay).await
                                 {
@@ -167,19 +167,21 @@ impl PeerListener {
     /// connections are waiting. This mirrors the C++ behavior where
     /// `socket_->isReadable(0)` checks for immediately available data
     /// without blocking.
-    async fn drain_pending(&self) -> bool {
+    async fn drain_pending(&self, shutdown: &mut tokio::sync::oneshot::Receiver<()>) -> bool {
         for _ in 1..MAX_ACCEPT_PER_CYCLE {
-            match tokio::time::timeout(
-                std::time::Duration::from_micros(500),
-                self.listener.accept(),
-            )
-            .await
-            {
+            let accept = tokio::select! {
+                biased;
+                _ = &mut *shutdown => return false,
+                result = tokio::time::timeout(
+                    std::time::Duration::from_micros(500),
+                    self.listener.accept(),
+                ) => result,
+            };
+            match accept {
                 Ok(Ok(peer)) => {
                     let addr = peer.addr;
                     debug!(addr = %addr, "Accepted incoming peer connection (drain)");
-                    if self.tx.send(peer).await.is_err() {
-                        warn!("Peer receiver dropped during drain");
+                    if !self.forward_peer(peer, shutdown).await {
                         return false;
                     }
                 }
@@ -191,6 +193,18 @@ impl PeerListener {
             }
         }
         true
+    }
+
+    async fn forward_peer(
+        &self,
+        peer: AcceptedPeer,
+        shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> bool {
+        tokio::select! {
+            biased;
+            _ = &mut *shutdown => false,
+            result = self.tx.send(peer) => result.is_ok(),
+        }
     }
 
     /// Returns the bound port number.
@@ -301,5 +315,29 @@ mod tests {
         let _ = shutdown_tx.send(());
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), listener_task).await;
         connect_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_accept_loop_blocked_by_receiver_backpressure() {
+        let (tx, _rx) = mpsc::channel::<AcceptedPeer>(1);
+        let listener = PeerListener::bind(0, tx).await.unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], listener.port()));
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            clients.push(tokio::net::TcpStream::connect(address).await.unwrap());
+        }
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let listener_task = tokio::spawn(listener.run(shutdown_rx));
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let _ = shutdown_tx.send(());
+
+        let joined =
+            tokio::time::timeout(std::time::Duration::from_millis(250), listener_task).await;
+        assert!(
+            joined.is_ok(),
+            "shutdown must interrupt a channel send blocked by receiver backpressure"
+        );
+        drop(clients);
     }
 }

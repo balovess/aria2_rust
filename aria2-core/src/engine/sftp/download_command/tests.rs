@@ -259,6 +259,18 @@ fn test_map_network_error_to_recoverable() {
 }
 
 #[test]
+fn test_map_unclassified_server_status_to_recoverable() {
+    let err = FileOpError::Other {
+        message: "READ failed (code=4): Generic failure".into(),
+    };
+    let mapped = SftpDownloadCommand::map_file_op_error(&err, "host", "/f");
+    assert!(matches!(
+        mapped,
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+    ));
+}
+
+#[test]
 fn sftp_retries_transient_network_failures_with_total_attempt_semantics() {
     let mut command = create_test_cmd();
     command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(2, 0);

@@ -243,6 +243,21 @@ mod tests {
 
     #[cfg(feature = "bittorrent")]
     #[test]
+    fn incoming_peer_handshake_timeout_projects_to_a_process_runtime_command() {
+        let changed = HashSet::from(["bt-incoming-peer-handshake-timeout".to_string()]);
+        let effective = HashMap::from([(
+            "bt-incoming-peer-handshake-timeout".to_string(),
+            OptionValue::Int(42),
+        )]);
+
+        assert!(matches!(
+            runtime_commands_for_global_option_changes(&changed, &effective).as_slice(),
+            [EngineCommand::SetIncomingPeerHandshakeTimeout { seconds: 42 }]
+        ));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
     fn dht_storage_option_change_projects_the_complete_effective_config() {
         let changed = HashSet::from(["dht-max-peer-info-hashes".to_string()]);
         let effective = HashMap::from([

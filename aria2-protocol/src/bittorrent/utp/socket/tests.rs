@@ -5,6 +5,74 @@ fn test_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
 }
 
+#[test]
+fn connection_id_search_wraps_and_finds_the_only_free_id() {
+    assert_eq!(
+        find_available_connection_id(u16::MAX, |connection_id| connection_id != 0),
+        Some(0)
+    );
+}
+
+#[test]
+fn connection_id_search_reports_full_id_space() {
+    assert_eq!(find_available_connection_id(123, |_| true), None);
+}
+
+#[tokio::test]
+async fn incoming_connection_id_collision_does_not_replace_active_connection() {
+    let options = UtpSocketOptions::default().with_max_connections(4);
+    let mut server = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let readiness = server.readiness_socket().unwrap();
+    let first_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let second_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local_connection_id = 101;
+    let syn = UtpPacket::syn(local_connection_id - 1, 7, 0, 65_536).to_bytes();
+
+    first_peer.send_to(&syn, server.local_addr()).await.unwrap();
+    poll_recv_after_readable(&mut server, &readiness).await;
+    let mut buffer = [0; 2048];
+    let (length, _) =
+        tokio::time::timeout(Duration::from_secs(2), first_peer.recv_from(&mut buffer))
+            .await
+            .expect("the first peer should receive SYN-ACK")
+            .unwrap();
+    assert_eq!(
+        UtpPacket::from_bytes(&buffer[..length])
+            .unwrap()
+            .packet_type()
+            .unwrap(),
+        PacketType::StAck
+    );
+    assert_eq!(server.connection_count(), 1);
+
+    second_peer
+        .send_to(&syn, server.local_addr())
+        .await
+        .unwrap();
+    poll_recv_after_readable(&mut server, &readiness).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            second_peer.recv_from(&mut buffer)
+        )
+        .await
+        .is_err(),
+        "the colliding peer must not receive a reply that could disturb another session"
+    );
+    assert_eq!(server.connection_count(), 1);
+    assert_eq!(
+        server
+            .connection_stats(local_connection_id)
+            .unwrap()
+            .remote_addr,
+        Some(first_peer.local_addr().unwrap())
+    );
+}
+
 async fn poll_recv_after_readable(socket: &mut UtpSocket, readiness: &tokio::net::UdpSocket) {
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut probe = [0; MAX_UDP_RECV_BUFFER];
@@ -68,6 +136,47 @@ fn socket_options_configure_connection_limit_and_timers() {
     assert!(matches!(
         socket.connect(remote_addr),
         Err(UtpSocketError::MaxConnectionsReached)
+    ));
+}
+
+#[tokio::test]
+async fn established_idle_connection_retires_without_retransmit_timer() {
+    let options = UtpSocketOptions::default()
+        .with_idle_timeout(Duration::from_millis(40))
+        .with_keepalive_interval(Duration::from_secs(5));
+    let mut client = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
+    let readiness = client.readiness_socket().unwrap();
+
+    let mut wire_buffer = [0; 2048];
+    let (syn_len, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
+    peer.send_to(
+        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    poll_recv_after_readable(&mut client, &readiness).await;
+    assert_eq!(
+        client.connection_state(conn_id).unwrap(),
+        ConnectionState::Established
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client.process_timers().unwrap();
+    assert!(matches!(
+        client.connection_state(conn_id),
+        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
     ));
 }
 

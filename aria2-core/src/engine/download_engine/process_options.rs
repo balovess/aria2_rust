@@ -300,6 +300,52 @@ mod tests {
         assert_eq!(dht_options.dht_max_peer_info_hashes, 1200);
         assert_eq!(dht_options.dht_max_peers_per_info_hash, 37);
     }
+
+    #[tokio::test]
+    async fn process_options_apply_incoming_handshake_timeout_to_live_listener() {
+        use crate::engine::bittorrent::peer::listener::BtPeerRouteConfig;
+        use crate::engine::bittorrent::peer::storage::DefaultPeerStorage;
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::Mutex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let options = HashMap::from([(
+            "bt-incoming-peer-handshake-timeout".to_string(),
+            OptionValue::Int(1),
+        )]);
+        let engine =
+            DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
+        let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+        let (port, _incoming, _route) = engine
+            .bt_listener
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ports: vec![0],
+                info_hash: [101; 20],
+                info_hash_v2: None,
+                local_peer_id: [1; 20],
+                caretaker_id: 101,
+                max_peers: 1,
+                peer_storage: storage,
+                crypto_policy: Default::default(),
+                dht_enabled: false,
+            })
+            .await
+            .unwrap();
+
+        let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        stream.write_all(b"x").await.unwrap();
+        let mut byte = [0; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+        engine.bt_listener.shutdown().await;
+        assert_eq!(
+            read.expect("startup timeout should close the incomplete handshake")
+                .unwrap(),
+            0
+        );
+    }
 }
 
 fn option_string<'a>(options: &'a HashMap<String, OptionValue>, name: &str) -> Option<&'a str> {
