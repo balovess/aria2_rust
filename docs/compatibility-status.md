@@ -81,7 +81,8 @@ behavior. An unlisted behavior has not been audited here.
   paths.
 - **Configuration:** all `http-adaptive-*` controls are exposed through the
   option registry, CLI, global RPC option updates, and C API global-option
-  entry points. They configure subsequently created download tasks. Session
+  entry points. RPC `addUri` and C API `add_uri` option maps can override them
+  for one task without changing global defaults. Session
   snapshots retain the configured values even when execution normalizes paired
   limits such as recovery successes or pacing intervals.
 - **Verification:** an engine-level pause/resume test lets a resumed range
@@ -392,18 +393,30 @@ behavior. An unlisted behavior has not been audited here.
   process-wide engine settings. `DownloadEngine::new` uses process defaults;
   library callers supply custom process settings through
   `DownloadEngine::from_process_options`.
+- **Resource limits:** process options `dht-max-peer-info-hashes` and
+  `dht-max-peers-per-info-hash` configure the Rust DHT engine's local announce
+  storage. Defaults remain 4,096 info-hashes and 50 peers per info-hash. The
+  original implementation had no corresponding caps; these bounded defaults
+  limit memory but can cause older swarm/peer announcements to stop being
+  returned under pressure. These settings are available as process
+  configuration through CLI/config files and C API session startup, are visible
+  through global-option RPC reads and `changeGlobalOption`. Global changes
+  immediately update running engines, trim excess entries by least-recently
+  updated swarm/peer, and update the process snapshot used by later engines.
 - **Compatibility reference:** original aria2's `DHTSetup.cc` reads these
   engine settings from `DownloadEngine::getOption()`, while `RequestGroup.cc`
   reads the per-task DHT enable flags. DHT options are not marked with
   `setChangeGlobalOption(true)` in `OptionHandlerFactory.cc`.
-- **Runtime contract:** DHT engine settings are excluded from both
-  `changeGlobalOption` and task `changeOption` allowlists. The live DHT engine
-  has no runtime reconfiguration command, and original aria2 does not mark the
-  DHT handlers changeable for either operation. CLI and config process options
-  supply engine settings; RPC-created and session-restored tasks retain their
+- **Runtime contract:** These two Rust-specific resource bounds are available
+  to `changeGlobalOption`, but remain excluded from task `changeOption`. Other
+  DHT engine settings remain fixed after startup and are excluded from both
+  runtime option allowlists. RPC-created and session-restored tasks retain
   per-task enable flags but cannot override shared engine settings.
 - **Verification:** focused core tests cover process-option precedence over a
-  task override and the runtime allowlist contract. DHT network interoperability
+  task override, projection of every configurable DHT timeout/concurrency and
+  persistence-age value into the protocol config, process-level peer-storage
+  options through the CLI/C API/config-to-engine path, RPC global-option
+  projection, and the runtime allowlist contract. DHT network interoperability
   under simultaneous tasks with conflicting DHT overrides has not been run.
 
 ## BitTorrent peer input error classification
@@ -570,8 +583,14 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** focused CLI, RPC option validation, C API global-option
   propagation, protocol option construction, and session restore tests cover
   the path, including rejection of a persisted zero connect timeout and
-  timeout of a pending connection future. Original aria2 has no matching
-  SFTP-specific timeout options; these are Rust extensions.
+  timeout of a pending core connection future. The protocol `connect_with_stream`
+  path now applies its configured deadline to both SSH handshake and
+  authentication, while the core deadline still includes policy-based DNS/TCP.
+  `cargo check -p aria2-protocol --features sftp` and `cargo check -p aria2-core
+  --features sftp` pass; this authentication-timeout extension was compile
+  checked but not independently exercised against a stalled authentication
+  peer in this pass. Original aria2 has no matching SFTP-specific timeout
+  options; these are Rust extensions.
 - **Host-key verification:** the protocol library now enforces the documented
   `Strict`, `AcceptNew`, and `Disable` modes using OpenSSH-format
   `~/.ssh/known_hosts` by default; library callers can supply another file.

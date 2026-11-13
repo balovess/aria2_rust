@@ -482,6 +482,12 @@ pub enum EngineCommand {
     /// Change the process-wide cap for open files used by multi-file downloads.
     #[cfg(feature = "bittorrent")]
     SetBtMaxOpenFiles { max: usize },
+
+    /// Change process-wide limits for locally announced DHT peers.
+    #[cfg(feature = "bittorrent")]
+    SetDhtPeerStorageConfig {
+        config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig,
+    },
 }
 
 impl EngineCommand {

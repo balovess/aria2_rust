@@ -665,13 +665,13 @@ Do not add pass-through engine clients around these public interfaces.
   download engine; callers provide `HttpConfig`, including its independent
   connect timeout. The active HTTP task path remains the reqwest-based engine
   described above, so this API is not an unconfigured bypass of task options.
-- **Improve** sequential HTTP gap filling: derive completed progress from the
-  normalized missing ranges so overlapping input ranges cannot be double
-  counted, clip out-of-file coverage while planning gaps, and cross
+- **Narrow** sequential HTTP gap filling around normalized completed ranges:
+  derive progress from missing ranges, clip out-of-file coverage before both
+  gap planning and checkpoint merging, and cross
   `SeekableDiskWriter::sync_all` before recording gap completion in a control
   file or completing the task. Keep redirect handling, cancellation, rate
-  limiting, and checkpoint lifecycle in the core downloader. Move its direct
-  tests into the adjacent `gap_download/tests.rs` module.
+  limiting, and checkpoint lifecycle in the core downloader. Keep direct gap
+  tests in the adjacent `gap_download/tests.rs` module.
 - **Narrow** active-range bookkeeping in
   `engine::http::concurrent_download::segment`: replace the positional
   `(offset, length, started_at, task_id)` tuple with a named `ActiveSegment`
@@ -717,10 +717,13 @@ Do not add pass-through engine clients around these public interfaces.
   data-socket policy, and task lifecycle. FTPS TLS and RFC 4217 negotiation
   live in the protocol crate. The standalone client remains a distinct
   public client rather than a forwarding stage in the engine route.
-- **Improve** FTPS TLS setup with a protocol-layer `FtpsClient` that builds one
-  rustls connector per attempt and reuses it for control and data-channel
-  handshakes. The engine selects direct/proxy and explicit/implicit connection
-  paths; it does not construct TLS connectors or issue RFC 4217 commands.
+- **Narrow** FTPS TLS assembly through `aria2_protocol::ftp::tls::FtpsClient`:
+  the engine builds one client per attempt and reuses its connector for
+  explicit/implicit control TLS and protected data-channel handshakes. Protocol
+  code owns the `AUTH TLS`, `PBSZ 0`, and `PROT P` exchanges; core selects
+  direct/proxy and explicit/implicit routes, maps options, and manages the FTP
+  task lifecycle. Keep the standalone per-call TLS helpers for their public
+  library callers.
 - **Narrow** FTP response input to the upstream 64 KiB limit in both the
   standalone client and injected control session. The shared bounded line
   reader checks the remaining response budget before growing the line buffer,
@@ -851,8 +854,15 @@ Do not add pass-through engine clients around these public interfaces.
   explicit bootstrap endpoints; the protocol engine owns its built-in bootstrap
   list and background resolution. `DownloadEngine::new` supplies process
   defaults, while CLI, C API, and library callers use `from_process_options`
-  for custom process settings. DHT settings are not runtime-changeable per task
-  or globally, matching the original option handlers.
+  for custom process settings. DHT settings are not runtime-changeable per
+  task. The Rust-specific announce-storage bounds are changeable globally;
+  updates trim running storage immediately and apply to engines started later.
+- **Improve** DHT peer-storage resource policy: protocol `DhtPeerStorageConfig`
+  owns the per-engine swarm and per-swarm peer bounds, and core passes the
+  process snapshot at engine startup. Preserve the original `DhtEngine::start`
+  and local-peer startup interfaces by adding configured startup entry points.
+  The existing defaults remain unchanged; fixed KRPC response and BEP limits
+  remain protocol behavior rather than user configuration.
 - **Delete** `DhtTaskFactory`, which only forwarded the shared context to task
   constructors. The engine now constructs the scheduled task directly, making
   task selection and its inputs visible at the scheduling point.
@@ -961,10 +971,12 @@ Do not add pass-through engine clients around these public interfaces.
   `DownloadOptions::from_option_strings` parser. Do not manually reparse
   selected persisted SFTP fields after construction, which bypasses shared
   value handling and can restore invalid timeout values.
-- **Improve** SFTP connection timeout and cancellation handling: bound the
-  policy-based DNS/TCP connection plus SSH setup with the configured timeout,
-  and release outbound-source in-flight accounting through RAII when the
-  timed connection future is cancelled.
+- **Narrow** SFTP connection deadlines by layer: core bounds policy-based
+  DNS/TCP establishment and the complete connection operation; the protocol
+  library independently bounds SSH handshake and authentication for callers
+  using `SshConnection::connect_with_stream`. Outbound-source in-flight
+  accounting is released through RAII when the TCP connection future is
+  cancelled.
 - **Keep** process-engine option assembly in core at
   `engine::download_engine::DownloadEngine::from_process_options`.
   CLI and C API pass typed option snapshots through this single boundary for

@@ -247,23 +247,26 @@ impl SshConnection {
     pub async fn connect(options: SshOptions) -> Result<Self, SshError> {
         let target = options.target();
         debug!("[SFTP] Connecting to SSH (russh): {}", target);
-        let config = build_client_config(&options)?;
-        let stream = tokio::time::timeout(
-            options.connect_timeout,
-            tokio::net::TcpStream::connect((options.host.as_str(), options.port)),
-        )
+        let timeout = options.connect_timeout;
+        let host = options.host.clone();
+        let port = options.port;
+        tokio::time::timeout(timeout, async move {
+            let config = build_client_config(&options)?;
+            let stream = tokio::net::TcpStream::connect((options.host.as_str(), options.port))
+                .await
+                .map_err(|error| SshError::ConnectFailed {
+                    host: options.host.clone(),
+                    port: options.port,
+                    message: error.to_string(),
+                })?;
+            Self::connect_with_config(options, stream, config).await
+        })
         .await
         .map_err(|_| SshError::ConnectTimeout {
-            host: options.host.clone(),
-            port: options.port,
-            timeout_secs: options.connect_timeout.as_secs(),
+            host,
+            port,
+            timeout_secs: timeout.as_secs(),
         })?
-        .map_err(|error| SshError::ConnectFailed {
-            host: options.host.clone(),
-            port: options.port,
-            message: error.to_string(),
-        })?;
-        Self::connect_with_config(options, stream, config).await
     }
 
     /// Complete the SSH handshake over a TCP stream created by the caller.
@@ -291,37 +294,45 @@ impl SshConnection {
 
         let config = Arc::new(config);
 
-        // Step 2: Create handler and establish SSH connection over the supplied TCP stream.
-        let host_key_error = Arc::new(std::sync::Mutex::new(None));
-        let handler = SshClientHandler::new(Arc::clone(&options_arc), Arc::clone(&host_key_error));
+        // A caller-supplied socket may still stall during either the SSH
+        // handshake or authentication, so the protocol connection timeout
+        // covers both phases. The engine may wrap this operation in a wider
+        // deadline that also includes policy-based DNS and TCP establishment.
+        let timeout = options_arc.connect_timeout;
+        let connection = async {
+            // Step 2: Create handler and establish SSH over the supplied stream.
+            let host_key_error = Arc::new(std::sync::Mutex::new(None));
+            let handler =
+                SshClientHandler::new(Arc::clone(&options_arc), Arc::clone(&host_key_error));
 
-        let mut handle = tokio::time::timeout(
-            options_arc.connect_timeout,
-            client::connect_stream(config, stream, handler),
-        )
-        .await
-        .map_err(|_| SshError::ConnectTimeout {
-            host: options_arc.host.clone(),
-            port: options_arc.port,
-            timeout_secs: options_arc.connect_timeout.as_secs(),
-        })?
-        .map_err(|e| {
-            host_key_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .unwrap_or_else(|| SshError::Handshake {
-                    message: format!("SSH handshake failed: {}", e),
-                })
-        })?;
+            let mut handle = client::connect_stream(config, stream, handler)
+                .await
+                .map_err(|error| {
+                    host_key_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                        .unwrap_or_else(|| SshError::Handshake {
+                            message: format!("SSH handshake failed: {error}"),
+                        })
+                })?;
 
-        info!(
-            "[SFTP] SSH handshake complete (russh): {} (key_check={})",
-            target, options_arc.host_key_mode
-        );
+            info!(
+                "[SFTP] SSH handshake complete (russh): {} (key_check={})",
+                target, options_arc.host_key_mode
+            );
 
-        // Step 3: Authenticate
-        Self::authenticate(&mut handle, &options_arc).await?;
+            // Step 3: Authenticate under the same connection deadline.
+            Self::authenticate(&mut handle, &options_arc).await?;
+            Ok::<_, SshError>(handle)
+        };
+        let handle = tokio::time::timeout(timeout, connection)
+            .await
+            .map_err(|_| SshError::ConnectTimeout {
+                host: options_arc.host.clone(),
+                port: options_arc.port,
+                timeout_secs: timeout.as_secs(),
+            })??;
 
         info!("[SFTP] SSH authenticated successfully: {}", target);
 

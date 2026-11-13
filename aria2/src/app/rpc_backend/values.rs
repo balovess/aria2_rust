@@ -262,6 +262,45 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
+    #[cfg(feature = "bittorrent")]
+    #[tokio::test]
+    async fn global_dht_storage_limits_update_config_and_engine() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "dht-max-peer-info-hashes".to_string(),
+                serde_json::json!(128),
+            )]))
+            .await
+            .expect("DHT resource bounds are global runtime options");
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("dht-max-peer-info-hashes")
+                .await,
+            Some(128)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetDhtPeerStorageConfig { config }
+                if config.max_info_hashes == 128
+                    && config.max_peers_per_info_hash
+                        == aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default()
+                            .max_peers_per_info_hash
+        ));
+    }
+
     #[tokio::test]
     async fn global_option_alias_updates_canonical_concurrency_setting() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));

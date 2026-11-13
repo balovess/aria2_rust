@@ -439,6 +439,8 @@ impl App {
         set_u64!("dht-bootstrap-timeout", b.dht_bootstrap_timeout);
         set_u64!("dht-max-concurrent-lookups", b.dht_max_concurrent_lookups);
         set_u64!("dht-persistence-max-age", b.dht_persistence_max_age);
+        set_u64!("dht-max-peer-info-hashes", b.dht_max_peer_info_hashes);
+        set_u64!("dht-max-peers-per-info-hash", b.dht_max_peers_per_info_hash);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
         set_str!("dht-entry-point6", b.dht_entry_point6);

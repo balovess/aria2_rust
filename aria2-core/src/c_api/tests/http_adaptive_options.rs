@@ -84,6 +84,61 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
 }
 
 #[test]
+fn c_api_http_adaptive_task_options_override_global_defaults() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(aria2_rust_library_init(), 0);
+    let session = unsafe { aria2_rust_session_new(ptr::null(), 0, ptr::null_mut()) };
+    assert!(!session.is_null());
+
+    let uri = CString::new("http://127.0.0.1:1/http-adaptive-task-test").unwrap();
+    let uri_ptr = uri.as_ptr();
+    let options = [
+        kv("http-adaptive-enabled", "true"),
+        kv("http-adaptive-recovery-successes-min", "40"),
+        kv("http-adaptive-recovery-successes-max", "20"),
+        kv("http-adaptive-backoff-base", "30"),
+        kv("http-adaptive-backoff-max", "10"),
+    ];
+    let entries = options
+        .iter()
+        .map(|(_, name, value)| Aria2RustKeyValue {
+            name: name.as_ptr(),
+            value: value.as_ptr(),
+        })
+        .collect::<Vec<_>>();
+    let mut gid = 0;
+
+    assert_eq!(
+        unsafe {
+            aria2_rust_add_uri(
+                session,
+                &uri_ptr,
+                1,
+                entries.as_ptr(),
+                entries.len(),
+                &mut gid,
+            )
+        },
+        0
+    );
+    let group = unsafe { (&*session).request_man.find_group(GroupId::new(gid)) }
+        .expect("C API should create a request group using its task options");
+    let group = group.read().unwrap();
+    let adaptive = group.options().http_adaptive;
+    assert!(adaptive.enabled);
+    assert_eq!(adaptive.recovery_successes_min, 40);
+    assert_eq!(adaptive.recovery_successes_max, 40);
+    assert_eq!(adaptive.backoff_base_secs, 30);
+    assert_eq!(adaptive.backoff_max_secs, 30);
+    drop(group);
+
+    assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
+    aria2_rust_library_deinit();
+}
+
+#[test]
 fn c_api_rejects_a_global_option_batch_without_partial_mutation() {
     let _guard = TEST_LOCK
         .lock()

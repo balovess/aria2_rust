@@ -413,6 +413,19 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
                     "BitTorrent multi-file open-file limit updated at runtime"
                 );
             }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetDhtPeerStorageConfig { config } => {
+                ctx.bt_registry
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_global_dht_peer_storage_config(config);
+                info!(
+                    max_info_hashes = config.max_info_hashes,
+                    max_peers_per_info_hash = config.max_peers_per_info_hash,
+                    "DHT peer-storage limits updated at runtime"
+                );
+            }
         }
     }
     processed

@@ -12,6 +12,20 @@ use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, Re
 use crate::util::perf_monitor::AtomicMetrics;
 use crate::util::rwlock_ext::RwLockRecover;
 
+#[test]
+fn completed_ranges_are_clipped_before_checkpoint_merging() {
+    let ranges = [(0, 4), (3, 5), (u64::MAX - 1, 3)];
+
+    assert_eq!(
+        SequentialDownloader::normalize_completed_ranges(&ranges, 10),
+        vec![(0, 8)]
+    );
+    assert_eq!(
+        SequentialDownloader::find_all_gaps(&ranges, 10),
+        vec![(8, 2)]
+    );
+}
+
 fn make_downloader(
     uri: &str,
     output_path: std::path::PathBuf,

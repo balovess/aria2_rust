@@ -763,6 +763,8 @@ fn dht_engine_options_are_not_change_global_options() {
         "dht-bootstrap-timeout",
         "dht-max-concurrent-lookups",
         "dht-persistence-max-age",
+        "dht-max-peer-info-hashes",
+        "dht-max-peers-per-info-hash",
     ] {
         assert!(
             !RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&name),

@@ -194,6 +194,36 @@ fn rejected_russh_authentication_is_not_treated_as_success() {
     ));
 }
 
+#[tokio::test]
+async fn connect_with_stream_times_out_when_the_ssh_peer_stalls() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind stalled SSH peer");
+    let address = listener.local_addr().expect("read listener address");
+    let peer = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept SSH client");
+        std::future::pending::<()>().await;
+    });
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect to stalled SSH peer");
+    let options = SshOptions::new("127.0.0.1", "user")
+        .with_host_key_mode(HostKeyCheckingMode::Disable)
+        .with_timeouts(Duration::from_millis(50), Duration::from_secs(1));
+
+    let result = SshConnection::connect_with_stream(options, stream).await;
+    peer.abort();
+
+    assert!(matches!(
+        result,
+        Err(SshError::ConnectTimeout {
+            host,
+            port: 22,
+            timeout_secs: 0,
+        }) if host == "127.0.0.1"
+    ));
+}
+
 #[test]
 fn test_host_key_fingerprint_formats() {
     let key = keys::parse_public_key_base64(

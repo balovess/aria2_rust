@@ -8,6 +8,19 @@ use tracing::trace;
 impl BtRegistry {
     // -----------------------------------------------------------------------
     // DHT engine management
+
+    /// Update process DHT storage limits and apply them to running engines.
+    pub(crate) fn set_global_dht_peer_storage_config(
+        &mut self,
+        config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig,
+    ) {
+        let options = Arc::make_mut(&mut self.global_dht_options);
+        options.dht_max_peer_info_hashes = config.max_info_hashes.max(1);
+        options.dht_max_peers_per_info_hash = config.max_peers_per_info_hash.max(1);
+        for engine in self.global_dht_engines.iter() {
+            engine.set_peer_storage_config(config);
+        }
+    }
     // -----------------------------------------------------------------------
 
     /// Set the process-wide DHT engine for its bound address family.
@@ -62,6 +75,22 @@ impl BtRegistry {
         gid: u64,
         config: aria2_protocol::bittorrent::dht::engine::DhtEngineConfig,
     ) -> std::io::Result<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        Self::get_or_start_global_dht_engine_with_storage_config(
+            registry,
+            gid,
+            config,
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default(),
+        )
+        .await
+    }
+
+    /// Start or join the process DHT engine with explicit peer-storage bounds.
+    pub async fn get_or_start_global_dht_engine_with_storage_config(
+        registry: &Arc<std::sync::RwLock<Self>>,
+        gid: u64,
+        config: aria2_protocol::bittorrent::dht::engine::DhtEngineConfig,
+        peer_storage_config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig,
+    ) -> std::io::Result<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
         let use_ipv6 = config.listen_addr.is_some_and(|address| address.is_ipv6());
         let startup_lock = {
             let registry = registry
@@ -91,8 +120,9 @@ impl BtRegistry {
 
         let registry_weak = Arc::downgrade(registry);
         let candidate =
-            aria2_protocol::bittorrent::dht::engine::DhtEngine::start_with_local_peer_lookup(
+            aria2_protocol::bittorrent::dht::engine::DhtEngine::start_with_local_peer_lookup_and_storage_config(
                 config,
+                peer_storage_config,
                 move |info_hash, requester_ip| {
                     let registry = registry_weak.upgrade()?;
                     let registry = registry
@@ -106,6 +136,9 @@ impl BtRegistry {
             let mut registry = registry
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            candidate.set_peer_storage_config(
+                registry.global_dht_options().protocol_peer_storage_config(),
+            );
             let engine = registry.get_or_install_global_dht_engine(Arc::clone(&candidate));
             registry.set_dht_engine_for_gid(gid, Arc::clone(&engine));
             engine

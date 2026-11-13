@@ -60,6 +60,25 @@ fn registry_default_dht_configuration_does_not_inherit_task_overrides() {
     );
 }
 
+#[tokio::test]
+async fn global_dht_start_applies_process_peer_storage_limits() {
+    let registry = Arc::new(std::sync::RwLock::new(BtRegistry::new()));
+    let engine = BtRegistry::get_or_start_global_dht_engine_with_storage_config(
+        &registry,
+        91,
+        aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+        aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+            max_info_hashes: 7,
+            max_peers_per_info_hash: 5,
+        },
+    )
+    .await
+    .expect("process DHT engine should start with configured peer-storage limits");
+
+    assert_eq!(engine.stats().await.max_peer_info_hashes, 7);
+    engine.shutdown_async().await;
+}
+
 /// Helper: create a BtObject with DownloadContext and TorrentAttribute.
 fn make_bt_object_with_info_hash(
     piece_length: u32,

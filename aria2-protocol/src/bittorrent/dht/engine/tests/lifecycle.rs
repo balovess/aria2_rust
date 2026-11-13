@@ -1,5 +1,6 @@
 use super::super::{DhtEngine, DhtEngineConfig, DhtEngineState};
 use crate::bittorrent::dht::node::DhtNode;
+use crate::bittorrent::dht::peer_storage::DhtPeerStorageConfig;
 use crate::bittorrent::dht::persistence::DhtPersistence;
 use crate::bittorrent::dht::store::DhtItemStore;
 use crate::bittorrent::dht::task::DhtTask;
@@ -155,9 +156,15 @@ async fn test_dht_engine_stats() {
         ..DhtEngineConfig::local()
     };
 
-    let engine = DhtEngine::start(config)
-        .await
-        .expect("start should succeed");
+    let engine = DhtEngine::start_with_peer_storage_config(
+        config,
+        DhtPeerStorageConfig {
+            max_info_hashes: 3,
+            max_peers_per_info_hash: 2,
+        },
+    )
+    .await
+    .expect("start should succeed");
     let info_hash_limit = engine.context.peer_storage.stats().max_info_hashes;
     for value in 0..=info_hash_limit {
         let mut info_hash = [0u8; 20];
@@ -173,6 +180,15 @@ async fn test_dht_engine_stats() {
     assert_eq!(stats.stored_peers, info_hash_limit);
     assert_eq!(stats.peer_storage_evictions, 1);
     assert_eq!(stats.max_peer_info_hashes, info_hash_limit);
+
+    engine.set_peer_storage_config(DhtPeerStorageConfig {
+        max_info_hashes: 2,
+        max_peers_per_info_hash: 1,
+    });
+    let updated_stats = engine.stats().await;
+    assert_eq!(updated_stats.peer_info_hashes, 2);
+    assert_eq!(updated_stats.stored_peers, 2);
+    assert_eq!(updated_stats.max_peer_info_hashes, 2);
 
     engine.shutdown_async().await;
 }

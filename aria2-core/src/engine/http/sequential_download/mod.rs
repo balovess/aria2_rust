@@ -207,8 +207,20 @@ impl SequentialDownloader {
         merged
     }
 
+    fn normalize_completed_ranges(ranges: &[(u64, u64)], total_length: u64) -> Vec<(u64, u64)> {
+        let bounded_ranges: Vec<_> = ranges
+            .iter()
+            .filter_map(|&(offset, length)| {
+                let start = offset.min(total_length);
+                let end = offset.saturating_add(length).min(total_length);
+                (start < end).then_some((start, end - start))
+            })
+            .collect();
+        Self::merge_ranges(&bounded_ranges)
+    }
+
     pub fn find_all_gaps(completed_ranges: &[(u64, u64)], total_length: u64) -> Vec<(u64, u64)> {
-        let merged_ranges = Self::merge_ranges(completed_ranges);
+        let merged_ranges = Self::normalize_completed_ranges(completed_ranges, total_length);
         let mut gaps = Vec::new();
         if merged_ranges.is_empty() {
             if total_length > 0 {
@@ -222,12 +234,10 @@ impl SequentialDownloader {
             if current >= total_length {
                 break;
             }
-            let start = offset.min(total_length);
-            let end = offset.saturating_add(length).min(total_length);
-            if start > current {
-                gaps.push((current, start - current));
+            if offset > current {
+                gaps.push((current, offset - current));
             }
-            current = std::cmp::max(current, end);
+            current = offset + length;
         }
         if current < total_length {
             gaps.push((current, total_length - current));

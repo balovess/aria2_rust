@@ -101,6 +101,34 @@ fn c_api_ignores_dht_settings_in_global_runtime_changes() {
     session.finalize();
 }
 
+#[cfg(feature = "bittorrent")]
+#[test]
+fn c_api_accepts_dht_peer_storage_process_options_at_session_start() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(vec![
+        ("dht-max-peer-info-hashes".to_string(), "1200".to_string()),
+        ("dht-max-peers-per-info-hash".to_string(), "37".to_string()),
+    ])
+    .expect("C API session should accept DHT process configuration");
+
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-peer-info-hashes")),
+        Some(1200)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-peers-per-info-hash")),
+        Some(37)
+    );
+
+    session.finalize();
+}
+
 #[test]
 fn c_api_applies_process_engine_network_and_server_stat_options() {
     let runtime = Runtime::new().unwrap();

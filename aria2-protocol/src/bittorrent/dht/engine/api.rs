@@ -15,6 +15,14 @@ use super::super::tracker::QueryType;
 use super::{DhtEngine, DhtEngineState, FindPeersResult};
 
 impl DhtEngine {
+    /// Change the locally announced peer-storage bounds for this engine.
+    pub fn set_peer_storage_config(
+        &self,
+        config: super::super::peer_storage::DhtPeerStorageConfig,
+    ) {
+        self.context.peer_storage.set_config(config);
+    }
+
     /// Return the UDP socket address this engine is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.context.task_context.socket.local_addr()

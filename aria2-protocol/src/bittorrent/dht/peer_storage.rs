@@ -9,10 +9,35 @@ use tracing::{debug, trace};
 const PEER_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Maximum peers to store per info_hash to prevent unbounded growth.
-const MAX_PEERS_PER_INFO_HASH: usize = 50;
+const DEFAULT_MAX_PEERS_PER_INFO_HASH: usize = 50;
 
 /// Maximum swarms retained by one DHT engine.
-const MAX_INFO_HASHES: usize = 4_096;
+const DEFAULT_MAX_INFO_HASHES: usize = 4_096;
+
+/// Resource limits for locally announced peers held by one DHT engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DhtPeerStorageConfig {
+    /// Maximum distinct info-hashes retained by one address-family engine.
+    pub max_info_hashes: usize,
+    /// Maximum peer endpoints retained for each info-hash.
+    pub max_peers_per_info_hash: usize,
+}
+
+impl Default for DhtPeerStorageConfig {
+    fn default() -> Self {
+        Self {
+            max_info_hashes: DEFAULT_MAX_INFO_HASHES,
+            max_peers_per_info_hash: DEFAULT_MAX_PEERS_PER_INFO_HASH,
+        }
+    }
+}
+
+fn normalize_config(config: DhtPeerStorageConfig) -> DhtPeerStorageConfig {
+    DhtPeerStorageConfig {
+        max_info_hashes: config.max_info_hashes.max(1),
+        max_peers_per_info_hash: config.max_peers_per_info_hash.max(1),
+    }
+}
 
 /// A single announced peer with the timestamp of its last announcement.
 struct PeerEntry {
@@ -25,11 +50,17 @@ struct SwarmEntry {
     last_updated: Instant,
 }
 
-#[derive(Default)]
 struct PeerStore {
     swarms: HashMap<[u8; 20], SwarmEntry>,
     least_recent: BTreeSet<(Instant, [u8; 20])>,
     evictions: u64,
+    config: DhtPeerStorageConfig,
+}
+
+impl Default for PeerStore {
+    fn default() -> Self {
+        Self::with_config(DhtPeerStorageConfig::default())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +72,46 @@ pub(crate) struct DhtPeerStorageStats {
 }
 
 impl PeerStore {
+    fn with_config(config: DhtPeerStorageConfig) -> Self {
+        Self {
+            swarms: HashMap::new(),
+            least_recent: BTreeSet::new(),
+            evictions: 0,
+            config: normalize_config(config),
+        }
+    }
+
+    fn set_config(&mut self, config: DhtPeerStorageConfig) {
+        self.config = normalize_config(config);
+
+        for swarm in self.swarms.values_mut() {
+            while swarm.peers.len() > self.config.max_peers_per_info_hash {
+                let oldest_idx = swarm
+                    .peers
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, peer)| peer.last_seen)
+                    .map(|(index, _)| index)
+                    .expect("over-limit swarm must contain a peer");
+                swarm.peers.remove(oldest_idx);
+            }
+        }
+        self.swarms.retain(|_, swarm| !swarm.peers.is_empty());
+        self.least_recent = self
+            .swarms
+            .iter()
+            .map(|(info_hash, swarm)| (swarm.last_updated, *info_hash))
+            .collect();
+
+        while self.swarms.len() > self.config.max_info_hashes {
+            let Some((_, oldest_hash)) = self.least_recent.pop_first() else {
+                break;
+            };
+            self.swarms.remove(&oldest_hash);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
+
     fn remove_swarm(&mut self, info_hash: &[u8; 20]) -> bool {
         let Some(entry) = self.swarms.remove(info_hash) else {
             return false;
@@ -87,9 +158,25 @@ impl Default for DhtPeerStorage {
 impl DhtPeerStorage {
     /// Create an empty peer storage.
     pub fn new() -> Self {
+        Self::with_config(DhtPeerStorageConfig::default())
+    }
+
+    /// Create peer storage with explicit memory bounds.
+    ///
+    /// Zero limits are normalized to one so the storage always has useful
+    /// behavior and cannot silently disable peer discovery.
+    pub fn with_config(config: DhtPeerStorageConfig) -> Self {
         Self {
-            inner: Mutex::new(PeerStore::default()),
+            inner: Mutex::new(PeerStore::with_config(config)),
         }
+    }
+
+    /// Update storage bounds immediately, evicting least-recent data as needed.
+    pub fn set_config(&self, config: DhtPeerStorageConfig) {
+        self.inner
+            .lock()
+            .expect("DhtPeerStorage mutex poisoned")
+            .set_config(config);
     }
 
     /// Add or refresh a peer for the given info_hash using the current time.
@@ -161,7 +248,7 @@ impl DhtPeerStorage {
             info_hashes: map.swarms.len(),
             peers: map.swarms.values().map(|swarm| swarm.peers.len()).sum(),
             evictions: map.evictions,
-            max_info_hashes: MAX_INFO_HASHES,
+            max_info_hashes: map.config.max_info_hashes,
         }
     }
 
@@ -212,17 +299,18 @@ impl DhtPeerStorage {
     ///
     /// If the peer already exists for this info_hash its `last_seen` is updated.
     /// Otherwise a new entry is appended; when the vector exceeds
-    /// `MAX_PEERS_PER_INFO_HASH` the oldest entry (smallest `last_seen`) is
-    /// evicted.
+    /// the configured per-info-hash limit the oldest entry (smallest
+    /// `last_seen`) is evicted.
     fn add_peer_inner(&self, info_hash: [u8; 20], addr: SocketAddr, last_seen: Instant) {
         let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
+        let config = map.config;
         if let Some(swarm) = map.swarms.get_mut(&info_hash) {
             let previous_update = swarm.last_updated;
             if let Some(entry) = swarm.peers.iter_mut().find(|e| e.addr == addr) {
                 entry.last_seen = last_seen;
             } else {
                 swarm.peers.push(PeerEntry { addr, last_seen });
-                if swarm.peers.len() > MAX_PEERS_PER_INFO_HASH {
+                if swarm.peers.len() > config.max_peers_per_info_hash {
                     let oldest_idx = swarm
                         .peers
                         .iter()
@@ -232,7 +320,7 @@ impl DhtPeerStorage {
                     if let Some(idx) = oldest_idx {
                         swarm.peers.remove(idx);
                         debug!(
-                            limit = MAX_PEERS_PER_INFO_HASH,
+                            limit = config.max_peers_per_info_hash,
                             "evicted oldest DHT peer to enforce per-info_hash cap"
                         );
                     }
@@ -245,14 +333,14 @@ impl DhtPeerStorage {
             return;
         }
 
-        if map.swarms.len() == MAX_INFO_HASHES
+        if map.swarms.len() == config.max_info_hashes
             && let Some((_, oldest_hash)) = map.least_recent.pop_first()
         {
             let removed = map.swarms.remove(&oldest_hash).is_some();
             debug_assert!(removed, "DHT swarm recency index must match peer map");
             map.evictions = map.evictions.saturating_add(1);
             debug!(
-                limit = MAX_INFO_HASHES,
+                limit = config.max_info_hashes,
                 evicted_info_hash = %hex::encode(oldest_hash),
                 "evicted least recently updated DHT swarm to enforce global cap"
             );
@@ -352,7 +440,10 @@ mod tests {
 
     #[test]
     fn test_max_peers_limit() {
-        let storage = DhtPeerStorage::new();
+        let storage = DhtPeerStorage::with_config(DhtPeerStorageConfig {
+            max_info_hashes: 3,
+            max_peers_per_info_hash: 3,
+        });
         let info_hash = [0xAAu8; 20];
         // First peer gets an explicitly older timestamp so it is the eviction
         // target regardless of clock resolution.
@@ -360,7 +451,7 @@ mod tests {
         let old_ts = Instant::now() - Duration::from_secs(60);
         storage.add_peer_with_timestamp(info_hash, first_addr, old_ts);
         // Add enough peers to exceed the cap by one.
-        for port in 5001u16..=(5000 + MAX_PEERS_PER_INFO_HASH as u16) {
+        for port in 5001u16..=5003 {
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
             storage.add_peer(info_hash, addr);
         }
@@ -369,8 +460,8 @@ mod tests {
 
         assert_eq!(
             peers.len(),
-            MAX_PEERS_PER_INFO_HASH,
-            "peer count must be capped at MAX_PEERS_PER_INFO_HASH"
+            3,
+            "peer count must respect the configured per-hash limit"
         );
         assert!(
             !peers.contains(&first_addr),
@@ -380,7 +471,10 @@ mod tests {
 
     #[test]
     fn global_hash_limit_evicts_the_least_recently_updated_swarm() {
-        let storage = DhtPeerStorage::new();
+        let storage = DhtPeerStorage::with_config(DhtPeerStorageConfig {
+            max_info_hashes: 3,
+            max_peers_per_info_hash: 50,
+        });
         let hash_for = |value: u64| {
             let mut hash = [0u8; 20];
             hash[..8].copy_from_slice(&value.to_be_bytes());
@@ -396,7 +490,7 @@ mod tests {
         );
         storage.cleanup_expired();
 
-        for value in 1..=MAX_INFO_HASHES as u64 {
+        for value in 1..=3 {
             let addr: SocketAddr = format!("127.0.0.1:{}", 10_000 + value)
                 .parse()
                 .expect("fixture peer address should parse");
@@ -410,20 +504,55 @@ mod tests {
                 .expect("refreshed peer address should parse"),
         );
         storage.add_peer(
-            hash_for(MAX_INFO_HASHES as u64 + 1),
+            hash_for(4),
             "127.0.0.1:20001"
                 .parse()
                 .expect("new peer address should parse"),
         );
 
         let hashes = storage.info_hashes();
-        assert_eq!(hashes.len(), MAX_INFO_HASHES);
+        assert_eq!(hashes.len(), 3);
         assert!(hashes.contains(&hash_for(1)), "refreshed swarm must remain");
         assert!(
             !hashes.contains(&hash_for(2)),
             "least recently updated swarm must be evicted"
         );
-        assert!(hashes.contains(&hash_for(MAX_INFO_HASHES as u64 + 1)));
+        assert!(hashes.contains(&hash_for(4)));
+    }
+
+    #[test]
+    fn updating_limits_immediately_trims_oldest_peers_and_swarms() {
+        let storage = DhtPeerStorage::with_config(DhtPeerStorageConfig {
+            max_info_hashes: 4,
+            max_peers_per_info_hash: 3,
+        });
+        let hash_for = |value: u8| [value; 20];
+        let old = Instant::now() - Duration::from_secs(10);
+        for value in 1..=3 {
+            storage.add_peer_with_timestamp(
+                hash_for(value),
+                format!("127.0.0.1:{}", 6_000 + u16::from(value))
+                    .parse()
+                    .unwrap(),
+                old + Duration::from_secs(u64::from(value)),
+            );
+        }
+        let hash = hash_for(3);
+        for port in 6_010..=6_011 {
+            storage.add_peer(hash, format!("127.0.0.1:{port}").parse().unwrap());
+        }
+
+        storage.set_config(DhtPeerStorageConfig {
+            max_info_hashes: 2,
+            max_peers_per_info_hash: 2,
+        });
+
+        let hashes = storage.info_hashes();
+        assert_eq!(hashes.len(), 2);
+        assert!(!hashes.contains(&hash_for(1)));
+        assert!(hashes.contains(&hash_for(2)));
+        assert_eq!(storage.get_peers(&hash).len(), 2);
+        assert_eq!(storage.stats().max_info_hashes, 2);
     }
 
     #[test]

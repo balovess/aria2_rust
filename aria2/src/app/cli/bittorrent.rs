@@ -407,6 +407,14 @@ pub struct BitTorrentArgs {
     #[arg(long = "dht-persistence-max-age")]
     pub dht_persistence_max_age: Option<u64>,
 
+    /// Maximum announced swarms retained by each DHT engine
+    #[arg(long = "dht-max-peer-info-hashes")]
+    pub dht_max_peer_info_hashes: Option<usize>,
+
+    /// Maximum announced peers retained for each DHT info-hash
+    #[arg(long = "dht-max-peers-per-info-hash")]
+    pub dht_max_peers_per_info_hash: Option<usize>,
+
     /// Enable IPv6 DHT
     #[arg(
         long = "enable-dht6",

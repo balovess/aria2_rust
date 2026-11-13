@@ -147,12 +147,18 @@ impl DownloadEngine {
             .map(|(name, value)| (name.clone(), value.to_string()))
             .collect();
         let download_options = DownloadOptions::from_option_strings(&option_strings);
+        let mut dht_options =
+            crate::engine::bittorrent::dht::config::DhtEngineOptions::from(&download_options);
+        let default_peer_storage = aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default();
+        dht_options.dht_max_peer_info_hashes = option_usize(options, "dht-max-peer-info-hashes")
+            .unwrap_or(default_peer_storage.max_info_hashes);
+        dht_options.dht_max_peers_per_info_hash =
+            option_usize(options, "dht-max-peers-per-info-hash")
+                .unwrap_or(default_peer_storage.max_peers_per_info_hash);
         self.bt_registry
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .set_global_dht_options(Arc::new(
-                crate::engine::bittorrent::dht::config::DhtEngineOptions::from(&download_options),
-            ));
+            .set_global_dht_options(Arc::new(dht_options));
         let source_fetcher = Arc::new(CoreTrackerSourceFetcher::new(
             Arc::clone(&self.dns_cache),
             Arc::clone(&self.outbound_network_policy),
@@ -224,6 +230,15 @@ fn option_i64(options: &HashMap<String, OptionValue>, name: &str) -> Option<i64>
     }
 }
 
+#[cfg(feature = "bittorrent")]
+fn option_usize(options: &HashMap<String, OptionValue>, name: &str) -> Option<usize> {
+    match options.get(name)? {
+        OptionValue::Int(value) => usize::try_from(*value).ok(),
+        OptionValue::Usize(value) => Some(*value),
+        _ => None,
+    }
+}
+
 #[cfg(all(test, feature = "bittorrent"))]
 mod tests {
     use super::*;
@@ -241,6 +256,14 @@ mod tests {
                 "dht-file-path".to_string(),
                 OptionValue::Str("process-dht.dat".to_string()),
             ),
+            (
+                "dht-max-peer-info-hashes".to_string(),
+                OptionValue::Int(1200),
+            ),
+            (
+                "dht-max-peers-per-info-hash".to_string(),
+                OptionValue::Int(37),
+            ),
         ]);
         let engine =
             DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
@@ -257,6 +280,8 @@ mod tests {
             dht_options.dht_file_path.as_deref(),
             Some("process-dht.dat")
         );
+        assert_eq!(dht_options.dht_max_peer_info_hashes, 1200);
+        assert_eq!(dht_options.dht_max_peers_per_info_hash, 37);
     }
 }
 

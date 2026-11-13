@@ -31,10 +31,14 @@ pub(crate) struct DhtEngineOptions {
     pub(crate) dht_bootstrap_timeout: u64,
     pub(crate) dht_max_concurrent_lookups: usize,
     pub(crate) dht_persistence_max_age: u64,
+    pub(crate) dht_max_peer_info_hashes: usize,
+    pub(crate) dht_max_peers_per_info_hash: usize,
 }
 
 impl From<&DownloadOptions> for DhtEngineOptions {
     fn from(options: &DownloadOptions) -> Self {
+        let peer_storage_defaults =
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default();
         Self {
             dht_listen_port: options.dht_listen_port.clone(),
             dht_listen_addr: options.dht_listen_addr.clone(),
@@ -56,6 +60,8 @@ impl From<&DownloadOptions> for DhtEngineOptions {
             dht_bootstrap_timeout: options.dht_bootstrap_timeout,
             dht_max_concurrent_lookups: options.dht_max_concurrent_lookups,
             dht_persistence_max_age: options.dht_persistence_max_age,
+            dht_max_peer_info_hashes: peer_storage_defaults.max_info_hashes,
+            dht_max_peers_per_info_hash: peer_storage_defaults.max_peers_per_info_hash,
         }
     }
 }
@@ -63,6 +69,17 @@ impl From<&DownloadOptions> for DhtEngineOptions {
 impl Default for DhtEngineOptions {
     fn default() -> Self {
         Self::from(&DownloadOptions::default())
+    }
+}
+
+impl DhtEngineOptions {
+    pub(crate) fn protocol_peer_storage_config(
+        &self,
+    ) -> aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+        aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+            max_info_hashes: self.dht_max_peer_info_hashes,
+            max_peers_per_info_hash: self.dht_max_peers_per_info_hash,
+        }
     }
 }
 
@@ -335,6 +352,46 @@ mod tests {
             Some(std::path::Path::new("dht6.dat"))
         );
         assert_eq!(config.query_timeout, Duration::from_secs(7));
+    }
+
+    #[tokio::test]
+    async fn process_dht_tuning_options_enter_the_protocol_engine_config() {
+        let options = DownloadOptions {
+            dht_message_timeout: 11,
+            dht_refresh_check_interval: 301,
+            dht_token_rotation_interval: 601,
+            dht_node_contact_interval: 901,
+            dht_cleanup_interval: 302,
+            dht_save_interval: 1801,
+            dht_bootstrap_timeout: 61,
+            dht_max_concurrent_lookups: 23,
+            dht_persistence_max_age: 86_401,
+            ..Default::default()
+        };
+
+        let config = build_dht_engine_config(&options)
+            .await
+            .expect("DHT tuning options should build a protocol config");
+
+        assert_eq!(config.query_timeout, Duration::from_secs(11));
+        assert_eq!(config.refresh_check_interval, Duration::from_secs(301));
+        assert_eq!(config.token_rotation_interval, Duration::from_secs(601));
+        assert_eq!(config.node_contact_interval, Duration::from_secs(901));
+        assert_eq!(config.cleanup_interval, Duration::from_secs(302));
+        assert_eq!(config.save_interval, Duration::from_secs(1801));
+        assert_eq!(config.bootstrap_timeout, Duration::from_secs(61));
+        assert_eq!(config.max_concurrent_lookups, 23);
+        assert_eq!(config.persistence_max_age, Duration::from_secs(86_401));
+        let mut dht_options = DhtEngineOptions::from(&options);
+        dht_options.dht_max_peer_info_hashes = 1200;
+        dht_options.dht_max_peers_per_info_hash = 37;
+        assert_eq!(
+            dht_options.protocol_peer_storage_config(),
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+                max_info_hashes: 1200,
+                max_peers_per_info_hash: 37,
+            }
+        );
     }
 
     #[tokio::test]

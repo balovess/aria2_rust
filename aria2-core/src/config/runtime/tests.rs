@@ -20,6 +20,10 @@ fn policy_matches_original_wire_names() {
         "bt-incoming-peer-handshake-timeout"
     ));
     #[cfg(feature = "bittorrent")]
+    for name in ["dht-max-peer-info-hashes", "dht-max-peers-per-info-hash"] {
+        assert!(is_global_option_changeable(name));
+    }
+    #[cfg(feature = "bittorrent")]
     for name in [
         "bt-utp-max-connections",
         "bt-utp-connect-timeout",

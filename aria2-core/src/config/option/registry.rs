@@ -420,6 +420,8 @@ impl OptionRegistry {
             | "log-max-files"
             | "lpd-listen-port"
             | "bt-lpd-interface"
+            | "dht-max-peer-info-hashes"
+            | "dht-max-peers-per-info-hash"
             | "bt-max-open-files"
             | "bt-incoming-peer-handshake-timeout"
             | "bt-tracker-source"
@@ -563,6 +565,8 @@ mod tests {
             ("async-dns-server", OptionOwner::ProcessEngine),
             ("dns-timeout", OptionOwner::ProcessEngine),
             ("bt-max-open-files", OptionOwner::ProcessEngine),
+            ("dht-max-peer-info-hashes", OptionOwner::ProcessEngine),
+            ("dht-max-peers-per-info-hash", OptionOwner::ProcessEngine),
             (
                 "bt-incoming-peer-handshake-timeout",
                 OptionOwner::ProcessEngine,
@@ -623,6 +627,14 @@ mod tests {
             );
             options.insert("enable-utp".to_string(), serde_json::json!(true));
             options.insert("utp-listen-port".to_string(), serde_json::json!(6882));
+            options.insert(
+                "dht-max-peer-info-hashes".to_string(),
+                serde_json::json!(1200),
+            );
+            options.insert(
+                "dht-max-peers-per-info-hash".to_string(),
+                serde_json::json!(37),
+            );
         }
 
         let projected = registry.project_defined_global_options_for_rpc(&options);
@@ -645,6 +657,14 @@ mod tests {
             assert_eq!(
                 projected.get("enable-public-trackers"),
                 Some(&serde_json::json!(true))
+            );
+            assert_eq!(
+                projected.get("dht-max-peer-info-hashes"),
+                Some(&serde_json::json!(1200))
+            );
+            assert_eq!(
+                projected.get("dht-max-peers-per-info-hash"),
+                Some(&serde_json::json!(37))
             );
         }
     }

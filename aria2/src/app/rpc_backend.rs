@@ -207,6 +207,41 @@ mod tests {
         assert!(!options.continue_download);
     }
 
+    #[tokio::test]
+    async fn add_uri_options_apply_http_adaptive_settings_per_download() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, _receiver) = aria2_core::engine::engine_command::channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            config,
+            None,
+            "test",
+        );
+
+        let (options, _) = backend
+            .merged_task_options(HashMap::from([
+                (
+                    "http-adaptive-enabled".to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+                (
+                    "http-adaptive-recovery-successes-min".to_string(),
+                    serde_json::json!(40),
+                ),
+                (
+                    "http-adaptive-recovery-successes-max".to_string(),
+                    serde_json::json!(20),
+                ),
+            ]))
+            .await
+            .expect("RPC task options should accept per-download adaptive settings");
+
+        assert!(options.http_adaptive.enabled);
+        assert_eq!(options.http_adaptive.recovery_successes_min, 40);
+        assert_eq!(options.http_adaptive.recovery_successes_max, 40);
+    }
+
     #[test]
     fn status_uses_real_non_bt_connection_count_instead_of_split() {
         let options = DownloadOptions {

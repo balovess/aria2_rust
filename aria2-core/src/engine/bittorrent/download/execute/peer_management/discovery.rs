@@ -295,7 +295,12 @@ impl BtDownloadCommand {
                 };
                 match self
                     .dht_engines
-                    .start_or_join(self.bt_registry.as_ref(), gid, dht_config)
+                    .start_or_join(
+                        self.bt_registry.as_ref(),
+                        gid,
+                        dht_config,
+                        dht_options.protocol_peer_storage_config(),
+                    )
                     .await
                 {
                     Ok(()) => tracing::info!(ipv6 = use_ipv6, "[BT] DHT family engine ready"),

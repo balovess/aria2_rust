@@ -501,6 +501,32 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "dht-max-peer-info-hashes".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default().max_info_hashes
+                    as i64,
+            ),
+            min: Some(1),
+            description: "Maximum announced swarms retained by each DHT engine".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "dht-max-peers-per-info-hash".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default()
+                    .max_peers_per_info_hash as i64,
+            ),
+            min: Some(1),
+            description: "Maximum announced peers retained for each DHT info-hash".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "enable-dht6".into(),
             opt_type: OptionType::Boolean,
             default_value: OptionValue::Bool(false),

@@ -80,7 +80,7 @@ impl SequentialDownloader {
                 .ok()
                 .flatten()
                 .filter(|cf| cf.total_length() == total_length && !cf.is_torrent_checkpoint()),
-            on_disk: Self::merge_ranges(completed_ranges),
+            on_disk: Self::normalize_completed_ranges(completed_ranges, total_length),
         };
 
         let rate_limit = { self.group.recover().options().max_download_limit };

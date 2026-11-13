@@ -127,6 +127,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-open-files",
+    "dht-max-peer-info-hashes",
+    "dht-max-peers-per-info-hash",
     "bt-max-peers",
     "bt-metadata-only",
     "bt-min-crypto-level",

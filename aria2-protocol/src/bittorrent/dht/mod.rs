@@ -21,7 +21,7 @@ pub mod token_tracker;
 pub mod tracker;
 
 pub use engine::{DhtEngine, DhtEngineConfig, DhtEngineState, FindPeersResult};
-pub use peer_storage::DhtPeerStorage;
+pub use peer_storage::{DhtPeerStorage, DhtPeerStorageConfig};
 pub use persistence::{DhtPersistedData, DhtPersistence, PersistedNode};
 pub use store::{DhtItemStore, StoreError};
 pub use task::{BoxedDhtTask, DEFAULT_NUM_CONCURRENT, DhtTask, DhtTaskExecutor, DhtTaskQueue};

@@ -218,6 +218,8 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--dht-entry-point-host6=::1",
         "--dht-entry-point-port6=6882",
         "--dht-file-path6=dht6.dat",
+        "--dht-max-peer-info-hashes=1200",
+        "--dht-max-peers-per-info-hash=37",
     ])
     .expect("BitTorrent timeout and DHT CLI options should parse");
 
@@ -272,6 +274,16 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.dht_entry_point_host6.as_deref(), Some("::1"));
     assert_eq!(options.dht_entry_point_port6, Some(6882));
     assert_eq!(options.dht_file_path6.as_deref(), Some("dht6.dat"));
+    for (name, expected) in [
+        ("dht-max-peer-info-hashes", 1200),
+        ("dht-max-peers-per-info-hash", 37),
+    ] {
+        assert_eq!(
+            app.config.read().await.get_global_i64(name).await,
+            Some(expected),
+            "CLI must pass {name} into process configuration"
+        );
+    }
 }
 
 #[tokio::test]
@@ -326,8 +338,13 @@ async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
 
     assert!(!options.http_adaptive.enabled);
 
-    let cli = CliArgs::try_parse_from(["aria2", "--http-adaptive-enabled=true"])
-        .expect("adaptive HTTP concurrency override should parse");
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--http-adaptive-enabled=true",
+        "--http-adaptive-recovery-successes-min=40",
+        "--http-adaptive-recovery-successes-max=20",
+    ])
+    .expect("adaptive HTTP concurrency override should parse");
 
     let mut app = App::new();
     app.load_cli_args(cli)
@@ -336,6 +353,8 @@ async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
     let (options, _) = app.download_options_with_snapshot().await;
 
     assert!(options.http_adaptive.enabled);
+    assert_eq!(options.http_adaptive.recovery_successes_min, 40);
+    assert_eq!(options.http_adaptive.recovery_successes_max, 40);
 }
 
 #[tokio::test]

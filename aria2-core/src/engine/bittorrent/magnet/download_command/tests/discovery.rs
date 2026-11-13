@@ -171,6 +171,7 @@ async fn public_magnet_hands_its_dht_engine_to_the_payload_command() {
             Some(&registry),
             gid,
             aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default(),
         )
         .await
         .expect("magnet should start and register its shared DHT engine");
