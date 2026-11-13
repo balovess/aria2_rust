@@ -838,7 +838,9 @@ Do not add pass-through engine clients around these public interfaces.
   accepts, and both the standalone `PeerListener` and core's
   `BtPeerListenerManager` use that primitive. The process-level manager remains
   in core because it coordinates torrent routes, task cancellation, handshake
-  limits, peer-storage admission, and uTP actors.
+  limits, peer-storage admission, and uTP actors. Keep listener tests adjacent;
+  separate process shutdown, route-backpressure, and uTP lifecycle cases from
+  the main listener test module.
 - **Keep** the public standalone `PeerListener` API for callers that want
   channel-driven raw TCP accepts; preserve its existing wildcard IPv4 binding
   behavior. The new `PeerTcpListener` interface supports engine-selected bind
