@@ -419,6 +419,10 @@ pub struct BitTorrentArgs {
     #[arg(long = "dht-max-peers-per-info-hash")]
     pub dht_max_peers_per_info_hash: Option<usize>,
 
+    /// Maximum BEP 44 items retained by each DHT engine
+    #[arg(long = "dht-max-items")]
+    pub dht_max_items: Option<usize>,
+
     /// Enable IPv6 DHT
     #[arg(
         long = "enable-dht6",

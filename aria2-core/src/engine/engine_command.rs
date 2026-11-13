@@ -492,6 +492,10 @@ pub enum EngineCommand {
     SetDhtPeerStorageConfig {
         config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig,
     },
+
+    /// Change the process-wide cap for stored BEP 44 items.
+    #[cfg(feature = "bittorrent")]
+    SetDhtItemStoreLimit { max_items: usize },
 }
 
 impl EngineCommand {

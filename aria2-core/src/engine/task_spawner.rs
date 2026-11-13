@@ -238,6 +238,83 @@ mod tests {
                 "async-dns=false must not pre-resolve {scheme} through the shared cache"
             );
         }
+
+        let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::new()));
+        let options = DownloadOptions {
+            async_dns: false,
+            http_proxy: Some("http://localhost:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+        let uri = "http://origin.invalid/file.bin";
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(72),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        let _command =
+            create_command_for_uri(uri, group, &options, dependencies(Arc::clone(&cache)))
+                .await
+                .expect("proxy command construction should use the default resolver path");
+        assert_eq!(
+            cache.lock().await.len(),
+            0,
+            "async-dns=false must not query the shared resolver for a proxy or origin"
+        );
+
+        let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::new()));
+        let options = DownloadOptions {
+            async_dns: false,
+            http_proxy: Some("http://localhost:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+        let uri = "http://origin.invalid/file.bin";
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(74),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        let mut deps = dependencies(Arc::clone(&cache));
+        deps.services.outbound_network_policy =
+            Arc::new(OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap()));
+        let _command = create_command_for_uri(uri, group, &options, deps)
+            .await
+            .expect("interface-bound proxy should use system DNS for source selection");
+        assert_eq!(
+            cache.lock().await.len(),
+            0,
+            "async-dns=false must not use the shared resolver when choosing a proxy source"
+        );
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind an unused explicit DNS endpoint");
+        let dns_server = socket.local_addr().expect("read DNS endpoint");
+        drop(socket);
+        let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            std::time::Duration::from_millis(300),
+            vec![dns_server],
+        )));
+        let options = DownloadOptions {
+            async_dns: false,
+            ..DownloadOptions::default()
+        };
+        let uri = "http://localhost:8080/file.bin";
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(77),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        let mut deps = dependencies(Arc::clone(&cache));
+        deps.services.outbound_network_policy =
+            Arc::new(OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap()));
+        let _command = create_command_for_uri(uri, group, &options, deps)
+            .await
+            .expect("direct interface binding should use system DNS for address-family selection");
+        assert_eq!(
+            cache.lock().await.len(),
+            0,
+            "async-dns=false direct binding must not query explicit async DNS servers"
+        );
     }
 
     #[tokio::test]
@@ -263,5 +340,99 @@ mod tests {
                 "async-dns=true must use the shared cache for {scheme}"
             );
         }
+
+        let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::new()));
+        let options = DownloadOptions {
+            http_proxy: Some("http://localhost:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+        let uri = "http://origin.invalid/file.bin";
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(73),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+        let _command =
+            create_command_for_uri(uri, group, &options, dependencies(Arc::clone(&cache)))
+                .await
+                .expect("proxied command should resolve the first-hop proxy");
+        let mut cache = cache.lock().await;
+        let proxy_addresses = cache
+            .resolve_no_network("localhost", 8080)
+            .expect("proxy endpoint must be in the DNS cache");
+        assert!(
+            !proxy_addresses.is_empty() && proxy_addresses.iter().all(|addr| addr.port() == 8080),
+            "async-dns=true must resolve the proxy endpoint"
+        );
+        assert!(
+            cache.resolve_no_network("origin.invalid", 80).is_err(),
+            "a proxy must resolve the first hop rather than the origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_dns_failure_aborts_http_command_setup() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind an unused explicit DNS endpoint");
+        let dns_server = socket.local_addr().expect("read DNS endpoint");
+        drop(socket);
+
+        let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            std::time::Duration::from_millis(300),
+            vec![dns_server],
+        )));
+        let options = DownloadOptions::default();
+        let uri = "http://explicit-only.invalid/file.bin";
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(75),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+
+        let result = create_command_for_uri(uri, group, &options, dependencies(cache)).await;
+        let error = match result {
+            Ok(_) => {
+                panic!("an explicit resolver failure must stop before reqwest system DNS fallback")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("using explicitly configured servers"),
+            "unexpected command-construction error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn numeric_http_origin_bypasses_explicit_dns_servers() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind an unused explicit DNS endpoint");
+        let dns_server = socket.local_addr().expect("read DNS endpoint");
+        drop(socket);
+
+        let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            std::time::Duration::from_millis(300),
+            vec![dns_server],
+        )));
+        let options = DownloadOptions::default();
+        let uri = "http://127.0.0.1:8080/file.bin";
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(76),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+
+        let _command =
+            create_command_for_uri(uri, group, &options, dependencies(Arc::clone(&cache)))
+                .await
+                .expect("an IP literal must not require DNS");
+        assert_eq!(
+            cache.lock().await.len(),
+            0,
+            "an IP literal must not query explicitly configured DNS servers"
+        );
     }
 }

@@ -38,9 +38,10 @@ pub struct DnsCache {
     dns_timeout: Duration,
     /// Explicit DNS servers, or an empty list when system defaults are used.
     dns_server_addresses: Vec<SocketAddr>,
-    /// Fully-async hickory DNS resolver. When `None` (or on lookup error) resolution
-    /// falls back to `tokio::net::lookup_host`. `TokioAsyncResolver` is `Arc`-backed
-    /// internally, so cloning is cheap and no outer `Arc` is required.
+    /// Fully-async Hickory DNS resolver. When system DNS is in use, an unavailable
+    /// resolver or lookup error falls back to `tokio::net::lookup_host`. Explicit
+    /// nameserver configuration never falls back to the system resolver. `TokioResolver`
+    /// is `Arc`-backed internally, so cloning is cheap and no outer `Arc` is required.
     resolver: Option<TokioResolver>,
 }
 
@@ -132,10 +133,10 @@ impl DnsCache {
     /// Resolution strategy:
     /// 1. Check positive cache — return immediately if entry exists and is not expired
     /// 2. Check negative cache — return error if lookup recently failed
-    /// 3. Try the fully-async hickory resolver (no blocking getaddrinfo); on success the
+    /// 3. Try the fully-async Hickory resolver (no blocking getaddrinfo); on success the
     ///    record TTL is capped at `default_ttl` and the result is cached
-    /// 4. If hickory is unavailable or errors, fall back to `tokio::net::lookup_host`
-    ///    (blocking getaddrinfo on a tokio thread pool) so behavior stays robust
+    /// 4. If system DNS is in use and Hickory is unavailable or errors, fall back to
+    ///    `tokio::net::lookup_host` (blocking getaddrinfo on a tokio thread pool)
     /// 5. On success: sort addresses by IPv4 preference, cache result, return
     /// 6. On failure: record in negative cache, return error
     ///
@@ -175,23 +176,27 @@ impl DnsCache {
             )));
         }
 
-        // 3. Try the hickory async resolver first; fall back to tokio::net::lookup_host on failure.
+        // 3. Try Hickory. The system lookup fallback below is allowed only when
+        // no explicit DNS server list replaces the system resolver configuration.
         let lookup_started = Instant::now();
+        let mut hickory_failure = None;
         if let Some(resolver) = self.resolver.as_ref() {
             match tokio::time::timeout(self.dns_timeout, resolver.lookup_ip(hostname)).await {
                 Err(error) => {
+                    hickory_failure = Some(format!("Hickory lookup timed out: {error}"));
                     tracing::debug!(
                         hostname = hostname,
                         timeout = ?self.dns_timeout,
                         error = %error,
-                        "hickory DNS lookup timed out, falling back to tokio::net::lookup_host"
+                        "Hickory DNS lookup timed out"
                     );
                 }
                 Ok(Err(error)) => {
+                    hickory_failure = Some(error.to_string());
                     tracing::debug!(
                         hostname = hostname,
                         error = %error,
-                        "hickory DNS lookup failed, falling back to tokio::net::lookup_host"
+                        "Hickory DNS lookup failed"
                     );
                     // Fall through to the OS-level fallback below.
                 }
@@ -232,10 +237,8 @@ impl DnsCache {
                         return Ok(addrs);
                     }
 
-                    tracing::debug!(
-                        hostname = hostname,
-                        "hickory returned no addresses, falling back to tokio::net::lookup_host"
-                    );
+                    hickory_failure = Some("Hickory returned no addresses".to_string());
+                    tracing::debug!(hostname = hostname, "Hickory returned no addresses");
                     // Fall through to the OS-level fallback below.
                 }
             }
@@ -243,6 +246,21 @@ impl DnsCache {
 
         // 4. Fallback: OS-level resolution via tokio (blocking getaddrinfo on a thread pool).
         //    Used when the hickory resolver is unavailable, returns no addresses, or errors.
+        if !self.dns_server_addresses.is_empty() {
+            let reason = hickory_failure
+                .unwrap_or_else(|| "the configured resolver is unavailable".to_string());
+            self.negative_entries.insert(endpoint, Instant::now());
+            tracing::debug!(
+                hostname = hostname,
+                error = %reason,
+                "DNS resolution failed using explicitly configured servers"
+            );
+            return Err(Aria2Error::NameResolve(format!(
+                "DNS resolution failed for {} using explicitly configured servers: {}",
+                hostname, reason
+            )));
+        }
+
         let addr_str = format!("{}:{}", hostname, port);
         let remaining_timeout = self.dns_timeout.saturating_sub(lookup_started.elapsed());
         let fallback = tokio::time::timeout(remaining_timeout, tokio::net::lookup_host(&addr_str))

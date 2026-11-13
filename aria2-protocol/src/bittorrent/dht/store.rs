@@ -1,6 +1,6 @@
 //! In-memory BEP 44 item store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -9,6 +9,7 @@ use crate::bittorrent::bencode::codec::BencodeValue;
 
 const MAX_VALUE_BYTES: usize = 1000;
 const MAX_SALT_BYTES: usize = 64;
+pub const DEFAULT_MAX_ITEMS: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
@@ -20,25 +21,116 @@ pub enum StoreError {
     CasMismatch,
 }
 
-#[derive(Clone, Default)]
+struct StoredEntry {
+    item: StoredItem,
+    order: u64,
+}
+
+struct ItemStore {
+    items: HashMap<[u8; 20], StoredEntry>,
+    least_recent: BTreeSet<(u64, [u8; 20])>,
+    next_order: u64,
+    max_items: usize,
+}
+
+impl ItemStore {
+    fn new(max_items: usize) -> Self {
+        Self {
+            items: HashMap::new(),
+            least_recent: BTreeSet::new(),
+            next_order: 0,
+            max_items: max_items.max(1),
+        }
+    }
+
+    fn insert(&mut self, target: [u8; 20], item: StoredItem) {
+        if let Some(previous) = self.items.remove(&target) {
+            self.least_recent.remove(&(previous.order, target));
+        } else if self.items.len() >= self.max_items
+            && let Some((_, oldest_target)) = self.least_recent.pop_first()
+        {
+            self.items.remove(&oldest_target);
+        }
+
+        let order = self.next_order;
+        self.next_order = self.next_order.wrapping_add(1);
+        self.items.insert(target, StoredEntry { item, order });
+        self.least_recent.insert((order, target));
+    }
+
+    fn set_limit(&mut self, max_items: usize) {
+        self.max_items = max_items.max(1);
+        while self.items.len() > self.max_items {
+            let Some((_, target)) = self.least_recent.pop_first() else {
+                break;
+            };
+            self.items.remove(&target);
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct DhtItemStore {
-    items: Arc<RwLock<HashMap<[u8; 20], StoredItem>>>,
+    items: Arc<RwLock<ItemStore>>,
+}
+
+impl Default for DhtItemStore {
+    fn default() -> Self {
+        Self::with_max_items(DEFAULT_MAX_ITEMS)
+    }
 }
 
 impl DhtItemStore {
+    /// Create a store with a bounded number of retained BEP 44 targets.
+    ///
+    /// Zero is normalized to one. A new target at capacity evicts the oldest
+    /// stored target; updating an existing target makes it the newest.
+    pub fn with_max_items(max_items: usize) -> Self {
+        Self {
+            items: Arc::new(RwLock::new(ItemStore::new(max_items))),
+        }
+    }
+
+    /// Apply a new limit immediately, evicting the oldest entries as needed.
+    pub fn set_max_items(&self, max_items: usize) {
+        if let Ok(mut items) = self.items.write() {
+            items.set_limit(max_items);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.items
+            .read()
+            .map(|items| items.items.len())
+            .unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn max_items(&self) -> usize {
+        self.items.read().map(|items| items.max_items).unwrap_or(1)
+    }
+
     pub fn targets(&self) -> Vec<[u8; 20]> {
         self.items
             .read()
-            .map(|items| items.keys().copied().collect())
+            .map(|items| items.items.keys().copied().collect())
             .unwrap_or_default()
     }
 
     pub fn get(&self, target: &[u8; 20]) -> Option<StoredItem> {
-        self.items.read().ok()?.get(target).cloned()
+        self.items
+            .read()
+            .ok()?
+            .items
+            .get(target)
+            .map(|entry| entry.item.clone())
     }
 
     pub fn put_immutable(&self, value: BencodeValue) -> Result<[u8; 20], StoreError> {
-        if value.encode().len() > MAX_VALUE_BYTES {
+        if value_exceeds_limit(&value) {
             return Err(StoreError::ValueTooLarge);
         }
         let target = StoredItem::immutable_target(&value);
@@ -54,14 +146,10 @@ impl DhtItemStore {
         item: super::modern::MutableValue,
         cas: Option<i64>,
     ) -> Result<[u8; 20], StoreError> {
-        if item.value.encode().len() > MAX_VALUE_BYTES {
+        if value_exceeds_limit(&item.value) {
             return Err(StoreError::ValueTooLarge);
         }
-        if item
-            .salt
-            .as_deref()
-            .is_some_and(|salt| salt.len() > MAX_SALT_BYTES)
-        {
+        if item.salt.as_deref().is_some_and(salt_exceeds_limit) {
             return Err(StoreError::SaltTooLarge);
         }
         if item.sequence < 0 || !item.verify_signature() {
@@ -69,10 +157,13 @@ impl DhtItemStore {
         }
         let target = StoredItem::mutable_target(&item.public_key, item.salt.as_deref());
         let mut items = self.items.write().map_err(|_| StoreError::InvalidTarget)?;
-        let current = items.get(&target).and_then(|stored| match stored {
-            StoredItem::Mutable { item, .. } => Some(item),
-            StoredItem::Immutable { .. } => None,
-        });
+        let current = items
+            .items
+            .get(&target)
+            .and_then(|stored| match &stored.item {
+                StoredItem::Mutable { item, .. } => Some(item),
+                StoredItem::Immutable { .. } => None,
+            });
         match accept_mutable_update(current, &item, cas) {
             MutableUpdate::Accepted => {
                 items.insert(target, StoredItem::Mutable { target, item });
@@ -93,10 +184,12 @@ impl DhtItemStore {
             .read()
             .map_err(|_| "BEP 44 item store lock poisoned".to_string())?;
         let values = items
-            .values()
-            .map(|item| {
+            .least_recent
+            .iter()
+            .filter_map(|(_, target)| items.items.get(target))
+            .map(|stored| {
                 let mut entry = std::collections::BTreeMap::new();
-                match item {
+                match &stored.item {
                     StoredItem::Immutable { target, value } => {
                         entry.insert(b"kind".to_vec(), BencodeValue::Bytes(b"immutable".to_vec()));
                         entry.insert(b"target".to_vec(), BencodeValue::Bytes(target.to_vec()));
@@ -126,6 +219,12 @@ impl DhtItemStore {
     /// Restore a store from [`Self::serialize`], rejecting malformed or
     /// cryptographically invalid entries instead of silently accepting them.
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
+        Self::deserialize_with_limit(data, DEFAULT_MAX_ITEMS)
+    }
+
+    /// Restore persisted entries using the configured capacity. Older entries
+    /// are discarded first if the file contains more items than the limit.
+    pub fn deserialize_with_limit(data: &[u8], max_items: usize) -> Result<Self, String> {
         let (value, consumed) = BencodeValue::decode(data)?;
         if consumed != data.len() {
             return Err("BEP 44 item store has trailing data".to_string());
@@ -133,7 +232,7 @@ impl DhtItemStore {
         let entries = value
             .as_list()
             .ok_or("BEP 44 item store root must be a list")?;
-        let store = Self::default();
+        let store = Self::with_max_items(max_items);
         for entry in entries {
             let dict = entry
                 .as_dict()
@@ -152,6 +251,9 @@ impl DhtItemStore {
                 .get(&b"v"[..])
                 .cloned()
                 .ok_or("BEP 44 item entry missing value")?;
+            if value_exceeds_limit(&value) {
+                return Err("BEP 44 item value exceeds 1000 encoded bytes".to_string());
+            }
             match kind {
                 b"immutable" => {
                     if StoredItem::immutable_target(&value) != target {
@@ -185,6 +287,9 @@ impl DhtItemStore {
                         ),
                         None => None,
                     };
+                    if salt.as_deref().is_some_and(salt_exceeds_limit) {
+                        return Err("BEP 44 item salt exceeds 64 bytes".to_string());
+                    }
                     let item = super::modern::MutableValue {
                         public_key,
                         signature,
@@ -222,6 +327,30 @@ impl DhtItemStore {
         let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         Self::deserialize(&data)
     }
+
+    /// Read and validate the persisted store without blocking the async
+    /// runtime. Signature verification and bencode decoding run on the
+    /// blocking pool because a store can contain many entries.
+    pub async fn load_from_file(path: &Path) -> Result<Self, String> {
+        Self::load_from_file_with_limit(path, DEFAULT_MAX_ITEMS).await
+    }
+
+    pub async fn load_from_file_with_limit(path: &Path, max_items: usize) -> Result<Self, String> {
+        let data = tokio::fs::read(path)
+            .await
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        tokio::task::spawn_blocking(move || Self::deserialize_with_limit(&data, max_items))
+            .await
+            .map_err(|error| format!("parse DHT item store task failed: {error}"))?
+    }
+}
+
+fn value_exceeds_limit(value: &BencodeValue) -> bool {
+    value.encode().len() > MAX_VALUE_BYTES
+}
+
+fn salt_exceeds_limit(salt: &[u8]) -> bool {
+    salt.len() > MAX_SALT_BYTES
 }
 
 #[cfg(test)]
@@ -251,6 +380,33 @@ mod tests {
             store.put_mutable(first, Some(0)),
             Err(StoreError::SequenceTooLow)
         );
+    }
+
+    #[test]
+    fn capacity_evicts_oldest_target_and_persists_recency_order() {
+        let store = DhtItemStore::with_max_items(2);
+        let first = store
+            .put_immutable(BencodeValue::Bytes(b"first".to_vec()))
+            .unwrap();
+        let second = store
+            .put_immutable(BencodeValue::Bytes(b"second".to_vec()))
+            .unwrap();
+        store
+            .put_immutable(BencodeValue::Bytes(b"first".to_vec()))
+            .unwrap();
+        let third = store
+            .put_immutable(BencodeValue::Bytes(b"third".to_vec()))
+            .unwrap();
+
+        assert_eq!(store.len(), 2);
+        assert!(store.get(&first).is_some());
+        assert!(store.get(&second).is_none());
+        assert!(store.get(&third).is_some());
+
+        let restored = DhtItemStore::deserialize_with_limit(&store.serialize().unwrap(), 1)
+            .expect("bounded item store should restore");
+        assert_eq!(restored.len(), 1);
+        assert!(restored.get(&third).is_some());
     }
 
     #[test]
@@ -293,6 +449,49 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_rejects_oversized_immutable_value() {
+        let value = BencodeValue::Bytes(vec![b'x'; MAX_VALUE_BYTES]);
+        let target = StoredItem::immutable_target(&value);
+        let entry = BTreeMap::from([
+            (b"kind".to_vec(), BencodeValue::Bytes(b"immutable".to_vec())),
+            (b"target".to_vec(), BencodeValue::Bytes(target.to_vec())),
+            (b"v".to_vec(), value),
+        ]);
+        let encoded = BencodeValue::List(vec![BencodeValue::Dict(entry)]).encode();
+
+        assert_eq!(
+            DhtItemStore::deserialize(&encoded)
+                .err()
+                .expect("oversized immutable item must be rejected"),
+            "BEP 44 item value exceeds 1000 encoded bytes"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_oversized_mutable_salt() {
+        let public_key = [7u8; 32];
+        let salt = vec![b's'; MAX_SALT_BYTES + 1];
+        let target = StoredItem::mutable_target(&public_key, Some(&salt));
+        let entry = BTreeMap::from([
+            (b"kind".to_vec(), BencodeValue::Bytes(b"mutable".to_vec())),
+            (b"target".to_vec(), BencodeValue::Bytes(target.to_vec())),
+            (b"k".to_vec(), BencodeValue::Bytes(public_key.to_vec())),
+            (b"sig".to_vec(), BencodeValue::Bytes(vec![0; 64])),
+            (b"seq".to_vec(), BencodeValue::Int(1)),
+            (b"salt".to_vec(), BencodeValue::Bytes(salt)),
+            (b"v".to_vec(), BencodeValue::Bytes(b"small value".to_vec())),
+        ]);
+        let encoded = BencodeValue::List(vec![BencodeValue::Dict(entry)]).encode();
+
+        assert_eq!(
+            DhtItemStore::deserialize(&encoded)
+                .err()
+                .expect("oversized mutable salt must be rejected"),
+            "BEP 44 item salt exceeds 64 bytes"
+        );
+    }
+
+    #[test]
     fn deserialize_rejects_non_bytes_salt() {
         let key = SigningKey::from_bytes(&[8u8; 32]);
         let mut item = super::super::modern::MutableValue {
@@ -322,7 +521,7 @@ mod tests {
 
     #[test]
     fn repeated_file_save_replaces_existing_store() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let path = dir.path().join("dht.items");
         let store = DhtItemStore::default();
         let first = store
@@ -337,5 +536,22 @@ mod tests {
         let restored = DhtItemStore::load_from_file_sync(&path).unwrap();
         assert!(restored.get(&first).is_some());
         assert!(restored.get(&second).is_some());
+    }
+
+    #[tokio::test]
+    async fn async_file_load_roundtrips_the_store() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let path = dir.path().join("dht.items");
+        let store = DhtItemStore::default();
+        let target = store
+            .put_immutable(BencodeValue::Bytes(b"async item".to_vec()))
+            .unwrap();
+        store.save_to_file_sync(&path).unwrap();
+
+        let restored = DhtItemStore::load_from_file(&path)
+            .await
+            .expect("async store load should succeed");
+
+        assert_eq!(restored.get(&target), store.get(&target));
     }
 }

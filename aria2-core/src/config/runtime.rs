@@ -129,6 +129,7 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-max-open-files",
     "dht-max-peer-info-hashes",
     "dht-max-peers-per-info-hash",
+    "dht-max-items",
     "bt-max-peers",
     "bt-metadata-only",
     "bt-min-crypto-level",

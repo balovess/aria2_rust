@@ -150,9 +150,11 @@ retry admission.
 
 1. `ProtocolAdapterRegistry` selects the HTTP adapter, which delegates
    command construction to `engine::http::command_factory`.
-2. `command_factory` resolves the origin and proxy addresses when async DNS is
-   enabled, then supplies those results and the outbound-address policy to
-   `DownloadCommand`.
+2. `command_factory` resolves only the connection's first hop: the origin for
+   a direct request, or the proxy endpoint for a proxied request. Async DNS
+   uses the shared cache; with `async-dns=false`, a constrained source policy
+   uses the system resolver only to choose a compatible local address. The
+   selected addresses are supplied to reqwest and the outbound-address policy.
 3. `download_command::constructor` calls `client_config` to build the primary
    reqwest client and range-client pool with the task's configured
    `connect-timeout`. The timeout participates in bound-client cache identity so
@@ -507,7 +509,9 @@ and scheduled tasks share the same protocol resources.
    replacement, and a parent-directory sync where supported. Both file writes
    run outside the async runtime and are attempted independently; one write
    failure does not suppress the other, and the shared method reports either
-   or both errors.
+   or both errors. Startup reads the item file asynchronously and runs bencode
+   decoding and signature checks on the blocking pool, matching the routing
+   snapshot's non-blocking startup path.
 
 Magnet is a metadata-resolution stage, not a second payload downloader. Both
 magnet and `.torrent` inputs converge on the same `BtDownloadCommand` and piece
@@ -533,6 +537,12 @@ add another task-facing interface.
   because it is shared by HTTP transfer strategies. HTTP target/proxy DNS resolution is owned by
   `engine/http/command_factory`, and reqwest client construction is owned by
   `engine/http/client_config`.
+- `aria2-core/src/dns` owns the process resolver cache and name-resolution
+  fallback. On paths that opt into async DNS, `async-dns-server` replaces
+  system DNS servers; a failed explicit lookup does not fall through to the
+  system resolver. With no explicit server list, Hickory uses system resolver
+  configuration and may fall back to Tokio's system lookup within the shared
+  DNS deadline. Paths with `async-dns=false` use system DNS resolution.
 - `aria2-core/src/{http,ftp,network}` owns shared core policy and helpers used
   by the engine. These directories are distinct from the similarly named
   engine directories: the former implement reusable policy; the latter
@@ -893,9 +903,13 @@ Do not add pass-through engine clients around these public interfaces.
   for custom process settings. DHT settings are not runtime-changeable per
   task. The Rust-specific announce-storage bounds are changeable globally;
   updates trim running storage immediately and apply to engines started later.
-- **Improve** DHT peer-storage resource policy: protocol `DhtPeerStorageConfig`
+- **Improve** DHT storage resource policy: protocol `DhtPeerStorageConfig`
   owns the per-engine swarm and per-swarm peer bounds, and core passes the
-  process snapshot at engine startup. Preserve the original `DhtEngine::start`
+  process snapshot at engine startup. BEP 44 storage has a separate
+  `dht-max-items` bound, defaults to 4,096, and evicts the oldest write on
+  capacity or when a runtime limit is reduced. The protocol store owns this
+  policy; core projects the process option to startup and running engines.
+  Preserve the original `DhtEngine::start`
   and local-peer startup interfaces by adding configured startup entry points.
   The existing defaults remain unchanged; fixed KRPC response and BEP limits
   remain protocol behavior rather than user configuration.
@@ -925,6 +939,15 @@ Do not add pass-through engine clients around these public interfaces.
   atomic file writer and per-file process lock. The binary serializer is
   infallible; parse errors and filesystem failures remain at their respective
   decode and I/O boundaries.
+- **Improve** DHT startup persistence I/O: load the BEP 44 `.items` file with
+  Tokio file I/O and run bencode parsing plus signature validation on
+  `spawn_blocking`. Keep the synchronous file API for direct callers and tests;
+  async engine startup must not block its runtime worker while restoring items.
+- **Improve** BEP 44 persistence validation: enforce the same encoded-value and
+  mutable-salt limits during restore that inbound `put` already enforces.
+  Keep the store's total item count unbounded until an explicit resource policy
+  is chosen, because eviction or rejection changes observable remote `put`
+  results.
 - **Narrow** inbound DHT query handling by protocol responsibility: shared sender
   validation and dispatch stay in `DhtQueryHandler`; BEP 44 item operations and
   BEP 51 sampling live in focused submodules. Keep one handler entry point with
@@ -983,6 +1006,25 @@ Do not add pass-through engine clients around these public interfaces.
   a request-group atomic signal to existing peer connections; core applies
   that live task policy at PEX receive, admission, and send boundaries, while
   the immutable private-torrent rule remains a separate gate.
+- **Improve** `aria2-core::dns::DnsCache` fallback policy: an explicit
+  `async-dns-server` list replaces system DNS servers and its lookup failure is
+  reported and negative-cached without consulting the OS resolver. Keep the
+  Hickory-to-Tokio fallback only for system-configured DNS. CLI engine startup
+  and C API process-option construction both feed the same `DownloadEngine`
+  resolver configuration.
+- **Improve** HTTP DNS assembly: resolve only the actual first hop, respect the
+  task's `async-dns` choice for proxy lookup, and pass resolved proxy addresses
+  to reqwest as well as source-address selection. Origin resolution remains on
+  the direct path when a proxy owns origin resolution.
+- **Narrow** DHT bootstrap resolution across core and protocol: core resolves
+  configured bootstrap hostnames through the engine's shared `DnsCache` when
+  `async-dns=true`, and uses the system resolver when false. With async DNS and
+  explicit DNS servers, core resolves the protocol's default bootstrap list as
+  well; if the selected address family has no successful result, it starts DHT
+  without public bootstrap instead of falling back to system DNS. Otherwise,
+  retain the protocol engine's background system resolver so normal startup
+  remains non-blocking. Keep the well-known bootstrap endpoint list in
+  `aria2-protocol`.
 - **Narrow** `aria2-rpc::engine`: method policy and ordered read-only batch
   dispatch live in private child modules. Keep the existing crate-internal
   `engine::dispatch_wire_entries` path used by HTTP and WebSocket servers; the

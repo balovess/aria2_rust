@@ -439,6 +439,18 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
                     "DHT peer-storage limits updated at runtime"
                 );
             }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetDhtItemStoreLimit { max_items } => {
+                ctx.bt_registry
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_global_dht_item_store_limit(max_items);
+                info!(
+                    max_items,
+                    "DHT BEP 44 item-storage limit updated at runtime"
+                );
+            }
         }
     }
     processed

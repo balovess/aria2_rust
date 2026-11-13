@@ -429,6 +429,10 @@ behavior. An unlisted behavior has not been audited here.
   through global-option RPC reads and `changeGlobalOption`. Global changes
   immediately update running engines, trim excess entries by least-recently
   updated swarm/peer, and update the process snapshot used by later engines.
+  `dht-max-items` independently caps BEP 44 targets at 4,096 per DHT engine;
+  when full, the oldest write is evicted. It is exposed through CLI/config,
+  C API session options, and global RPC options. Runtime changes trim the
+  running store immediately and configure later engine startups.
 - **Compatibility reference:** original aria2's `DHTSetup.cc` reads these
   engine settings from `DownloadEngine::getOption()`, while `RequestGroup.cc`
   reads the per-task DHT enable flags. DHT options are not marked with
@@ -438,12 +442,36 @@ behavior. An unlisted behavior has not been audited here.
   DHT engine settings remain fixed after startup and are excluded from both
   runtime option allowlists. RPC-created and session-restored tasks retain
   per-task enable flags but cannot override shared engine settings.
+- **Persistence lifecycle:** DHT startup reads the BEP 44 `.items` snapshot
+  through Tokio file I/O and performs bencode decoding and signature checks on
+  the blocking pool. The synchronous `DhtItemStore` file API remains available
+  to direct library callers.
 - **Verification:** focused core tests cover process-option precedence over a
   task override, projection of every configurable DHT timeout/concurrency and
-  persistence-age value into the protocol config, process-level peer-storage
+  persistence-age value into the protocol config, process-level peer and
+  BEP 44 item-storage
   options through the CLI/C API/config-to-engine path, RPC global-option
-  projection, and the runtime allowlist contract. DHT network interoperability
-  under simultaneous tasks with conflicting DHT overrides has not been run.
+  projection, and the runtime allowlist contract. Protocol tests cover routing
+  snapshot startup and async item-store file restoration. DHT network
+  interoperability under simultaneous tasks with conflicting DHT overrides
+  has not been run.
+
+## BitTorrent DHT BEP 44 item storage
+
+- **Behavior:** inbound `put` requires a valid write token; mutable values also
+  require a valid signature and monotonic sequence. The store rejects bencoded
+  values over 1,000 bytes and mutable salts over 64 bytes. Restored `.items`
+  data now enforces those same per-item bounds before accepting entries.
+- **Resource boundary:** the item store has no configured total item-count or
+  byte budget. Entries are retained until replacement or process state is
+  discarded. Adding a cap or eviction policy would change which valid remote
+  `put` operations receive success and requires an explicit policy decision.
+- **Compatibility reference:** [BEP 44](https://www.bittorrent.org/beps/bep_0044.html)
+  permits nodes to reject values whose bencoded form exceeds 1,000 bytes and
+  requires salt strings to be no longer than 64 bytes.
+- **Verification:** protocol unit tests cover remote put validation, persisted
+  item round trips, and rejection of restored entries with oversized values or
+  salts. The current unbounded total item count has not been stress-tested.
 
 ## BitTorrent peer input error classification
 
@@ -750,20 +778,59 @@ behavior. An unlisted behavior has not been audited here.
 
 ## DNS resolver defaults
 
-- **Supported scope:** unless `--async-dns-server` is configured, asynchronous
-  DNS uses the operating system's resolver configuration and hosts file.
-  Explicit DNS server settings continue to take precedence.
+- **Supported scope:** with `async-dns=true`, DNS uses the operating system's
+  resolver configuration and hosts file unless `--async-dns-server` is
+  configured. When configured, explicit DNS servers replace the system DNS
+  server list, as documented by the
+  [aria2 option reference](https://aria2.github.io/manual/en/html/aria2c.html).
+  With `async-dns=false`, protocol adapters use system DNS resolution.
 - **Compatibility:** this matches the original aria2 `AsyncNameResolver`,
-  which initializes c-ares without overriding its system-configured servers.
+  which calls `ares_set_servers_csv` for a configured list and leaves c-ares'
+  system-configured servers in place otherwise ([upstream implementation](https://github.com/aria2/aria2/blob/master/src/AsyncNameResolver.cc)). The original DHT bootstrap command branches on `async-dns` and uses the system resolver when it is false ([DHTEntryPointNameResolveCommand.cc](https://github.com/aria2/aria2/blob/master/src/DHTEntryPointNameResolveCommand.cc)).
 - **Fallback:** if Hickory cannot read the system resolver configuration or
-  build its resolver, lookup falls back to Tokio's system name lookup. Each
-  Hickory request has a 5-second timeout; Hickory and the fallback share the
-  configured 30-second default total lookup deadline.
+  build its resolver, lookup falls back to Tokio's system name lookup. Lookup
+  errors also use this fallback only when system DNS is configured. An explicit
+  server failure is returned as a name-resolution error and is negative-cached;
+  it never silently switches to system DNS. HTTP command assembly propagates
+  that error instead of allowing reqwest to retry with system DNS. Each Hickory
+  request has a 5-second timeout; Hickory and the fallback share the configured
+  30-second default total lookup deadline.
+- **Proxy path:** HTTP assembly resolves the proxy as the first hop and lets
+  reqwest use those resolved addresses. It does not separately resolve the
+  origin when a proxy handles the request. Numeric origin and proxy addresses
+  bypass DNS resolution. With `async-dns=false`, direct routing without a
+  source constraint leaves resolution to reqwest. A configured source-interface
+  policy uses Tokio's system resolver to select compatible addresses for either
+  the direct origin or proxy endpoint, without populating or consulting the
+  shared Hickory cache.
+- **BitTorrent DHT:** with `async-dns=true`, custom bootstrap hostnames use the
+  engine's shared DNS cache. If explicit DNS servers are configured, core also
+  resolves the default bootstrap list through that cache and passes the
+  resulting addresses to the protocol engine; if none resolve for the selected
+  address family, DHT starts without public bootstrap instead of retrying
+  through system DNS. With `async-dns=false`, core uses the system resolver for
+  custom bootstrap hostnames and leaves default bootstrap resolution to the
+  protocol engine. The `async-dns-server` list does not replace system DNS on
+  this path, matching original aria2.
 - **Verification:** on this Windows host, a focused async test starts a local
   UDP DNS fixture, configures it as the explicit server, and resolves a
   synthetic hostname through `DnsCache`. This confirms explicit-server
-  runtime wiring. Reading the machine's OS resolver configuration and resolving
-  through its configured nameserver are not exercised by that fixture.
+  runtime wiring. A second fixture returns NXDOMAIN and verifies the error stays
+  on the configured-server path rather than falling through to system DNS.
+  Task-spawner tests cover HTTP proxy first-hop resolution with async DNS on and
+  off, including system lookup for source selection while the shared cache
+  remains untouched. A local HTTP proxy fixture confirms reqwest connects to
+  the proxy address supplied by the resolver while preserving the origin URI
+  in the proxy request. Reading the machine's OS resolver configuration and
+  resolving through its configured nameserver are not exercised by these
+  fixtures. DHT configuration tests verify numeric custom bootstrap endpoints
+  and verify that a failed explicit DNS resolver disables default bootstrap
+  without failing the download. A local DNS fixture also verifies that resolved
+  default bootstrap addresses reach `DhtEngineConfig`; a live DHT UDP bootstrap
+  handshake using the configured DNS server has not been exercised. A core
+  fixture also verifies that `async-dns=false` resolves a custom bootstrap
+  hostname through system DNS even when the shared cache has a failing explicit
+  server configured.
 
 ## C API process-engine option setup
 

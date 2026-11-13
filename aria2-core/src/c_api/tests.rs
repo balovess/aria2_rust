@@ -110,6 +110,7 @@ fn c_api_accepts_dht_peer_storage_process_options_at_session_start() {
     let mut session = Aria2RustSession::new(vec![
         ("dht-max-peer-info-hashes".to_string(), "1200".to_string()),
         ("dht-max-peers-per-info-hash".to_string(), "37".to_string()),
+        ("dht-max-items".to_string(), "512".to_string()),
     ])
     .expect("C API session should accept DHT process configuration");
 
@@ -124,6 +125,12 @@ fn c_api_accepts_dht_peer_storage_process_options_at_session_start() {
             .runtime
             .block_on(session.config.get_global_i64("dht-max-peers-per-info-hash")),
         Some(37)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-items")),
+        Some(512)
     );
 
     session.finalize();

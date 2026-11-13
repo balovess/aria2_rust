@@ -23,6 +23,17 @@ impl BtRegistry {
             engine.set_peer_storage_config(config);
         }
     }
+
+    /// Update the process BEP 44 item limit and apply it to running engines.
+    pub(crate) fn set_global_dht_item_store_limit(&mut self, max_items: usize) {
+        let max_items = max_items.max(1);
+        Arc::make_mut(&mut self.global_dht_options).dht_max_items = max_items;
+        self.global_dht_storage_config_revision =
+            self.global_dht_storage_config_revision.wrapping_add(1);
+        for engine in self.global_dht_engines.iter() {
+            engine.set_item_store_limit(max_items);
+        }
+    }
     // -----------------------------------------------------------------------
 
     /// Set the process-wide DHT engine for its bound address family.
@@ -140,9 +151,9 @@ impl BtRegistry {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if registry.global_dht_storage_config_revision != storage_config_revision {
-                candidate.set_peer_storage_config(
-                    registry.global_dht_options().protocol_peer_storage_config(),
-                );
+                let current_options = registry.global_dht_options();
+                candidate.set_peer_storage_config(current_options.protocol_peer_storage_config());
+                candidate.set_item_store_limit(current_options.dht_max_items);
             }
             let engine = registry.get_or_install_global_dht_engine(Arc::clone(&candidate));
             registry.set_dht_engine_for_gid(gid, Arc::clone(&engine));

@@ -22,7 +22,11 @@ fn policy_matches_original_wire_names() {
     #[cfg(feature = "bittorrent")]
     assert!(is_global_option_changeable("bt-tracker-source-concurrency"));
     #[cfg(feature = "bittorrent")]
-    for name in ["dht-max-peer-info-hashes", "dht-max-peers-per-info-hash"] {
+    for name in [
+        "dht-max-peer-info-hashes",
+        "dht-max-peers-per-info-hash",
+        "dht-max-items",
+    ] {
         assert!(is_global_option_changeable(name));
     }
     #[cfg(feature = "bittorrent")]

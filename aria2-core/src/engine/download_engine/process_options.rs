@@ -156,6 +156,8 @@ impl DownloadEngine {
         dht_options.dht_max_peers_per_info_hash =
             option_usize(options, "dht-max-peers-per-info-hash")
                 .unwrap_or(default_peer_storage.max_peers_per_info_hash);
+        dht_options.dht_max_items = option_usize(options, "dht-max-items")
+            .unwrap_or(aria2_protocol::bittorrent::dht::DEFAULT_DHT_MAX_ITEMS);
         self.bt_registry
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

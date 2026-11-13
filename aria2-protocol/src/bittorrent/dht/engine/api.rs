@@ -15,6 +15,11 @@ use super::super::tracker::QueryType;
 use super::{DhtEngine, DhtEngineState, FindPeersResult};
 
 impl DhtEngine {
+    /// Change the maximum number of locally stored BEP 44 items.
+    pub fn set_item_store_limit(&self, max_items: usize) {
+        self.context.item_store.set_max_items(max_items);
+    }
+
     /// Change the locally announced peer-storage bounds for this engine.
     pub fn set_peer_storage_config(
         &self,

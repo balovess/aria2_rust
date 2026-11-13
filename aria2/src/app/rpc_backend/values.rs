@@ -302,6 +302,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_dht_item_limit_dispatches_to_runtime() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "dht-max-items".to_string(),
+                serde_json::json!(512),
+            )]))
+            .await
+            .expect("DHT item capacity is a process global option");
+
+        assert_eq!(
+            config.read().await.get_global_i64("dht-max-items").await,
+            Some(512)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetDhtItemStoreLimit { max_items: 512 }
+        ));
+    }
+
+    #[tokio::test]
     async fn global_option_alias_updates_canonical_concurrency_setting() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, mut receiver) = channel();

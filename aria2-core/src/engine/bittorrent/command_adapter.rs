@@ -68,6 +68,7 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
                 &[],
                 &services.outbound_network_policy,
             )?;
+            command.set_dns_cache(Arc::clone(&services.dns_cache));
             command.set_bt_listener(Arc::clone(&self.services.bt_listener));
             command.set_bt_registry(Arc::clone(&self.services.bt_registry));
             command.set_lpd_manager(Arc::clone(&self.services.lpd_manager));
@@ -83,6 +84,7 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
             request.group,
             request.options.dir.as_deref(),
         )?;
+        command.set_dns_cache(Arc::clone(&services.dns_cache));
         command.set_bt_listener(Arc::clone(&self.services.bt_listener));
         command.set_bt_registry(Arc::clone(&self.services.bt_registry));
         command.set_lpd_manager(Arc::clone(&self.services.lpd_manager));

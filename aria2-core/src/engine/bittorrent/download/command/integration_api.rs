@@ -25,6 +25,13 @@ impl BtDownloadCommand {
         self.outbound_network_policy = policy;
     }
 
+    pub(crate) fn set_dns_cache(
+        &mut self,
+        dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
+    ) {
+        self.dns_cache = dns_cache;
+    }
+
     /// Enable BT progress persistence for resume support.
     pub fn set_progress_manager(&mut self, manager: BtProgressManager) {
         info!("BT progress manager enabled");

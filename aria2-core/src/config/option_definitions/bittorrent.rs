@@ -544,6 +544,18 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "dht-max-items".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::dht::DEFAULT_DHT_MAX_ITEMS as i64,
+            ),
+            min: Some(1),
+            description: "Maximum BEP 44 items retained by each DHT engine".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "enable-dht6".into(),
             opt_type: OptionType::Boolean,
             default_value: OptionValue::Bool(false),

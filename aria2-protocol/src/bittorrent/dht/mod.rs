@@ -23,7 +23,7 @@ pub mod tracker;
 pub use engine::{DhtEngine, DhtEngineConfig, DhtEngineState, FindPeersResult};
 pub use peer_storage::{DhtPeerStorage, DhtPeerStorageConfig};
 pub use persistence::{DhtPersistedData, DhtPersistence, PersistedNode};
-pub use store::{DhtItemStore, StoreError};
+pub use store::{DEFAULT_MAX_ITEMS as DEFAULT_DHT_MAX_ITEMS, DhtItemStore, StoreError};
 pub use task::{BoxedDhtTask, DEFAULT_NUM_CONCURRENT, DhtTask, DhtTaskExecutor, DhtTaskQueue};
 pub use task_impl::{BucketRefreshTask, DhtTaskContext, PingTask};
 pub use task_peer::{PeerLookupResult, PeerLookupTask};

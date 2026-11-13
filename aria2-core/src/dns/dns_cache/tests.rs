@@ -360,6 +360,76 @@ async fn test_explicit_dns_server_is_used_for_resolution() {
         .expect("DNS fixture task must not fail");
 }
 
+#[tokio::test]
+async fn test_explicit_dns_failure_does_not_fall_back_to_system_resolver() {
+    use tokio::net::UdpSocket;
+
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("DNS fixture must bind a UDP socket");
+    let server_address = socket
+        .local_addr()
+        .expect("DNS fixture must expose its local address");
+    let server = tokio::spawn(async move {
+        let mut request = [0u8; 512];
+        for _ in 0..4 {
+            let Ok(Ok((length, peer))) =
+                tokio::time::timeout(Duration::from_millis(250), socket.recv_from(&mut request))
+                    .await
+            else {
+                break;
+            };
+            let mut question_end = 12;
+            loop {
+                let label_length = request[question_end] as usize;
+                question_end += 1;
+                if label_length == 0 {
+                    question_end += 4;
+                    break;
+                }
+                question_end += label_length;
+            }
+            let qtype = u16::from_be_bytes([request[question_end - 4], request[question_end - 3]]);
+            let mut response = Vec::with_capacity(question_end);
+            response.extend_from_slice(&request[..2]);
+            response.extend_from_slice(&[0x81, 0x83, 0, 1, 0, 0, 0, 0, 0, 0]);
+            response.extend_from_slice(&request[12..question_end]);
+            socket
+                .send_to(&response, peer)
+                .await
+                .expect("DNS fixture must send NXDOMAIN");
+            assert!(
+                length >= question_end,
+                "DNS query must contain its question"
+            );
+            if qtype == 1 {
+                break;
+            }
+        }
+    });
+
+    let mut cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
+    let error = cache
+        .resolve("explicit-only.invalid", 80)
+        .await
+        .expect_err("explicit DNS NXDOMAIN must not resolve through system DNS");
+    assert!(
+        error
+            .to_string()
+            .contains("using explicitly configured servers"),
+        "unexpected DNS error: {error}"
+    );
+    assert!(
+        cache
+            .negative_entries
+            .contains_key(&EndpointKey::new("explicit-only.invalid", 80))
+    );
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("DNS fixture must finish promptly")
+        .expect("DNS fixture task must not fail");
+}
+
 /// Test J3.4 #2: Failed lookup blocks retry for negative_ttl duration.
 ///
 /// We inject a negative cache entry directly (without network DNS)

@@ -1,6 +1,70 @@
 use super::*;
 
 #[tokio::test]
+async fn proxy_client_uses_the_resolved_proxy_addresses() {
+    use crate::engine::http::client_config::ResolvedNetworkAddresses;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind resolved-proxy fixture");
+    let proxy_address = listener
+        .local_addr()
+        .expect("read resolved-proxy fixture address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept connection through resolved proxy address");
+        let mut request = [0u8; 4096];
+        let length = stream
+            .read(&mut request)
+            .await
+            .expect("read request sent through resolved proxy");
+        let request = String::from_utf8_lossy(&request[..length]);
+        assert!(request.starts_with("GET http://origin.invalid/file.bin HTTP/1.1\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("respond through resolved proxy");
+    });
+
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://proxy.invalid:{}", proxy_address.port())),
+        ..DownloadOptions::default()
+    };
+    let uri = "http://origin.invalid/file.bin";
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1200),
+        vec![uri.to_string()],
+        options.clone(),
+    )));
+    let command = DownloadCommand::new_with_group_and_resolved_network_addresses(
+        group,
+        uri,
+        &options,
+        None,
+        None,
+        ResolvedNetworkAddresses {
+            target: None,
+            proxy: Some(vec![proxy_address]),
+        },
+        Arc::new(OutboundNetworkPolicy::direct()),
+    )
+    .expect("build proxy client with supplied resolver addresses");
+
+    let response = command
+        .client
+        .get(uri)
+        .send()
+        .await
+        .expect("client must connect to the resolved proxy address");
+    assert_eq!(response.status().as_u16(), 200);
+    server.await.expect("resolved-proxy fixture must finish");
+}
+
+#[tokio::test]
 async fn proxy_client_leaves_redirects_for_the_download_flow() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

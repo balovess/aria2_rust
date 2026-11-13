@@ -280,9 +280,10 @@ impl BtDownloadCommand {
                         )
                     });
                 let dht_config =
-                    crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family(
+                    crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family_with_dns_cache(
                         &dht_options,
                         &self.outbound_network_policy,
+                        &self.dns_cache,
                         use_ipv6,
                     )
                     .await?;

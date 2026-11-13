@@ -230,6 +230,8 @@ pub struct BtDownloadCommand {
     pub(crate) torrent_upload_limiter: RateLimiter,
     /// Process-wide outbound TCP policy for tracker/peer protocol adapters.
     pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
+    /// Shared resolver configured by the owning download engine.
+    pub(crate) dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
 
     /// Shared rejection state for verified bad piece sources.
     pub(crate) peer_rejection: crate::engine::bittorrent::peer::storage::SharedPeerRejection,

@@ -221,6 +221,7 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--dht-file-path6=dht6.dat",
         "--dht-max-peer-info-hashes=1200",
         "--dht-max-peers-per-info-hash=37",
+        "--dht-max-items=512",
     ])
     .expect("BitTorrent timeout and DHT CLI options should parse");
 
@@ -286,6 +287,7 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     for (name, expected) in [
         ("dht-max-peer-info-hashes", 1200),
         ("dht-max-peers-per-info-hash", 37),
+        ("dht-max-items", 512),
     ] {
         assert_eq!(
             app.config.read().await.get_global_i64(name).await,

@@ -34,6 +34,7 @@ pub struct MagnetDownloadCommand {
     /// Carried through to the internally-created `BtDownloadCommand`.
     global_limiter: Option<RateLimiter>,
     outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
+    dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
     #[cfg(feature = "bittorrent")]
     public_tracker_catalog:
         Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
@@ -75,6 +76,13 @@ impl MagnetDownloadCommand {
         policy: Arc<crate::network::OutboundNetworkPolicy>,
     ) {
         self.outbound_network_policy = policy;
+    }
+
+    pub(crate) fn set_dns_cache(
+        &mut self,
+        dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
+    ) {
+        self.dns_cache = dns_cache;
     }
 
     /// Create a magnet download command that reuses an externally-managed
@@ -148,6 +156,9 @@ impl MagnetDownloadCommand {
             dht_engines: DhtEngineSet::default(),
             global_limiter: None,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+            dns_cache: Arc::new(tokio::sync::Mutex::new(
+                crate::dns::dns_cache::DnsCache::new(),
+            )),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -383,6 +394,7 @@ impl Command for MagnetDownloadCommand {
             &[],
             &self.outbound_network_policy,
         )?;
+        bt_cmd.set_dns_cache(Arc::clone(&self.dns_cache));
         bt_cmd.local_peer_id = self.local_peer_id;
         bt_cmd.initial_peer_swarm = self.initial_peer_swarm.take();
         self.group.recover_mut().set_bt_metadata_data(torrent_bytes);

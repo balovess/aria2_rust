@@ -61,20 +61,21 @@ pub(super) fn build_download_clients(
     .flatten()
     .any(|proxy| !proxy.is_empty());
     let proxy_origin = http_proxy_origin(uri, options);
-    let target_remote = resolved_addresses
+    let target_remotes = resolved_addresses
         .target
-        .as_ref()
-        .and_then(|addresses| addresses.first().copied())
+        .as_deref()
+        .filter(|addresses| !addresses.is_empty())
+        .map(<[_]>::to_vec)
         .or_else(|| {
             uri_host(uri).and_then(|host| {
                 host.parse::<IpAddr>().ok().map(|ip| {
-                    std::net::SocketAddr::new(
+                    vec![std::net::SocketAddr::new(
                         ip,
                         url::Url::parse(uri)
                             .ok()
                             .and_then(|url| url.port_or_known_default())
                             .unwrap_or(80),
-                    )
+                    )]
                 })
             })
         });
@@ -100,16 +101,16 @@ pub(super) fn build_download_clients(
             )))
         })?
     } else {
-        target_remote
-            .map(|remote| outbound_network_policy.source_for(remote))
-            .transpose()
-            .map_err(|error| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Outbound network policy cannot serve {uri}: {error}"
-                )))
-            })?
-            .flatten()
-            .or_else(|| outbound_network_policy.addresses().into_iter().next())
+        let source = source_for_remotes(
+            outbound_network_policy,
+            target_remotes.as_deref().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "Outbound network policy cannot serve {uri}: {error}"
+            )))
+        })?;
+        source.or_else(|| outbound_network_policy.addresses().into_iter().next())
     };
 
     let client = build_download_client(
@@ -404,6 +405,16 @@ pub(super) fn build_download_client(
                 warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, error);
             }
         }
+    }
+
+    if let (Some((proxy_host, _)), Some(proxy_addresses)) = (
+        http_proxy_origin(uri, options),
+        resolved_addresses
+            .proxy
+            .as_deref()
+            .filter(|addresses| !addresses.is_empty()),
+    ) {
+        builder = builder.resolve_to_addrs(&proxy_host, proxy_addresses);
     }
 
     let builder = apply_local_address(builder, local_address);

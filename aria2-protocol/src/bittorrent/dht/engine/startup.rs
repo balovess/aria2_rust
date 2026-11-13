@@ -196,21 +196,24 @@ impl DhtEngine {
 
         let token_tracker = Arc::new(std::sync::Mutex::new(TokenTracker::new()));
         let peer_storage = Arc::new(DhtPeerStorage::with_config(peer_storage_config));
-        let item_store = config
+        let item_store = if let Some(path) = config
             .dht_file_path
             .as_deref()
             .map(|path| path.with_extension("items"))
-            .and_then(|path| match DhtItemStore::load_from_file_sync(&path) {
+        {
+            match DhtItemStore::load_from_file_with_limit(&path, config.max_stored_items).await {
                 Ok(store) => {
                     info!(path = %path.display(), "Loaded BEP 44 item store");
-                    Some(store)
+                    store
                 }
                 Err(error) => {
                     debug!(path = %path.display(), "BEP 44 item store unavailable: {error}");
-                    None
+                    DhtItemStore::with_max_items(config.max_stored_items)
                 }
-            })
-            .unwrap_or_default();
+            }
+        } else {
+            DhtItemStore::with_max_items(config.max_stored_items)
+        };
         let tracker = Arc::new(TransactionTracker::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 

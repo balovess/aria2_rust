@@ -422,6 +422,7 @@ impl OptionRegistry {
             | "bt-lpd-interface"
             | "dht-max-peer-info-hashes"
             | "dht-max-peers-per-info-hash"
+            | "dht-max-items"
             | "bt-max-open-files"
             | "bt-incoming-peer-handshake-timeout"
             | "bt-tracker-source"
@@ -568,6 +569,7 @@ mod tests {
             ("bt-max-open-files", OptionOwner::ProcessEngine),
             ("dht-max-peer-info-hashes", OptionOwner::ProcessEngine),
             ("dht-max-peers-per-info-hash", OptionOwner::ProcessEngine),
+            ("dht-max-items", OptionOwner::ProcessEngine),
             (
                 "bt-incoming-peer-handshake-timeout",
                 OptionOwner::ProcessEngine,

@@ -130,7 +130,7 @@ aria2c --conf-path=aria2.conf --reset-config
 
 以下目录覆盖当前 `OptionRegistry` 注册的 canonical 名称，但“已注册”不等于“已接线”。当前源码明确标记为 `supported: false` 的选项只用于兼容旧配置，解析时会保留并警告，不会改变运行行为。其他选项也应以当前构建的 `aria2c --help` 和实际测试为准。`max-retries`、`enable-lpd`、`dht-message-path`、`server-stat-file`、`max-downloads` 是兼容别名，分别映射到 `max-tries`、`bt-enable-lpd`、`dht-file-path`、`server-stat-of`、`max-concurrent-downloads`。
 
-当前明确未接线的兼容选项：`interface`、`multiple-interface`、`async-dns-server`、`dns-timeout`、`enable-async-dns6`、`event-poll`、`optimize-concurrent-downloads`、`optimize-concurrent-downloads-coeffA`、`optimize-concurrent-downloads-coeffB`、`rlimit-nofile`、`select-least-used-host`、`socket-recv-buffer-size`、`dscp`、`max-http-pipelining`。这些名称可以出现在兼容配置中，但不要依赖它们提供对应功能。
+当前明确未接线的兼容选项：`enable-async-dns6`、`event-poll`、`optimize-concurrent-downloads`、`optimize-concurrent-downloads-coeffA`、`optimize-concurrent-downloads-coeffB`、`rlimit-nofile`、`select-least-used-host`、`socket-recv-buffer-size`、`dscp`、`max-http-pipelining`。这些名称可以出现在兼容配置中，但不要依赖它们提供对应功能。
 
 ### General：基础、会话、界面和日志
 
@@ -230,6 +230,17 @@ DHT 的协议引擎维护参数也可从配置文件、CLI 和 RPC 统一设置�
 | `dht-bootstrap-timeout` | `60` | bootstrap 后台任务上限（秒） |
 | `dht-max-concurrent-lookups` | `16` | 并发 DHT lookup 数量上限 |
 | `dht-persistence-max-age` | `86400` | 接受磁盘快照的最大年龄（秒） |
+
+#### DHT 存储上限
+
+| 选项 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `dht-max-peer-info-hashes` | `4096` | 每个 DHT 引擎保存的本地 announce swarm 数量上限 |
+| `dht-max-peers-per-info-hash` | `50` | 每个 swarm 保存的本地 peer 数量上限 |
+| `dht-max-items` | `4096` | 每个 DHT 引擎保存的 BEP 44 target 数量上限 |
+
+这些进程级选项可通过配置文件、CLI、C API session 选项和全局 RPC 选项设置。
+运行时修改会立即生效；调低上限时会淘汰最早写入的条目。
 
 快照会复用其中保存的本地 node id；超过 `dht-persistence-max-age` 的快照不会
 注入路由表，合并保存时也不会继续保留过期旧节点。`aria2.getDhtStatus` 会

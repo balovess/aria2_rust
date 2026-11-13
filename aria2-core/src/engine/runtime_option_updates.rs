@@ -114,6 +114,13 @@ pub fn runtime_commands_for_global_option_changes(
                 },
             });
         }
+        if changed_options.contains("dht-max-items")
+            && let Some(max_items) = option_i64(effective_options, "dht-max-items")
+                .and_then(|value| usize::try_from(value).ok())
+            && max_items > 0
+        {
+            commands.push(EngineCommand::SetDhtItemStoreLimit { max_items });
+        }
         if [
             "bt-utp-max-connections",
             "bt-utp-connect-timeout",
@@ -275,6 +282,18 @@ mod tests {
             runtime_commands_for_global_option_changes(&changed, &effective).as_slice(),
             [EngineCommand::SetDhtPeerStorageConfig { config }]
                 if config.max_info_hashes == 128 && config.max_peers_per_info_hash == 24
+        ));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn dht_item_limit_projects_to_a_runtime_command() {
+        let changed = HashSet::from(["dht-max-items".to_string()]);
+        let effective = HashMap::from([("dht-max-items".to_string(), OptionValue::Int(512))]);
+
+        assert!(matches!(
+            runtime_commands_for_global_option_changes(&changed, &effective).as_slice(),
+            [EngineCommand::SetDhtItemStoreLimit { max_items: 512 }]
         ));
     }
 

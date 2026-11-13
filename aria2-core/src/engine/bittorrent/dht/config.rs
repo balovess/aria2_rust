@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::parse_integer_segments;
+use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::DownloadOptions;
 
 /// The subset of process options that configures the shared DHT engines.
 #[derive(Clone, Debug)]
 pub(crate) struct DhtEngineOptions {
+    pub(crate) async_dns: bool,
     pub(crate) dht_listen_port: Option<String>,
     pub(crate) dht_listen_addr: Option<String>,
     pub(crate) dht_listen_addr6: Option<String>,
@@ -33,6 +35,7 @@ pub(crate) struct DhtEngineOptions {
     pub(crate) dht_persistence_max_age: u64,
     pub(crate) dht_max_peer_info_hashes: usize,
     pub(crate) dht_max_peers_per_info_hash: usize,
+    pub(crate) dht_max_items: usize,
 }
 
 impl From<&DownloadOptions> for DhtEngineOptions {
@@ -40,6 +43,7 @@ impl From<&DownloadOptions> for DhtEngineOptions {
         let peer_storage_defaults =
             aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default();
         Self {
+            async_dns: options.async_dns,
             dht_listen_port: options.dht_listen_port.clone(),
             dht_listen_addr: options.dht_listen_addr.clone(),
             dht_listen_addr6: options.dht_listen_addr6.clone(),
@@ -62,6 +66,7 @@ impl From<&DownloadOptions> for DhtEngineOptions {
             dht_persistence_max_age: options.dht_persistence_max_age,
             dht_max_peer_info_hashes: peer_storage_defaults.max_info_hashes,
             dht_max_peers_per_info_hash: peer_storage_defaults.max_peers_per_info_hash,
+            dht_max_items: aria2_protocol::bittorrent::dht::DEFAULT_DHT_MAX_ITEMS,
         }
     }
 }
@@ -92,10 +97,12 @@ impl DhtEngineOptions {
 pub(crate) async fn build_dht_engine_config(
     options: &DownloadOptions,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
+    let dns_cache = tokio::sync::Mutex::new(DnsCache::new());
     let dht_options = DhtEngineOptions::from(options);
-    build_dht_engine_config_for_family(
+    build_dht_engine_config_for_family_with_dns_cache(
         &dht_options,
         &crate::network::OutboundNetworkPolicy::direct(),
+        &dns_cache,
         options.enable_dht6,
     )
     .await?
@@ -107,18 +114,31 @@ pub(crate) async fn build_dht_engine_config_with_policy(
     options: &DownloadOptions,
     policy: &crate::network::OutboundNetworkPolicy,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
-    build_dht_engine_config_for_family(
+    let dns_cache = tokio::sync::Mutex::new(DnsCache::new());
+    build_dht_engine_config_for_family_with_dns_cache(
         &DhtEngineOptions::from(options),
         policy,
+        &dns_cache,
         options.enable_dht6,
     )
     .await?
     .ok_or_else(|| config_error("no compatible outbound source for DHT".to_string()))
 }
 
+#[cfg(test)]
 pub(crate) async fn build_dht_engine_config_for_family(
     options: &DhtEngineOptions,
     policy: &crate::network::OutboundNetworkPolicy,
+    use_ipv6: bool,
+) -> Result<Option<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig>> {
+    let dns_cache = tokio::sync::Mutex::new(DnsCache::new());
+    build_dht_engine_config_for_family_with_dns_cache(options, policy, &dns_cache, use_ipv6).await
+}
+
+pub(crate) async fn build_dht_engine_config_for_family_with_dns_cache(
+    options: &DhtEngineOptions,
+    policy: &crate::network::OutboundNetworkPolicy,
+    dns_cache: &tokio::sync::Mutex<DnsCache>,
     use_ipv6: bool,
 ) -> Result<Option<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig>> {
     let port_range = options
@@ -157,7 +177,30 @@ pub(crate) async fn build_dht_engine_config_for_family(
         }
     };
     let bootstrap_specs = selected_bootstrap_specs(options, use_ipv6)?;
-    let bootstrap_nodes = resolve_bootstrap_nodes(&bootstrap_specs, use_ipv6).await?;
+    let (bootstrap_nodes, bootstrap_on_start) = if bootstrap_specs.is_empty() {
+        if !options.async_dns || dns_cache.lock().await.dns_server_addresses().is_empty() {
+            // Let the protocol engine perform its background system-DNS
+            // bootstrap when async DNS is disabled or no explicit resolver is
+            // configured.
+            (Vec::new(), true)
+        } else {
+            let nodes = resolve_default_bootstrap_nodes(dns_cache, use_ipv6).await;
+            let bootstrap_available = !nodes.is_empty();
+            if !bootstrap_available {
+                tracing::warn!(
+                    ipv6 = use_ipv6,
+                    "No default DHT bootstrap endpoint resolved using explicitly configured DNS servers; starting without public bootstrap"
+                );
+            }
+            (nodes, bootstrap_available)
+        }
+    } else {
+        (
+            resolve_bootstrap_nodes(dns_cache, &bootstrap_specs, options.async_dns, use_ipv6)
+                .await?,
+            true,
+        )
+    };
     let dht_file_path = selected_file_path(options, use_ipv6)
         .map(|path| expand_home_path(path, home_dir().as_deref()))
         .or_else(|| Some(default_dht_file_path(use_ipv6)));
@@ -171,6 +214,7 @@ pub(crate) async fn build_dht_engine_config_for_family(
             port_range,
             listen_addr,
             bootstrap_nodes,
+            bootstrap_on_start,
             dht_file_path,
             query_timeout: Duration::from_secs(options.dht_message_timeout.max(1)),
             refresh_check_interval: Duration::from_secs(options.dht_refresh_check_interval.max(1)),
@@ -183,6 +227,7 @@ pub(crate) async fn build_dht_engine_config_for_family(
             bootstrap_timeout: Duration::from_secs(options.dht_bootstrap_timeout.max(1)),
             max_concurrent_lookups: options.dht_max_concurrent_lookups.max(1),
             persistence_max_age: Duration::from_secs(options.dht_persistence_max_age.max(1)),
+            max_stored_items: options.dht_max_items.max(1),
             ..Default::default()
         },
     ))
@@ -295,14 +340,22 @@ fn selected_bootstrap_specs(options: &DhtEngineOptions, use_ipv6: bool) -> Resul
     Ok(specs)
 }
 
-async fn resolve_bootstrap_nodes(specs: &[String], use_ipv6: bool) -> Result<Vec<SocketAddr>> {
+async fn resolve_bootstrap_nodes(
+    dns_cache: &tokio::sync::Mutex<DnsCache>,
+    specs: &[String],
+    async_dns: bool,
+    use_ipv6: bool,
+) -> Result<Vec<SocketAddr>> {
     let mut nodes = Vec::with_capacity(specs.len());
     for spec in specs {
-        let mut addresses = tokio::net::lookup_host(spec.as_str())
+        let (host, port) = parse_bootstrap_endpoint(spec)
+            .ok_or_else(|| config_error(format!("invalid DHT bootstrap endpoint '{spec}'")))?;
+        let addresses = resolve_bootstrap_host(dns_cache, host, port, async_dns)
             .await
             .map_err(|error| {
                 config_error(format!("cannot resolve DHT bootstrap '{spec}': {error}"))
             })?;
+        let mut addresses = addresses.into_iter();
         let address = addresses
             .find(|address| address.is_ipv6() == use_ipv6)
             .ok_or_else(|| {
@@ -314,6 +367,66 @@ async fn resolve_bootstrap_nodes(specs: &[String], use_ipv6: bool) -> Result<Vec
         nodes.push(address);
     }
     Ok(nodes)
+}
+
+async fn resolve_default_bootstrap_nodes(
+    dns_cache: &tokio::sync::Mutex<DnsCache>,
+    use_ipv6: bool,
+) -> Vec<SocketAddr> {
+    let mut nodes = Vec::new();
+    for endpoint in aria2_protocol::bittorrent::dht::bootstrap::DhtBootstrap::bootstrap_node_list()
+    {
+        let Some((host, port)) = parse_bootstrap_endpoint(&endpoint) else {
+            continue;
+        };
+        match resolve_bootstrap_host(dns_cache, host, port, true).await {
+            Ok(addresses) => {
+                if let Some(address) = addresses
+                    .into_iter()
+                    .find(|address| address.is_ipv6() == use_ipv6)
+                {
+                    nodes.push(address);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, endpoint, "Failed to resolve default DHT bootstrap endpoint")
+            }
+        }
+    }
+    nodes
+}
+
+async fn resolve_bootstrap_host(
+    dns_cache: &tokio::sync::Mutex<DnsCache>,
+    host: &str,
+    port: u16,
+    async_dns: bool,
+) -> Result<Vec<SocketAddr>> {
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(address, port)]);
+    }
+    if async_dns {
+        dns_cache
+            .lock()
+            .await
+            .resolve_with_refresh(host, port)
+            .await
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map(|addresses| addresses.collect())
+            .map_err(|error| Aria2Error::NameResolve(error.to_string()))
+    }
+}
+
+fn parse_bootstrap_endpoint(endpoint: &str) -> Option<(&str, u16)> {
+    let (host, port) = endpoint.rsplit_once(':')?;
+    let port = port.parse().ok()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    (!host.is_empty()).then_some((host, port))
 }
 
 fn config_error(message: String) -> Aria2Error {
@@ -385,6 +498,16 @@ mod tests {
         let mut dht_options = DhtEngineOptions::from(&options);
         dht_options.dht_max_peer_info_hashes = 1200;
         dht_options.dht_max_peers_per_info_hash = 37;
+        dht_options.dht_max_items = 512;
+        let configured = build_dht_engine_config_for_family(
+            &dht_options,
+            &crate::network::OutboundNetworkPolicy::direct(),
+            false,
+        )
+        .await
+        .expect("DHT options should map into protocol config")
+        .expect("IPv4 DHT config should exist");
+        assert_eq!(configured.max_stored_items, 512);
         assert_eq!(
             dht_options.protocol_peer_storage_config(),
             aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
@@ -489,6 +612,154 @@ mod tests {
         assert!(
             matches!(error, Aria2Error::Fatal(FatalError::Config(message)) if message.contains("not an outbound source address"))
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_dns_failure_disables_default_dht_bootstrap_without_system_fallback() {
+        let options = DownloadOptions::default();
+        let dht_options = DhtEngineOptions::from(&options);
+        let policy = crate::network::OutboundNetworkPolicy::direct();
+        let dns_cache = tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            Duration::from_millis(200),
+            vec!["127.0.0.1:9".parse().unwrap()],
+        ));
+
+        let config = build_dht_engine_config_for_family_with_dns_cache(
+            &dht_options,
+            &policy,
+            &dns_cache,
+            false,
+        )
+        .await
+        .expect("unavailable default bootstrap servers must not fail the download")
+        .expect("direct DHT should remain available");
+
+        assert!(config.bootstrap_nodes.is_empty());
+        assert!(!config.bootstrap_on_start);
+    }
+
+    #[tokio::test]
+    async fn explicit_dns_resolves_default_dht_bootstrap_endpoints() {
+        use tokio::net::UdpSocket;
+
+        let socket = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("DNS fixture should bind");
+        let server_address = socket.local_addr().expect("DNS fixture address");
+        let dns_server = tokio::spawn(async move {
+            let mut request = [0_u8; 512];
+            loop {
+                let Ok((length, peer)) = socket.recv_from(&mut request).await else {
+                    break;
+                };
+                let request = &request[..length];
+                let mut question_end = 12;
+                while question_end < request.len() && request[question_end] != 0 {
+                    question_end += 1;
+                }
+                question_end += 5;
+                if question_end > request.len() {
+                    continue;
+                }
+                let query_type =
+                    u16::from_be_bytes([request[question_end - 4], request[question_end - 3]]);
+                let has_ipv4_answer = query_type == 1;
+                let mut response = Vec::with_capacity(question_end + 16);
+                response.extend_from_slice(&request[..2]);
+                response.extend_from_slice(&[
+                    0x81,
+                    0x80,
+                    0,
+                    1,
+                    0,
+                    u8::from(has_ipv4_answer),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                response.extend_from_slice(&request[12..question_end]);
+                if has_ipv4_answer {
+                    response.extend_from_slice(&[
+                        0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1,
+                    ]);
+                }
+                let _ = socket.send_to(&response, peer).await;
+            }
+        });
+
+        let options = DownloadOptions::default();
+        let dht_options = DhtEngineOptions::from(&options);
+        let policy = crate::network::OutboundNetworkPolicy::direct();
+        let dns_cache = tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            Duration::from_secs(2),
+            vec![server_address],
+        ));
+
+        let config = build_dht_engine_config_for_family_with_dns_cache(
+            &dht_options,
+            &policy,
+            &dns_cache,
+            false,
+        )
+        .await
+        .expect("DHT config should resolve through its explicit DNS server")
+        .expect("direct DHT should be available");
+        dns_server.abort();
+
+        assert!(config.bootstrap_on_start);
+        assert!(!config.bootstrap_nodes.is_empty());
+        assert!(
+            config
+                .bootstrap_nodes
+                .iter()
+                .all(|address| address.ip().is_loopback() && address.port() == 6881)
+        );
+    }
+
+    #[tokio::test]
+    async fn async_dns_disabled_uses_system_resolution_for_custom_bootstrap() {
+        let options = DownloadOptions {
+            async_dns: false,
+            dht_entry_point: Some(vec!["localhost:49003".to_string()]),
+            ..Default::default()
+        };
+        let dht_options = DhtEngineOptions::from(&options);
+        let policy = crate::network::OutboundNetworkPolicy::direct();
+        let dns_cache = tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            Duration::from_millis(200),
+            vec!["127.0.0.1:9".parse().unwrap()],
+        ));
+
+        let config = build_dht_engine_config_for_family_with_dns_cache(
+            &dht_options,
+            &policy,
+            &dns_cache,
+            false,
+        )
+        .await
+        .expect("system resolver should resolve localhost when async DNS is disabled")
+        .expect("direct DHT should be available");
+
+        assert_eq!(config.bootstrap_nodes.len(), 1);
+        assert!(config.bootstrap_nodes[0].ip().is_loopback());
+        assert_eq!(config.bootstrap_nodes[0].port(), 49003);
+
+        let default_options = DhtEngineOptions::from(&DownloadOptions {
+            async_dns: false,
+            ..Default::default()
+        });
+        let default_config = build_dht_engine_config_for_family_with_dns_cache(
+            &default_options,
+            &policy,
+            &dns_cache,
+            false,
+        )
+        .await
+        .expect("default bootstrap should keep the system resolver path")
+        .expect("direct DHT should be available");
+        assert!(default_config.bootstrap_nodes.is_empty());
+        assert!(default_config.bootstrap_on_start);
     }
 
     #[tokio::test]

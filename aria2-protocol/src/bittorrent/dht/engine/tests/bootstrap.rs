@@ -194,6 +194,33 @@ async fn startup_restores_only_nodes_matching_the_bound_ip_family() {
 }
 
 #[tokio::test]
+async fn startup_restores_bep44_items_from_the_async_store_loader() {
+    use crate::bittorrent::bencode::codec::BencodeValue;
+    use crate::bittorrent::dht::store::DhtItemStore;
+
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dht_file_path = temp_dir.path().join("dht.dat");
+    let store_path = dht_file_path.with_extension("items");
+    let store = DhtItemStore::default();
+    let target = store
+        .put_immutable(BencodeValue::Bytes(b"restored BEP 44 item".to_vec()))
+        .expect("fixture item should be valid");
+    store
+        .save_to_file_sync(&store_path)
+        .expect("fixture item store should be persisted");
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        dht_file_path: Some(dht_file_path),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT should start after asynchronously restoring the item store");
+
+    assert_eq!(engine.context.item_store.get(&target), store.get(&target));
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
 async fn configured_bootstrap_endpoints_are_all_seeded() {
     use crate::bittorrent::dht::persistence::DhtPersistence;
 

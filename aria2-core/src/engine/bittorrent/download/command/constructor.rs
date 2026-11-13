@@ -452,6 +452,9 @@ impl BtDownloadCommand {
             global_limiter: None,
             torrent_upload_limiter,
             outbound_network_policy: Arc::new(policy.clone()),
+            dns_cache: Arc::new(tokio::sync::Mutex::new(
+                crate::dns::dns_cache::DnsCache::new(),
+            )),
 
             peer_rejection: crate::engine::bittorrent::peer::storage::PeerRejectionState::shared(),
             peer_storage,
