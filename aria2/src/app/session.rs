@@ -101,9 +101,9 @@ impl App {
             // Keep the persisted request options separate from Rust-only
             // session metadata before reconstructing execution settings.
             let mut restored_options = entry.options.clone();
-            // A session entry represents an interrupted task. Resume it from
-            // its data/control files even when an older session omitted the
-            // default-false `continue` option.
+            // A session entry represents interrupted work. Resume from its
+            // data/control files even if persisted per-task options disabled
+            // continuation or came from an older session without that option.
             restored_options.insert("continue".to_string(), "true".to_string());
             let option_snapshot = Self::session_option_snapshot(&restored_options);
             let opts = Self::map_entry_to_download_options(&restored_options);

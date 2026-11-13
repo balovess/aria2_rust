@@ -1,6 +1,7 @@
 use super::{
     ChangeableKind, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
-    is_global_option_changeable, is_initial_option, is_option_changeable, project_initial_options,
+    is_global_option_changeable, is_initial_option, is_option_available, is_option_changeable,
+    project_initial_options,
 };
 #[test]
 fn policy_matches_original_wire_names() {
@@ -51,6 +52,66 @@ fn policy_matches_original_wire_names() {
     assert!(!is_global_option_changeable("bt-force-encryption"));
     assert!(!is_global_option_changeable("no-conf"));
     assert!(!is_global_option_changeable("show-files"));
+}
+
+#[test]
+fn compatibility_aliases_use_the_canonical_runtime_policy() {
+    let aliases = [
+        ("max-retries", "max-tries"),
+        ("enable-lpd", "bt-enable-lpd"),
+        ("dht-message-path", "dht-file-path"),
+        ("server-stat-file", "server-stat-of"),
+        ("max-downloads", "max-concurrent-downloads"),
+    ];
+
+    for (alias, canonical) in aliases {
+        assert_eq!(
+            is_option_available(alias),
+            is_option_available(canonical),
+            "runtime availability for {alias} must match {canonical}"
+        );
+        assert_eq!(
+            is_initial_option(alias),
+            is_initial_option(canonical),
+            "initial-option policy for {alias} must match {canonical}"
+        );
+        assert_eq!(
+            is_global_option_changeable(alias),
+            is_global_option_changeable(canonical),
+            "global runtime policy for {alias} must match {canonical}"
+        );
+        for active in [false, true] {
+            assert_eq!(
+                is_option_changeable(alias, active),
+                is_option_changeable(canonical, active),
+                "task runtime policy for {alias} must match {canonical}"
+            );
+        }
+    }
+
+    assert!(is_global_option_changeable("max-downloads"));
+
+    #[cfg(feature = "bittorrent")]
+    {
+        assert!(is_initial_option("enable-lpd"));
+        assert_eq!(
+            is_option_changeable("enable-lpd", false),
+            ChangeableKind::Immediate
+        );
+        assert_eq!(
+            is_option_changeable("enable-lpd", true),
+            ChangeableKind::Pending
+        );
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
+    {
+        assert!(!is_initial_option("enable-lpd"));
+        assert_eq!(
+            is_option_changeable("enable-lpd", false),
+            ChangeableKind::NotChangeable
+        );
+    }
 }
 
 #[test]

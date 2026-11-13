@@ -596,8 +596,16 @@ fn test_tracker_announcer_with_announce_url() {
 fn test_tracker_announcer_udp_detection() {
     let urls = vec![vec!["udp://tracker.example.com:6969/announce".to_string()]];
     let _announcer = TrackerAnnouncer::new(&urls, &None);
-    assert!(is_udp_tracker("udp://tracker.example.com:6969/announce"));
-    assert!(!is_udp_tracker("http://tracker.example.com:6969/announce"));
+    use aria2_protocol::bittorrent::tracker::url::{TrackerTransport, classify_tracker_url};
+
+    assert_eq!(
+        classify_tracker_url("udp://tracker.example.com:6969/announce"),
+        Some(TrackerTransport::Udp)
+    );
+    assert_eq!(
+        classify_tracker_url("http://tracker.example.com:6969/announce"),
+        Some(TrackerTransport::Http)
+    );
 }
 
 #[test]

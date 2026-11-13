@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::DownloadOptions;
 use crate::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::bittorrent::tracker::url::{TrackerTransport, classify_tracker_url};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,13 +30,7 @@ pub(super) fn metadata_tracker_urls(
         .map(|url| url.trim().to_owned())
         .filter(|url| {
             !url.is_empty()
-                && matches!(
-                    reqwest::Url::parse(url)
-                        .ok()
-                        .as_ref()
-                        .map(reqwest::Url::scheme),
-                    Some("http" | "https" | "udp" | "ws" | "wss")
-                )
+                && classify_tracker_url(url).is_some()
                 && !excluded.iter().any(|excluded| excluded == url)
         })
         .fold(Vec::new(), |mut unique, url| {
@@ -226,10 +221,10 @@ impl MagnetDownloadCommand {
         let mut discovered_peers = Vec::new();
 
         for tracker_url in tracker_urls.into_iter().take(MAX_MAGNET_TRACKERS_TO_TRY) {
-            let tracker_scheme = reqwest::Url::parse(&tracker_url)
-                .ok()
-                .map(|url| url.scheme().to_owned());
-            if matches!(tracker_scheme.as_deref(), Some("ws" | "wss")) {
+            if matches!(
+                classify_tracker_url(&tracker_url),
+                Some(TrackerTransport::WebSocket)
+            ) {
                 match crate::engine::bittorrent::tracker::websocket::announce_with_policy(
                     &tracker_url,
                     crate::engine::bittorrent::tracker::websocket::AnnounceRequest {

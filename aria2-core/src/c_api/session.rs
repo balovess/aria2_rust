@@ -382,7 +382,9 @@ impl Aria2RustSession {
         for command in
             runtime_commands_for_global_option_changes(&changed_options, &effective_options)
         {
-            let _ = self.command_tx.send(command);
+            if let Err(error) = self.command_tx.send(command) {
+                return self.fail(error.to_string(), INTERNAL_ERROR);
+            }
         }
         0
     }

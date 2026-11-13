@@ -16,6 +16,10 @@ pub fn runtime_commands_for_global_option_changes(
     changed_options: &HashSet<String>,
     effective_options: &HashMap<String, OptionValue>,
 ) -> Vec<EngineCommand> {
+    let changed_options = changed_options
+        .iter()
+        .map(|name| crate::config::OptionRegistry::canonical_name(name))
+        .collect::<HashSet<_>>();
     let mut commands = Vec::new();
 
     if changed_options.contains("max-concurrent-downloads")
@@ -172,5 +176,19 @@ mod tests {
         )]);
 
         assert!(runtime_commands_for_global_option_changes(&changed, &effective).is_empty());
+    }
+
+    #[test]
+    fn compatibility_alias_projects_the_canonical_runtime_command() {
+        let changed = HashSet::from(["max-downloads".to_string()]);
+        let effective =
+            HashMap::from([("max-concurrent-downloads".to_string(), OptionValue::Int(9))]);
+
+        let commands = runtime_commands_for_global_option_changes(&changed, &effective);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [EngineCommand::SetMaxConcurrent { max: 9 }]
+        ));
     }
 }

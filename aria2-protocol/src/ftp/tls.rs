@@ -18,6 +18,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, info, warn};
 
+use crate::crypto::ensure_ring_provider;
+
 /// FTPS (FTP over TLS) configuration per RFC 4217.
 ///
 /// The engine maps its user-facing options into this transport configuration.
@@ -173,7 +175,7 @@ pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConne
     use rustls::ClientConfig;
     use rustls::crypto::ring::default_provider;
 
-    let _ = default_provider().install_default();
+    ensure_ring_provider();
     let mut root_store = rustls::RootCertStore::empty();
 
     if config.check_certificate {

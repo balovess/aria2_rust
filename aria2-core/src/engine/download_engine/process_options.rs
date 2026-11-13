@@ -77,10 +77,9 @@ impl DownloadEngine {
 
         if let Some(max) =
             option_i64(options, "max-concurrent-downloads").filter(|value| *value >= 0)
+            && let Ok(max) = u32::try_from(max)
         {
-            if let Ok(max) = u32::try_from(max) {
-                request_man.set_max_concurrent(max);
-            }
+            request_man.set_max_concurrent(max);
         }
         let download_limit =
             option_i64(options, "max-overall-download-limit").and_then(non_zero_limit);

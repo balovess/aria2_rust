@@ -1,4 +1,3 @@
-#[cfg(feature = "bittorrent")]
 use std::sync::Arc;
 
 use async_trait::async_trait;

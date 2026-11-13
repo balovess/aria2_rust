@@ -6,7 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use super::super::bt_announce::{BtAnnounce, is_udp_tracker};
+use aria2_protocol::bittorrent::tracker::url::{
+    TrackerTransport, classify_tracker_url, is_udp_tracker_url,
+};
+
+use super::super::bt_announce::BtAnnounce;
 use super::super::types::AnnounceEvent;
 use crate::engine::bittorrent::tracker::udp_client::{
     UdpAnnounceParams, UdpError, UdpTrackerClient, resolve_udp_tracker_addr,
@@ -195,13 +199,10 @@ impl TrackerAnnouncer {
         self.tracker_attempt_started(&tracker_url);
         self.publish_runtime_snapshot();
         let event = self.announce.announce_list().get_event();
-        let result = if is_udp_tracker(&tracker_url) {
+        let result = if is_udp_tracker_url(&tracker_url) {
             self.announce_udp(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
                 .await
-        } else if reqwest::Url::parse(&tracker_url)
-            .ok()
-            .is_some_and(|url| matches!(url.scheme(), "ws" | "wss"))
-        {
+        } else if classify_tracker_url(&tracker_url) == Some(TrackerTransport::WebSocket) {
             self.announce_websocket(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
                 .await
         } else {

@@ -3,7 +3,9 @@
 use std::time::Duration;
 use tracing::debug;
 
-use super::{AnnounceEvent, BtAnnounce, is_udp_tracker};
+use aria2_protocol::bittorrent::tracker::url::is_udp_tracker_url;
+
+use super::{AnnounceEvent, BtAnnounce};
 
 impl BtAnnounce {
     // ==================================================================
@@ -22,7 +24,7 @@ impl BtAnnounce {
     pub fn is_current_tracker_udp(&self) -> bool {
         self.announce_list
             .get_announce()
-            .map(is_udp_tracker)
+            .map(is_udp_tracker_url)
             .unwrap_or(false)
     }
 

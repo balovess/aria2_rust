@@ -338,6 +338,35 @@ async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
     assert!(options.http_adaptive.enabled);
 }
 
+#[tokio::test]
+async fn test_cli_continue_defaults_to_true_and_accepts_explicit_false() {
+    let cli = CliArgs::try_parse_from(["aria2"]).expect("default CLI options should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("default CLI options should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(options.continue_download);
+
+    let cli = CliArgs::try_parse_from(["aria2", "--continue=false"])
+        .expect("explicit continue=false should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("explicit continue=false should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(!options.continue_download);
+
+    let cli =
+        CliArgs::try_parse_from(["aria2", "--no-continue"]).expect("--no-continue should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("--no-continue should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(!options.continue_download);
+}
+
 #[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_bt_input_does_not_inherit_implicit_generic_timeout() {

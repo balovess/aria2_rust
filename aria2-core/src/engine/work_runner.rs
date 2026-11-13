@@ -45,12 +45,8 @@ pub(crate) async fn run_single_work_item<A: SingleWorkAdapter>(
                 if max_attempts != 0 && attempt >= max_attempts {
                     return Err(error);
                 }
-                if let Err(wait_error) = adapter.wait_for_retry(wait).await {
-                    return Err(wait_error);
-                }
-                if let Err(retry_error) = adapter.prepare_retry().await {
-                    return Err(retry_error);
-                }
+                adapter.wait_for_retry(wait).await?;
+                adapter.prepare_retry().await?;
                 attempt = attempt.saturating_add(1);
             }
         }

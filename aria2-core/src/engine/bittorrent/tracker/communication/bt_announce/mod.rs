@@ -8,7 +8,7 @@
 //! The [`BtAnnounce`] state machine supplies lifecycle state for HTTP,
 //! WebSocket, and UDP tracker URLs.
 //! `TrackerAnnouncer` routes `udp://` URLs to the policy-bound UDP client.
-//! The helper [`is_udp_tracker`] detects UDP URLs.
+//! Tracker URL transport classification is provided by `aria2-protocol`.
 
 #![allow(clippy::empty_line_after_doc_comments)]
 

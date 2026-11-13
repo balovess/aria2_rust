@@ -1,4 +1,3 @@
-use std::sync::Once;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -6,6 +5,7 @@ use futures::{StreamExt, stream::BoxStream};
 use reqwest::{Certificate, Client, ClientBuilder, redirect};
 use tracing::{debug, info};
 
+use crate::crypto::ensure_ring_provider;
 use crate::http::request::HttpRequest;
 use crate::http::response::{HttpResponse, is_redirect_status};
 
@@ -117,21 +117,6 @@ pub enum HttpRequestBuilderError {
     InvalidName(String),
     #[error("invalid header value: {0}")]
     InvalidValue(String),
-}
-
-/// Lazily install the `ring` crypto provider for rustls on first call.
-///
-/// Required when reqwest is built with the `rustls-no-provider` feature;
-/// without a provider, `ClientBuilder::build()` will panic.
-///
-/// Note: `install_default()` returns Err if a provider is already installed
-/// (e.g., by test helpers' `ensure_crypto_provider()`). That is fine — we
-/// only need to ensure a provider is present, not that we installed it.
-pub(crate) fn ensure_ring_provider() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 impl HttpClient {

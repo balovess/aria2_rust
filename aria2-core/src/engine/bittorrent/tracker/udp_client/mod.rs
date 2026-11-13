@@ -125,25 +125,26 @@ impl UdpTrackerClient {
     }
 }
 
-const DEFAULT_UDP_TRACKER_PORT: u16 = 6881;
-
 pub(crate) async fn resolve_udp_tracker_addr(
     url: &str,
     policy: &OutboundNetworkPolicy,
 ) -> Result<SocketAddr, String> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|error| format!("invalid UDP tracker URL {url}: {error}"))?;
-    if parsed.scheme() != "udp" {
-        return Err(format!("invalid UDP tracker URL: {url}"));
-    }
-    let host = parsed
-        .host_str()
-        .filter(|host| !host.is_empty())
-        .ok_or_else(|| format!("missing UDP tracker host: {url}"))?;
-    let port = parsed.port().unwrap_or(DEFAULT_UDP_TRACKER_PORT);
+    let tracker = aria2_protocol::bittorrent::tracker::udp_url::UdpTrackerUrl::parse(url).map_err(
+        |error| match error {
+            aria2_protocol::bittorrent::tracker::udp_url::UdpTrackerUrlError::InvalidUrl(
+                message,
+            ) => format!("invalid UDP tracker URL {url}: {message}"),
+            aria2_protocol::bittorrent::tracker::udp_url::UdpTrackerUrlError::UnsupportedScheme => {
+                format!("invalid UDP tracker URL: {url}")
+            }
+            aria2_protocol::bittorrent::tracker::udp_url::UdpTrackerUrlError::MissingHost => {
+                format!("missing UDP tracker host: {url}")
+            }
+        },
+    )?;
 
     policy
-        .resolve_udp_host(host, port)
+        .resolve_udp_host(tracker.host(), tracker.port())
         .await
         .map_err(|error| format!("failed to resolve UDP tracker {url}: {error}"))
 }

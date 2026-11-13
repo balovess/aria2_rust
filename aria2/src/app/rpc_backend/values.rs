@@ -231,6 +231,40 @@ mod tests {
     use tokio::sync::RwLock;
 
     #[tokio::test]
+    async fn global_option_alias_updates_canonical_concurrency_setting() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "max-downloads".to_string(),
+                serde_json::json!(13),
+            )]))
+            .await
+            .expect("registered compatibility alias should be accepted");
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("max-concurrent-downloads")
+                .await,
+            Some(13)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetMaxConcurrent { max: 13 }
+        ));
+    }
+
+    #[tokio::test]
     async fn global_handshake_timeout_updates_config_and_engine() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, mut receiver) = channel();

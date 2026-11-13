@@ -10,6 +10,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use url::Url;
 
+use crate::crypto::ensure_ring_provider;
+
 /// Inputs encoded into a WebTorrent-compatible announce JSON message.
 pub struct WebSocketAnnounceRequest<'a> {
     /// Torrent v1 info hash sent in the announce.
@@ -133,7 +135,7 @@ pub async fn announce_over_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    ensure_ring_provider();
     let tracker_url = parse_tracker_url(tracker_url)?;
     let ws_request = tracker_url
         .as_str()

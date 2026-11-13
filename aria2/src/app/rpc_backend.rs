@@ -179,6 +179,34 @@ mod tests {
     use super::*;
     use aria2_core::request::request_group::RequestGroup;
 
+    #[tokio::test]
+    async fn add_uri_options_inherit_continue_default_and_accept_false() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, _receiver) = aria2_core::engine::engine_command::channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            config,
+            None,
+            "test",
+        );
+
+        let (options, _) = backend
+            .merged_task_options(HashMap::new())
+            .await
+            .expect("RPC task options should inherit defaults");
+        assert!(options.continue_download);
+
+        let (options, _) = backend
+            .merged_task_options(HashMap::from([(
+                "continue".to_string(),
+                serde_json::Value::Bool(false),
+            )]))
+            .await
+            .expect("RPC continue=false should be accepted");
+        assert!(!options.continue_download);
+    }
+
     #[test]
     fn status_uses_real_non_bt_connection_count_instead_of_split() {
         let options = DownloadOptions {

@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::http::client::ensure_ring_provider;
+use crate::crypto::ensure_ring_provider;
 
 mod parse;
 

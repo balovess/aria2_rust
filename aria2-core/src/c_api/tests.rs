@@ -27,6 +27,55 @@ fn kv(name: &str, value: &str) -> (Aria2RustKeyValue, CString, CString) {
 }
 
 #[test]
+fn c_api_reports_failed_global_runtime_option_dispatch() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+    let (closed_sender, receiver) = crate::engine::engine_command::channel();
+    drop(receiver);
+    session.command_tx = closed_sender;
+
+    let result = session.change_global_options(vec![(
+        "max-concurrent-downloads".to_string(),
+        "3".to_string(),
+    )]);
+
+    assert_eq!(result, INTERNAL_ERROR);
+    assert!(!session.last_error.is_empty());
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("max-concurrent-downloads")),
+        Some(3),
+        "the validated global option remains stored when runtime dispatch fails"
+    );
+
+    session.finalize();
+}
+
+#[test]
+fn c_api_applies_registered_global_option_aliases() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    let result =
+        session.change_global_options(vec![("max-downloads".to_string(), "13".to_string())]);
+
+    assert_eq!(result, 0, "registered alias should be changeable");
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("max-concurrent-downloads")),
+        Some(13)
+    );
+
+    session.finalize();
+}
+
+#[test]
 fn c_api_applies_process_engine_network_and_server_stat_options() {
     let runtime = Runtime::new().unwrap();
     let mut config = ConfigManager::new();

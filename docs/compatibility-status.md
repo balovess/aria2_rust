@@ -9,9 +9,11 @@ behavior. An unlisted behavior has not been audited here.
   output file can be reused for a resume attempt without explicitly passing
   `-c`. This differs from original aria2's default of `false`; `--no-continue`
   or `continue=false` still disables it.
-- **Verification:** default and explicit override behavior is covered by the
-  task option conversion regression test. CLI/config/RPC contract verification
-  for the changed default has not been run.
+- **Verification:** core configuration defaults, task-option conversion, CLI
+  parsing/application (including `--continue=false` and `--no-continue`), and
+  RPC task-option merging (including an explicit false override) are covered by
+  focused tests. The full external aria2 CLI/config/RPC differential suite has
+  not been run against an original aria2 binary.
 
 ## HTTP split and piece geometry
 
@@ -523,17 +525,21 @@ behavior. An unlisted behavior has not been audited here.
 ## Metalink parsed execution data
 
 - **Ownership:** Metalink XML parsing and file metadata remain in
-  `aria2-protocol`. Core constructors pass the parsed per-file projection into
-  task execution; an execution command no longer retains and reparses the same
-  raw XML. Request-group source bytes remain available separately for session
-  reconstruction.
+  `aria2-protocol`. Initial expansion passes each normalized parsed file
+  transiently through its in-memory request group to execution, so the command
+  adapter does not parse the same XML again for every resource group. Restored
+  groups reconstruct the parsed file from persisted source XML and file index.
+  Commands retain parsed execution data; request groups retain source bytes for
+  session reconstruction.
 - **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
   BitTorrent metaurls use the same parser output as before. Parsing errors are
   still surfaced by command construction, before task execution.
 - **Verification:** focused Metalink constructor and execution tests cover
   direct mirrors, torrent-metaurl-only inputs, integrity data, grouped files,
-  and manager-restored source handling. No upstream binary comparison was run
-  for this internal ownership change.
+  manager-restored source handling, parsed-file handoff, and restored-source
+  fallback. The initial-path regression deliberately provides invalid source
+  XML alongside a valid cached parsed file. No upstream binary comparison was
+  run for this internal ownership change.
 
 ## Pause and unpause lifecycle status
 
@@ -561,9 +567,11 @@ behavior. An unlisted behavior has not been audited here.
   build its resolver, lookup falls back to Tokio's system name lookup. Each
   Hickory request has a 5-second timeout; Hickory and the fallback share the
   configured 30-second default total lookup deadline.
-- **Verification gap:** the crate compiles with system-config support, but
-  runtime resolution against a configured local DNS server has not yet been
-  manually checked on Windows.
+- **Verification:** on this Windows host, a focused async test starts a local
+  UDP DNS fixture, configures it as the explicit server, and resolves a
+  synthetic hostname through `DnsCache`. This confirms explicit-server
+  runtime wiring. Reading the machine's OS resolver configuration and resolving
+  through its configured nameserver are not exercised by that fixture.
 
 ## C API process-engine option setup
 
@@ -584,7 +592,15 @@ behavior. An unlisted behavior has not been audited here.
   and uTP runtime extensions. RPC and C API now use the same core
   `runtime_commands_for_global_option_changes` projection after their respective
   parsing and configuration commit steps. Focused RPC tests verify command
-  updates; this does not claim end-to-end C ABI interoperability.
+  updates. C API now returns `INTERNAL_ERROR` when the engine command queue
+  rejects a projected runtime update instead of reporting success; validated
+  option values remain committed, matching RPC's commit-then-dispatch ordering.
+  A focused FFI-side test covers a closed command receiver. This does not claim
+  end-to-end C ABI interoperability.
+- **Option aliases:** runtime whitelist, feature availability, task changeability,
+  and command projection use the registry's canonical option name. For example,
+  the accepted `max-downloads` alias updates the `max-concurrent-downloads`
+  runtime command instead of being silently ignored.
 - **Concurrency range:** `max-concurrent-downloads` accepts `0..=u32::MAX`,
   matching the engine command's `u32` representation and the existing RPC
   conversion boundary. Other entry points reject values above that bound

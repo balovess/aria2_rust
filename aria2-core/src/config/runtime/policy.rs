@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 /// Returns whether an option belongs to a request-group's initial state.
 pub fn is_initial_option(option_name: &str) -> bool {
+    let option_name = crate::config::OptionRegistry::canonical_name(option_name);
     is_option_available(option_name) && INITIAL_REQUEST_OPTIONS.contains(&option_name)
 }
 
@@ -30,6 +31,7 @@ where
 
 /// Returns whether a name is accepted by `changeGlobalOption`.
 pub fn is_global_option_changeable(option_name: &str) -> bool {
+    let option_name = crate::config::OptionRegistry::canonical_name(option_name);
     is_option_available(option_name) && RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&option_name)
 }
 
@@ -221,6 +223,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
 /// The policy tables retain the complete aria2 wire vocabulary, but a build
 /// without BitTorrent must not expose those names as usable runtime options.
 pub fn is_option_available(option_name: &str) -> bool {
+    let option_name = crate::config::OptionRegistry::canonical_name(option_name);
     #[cfg(feature = "bittorrent")]
     {
         let _ = option_name;
@@ -258,6 +261,7 @@ fn is_bittorrent_option(option_name: &str) -> bool {
 
 /// Classifies how `aria2.changeOption` applies an option for a download.
 pub fn is_option_changeable(option_name: &str, is_active: bool) -> ChangeableKind {
+    let option_name = crate::config::OptionRegistry::canonical_name(option_name);
     if !is_option_available(option_name) {
         return ChangeableKind::NotChangeable;
     }
