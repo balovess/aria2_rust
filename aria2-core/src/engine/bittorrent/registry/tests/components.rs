@@ -76,6 +76,19 @@ async fn global_dht_start_applies_process_peer_storage_limits() {
     .expect("process DHT engine should start with configured peer-storage limits");
 
     assert_eq!(engine.stats().await.max_peer_info_hashes, 7);
+    registry
+        .write()
+        .unwrap()
+        .set_global_dht_peer_storage_config(
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+                max_info_hashes: 3,
+                max_peers_per_info_hash: 2,
+            },
+        );
+    assert_eq!(engine.stats().await.max_peer_info_hashes, 3);
+    let options = registry.read().unwrap().global_dht_options();
+    assert_eq!(options.dht_max_peer_info_hashes, 3);
+    assert_eq!(options.dht_max_peers_per_info_hash, 2);
     engine.shutdown_async().await;
 }
 

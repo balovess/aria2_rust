@@ -17,6 +17,8 @@ impl BtRegistry {
         let options = Arc::make_mut(&mut self.global_dht_options);
         options.dht_max_peer_info_hashes = config.max_info_hashes.max(1);
         options.dht_max_peers_per_info_hash = config.max_peers_per_info_hash.max(1);
+        self.global_dht_storage_config_revision =
+            self.global_dht_storage_config_revision.wrapping_add(1);
         for engine in self.global_dht_engines.iter() {
             engine.set_peer_storage_config(config);
         }
@@ -100,15 +102,16 @@ impl BtRegistry {
         };
         let startup_guard = startup_lock.lock().await;
 
-        let existing = {
+        let (existing, storage_config_revision) = {
             let registry = registry
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if use_ipv6 {
+            let existing = if use_ipv6 {
                 registry.global_dht_engines.ipv6()
             } else {
                 registry.global_dht_engines.ipv4()
-            }
+            };
+            (existing, registry.global_dht_storage_config_revision)
         };
         if let Some(engine) = existing {
             registry
@@ -136,9 +139,11 @@ impl BtRegistry {
             let mut registry = registry
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            candidate.set_peer_storage_config(
-                registry.global_dht_options().protocol_peer_storage_config(),
-            );
+            if registry.global_dht_storage_config_revision != storage_config_revision {
+                candidate.set_peer_storage_config(
+                    registry.global_dht_options().protocol_peer_storage_config(),
+                );
+            }
             let engine = registry.get_or_install_global_dht_engine(Arc::clone(&candidate));
             registry.set_dht_engine_for_gid(gid, Arc::clone(&engine));
             engine

@@ -81,6 +81,9 @@ pub struct BtRegistry {
     /// not configure the process-owned engine.
     global_dht_options: Arc<DhtEngineOptions>,
 
+    /// Incremented when live updates change the storage limits during engine startup.
+    pub(crate) global_dht_storage_config_revision: u64,
+
     /// Serialize first-use startup independently for IPv4 and IPv6. The
     /// registry's outer lock must not be held across asynchronous socket or
     /// persistence I/O.
@@ -117,6 +120,7 @@ impl BtRegistry {
             dht_external_ips: HashMap::new(),
             global_dht_engines: DhtEngineSet::default(),
             global_dht_options: Arc::new(DhtEngineOptions::default()),
+            global_dht_storage_config_revision: 0,
             dht_engine_start_locks: [
                 std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 std::sync::Arc::new(tokio::sync::Mutex::new(())),

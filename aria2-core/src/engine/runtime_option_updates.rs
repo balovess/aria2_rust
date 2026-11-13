@@ -84,24 +84,23 @@ pub fn runtime_commands_for_global_option_changes(
         {
             commands.push(EngineCommand::SetBtMaxOpenFiles { max });
         }
-        if changed_options.contains("dht-max-peer-info-hashes")
-            || changed_options.contains("dht-max-peers-per-info-hash")
-        {
-            if let (Some(max_info_hashes), Some(max_peers_per_info_hash)) = (
+        if (changed_options.contains("dht-max-peer-info-hashes")
+            || changed_options.contains("dht-max-peers-per-info-hash"))
+            && let (Some(max_info_hashes), Some(max_peers_per_info_hash)) = (
                 option_i64(effective_options, "dht-max-peer-info-hashes")
                     .and_then(|value| usize::try_from(value).ok()),
                 option_i64(effective_options, "dht-max-peers-per-info-hash")
                     .and_then(|value| usize::try_from(value).ok()),
-            ) && max_info_hashes > 0
-                && max_peers_per_info_hash > 0
-            {
-                commands.push(EngineCommand::SetDhtPeerStorageConfig {
-                    config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
-                        max_info_hashes,
-                        max_peers_per_info_hash,
-                    },
-                });
-            }
+            )
+            && max_info_hashes > 0
+            && max_peers_per_info_hash > 0
+        {
+            commands.push(EngineCommand::SetDhtPeerStorageConfig {
+                config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+                    max_info_hashes,
+                    max_peers_per_info_hash,
+                },
+            });
         }
         if [
             "bt-utp-max-connections",

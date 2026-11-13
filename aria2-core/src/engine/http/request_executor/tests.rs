@@ -55,6 +55,17 @@ fn total_and_authority_limits_are_independent() {
 }
 
 #[test]
+fn h1_admission_uses_the_registered_per_server_connection_cap() {
+    let state = ExecutorState::new(&["http://cap.test:80".into()], 64, usize::MAX, 1);
+    let authority = state.authority("http://cap.test:80").unwrap();
+
+    assert_eq!(
+        authority.connection_limit,
+        crate::constants::MAX_CONNECTION_PER_SERVER
+    );
+}
+
+#[test]
 fn h2_prefers_streams_on_each_session_before_opening_another() {
     let state = Arc::new(ExecutorState::new(
         &["https://h2.test:443".into()],

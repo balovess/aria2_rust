@@ -660,6 +660,9 @@ Do not add pass-through engine clients around these public interfaces.
 - **Keep** HTTP adaptive concurrency in the core engine: it owns admission,
   per-source feedback, pacing and recovery policy; the protocol client only
   performs the HTTP requests. Keep its policy tests in an adjacent test module.
+- **Narrow** HTTP/1.1 admission's defensive per-authority cap to the shared
+  `MAX_CONNECTION_PER_SERVER` constant used by the `max-connection-per-server`
+  option definition, avoiding a duplicate hard-coded ceiling.
 - **Keep** the public `aria2_core::http::connection::HttpConnectionManager`
   as a standalone low-level library API. It has no production callers in the
   download engine; callers provide `HttpConfig`, including its independent

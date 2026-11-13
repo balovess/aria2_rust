@@ -16,8 +16,6 @@ use crate::error::Result;
 #[cfg(test)]
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
-const MAX_SERVER_CONCURRENCY: usize = 16;
-
 mod admission;
 mod executor;
 #[cfg(test)]

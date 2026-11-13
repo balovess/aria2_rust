@@ -51,24 +51,33 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
         command_rx.try_recv(),
         Ok(crate::engine::engine_command::EngineCommand::SetBtMaxOpenFiles { max: 17 })
     ));
-    let dht_update = command_rx.try_recv().expect("DHT update command expected");
-    let crate::engine::engine_command::EngineCommand::SetDhtPeerStorageConfig { config } =
-        dht_update
-    else {
-        panic!("DHT storage update command expected next");
-    };
-    assert_eq!(config.max_info_hashes, 128);
-    assert_eq!(
-        config.max_peers_per_info_hash,
-        aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default().max_peers_per_info_hash
-    );
     let expected_utp_options =
         aria2_protocol::bittorrent::utp::UtpSocketOptions::default().with_max_connections(73);
-    assert!(matches!(
-        command_rx.try_recv(),
-        Ok(crate::engine::engine_command::EngineCommand::SetUtpSocketOptions { options })
-            if options == expected_utp_options
-    ));
+    let mut dht_update_seen = false;
+    let mut utp_update_seen = false;
+    while let Ok(command) = command_rx.try_recv() {
+        match command {
+            crate::engine::engine_command::EngineCommand::SetDhtPeerStorageConfig { config } => {
+                assert_eq!(config.max_info_hashes, 128);
+                assert_eq!(
+                    config.max_peers_per_info_hash,
+                    aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default()
+                        .max_peers_per_info_hash
+                );
+                dht_update_seen = true;
+            }
+            crate::engine::engine_command::EngineCommand::SetUtpSocketOptions { options } => {
+                assert_eq!(options, expected_utp_options);
+                utp_update_seen = true;
+            }
+            _ => panic!("unexpected runtime command while checking BT updates"),
+        }
+    }
+    assert!(
+        dht_update_seen,
+        "DHT storage update command was not dispatched"
+    );
+    assert!(utp_update_seen, "uTP update command was not dispatched");
     assert!(matches!(
         command_rx.try_recv(),
         Err(crate::engine::engine_command::EngineCommandTryRecvError::Empty)

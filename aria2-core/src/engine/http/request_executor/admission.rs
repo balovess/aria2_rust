@@ -6,7 +6,7 @@ use tokio::sync::OnceCell;
 
 use crate::error::Aria2Error;
 
-use super::MAX_SERVER_CONCURRENCY;
+use crate::constants::MAX_CONNECTION_PER_SERVER;
 pub(super) struct AuthorityState {
     /// Per-download logical Range budget (`split`).
     pub(super) hard_limit: usize,
@@ -70,7 +70,7 @@ impl ExecutorState {
         session_count: usize,
     ) -> Self {
         let hard_limit = total_limit.max(1);
-        let connection_limit = http1_connection_limit.clamp(1, MAX_SERVER_CONCURRENCY);
+        let connection_limit = http1_connection_limit.clamp(1, MAX_CONNECTION_PER_SERVER);
         let session_count = session_count.max(1);
         let http1_client_slot_limit = hard_limit.div_ceil(session_count).max(1);
         let authorities = DashMap::new();
