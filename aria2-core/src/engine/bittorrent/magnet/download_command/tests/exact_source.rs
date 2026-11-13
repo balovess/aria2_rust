@@ -71,11 +71,14 @@ async fn magnet_exact_source_reads_file_url_without_dht() {
     std::fs::write(&path, &torrent).expect("write exact-source torrent");
     let source =
         url::Url::from_file_path(&path).expect("temporary path should convert to a file URL");
-    let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
-        "magnet:?xt=urn:btih:{}&xs={source}",
-        hex::encode(info_hash)
-    ))
-    .expect("file exact-source magnet should parse");
+    let magnet_query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("xt", &format!("urn:btih:{}", hex::encode(info_hash)))
+        .append_pair("xs", source.as_str())
+        .finish();
+    let magnet =
+        aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!("magnet:?{magnet_query}"))
+            .expect("file exact-source magnet should parse");
+    assert_eq!(magnet.exact_sources, [source.as_str()]);
 
     let command = make_test_command();
     let metadata = command

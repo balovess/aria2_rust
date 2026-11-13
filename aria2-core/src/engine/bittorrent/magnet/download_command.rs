@@ -21,7 +21,7 @@ const MAX_MAGNET_METADATA_PEERS_PER_SOURCE: usize = 20;
 
 pub struct MagnetDownloadCommand {
     group: Arc<std::sync::RwLock<RequestGroup>>,
-    magnet_uri: String,
+    magnet_link: Arc<aria2_protocol::bittorrent::magnet::MagnetLink>,
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
@@ -107,7 +107,7 @@ impl MagnetDownloadCommand {
             (uri, opts)
         };
 
-        let _ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri)
+        let magnet_link = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri)
             .map_err(|e| Aria2Error::MagnetParse(format!("Invalid magnet link: {}", e)))?;
 
         let dir = output_dir
@@ -121,7 +121,8 @@ impl MagnetDownloadCommand {
             .map(validate_magnet_output_name)
             .transpose()?
             .or_else(|| {
-                _ml.display_name
+                magnet_link
+                    .display_name
                     .as_deref()
                     .and_then(sanitize_magnet_display_name)
             })
@@ -138,12 +139,12 @@ impl MagnetDownloadCommand {
             "MagnetDownloadCommand created (shared group): {} -> {} (hash={})",
             filename,
             path.display(),
-            _ml.info_hash_hex()
+            magnet_link.info_hash_hex()
         );
 
         Ok(Self {
             group,
-            magnet_uri: magnet_uri.to_string(),
+            magnet_link: Arc::new(magnet_link),
             output_path: path,
             started: false,
             completed_bytes: 0,
@@ -284,8 +285,7 @@ impl Command for MagnetDownloadCommand {
             self.started = true;
         }
 
-        let ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&self.magnet_uri)
-            .map_err(|e| Aria2Error::MagnetParse(format!("Magnet parse error: {}", e)))?;
+        let ml = Arc::clone(&self.magnet_link);
 
         info!(
             "Magnet download: hash={}, name={:?}",

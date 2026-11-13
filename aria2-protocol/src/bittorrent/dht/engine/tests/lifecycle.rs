@@ -153,6 +153,7 @@ async fn test_dht_engine_tries_next_port_when_first_is_occupied() {
 async fn test_dht_engine_stats() {
     let config = DhtEngineConfig {
         dht_file_path: None,
+        max_stored_items: 3,
         ..DhtEngineConfig::local()
     };
 
@@ -190,6 +191,29 @@ async fn test_dht_engine_stats() {
     assert_eq!(updated_stats.stored_peers, 2);
     assert_eq!(updated_stats.max_peer_info_hashes, 2);
 
+    let item_store = &engine.context.item_store;
+    let first_item = item_store
+        .put_immutable(crate::bittorrent::bencode::codec::BencodeValue::Bytes(
+            b"first".to_vec(),
+        ))
+        .unwrap();
+    item_store
+        .put_immutable(crate::bittorrent::bencode::codec::BencodeValue::Bytes(
+            b"second".to_vec(),
+        ))
+        .unwrap();
+    item_store
+        .put_immutable(crate::bittorrent::bencode::codec::BencodeValue::Bytes(
+            b"third".to_vec(),
+        ))
+        .unwrap();
+    assert_eq!(item_store.len(), 3);
+
+    engine.set_item_store_limit(2);
+    assert_eq!(item_store.len(), 2);
+    assert!(item_store.get(&first_item).is_none());
+    assert_eq!(item_store.max_items(), 2);
+
     engine.shutdown_async().await;
 }
 
@@ -213,7 +237,8 @@ async fn periodic_save_is_queued_while_maintenance_lane_is_busy() {
         }
     }
 
-    let temp_dir = tempfile::tempdir().expect("temporary DHT directory should be created");
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+        .expect("temporary DHT directory should be created in the workspace");
     let path = temp_dir.path().join("dht.dat");
     let engine = DhtEngine::start(DhtEngineConfig {
         dht_file_path: Some(path.clone()),
@@ -275,7 +300,8 @@ async fn periodic_save_is_queued_while_maintenance_lane_is_busy() {
 
 #[tokio::test]
 async fn state_save_attempts_items_when_routing_snapshot_fails() {
-    let temp_dir = tempfile::tempdir().expect("temporary DHT directory should be created");
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+        .expect("temporary DHT directory should be created in the workspace");
     let path = temp_dir.path().join("dht.dat");
     std::fs::create_dir(&path).expect("routing snapshot path should block file replacement");
 

@@ -304,12 +304,14 @@ classification, peer-registry updates, and torrent-activity lifecycle under
 1. `ProtocolAdapterRegistry` selects `engine::bittorrent::command_adapter` for
    existing torrent metadata, a `bt://` request, or a `magnet:` URI. It routes
    payloads to `BtDownloadCommand` and magnets to `MagnetDownloadCommand`.
-2. The magnet command uses the protocol library's `MagnetLink` parser, then
-   resolves metadata in this order: a saved torrent when enabled, an `xs`
-   exact source, tracker-discovered peers, then DHT-discovered peers and BEP 9
-   metadata exchange. `metadata_source` coordinates those sources;
-   `discovery` owns tracker/DHT peer lookup; core `metadata` owns saved files
-   and info-hash checks. `aria2-protocol::bittorrent::torrent::metainfo` owns
+2. `MagnetDownloadCommand` parses the URI once through the protocol library's
+   `MagnetLink` parser during construction and retains the typed value for
+   output naming and execution. It resolves metadata in this order: a saved
+   torrent when enabled, an `xs` exact source, tracker-discovered peers, then
+   DHT-discovered peers and BEP 9 metadata exchange. `metadata_source`
+   coordinates those sources; `discovery` owns tracker/DHT peer lookup; core
+   `metadata` owns saved files and info-hash checks.
+   `aria2-protocol::bittorrent::torrent::metainfo` owns
    the pure bencode transformations that wrap BEP 9 info dictionaries and
    merge magnet WebSeeds into torrent metainfo. Protocol `MetadataCollector`
    validates piece boundaries and assembles BEP 9 metadata; core owns peer
@@ -814,6 +816,11 @@ Do not add pass-through engine clients around these public interfaces.
   BEP 9 info-dictionary wrapping, and magnet WebSeed merging. Core retains
   metadata-source selection, saved-file I/O, expected-info-hash validation,
   and download lifecycle decisions.
+- **Keep** `aria2_protocol::bittorrent::magnet::MagnetLink` as the protocol
+  boundary for `magnet:` URI parsing and typed parameter extraction. Its
+  percent decoding follows aria2's byte semantics (`+` remains literal); core
+  retains fetching and reading `xs` sources, source order, and metadata
+  resolution lifecycle.
 - **Narrow** BEP 9 metadata piece assembly into
   `aria2_protocol::bittorrent::message::extension::MetadataCollector`.
   Core retains its historical `magnet::metadata_collector` public path as a
@@ -903,16 +910,14 @@ Do not add pass-through engine clients around these public interfaces.
   for custom process settings. DHT settings are not runtime-changeable per
   task. The Rust-specific announce-storage bounds are changeable globally;
   updates trim running storage immediately and apply to engines started later.
-- **Improve** DHT storage resource policy: protocol `DhtPeerStorageConfig`
-  owns the per-engine swarm and per-swarm peer bounds, and core passes the
-  process snapshot at engine startup. BEP 44 storage has a separate
-  `dht-max-items` bound, defaults to 4,096, and evicts the oldest write on
-  capacity or when a runtime limit is reduced. The protocol store owns this
-  policy; core projects the process option to startup and running engines.
-  Preserve the original `DhtEngine::start`
-  and local-peer startup interfaces by adding configured startup entry points.
-  The existing defaults remain unchanged; fixed KRPC response and BEP limits
-  remain protocol behavior rather than user configuration.
+- **Keep** DHT storage policy in the protocol crate: `DhtPeerStorageConfig`
+  owns announced-peer limits, and `DhtItemStore` owns BEP 44 item validation,
+  capacity, and eviction. Core projects process settings to engine startup and
+  applies global runtime changes to running process engines. `dht-max-items`
+  defaults to 4,096 and evicts the oldest write at capacity or when reduced;
+  this affects retention, while the inbound `put` still succeeds. Per-value
+  BEP limits remain protocol behavior rather than user configuration. Existing
+  `DhtEngine::start` and local-peer startup entry points remain available.
 - **Delete** `DhtTaskFactory`, which only forwarded the shared context to task
   constructors. The engine now constructs the scheduled task directly, making
   task selection and its inputs visible at the scheduling point.

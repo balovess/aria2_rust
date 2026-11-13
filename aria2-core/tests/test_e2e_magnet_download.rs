@@ -148,8 +148,9 @@ fn test_magnet_url_decode() {
     assert_eq!(MagnetLink::url_decode("Hello%20World"), "Hello World");
     assert_eq!(
         MagnetLink::url_decode("name+with+spaces"),
-        "name with spaces"
+        "name+with+spaces"
     );
+    assert_eq!(MagnetLink::url_decode("%E2%9C%93"), "✓");
 }
 
 #[tokio::test]

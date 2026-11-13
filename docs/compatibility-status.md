@@ -117,6 +117,29 @@ behavior. An unlisted behavior has not been audited here.
   session, and exercises slow-range replacement. Core and protocol tests were
   run with BitTorrent, Metalink, and SFTP features enabled.
 
+## Magnet URI parameter decoding
+
+- **Supported scope:** `MagnetLink` parses the `magnet:` URI and extracts
+  supported `xt`, `dn`, `tr`, `xl`, `xs`, and `ws` values in the protocol
+  crate. Percent escapes are decoded as bytes, and `+` remains a literal plus
+  as in original aria2's magnet parser; it is not form-query decoding.
+- **UTF-8 boundary:** valid percent-encoded UTF-8 is reconstructed before
+  returning Rust `String` values. Invalid decoded UTF-8 is represented with
+  replacement characters because the public parser output uses `String`,
+  while original aria2's byte strings can retain arbitrary bytes.
+- **Observed acceptance differences:** the Rust parser trims surrounding
+  whitespace and matches the scheme, parameter names, and `btih`/`btmh` URN
+  prefixes without case sensitivity. The local original parser requires the
+  exact `magnet:?` prefix and preserves parameter-name case; its v1 parser
+  recognizes the exact lowercase `urn:btih:` prefix. These broader Rust
+  acceptance rules are retained pending a separate compatibility decision.
+- **Verification:** behavior was compared with the local original aria2
+  `magnet.cc` and `util.cc` implementations. Protocol magnet tests passed
+  (11/11); core magnet-command tests passed (25/25), including `xs=file://`
+  reading and HTTP exact-source retrieval; the core URL-decoding integration
+  test passed (1/1). No original-versus-Rust runtime differential test has
+  been run.
+
 ## BitTorrent WebSocket tracker response correlation
 
 - **Protocol behavior:** a WebSocket announce response must identify the
@@ -461,17 +484,23 @@ behavior. An unlisted behavior has not been audited here.
 - **Behavior:** inbound `put` requires a valid write token; mutable values also
   require a valid signature and monotonic sequence. The store rejects bencoded
   values over 1,000 bytes and mutable salts over 64 bytes. Restored `.items`
-  data now enforces those same per-item bounds before accepting entries.
-- **Resource boundary:** the item store has no configured total item-count or
-  byte budget. Entries are retained until replacement or process state is
-  discarded. Adding a cap or eviction policy would change which valid remote
-  `put` operations receive success and requires an explicit policy decision.
+  data enforces those same per-item bounds before accepting entries. Each DHT
+  engine retains at most 4,096 targets by default. A valid write at capacity is
+  accepted and evicts the oldest-written target; lowering `dht-max-items`
+  applies the same eviction immediately. This Rust resource policy may make a
+  previously stored value unavailable earlier than its BEP 44 expiration time.
+  It does not reject the incoming `put` because of the total-store limit.
+- **Persistence:** current snapshots serialize targets from oldest to newest,
+  so capacity reduction during restore retains the newest entries. Snapshots
+  written before stable ordering have no reliable chronology; when capped on
+  restore, their persisted list order is used.
 - **Compatibility reference:** [BEP 44](https://www.bittorrent.org/beps/bep_0044.html)
   permits nodes to reject values whose bencoded form exceeds 1,000 bytes and
   requires salt strings to be no longer than 64 bytes.
-- **Verification:** protocol unit tests cover remote put validation, persisted
-  item round trips, and rejection of restored entries with oversized values or
-  salts. The current unbounded total item count has not been stress-tested.
+- **Verification:** protocol tests cover remote put validation, capacity
+  eviction, runtime limit reduction on a running engine, persisted item order,
+  round trips, and rejection of restored entries with oversized values or
+  salts. Large-scale network behavior with a saturated store has not been run.
 
 ## BitTorrent peer input error classification
 

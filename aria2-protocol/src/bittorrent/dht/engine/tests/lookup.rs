@@ -129,7 +129,8 @@ async fn replacement_ping_persists_the_responding_node_identity() {
     const CACHED_REPLACEMENT_ID: [u8; 20] = [0x42; 20];
     const RESPONDING_NODE_ID: [u8; 20] = [0xC2; 20];
 
-    let temp_dir = tempfile::tempdir().expect("DHT snapshot directory should be created");
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+        .expect("DHT snapshot directory should be created in the workspace");
     let snapshot_path = temp_dir.path().join("dht.dat");
     let old_node = UdpSocket::bind("127.0.0.1:0")
         .await

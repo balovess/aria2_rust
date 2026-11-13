@@ -157,24 +157,28 @@ impl MagnetLink {
     }
 
     pub fn url_decode(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                let hex: String = chars.by_ref().take(2).collect();
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                } else {
-                    result.push(c);
-                    result.push_str(&hex);
-                }
-            } else if c == '+' {
-                result.push(' ');
-            } else {
-                result.push(c);
+        let input = s.as_bytes();
+        let mut result = Vec::with_capacity(input.len());
+        let mut index = 0;
+
+        while index < input.len() {
+            if input[index] == b'%'
+                && index + 2 < input.len()
+                && let (Some(high), Some(low)) =
+                    (hex_value(input[index + 1]), hex_value(input[index + 2]))
+            {
+                result.push((high << 4) | low);
+                index += 3;
+                continue;
             }
+
+            // Magnet query decoding follows aria2's percent-byte decoding;
+            // unlike form decoding, '+' is a literal plus sign.
+            result.push(input[index]);
+            index += 1;
         }
-        result
+
+        String::from_utf8_lossy(&result).into_owned()
     }
 
     pub fn info_hash_hex(&self) -> String {
@@ -189,13 +193,22 @@ impl MagnetLink {
     }
 }
 
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_parse_magnet_with_hex_hash() {
-        let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu+22.04&tr=udp://tracker.example.com:1337/announce";
+        let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu%2022.04&tr=udp://tracker.example.com:1337/announce";
         let ml = MagnetLink::parse(magnet).unwrap();
         assert_eq!(
             ml.info_hash_hex(),
@@ -229,7 +242,19 @@ mod tests {
         assert_eq!(MagnetLink::url_decode("Hello%20World"), "Hello World");
         assert_eq!(
             MagnetLink::url_decode("name+with+spaces"),
-            "name with spaces"
+            "name+with+spaces"
+        );
+        assert_eq!(MagnetLink::url_decode("%E2%9C%93"), "✓");
+    }
+
+    #[test]
+    fn parse_preserves_plus_in_tracker_query_values() {
+        let magnet = "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&tr=https%3A%2F%2Ftracker.example%2Fannounce%3Ftoken%3Da%2Bb";
+        let parsed = MagnetLink::parse(magnet).unwrap();
+
+        assert_eq!(
+            parsed.trackers,
+            ["https://tracker.example/announce?token=a+b"]
         );
     }
 

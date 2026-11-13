@@ -350,7 +350,8 @@ mod tests {
         )
         .expect("test torrent should construct");
 
-        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+            .expect("temporary directory should be created in the workspace");
         let dht_path = temp_dir.path().join("dht.dat");
         let dht = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
             aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
