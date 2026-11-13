@@ -77,6 +77,13 @@ pub fn runtime_commands_for_global_option_changes(
         {
             commands.push(EngineCommand::SetIncomingPeerHandshakeTimeout { seconds });
         }
+        if changed_options.contains("bt-max-open-files")
+            && let Some(max) = option_i64(effective_options, "bt-max-open-files")
+            && let Ok(max) = usize::try_from(max)
+            && max > 0
+        {
+            commands.push(EngineCommand::SetBtMaxOpenFiles { max });
+        }
         if [
             "bt-utp-max-connections",
             "bt-utp-connect-timeout",
@@ -189,6 +196,18 @@ mod tests {
         assert!(matches!(
             commands.as_slice(),
             [EngineCommand::SetMaxConcurrent { max: 9 }]
+        ));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn bt_max_open_files_projects_to_a_process_runtime_command() {
+        let changed = HashSet::from(["bt-max-open-files".to_string()]);
+        let effective = HashMap::from([("bt-max-open-files".to_string(), OptionValue::Int(17))]);
+
+        assert!(matches!(
+            runtime_commands_for_global_option_changes(&changed, &effective).as_slice(),
+            [EngineCommand::SetBtMaxOpenFiles { max: 17 }]
         ));
     }
 }

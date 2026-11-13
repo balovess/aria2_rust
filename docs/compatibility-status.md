@@ -738,3 +738,26 @@ behavior. An unlisted behavior has not been audited here.
   Upstream source and manual examples were used as the reference. A live
   cross-binary differential run against an original `aria2c` executable remains
   a verification gap because no original binary is available in this workspace.
+
+## BitTorrent and Metalink open-file limit
+
+- **External behavior:** `bt-max-open-files` is a process-wide limit for files
+  opened by multi-file BitTorrent and Metalink downloads. Original aria2 owns
+  one `OpenedFileCounter` in `RequestGroupMan`, shares it with each
+  `MultiDiskAdaptor`, and updates it from `changeGlobalOption`.
+- **Core behavior:** `OpenFileBudget` is shared by the engine's BitTorrent and
+  Metalink command adapters. Multi-file BitTorrent block and piece writers
+  reserve the handles needed for each batch, and resumed/seeding reads reserve
+  one handle; Metalink payload streams reserve one output handle. RAII releases
+  reservations when those operations close. A runtime decrease applies to new
+  reservations while existing batches drain. The process budget is the single
+  source of truth, including for tasks created before a global option update.
+- **Configuration propagation:** process options initialize the shared budget;
+  the common global-option projection emits `SetBtMaxOpenFiles`, used by the
+  RPC and C API runtime paths. CLI startup uses the same process-options
+  constructor.
+- **Verification:** focused core tests cover budget sharing and release,
+  resizing/waiter wakeup, multi-file writes split under a smaller process
+  budget, startup option initialization, runtime command handling, global
+  option projection, and RPC/C API command dispatch. Full original-aria2
+  runtime comparison and OS-level descriptor instrumentation have not been run.

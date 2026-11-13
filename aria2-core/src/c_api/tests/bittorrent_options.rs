@@ -12,7 +12,8 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
     let (timeout_entry, timeout_name, timeout_value) =
         kv("bt-incoming-peer-handshake-timeout", "42");
     let (utp_entry, utp_name, utp_value) = kv("bt-utp-max-connections", "73");
-    let entries = [timeout_entry, utp_entry];
+    let (file_limit_entry, file_limit_name, file_limit_value) = kv("bt-max-open-files", "17");
+    let entries = [timeout_entry, utp_entry, file_limit_entry];
     let result =
         unsafe { aria2_rust_change_global_option(&mut session, entries.as_ptr(), entries.len()) };
 
@@ -39,6 +40,10 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
             }
         )
     ));
+    assert!(matches!(
+        command_rx.try_recv(),
+        Ok(crate::engine::engine_command::EngineCommand::SetBtMaxOpenFiles { max: 17 })
+    ));
     let expected_utp_options =
         aria2_protocol::bittorrent::utp::UtpSocketOptions::default().with_max_connections(73);
     assert!(matches!(
@@ -51,6 +56,13 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
         Err(crate::engine::engine_command::EngineCommandTryRecvError::Empty)
     ));
 
-    drop((timeout_name, timeout_value, utp_name, utp_value));
+    drop((
+        timeout_name,
+        timeout_value,
+        utp_name,
+        utp_value,
+        file_limit_name,
+        file_limit_value,
+    ));
     session.finalize();
 }

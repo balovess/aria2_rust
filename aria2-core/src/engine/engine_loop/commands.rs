@@ -404,6 +404,15 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
                 ctx.bt_listener.set_utp_socket_options(options);
                 info!("uTP socket options updated for future transport endpoints");
             }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetBtMaxOpenFiles { max } => {
+                ctx.open_file_budget.set_max_open_files(max);
+                info!(
+                    max,
+                    "BitTorrent multi-file open-file limit updated at runtime"
+                );
+            }
         }
     }
     processed

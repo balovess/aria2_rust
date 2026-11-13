@@ -99,6 +99,13 @@ impl DownloadEngine {
             DEFAULT_TRACKER_SOURCE_TIMEOUT, DEFAULT_TRACKER_UPDATE_INTERVAL, TrackerCatalogConfig,
         };
 
+        if let Some(max_open_files) = option_i64(options, "bt-max-open-files")
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+        {
+            self.open_file_budget.set_max_open_files(max_open_files);
+        }
+
         self.set_utp_socket_options(crate::config::utp_socket_options_from_values(
             option_i64(options, "bt-utp-max-connections"),
             option_i64(options, "bt-utp-connect-timeout"),
@@ -208,6 +215,20 @@ fn option_i64(options: &HashMap<String, OptionValue>, name: &str) -> Option<i64>
         OptionValue::Int(value) => Some(*value),
         OptionValue::Usize(value) => i64::try_from(*value).ok(),
         _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "bittorrent"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_option_initializes_shared_open_file_budget() {
+        let options = HashMap::from([("bt-max-open-files".to_string(), OptionValue::Int(17))]);
+        let engine =
+            DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
+
+        assert_eq!(engine.open_file_budget.max_open_files(), 17);
     }
 }
 

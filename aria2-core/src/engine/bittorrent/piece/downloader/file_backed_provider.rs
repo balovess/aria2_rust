@@ -22,6 +22,8 @@ pub struct FileBackedPieceProvider {
     /// Write-back cache shared with the active single-file download writer.
     /// Verified data must be served from here before it reaches the file.
     write_cache: Option<std::sync::Arc<crate::filesystem::disk_cache::WrDiskCache>>,
+    /// Process-wide budget for concurrent reads from multi-file torrents.
+    open_file_budget: Option<std::sync::Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 }
 
 impl FileBackedPieceProvider {
@@ -42,6 +44,7 @@ impl FileBackedPieceProvider {
             pieces,
             shared_pieces: None,
             write_cache: None,
+            open_file_budget: None,
         }
     }
 
@@ -70,6 +73,7 @@ impl FileBackedPieceProvider {
             pieces: available,
             shared_pieces: None,
             write_cache: None,
+            open_file_budget: None,
         }
     }
 
@@ -91,6 +95,7 @@ impl FileBackedPieceProvider {
             pieces: Bitfield::new(num_pieces as usize),
             shared_pieces: Some(shared_pieces),
             write_cache: None,
+            open_file_budget: None,
         }
     }
 
@@ -99,6 +104,14 @@ impl FileBackedPieceProvider {
         write_cache: Option<std::sync::Arc<crate::filesystem::disk_cache::WrDiskCache>>,
     ) -> Self {
         self.write_cache = write_cache;
+        self
+    }
+
+    pub(crate) fn with_open_file_budget(
+        mut self,
+        budget: Option<std::sync::Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
+    ) -> Self {
+        self.open_file_budget = budget;
         self
     }
 
@@ -173,6 +186,11 @@ impl PieceDataProvider for FileBackedPieceProvider {
         }
 
         if let Some(ref layout) = self.multi_file_layout {
+            let _open_file_reservation = if let Some(budget) = &self.open_file_budget {
+                Some(budget.reserve_up_to(1).await)
+            } else {
+                None
+            };
             let global_start = piece_index as u64 * layout.piece_length() as u64 + offset as u64;
 
             if global_start >= layout.piece_space_size() {
@@ -251,7 +269,12 @@ impl PieceDataProvider for FileBackedPieceProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::engine::bittorrent::peer::upload_session::PieceDataProvider;
+    use crate::engine::bittorrent::torrent::file_layout::MultiFileLayout;
+    use crate::filesystem::open_file_budget::OpenFileBudget;
 
     #[test]
     fn live_provider_availability_tracks_verified_shared_bitfield() {
@@ -276,5 +299,46 @@ mod tests {
         assert!(!provider.has_piece(1));
         assert!(provider.has_piece(2));
         assert!(!provider.has_piece(3));
+    }
+
+    #[tokio::test]
+    async fn multi_file_upload_reads_wait_for_the_shared_open_file_budget() {
+        use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
+
+        let info = InfoDict {
+            name: "upload-budget".to_string(),
+            piece_length: 4,
+            pieces: vec![[0; 20]],
+            length: None,
+            files: Some(vec![FileEntry {
+                length: 4,
+                path: vec!["payload.bin".to_string()],
+            }]),
+            private: None,
+            meta_version: None,
+            v2_files: None,
+            pieces_root: None,
+        };
+        let output = tempfile::tempdir().expect("temporary output directory");
+        let layout = MultiFileLayout::from_info_dict(&info, output.path()).unwrap();
+        layout.create_directories().unwrap();
+        std::fs::write(layout.file_absolute_path(0).unwrap(), b"data").unwrap();
+
+        let budget = OpenFileBudget::new(1);
+        let provider = Arc::new(
+            FileBackedPieceProvider::new(output.path().to_path_buf(), 4, 1, Some(layout))
+                .with_open_file_budget(Some(Arc::clone(&budget))),
+        );
+        let held = budget.reserve_up_to(1).await;
+        let task = tokio::spawn(async move { provider.get_piece_data(0, 0, 4).await });
+
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        drop(held);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("released budget should allow the upload read")
+            .expect("upload read task should complete");
+        assert_eq!(result.as_deref(), Some(b"data".as_slice()));
     }
 }

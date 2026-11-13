@@ -400,6 +400,7 @@ impl BtDownloadCommand {
             public_trackers: None,
             choking_algo,
             multi_file_layout,
+            open_file_budget: None,
             file_allocation: options
                 .file_allocation
                 .clone()

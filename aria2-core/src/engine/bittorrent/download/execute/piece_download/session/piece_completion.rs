@@ -45,16 +45,9 @@ impl WorkCommitter for PieceWorkCommitter<'_, '_> {
         let data_length = data.len() as u64;
         let piece_bytes = bytes::Bytes::from(data);
         if self.session.command.multi_file_layout.is_some() {
-            let max_open_files = self
-                .session
-                .command
-                .group
-                .recover()
-                .options()
-                .bt_max_open_files;
             self.session
                 .command
-                .write_multi_file_piece_and_track(self.piece_index, &piece_bytes, max_open_files)
+                .write_multi_file_piece_and_track(self.piece_index, &piece_bytes)
                 .await?;
         } else {
             self.session

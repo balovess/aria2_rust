@@ -12,6 +12,7 @@ pub mod file_lock;
 pub mod mmap_disk_writer;
 pub mod multi_disk_adaptor;
 pub mod multi_file_allocation_iterator;
+#[cfg(feature = "bittorrent")]
 pub(crate) mod open_file_budget;
 pub mod positioned_disk_writer;
 pub mod resume_helper;

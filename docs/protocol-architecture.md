@@ -72,6 +72,15 @@ BitTorrent. The built-in registry orders metadata and scheme-specific adapters
 before the HTTP fallback. The HTTP adapter delegates construction to
 `engine::http::command_factory`, which resolves target and proxy addresses.
 
+The process-level `OpenFileBudget` is a core filesystem service. The BitTorrent
+adapter injects it into payload and magnet commands; Metalink injects the same
+service into payload writers and torrent fallback. Multi-file BitTorrent block
+and piece writes reserve the number of handles in each batch; resume reads and
+seeding reads reserve one handle. A Metalink payload reserves one handle for
+its output stream. `bt-max-open-files` sets the shared budget at startup and
+updates it through the engine command path, so concurrent groups share one
+limit rather than multiplying per-task limits.
+
 ## Shared work-item interface
 
 `engine::work_scheduler::WorkScheduler<T>` is transport-neutral. A caller

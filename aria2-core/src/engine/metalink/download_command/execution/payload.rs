@@ -184,6 +184,13 @@ impl MetalinkDownloadCommand {
             Box::new(raw_writer)
         };
 
+        #[cfg(feature = "bittorrent")]
+        let _open_file_reservation = if let Some(budget) = &self.open_file_budget {
+            Some(budget.reserve_up_to(1).await)
+        } else {
+            None
+        };
+
         self.completed_bytes = resume_offset;
         let mut stream = response.bytes_stream();
         let mut last_speed_update = Instant::now();

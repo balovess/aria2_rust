@@ -478,6 +478,10 @@ pub enum EngineCommand {
     SetUtpSocketOptions {
         options: aria2_protocol::bittorrent::utp::UtpSocketOptions,
     },
+
+    /// Change the process-wide cap for open files used by multi-file downloads.
+    #[cfg(feature = "bittorrent")]
+    SetBtMaxOpenFiles { max: usize },
 }
 
 impl EngineCommand {
@@ -523,6 +527,7 @@ impl EngineCommand {
                     | Self::SetPublicTrackersEnabled { .. }
                     | Self::SetIncomingPeerHandshakeTimeout { .. }
                     | Self::SetUtpSocketOptions { .. }
+                    | Self::SetBtMaxOpenFiles { .. }
             );
         common
     }

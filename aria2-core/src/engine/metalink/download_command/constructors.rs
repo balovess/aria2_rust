@@ -131,6 +131,8 @@ impl MetalinkDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 
@@ -268,6 +270,8 @@ impl MetalinkDownloadCommand {
                     bt_listener: None,
                     #[cfg(feature = "bittorrent")]
                     lpd_manager: None,
+                    #[cfg(feature = "bittorrent")]
+                    open_file_budget: None,
                 },
                 file_index: i,
             });
@@ -380,6 +384,8 @@ impl MetalinkDownloadCommand {
                 bt_listener: None,
                 #[cfg(feature = "bittorrent")]
                 lpd_manager: None,
+                #[cfg(feature = "bittorrent")]
+                open_file_budget: None,
             },
             file_index: 0,
         }])
@@ -499,6 +505,8 @@ impl MetalinkDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 
@@ -583,6 +591,8 @@ impl MetalinkDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 }

@@ -33,6 +33,8 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
         ),
         #[cfg(feature = "bittorrent")]
         lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
+        #[cfg(feature = "bittorrent")]
+        open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(100),
     }
 }
 

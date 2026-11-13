@@ -70,6 +70,7 @@ impl ProtocolCommandAdapter for MetalinkCommandAdapter {
             command.set_bt_registry(Arc::clone(&self.bittorrent.bt_registry));
             command.set_bt_listener(Arc::clone(&self.bittorrent.bt_listener));
             command.set_lpd_manager(Arc::clone(&self.bittorrent.lpd_manager));
+            command.set_open_file_budget(Arc::clone(&self.bittorrent.open_file_budget));
         }
         Ok(Box::new(command))
     }

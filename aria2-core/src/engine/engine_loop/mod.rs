@@ -137,6 +137,10 @@ pub struct EngineLoopContext {
     /// Process-level Local Peer Discovery manager and receive loop.
     #[cfg(feature = "bittorrent")]
     pub lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+
+    /// Shared limit for simultaneously open multi-file payload handles.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) open_file_budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.

@@ -137,6 +137,8 @@ pub struct BtDownloadCommand {
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
     pub(crate) multi_file_layout: Option<MultiFileLayout>,
+    /// Process-wide reservation budget for multi-file payload handles.
+    pub(crate) open_file_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 
     /// File allocation strategy from options
     /// ("none" / "prealloc" / "falloc" / "trunc" / "mmap"). Mirrors C++

@@ -10,7 +10,7 @@ use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::info;
 
-use super::piece_storage::stage_received_block;
+use super::piece_storage::{MultiFileWriteLimits, stage_received_block};
 use super::{PieceDownloadSession, PieceLoopAction};
 
 impl PieceDownloadSession<'_> {
@@ -82,6 +82,10 @@ impl PieceDownloadSession<'_> {
         let (block_sender, mut block_receiver) = block_tx;
         let piece_lengths = HashMap::from([(piece_index, actual_piece_len)]);
         let max_open_files = self.command.group.recover().options().bt_max_open_files;
+        let write_limits = MultiFileWriteLimits {
+            per_download: max_open_files,
+            process_budget: self.command.open_file_budget.clone(),
+        };
         let request_timeout = self.request_timeout;
         let endgame_active = self.endgame_state.is_endgame_active();
         let swarm_len = self.swarm.len();
@@ -166,7 +170,7 @@ impl PieceDownloadSession<'_> {
                                 &piece_lengths,
                                 in_flight,
                                 dirty_multi_file_indices,
-                                max_open_files,
+                                &write_limits,
                                 block,
                             ).await?;
                         }
@@ -185,7 +189,7 @@ impl PieceDownloadSession<'_> {
                     &piece_lengths,
                     in_flight,
                     dirty_multi_file_indices,
-                    max_open_files,
+                    &write_limits,
                     block,
                 )
                 .await?;
@@ -267,6 +271,10 @@ impl PieceDownloadSession<'_> {
             .collect::<HashMap<_, _>>();
         let max_attempts = self.command.group.recover().options().max_retries;
         let max_open_files = self.command.group.recover().options().bt_max_open_files;
+        let write_limits = MultiFileWriteLimits {
+            per_download: max_open_files,
+            process_budget: self.command.open_file_budget.clone(),
+        };
         let lifecycle_notify = self.command.group.recover().lifecycle_notifier();
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
@@ -304,7 +312,7 @@ impl PieceDownloadSession<'_> {
                                 &piece_lengths,
                                 in_flight,
                                 dirty_multi_file_indices,
-                                max_open_files,
+                                &write_limits,
                                 block,
                             ).await?;
                         }
@@ -323,7 +331,7 @@ impl PieceDownloadSession<'_> {
                     &piece_lengths,
                     in_flight,
                     dirty_multi_file_indices,
-                    max_open_files,
+                    &write_limits,
                     block,
                 )
                 .await?;

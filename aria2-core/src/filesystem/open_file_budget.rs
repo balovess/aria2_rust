@@ -36,6 +36,7 @@ impl OpenFileBudget {
         self.changed.notify_waiters();
     }
 
+    #[cfg(test)]
     pub(crate) fn max_open_files(&self) -> usize {
         self.state
             .lock()
@@ -145,5 +146,24 @@ mod tests {
 
         assert_eq!(reservation.permits(), 1);
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn lowering_the_limit_waits_for_existing_reservations_to_drain() {
+        let budget = OpenFileBudget::new(2);
+        let held = budget.reserve_up_to(2).await;
+        budget.set_max_open_files(1);
+        let waiting_budget = Arc::clone(&budget);
+        let waiter = tokio::spawn(async move { waiting_budget.reserve_up_to(2).await });
+
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        drop(held);
+
+        let reservation = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("released reservations should wake a waiter")
+            .expect("waiter task should complete");
+        assert_eq!(reservation.permits(), 1);
     }
 }

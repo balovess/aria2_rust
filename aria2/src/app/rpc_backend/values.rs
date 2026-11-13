@@ -466,6 +466,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_bt_max_open_files_updates_config_and_engine_command() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "bt-max-open-files".to_string(),
+                serde_json::json!(17),
+            )]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("bt-max-open-files")
+                .await,
+            Some(17)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetBtMaxOpenFiles { max: 17 }
+        ));
+    }
+
+    #[tokio::test]
     async fn empty_public_tracker_sources_are_accepted_and_applied() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, mut receiver) = channel();

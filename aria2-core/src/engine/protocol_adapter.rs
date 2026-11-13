@@ -63,6 +63,7 @@ impl ProtocolAdapterRegistry {
             bt_registry: Arc::clone(&_context.bt_registry),
             bt_listener: Arc::clone(&_context.bt_listener),
             lpd_manager: Arc::clone(&_context.lpd_manager),
+            open_file_budget: Arc::clone(&_context.open_file_budget),
         };
 
         Self::builtins(

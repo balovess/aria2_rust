@@ -43,6 +43,8 @@ impl MetalinkDownloadCommand {
                 bt_listener: self.bt_listener.clone(),
                 #[cfg(feature = "bittorrent")]
                 lpd_manager: self.lpd_manager.clone(),
+                #[cfg(feature = "bittorrent")]
+                open_file_budget: self.open_file_budget.clone(),
             };
             match command.execute_file(false, false).await {
                 Ok(()) => {
@@ -145,6 +147,9 @@ impl MetalinkDownloadCommand {
                     #[cfg(feature = "bittorrent")]
                     if let Some(manager) = self.lpd_manager.clone() {
                         bt_cmd.set_lpd_manager(manager);
+                    }
+                    if let Some(budget) = self.open_file_budget.clone() {
+                        bt_cmd.set_open_file_budget(budget);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
@@ -290,6 +295,9 @@ impl MetalinkDownloadCommand {
                     #[cfg(feature = "bittorrent")]
                     if let Some(manager) = self.lpd_manager.clone() {
                         bt_cmd.set_lpd_manager(manager);
+                    }
+                    if let Some(budget) = self.open_file_budget.clone() {
+                        bt_cmd.set_open_file_budget(budget);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().completed_length();

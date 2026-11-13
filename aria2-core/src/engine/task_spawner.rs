@@ -203,6 +203,7 @@ mod tests {
                     lpd_manager: Arc::new(
                         crate::engine::bittorrent::discovery::lpd::LpdManager::new(),
                     ),
+                    open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(100),
                 },
             )),
         }

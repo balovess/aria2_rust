@@ -43,6 +43,8 @@ pub struct MagnetDownloadCommand {
     bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>>,
     #[cfg(feature = "bittorrent")]
     lpd_manager: Option<Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>>,
+    #[cfg(feature = "bittorrent")]
+    open_file_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 }
 
 impl MagnetDownloadCommand {
@@ -154,6 +156,8 @@ impl MagnetDownloadCommand {
             bt_registry: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 
@@ -187,6 +191,14 @@ impl MagnetDownloadCommand {
         manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
     ) {
         self.lpd_manager = Some(manager);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn set_open_file_budget(
+        &mut self,
+        budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
+    ) {
+        self.open_file_budget = Some(budget);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
@@ -378,6 +390,10 @@ impl Command for MagnetDownloadCommand {
             .notify_metadata_resolved(MetadataResolvedEvent::new(gid, vec![gid]));
         if let Some(gl) = self.global_limiter.clone() {
             bt_cmd.set_global_limiter(gl);
+        }
+        #[cfg(feature = "bittorrent")]
+        if let Some(budget) = self.open_file_budget.clone() {
+            bt_cmd.set_open_file_budget(budget);
         }
         #[cfg(feature = "bittorrent")]
         if let Some(catalog) = self.public_tracker_catalog.clone() {

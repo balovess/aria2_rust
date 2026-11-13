@@ -83,7 +83,8 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(100),
             min: Some(1),
-            description: "Max open files for BT".into(),
+            description: "Maximum open files across multi-file BitTorrent and Metalink downloads"
+                .into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

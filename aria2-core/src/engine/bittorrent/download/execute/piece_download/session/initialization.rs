@@ -260,7 +260,8 @@ impl<'a> PieceDownloadSession<'a> {
                     command.multi_file_layout.clone(),
                     Arc::clone(&completed_bitfield),
                 )
-                .with_write_cache(upload_write_cache),
+                .with_write_cache(upload_write_cache)
+                .with_open_file_budget(command.open_file_budget.clone()),
             );
         let mut active_connections = command
             .connect_to_peers(

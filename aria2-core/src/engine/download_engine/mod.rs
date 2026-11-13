@@ -70,6 +70,9 @@ pub struct DownloadEngine {
     /// Process-wide Local Peer Discovery manager and receive loop.
     #[cfg(feature = "bittorrent")]
     pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    /// Process-wide file-handle budget for multi-file downloads.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) open_file_budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -154,6 +157,8 @@ impl DownloadEngine {
             ),
             #[cfg(feature = "bittorrent")]
             lpd_manager,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(100),
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 

@@ -80,6 +80,8 @@ impl DownloadEngine {
             bt_listener: Arc::clone(&self.bt_listener),
             #[cfg(feature = "bittorrent")]
             lpd_manager: Arc::clone(&self.lpd_manager),
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: Arc::clone(&self.open_file_budget),
         };
 
         #[cfg(feature = "bittorrent")]

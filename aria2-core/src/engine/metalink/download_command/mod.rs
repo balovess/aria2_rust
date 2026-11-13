@@ -55,6 +55,8 @@ pub struct MetalinkDownloadCommand {
         Option<Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>>,
     #[cfg(feature = "bittorrent")]
     pub(crate) lpd_manager: Option<Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) open_file_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 }
 
 mod constructors;
@@ -103,6 +105,14 @@ impl MetalinkDownloadCommand {
         manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
     ) {
         self.lpd_manager = Some(manager);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn set_open_file_budget(
+        &mut self,
+        budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
+    ) {
+        self.open_file_budget = Some(budget);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {

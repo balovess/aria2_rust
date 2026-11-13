@@ -16,6 +16,7 @@ pub(crate) struct BtCommandServices {
     pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>,
     pub(crate) bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
     pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    pub(crate) open_file_budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
 }
 
 pub(crate) struct BtCommandAdapter {
@@ -70,6 +71,7 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
             command.set_bt_listener(Arc::clone(&self.services.bt_listener));
             command.set_bt_registry(Arc::clone(&self.services.bt_registry));
             command.set_lpd_manager(Arc::clone(&self.services.lpd_manager));
+            command.set_open_file_budget(Arc::clone(&self.services.open_file_budget));
             if let Some(limiter) = services.global_limiter.clone() {
                 command.set_global_limiter(limiter);
             }
@@ -84,6 +86,7 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
         command.set_bt_listener(Arc::clone(&self.services.bt_listener));
         command.set_bt_registry(Arc::clone(&self.services.bt_registry));
         command.set_lpd_manager(Arc::clone(&self.services.lpd_manager));
+        command.set_open_file_budget(Arc::clone(&self.services.open_file_budget));
         command.set_outbound_network_policy(Arc::clone(&services.outbound_network_policy));
         if let Some(limiter) = services.global_limiter.clone() {
             command.set_global_limiter(limiter);
