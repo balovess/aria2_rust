@@ -228,7 +228,7 @@ fn strict_host_key_mode_rejects_unknown_keys_and_accepts_recorded_keys() {
 
     assert!(matches!(
         verify_server_key(&options, &key, &known_hosts),
-        Err(SshError::Handshake { message }) if message.contains("not present")
+        Err(SshError::Config { message }) if message.contains("not present")
     ));
 
     russh::keys::known_hosts::learn_known_hosts_path("sftp.example", 22, &key, &known_hosts)
@@ -255,7 +255,7 @@ fn accept_new_host_key_persists_first_key_and_rejects_replacement() {
     assert!(verify_server_key(&options, &first_key, &known_hosts).unwrap());
     assert!(matches!(
         verify_server_key(&options, &replacement_key, &known_hosts),
-        Err(SshError::Handshake { message }) if message.contains("host key changed")
+        Err(SshError::Config { message }) if message.contains("host key changed")
     ));
 }
 

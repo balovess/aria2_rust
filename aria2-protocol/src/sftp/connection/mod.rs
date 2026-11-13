@@ -73,7 +73,7 @@ fn verify_server_key(
         return if matches_fingerprint(server_key, expected) {
             Ok(true)
         } else {
-            Err(SshError::Handshake {
+            Err(SshError::Config {
                 message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
             })
         };
@@ -89,7 +89,7 @@ fn verify_server_key(
         options.port,
         known_hosts_path,
     )
-    .map_err(|error| SshError::Handshake {
+    .map_err(|error| SshError::Config {
         message: format!("SSH known-hosts verification failed: {error}"),
     })?;
 
@@ -101,13 +101,13 @@ fn verify_server_key(
     }
 
     if !recorded_keys.is_empty() {
-        return Err(SshError::Handshake {
+        return Err(SshError::Config {
             message: format!("SSH host key changed for {}", options.target()),
         });
     }
 
     match options.host_key_mode {
-        HostKeyCheckingMode::Strict => Err(SshError::Handshake {
+        HostKeyCheckingMode::Strict => Err(SshError::Config {
             message: format!(
                 "SSH host key for {} is not present in {}",
                 options.target(),
@@ -121,7 +121,7 @@ fn verify_server_key(
                 server_key,
                 known_hosts_path,
             )
-            .map_err(|error| SshError::Handshake {
+            .map_err(|error| SshError::Config {
                 message: format!("Failed to record SSH host key: {error}"),
             })?;
             Ok(true)
@@ -137,7 +137,7 @@ fn resolve_known_hosts_path(options: &SshOptions) -> Result<PathBuf, SshError> {
 
     dirs::home_dir()
         .map(|home| home.join(".ssh").join("known_hosts"))
-        .ok_or_else(|| SshError::Handshake {
+        .ok_or_else(|| SshError::Config {
             message: "Cannot locate the home directory for SSH known-hosts verification".into(),
         })
 }
@@ -151,11 +151,18 @@ fn resolve_known_hosts_path(options: &SshOptions) -> Result<PathBuf, SshError> {
 /// connection-level verification behavior.
 struct SshClientHandler {
     options: Arc<SshOptions>,
+    host_key_error: Arc<std::sync::Mutex<Option<SshError>>>,
 }
 
 impl SshClientHandler {
-    fn new(options: Arc<SshOptions>) -> Self {
-        Self { options }
+    fn new(
+        options: Arc<SshOptions>,
+        host_key_error: Arc<std::sync::Mutex<Option<SshError>>>,
+    ) -> Self {
+        Self {
+            options,
+            host_key_error,
+        }
     }
 }
 
@@ -169,20 +176,29 @@ impl client::Handler for SshClientHandler {
         _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         let options = Arc::clone(&self.options);
+        let host_key_error = Arc::clone(&self.host_key_error);
         let server_key = _server_public_key.public_key();
         async move {
             debug!(
                 "[SFTP] Checking server key (mode={})",
                 options.host_key_mode
             );
-            let path = if options.host_key_fingerprint.is_some()
-                || options.host_key_mode == HostKeyCheckingMode::Disable
-            {
-                PathBuf::new()
-            } else {
-                resolve_known_hosts_path(&options)?
-            };
-            verify_server_key(&options, &server_key, &path)
+            let result = (|| {
+                let path = if options.host_key_fingerprint.is_some()
+                    || options.host_key_mode == HostKeyCheckingMode::Disable
+                {
+                    PathBuf::new()
+                } else {
+                    resolve_known_hosts_path(&options)?
+                };
+                verify_server_key(&options, &server_key, &path)
+            })();
+            if let Err(error @ SshError::Config { .. }) = &result {
+                *host_key_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.clone());
+            }
+            result
         }
     }
 }
@@ -242,8 +258,10 @@ impl SshConnection {
             port: options.port,
             timeout_secs: options.connect_timeout.as_secs(),
         })?
-        .map_err(|error| SshError::Handshake {
-            message: format!("SSH TCP connection failed: {error}"),
+        .map_err(|error| SshError::ConnectFailed {
+            host: options.host.clone(),
+            port: options.port,
+            message: error.to_string(),
         })?;
         Self::connect_with_config(options, stream, config).await
     }
@@ -274,7 +292,8 @@ impl SshConnection {
         let config = Arc::new(config);
 
         // Step 2: Create handler and establish SSH connection over the supplied TCP stream.
-        let handler = SshClientHandler::new(Arc::clone(&options_arc));
+        let host_key_error = Arc::new(std::sync::Mutex::new(None));
+        let handler = SshClientHandler::new(Arc::clone(&options_arc), Arc::clone(&host_key_error));
 
         let mut handle = tokio::time::timeout(
             options_arc.connect_timeout,
@@ -286,8 +305,14 @@ impl SshConnection {
             port: options_arc.port,
             timeout_secs: options_arc.connect_timeout.as_secs(),
         })?
-        .map_err(|e| SshError::Handshake {
-            message: format!("SSH handshake failed: {}", e),
+        .map_err(|e| {
+            host_key_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .unwrap_or_else(|| SshError::Handshake {
+                    message: format!("SSH handshake failed: {}", e),
+                })
         })?;
 
         info!(

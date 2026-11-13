@@ -41,9 +41,7 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
     {
         map.insert("disk-cache".to_string(), v.to_string());
     }
-    if opts.continue_download {
-        map.insert("continue".to_string(), "true".to_string());
-    }
+    map.insert("continue".to_string(), opts.continue_download.to_string());
     if opts.allow_overwrite {
         map.insert("allow-overwrite".to_string(), "true".to_string());
     }

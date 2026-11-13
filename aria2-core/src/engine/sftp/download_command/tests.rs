@@ -208,6 +208,20 @@ fn test_map_ssh_connect_timeout_to_recoverable() {
 }
 
 #[test]
+fn sftp_host_key_rejection_is_terminal_and_does_not_retry() {
+    let mut command = create_test_cmd();
+    command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(0, 0);
+    let error = SshError::Config {
+        message: "SSH host-key fingerprint mismatch".into(),
+    };
+
+    let mapped = SftpDownloadCommand::map_ssh_error(&error, "h", 22, "/f");
+
+    assert!(matches!(mapped, Aria2Error::Fatal(FatalError::Config(_))));
+    assert!(!command.should_retry_error(0, &mapped));
+}
+
+#[test]
 fn test_map_file_not_found_to_resource_result() {
     let err = FileOpError::NotFound {
         path: "/missing".to_string(),

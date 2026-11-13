@@ -26,6 +26,26 @@ impl UdpAction {
     }
 }
 
+/// Common fields at the start of every UDP tracker response frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpTrackerResponseHeader {
+    /// Raw action value, retained so callers can reject or report unknown actions.
+    pub action: i32,
+    pub transaction_id: u32,
+}
+
+/// Decode the action and transaction ID shared by UDP tracker responses.
+///
+/// Unknown action values are returned unchanged so the engine can correlate
+/// the response before deciding how to handle the action.
+pub fn decode_response_header(data: &[u8]) -> Option<UdpTrackerResponseHeader> {
+    let header = data.get(..8)?;
+    Some(UdpTrackerResponseHeader {
+        action: i32::from_be_bytes(header[..4].try_into().ok()?),
+        transaction_id: u32::from_be_bytes(header[4..8].try_into().ok()?),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum UdpEvent {
@@ -99,16 +119,19 @@ pub fn parse_connect_response(data: &[u8]) -> Result<ConnectResponse, String> {
             data.len()
         ));
     }
-    let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    if action != UdpAction::Connect as i32 {
-        return Err(format!("Unexpected action in CONNECT response: {}", action));
+    let header = decode_response_header(data)
+        .ok_or_else(|| "CONNECT response too short for header".to_string())?;
+    if header.action != UdpAction::Connect as i32 {
+        return Err(format!(
+            "Unexpected action in CONNECT response: {}",
+            header.action
+        ));
     }
-    let txn_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let conn_id = u64::from_be_bytes([
         data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
     ]);
     Ok(ConnectResponse {
-        transaction_id: txn_id,
+        transaction_id: header.transaction_id,
         connection_id: conn_id,
     })
 }
@@ -141,16 +164,17 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
             data.len()
         ));
     }
-    let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    if action == UdpAction::Error as i32 {
+    let header = decode_response_header(data)
+        .ok_or_else(|| format!("ANNOUNCE response too short: {} bytes (min 8)", data.len()))?;
+    if header.action == UdpAction::Error as i32 {
         let msg_len = (data.len() - 8).min(256);
         let msg = String::from_utf8_lossy(&data[8..8 + msg_len]);
         return Err(format!("Tracker error: {}", msg));
     }
-    if action != UdpAction::Announce as i32 {
+    if header.action != UdpAction::Announce as i32 {
         return Err(format!(
             "Unexpected action in ANNOUNCE response: {}",
-            action
+            header.action
         ));
     }
     if data.len() < 20 {
@@ -165,7 +189,6 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
             data.len() - 20
         ));
     }
-    let txn_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let interval = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let leechers = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
     let seeders = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
@@ -179,7 +202,7 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
         Vec::new()
     };
     Ok(AnnounceResponse {
-        transaction_id: txn_id,
+        transaction_id: header.transaction_id,
         interval,
         leechers,
         seeders,
@@ -225,9 +248,13 @@ pub fn parse_scrape_response(data: &[u8]) -> Result<Vec<ScrapeResult>, String> {
             data.len()
         ));
     }
-    let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    if action != UdpAction::Scrape as i32 {
-        return Err(format!("Unexpected action in SCRAPE response: {}", action));
+    let header = decode_response_header(data)
+        .ok_or_else(|| format!("SCRAPE response too short: {} bytes (min 8)", data.len()))?;
+    if header.action != UdpAction::Scrape as i32 {
+        return Err(format!(
+            "Unexpected action in SCRAPE response: {}",
+            header.action
+        ));
     }
 
     // Skip action + transaction_id = 8 bytes

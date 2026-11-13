@@ -9,7 +9,7 @@ use super::{
 };
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
     ConnectResponse, UdpAction, UdpEvent, build_announce_request, build_connect_request,
-    parse_announce_response, parse_connect_response, parse_scrape_response,
+    decode_response_header, parse_announce_response, parse_connect_response, parse_scrape_response,
 };
 
 impl UdpTrackerClient {
@@ -257,18 +257,16 @@ impl UdpTrackerClient {
     }
 
     pub(crate) async fn handle_response(&mut self, data: &[u8], from: &SocketAddr) {
-        if data.len() < 4 {
-            warn!("Short response from {}: {} bytes", from, data.len());
-            return;
-        }
-
-        let action_val = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        let txn_id = if data.len() >= 8 {
-            u32::from_be_bytes([data[4], data[5], data[6], data[7]])
-        } else {
-            warn!("Response too short for txn_id from {}", from);
+        let Some(header) = decode_response_header(data) else {
+            if data.len() < 4 {
+                warn!("Short response from {}: {} bytes", from, data.len());
+            } else {
+                warn!("Response too short for txn_id from {}", from);
+            }
             return;
         };
+        let action_val = header.action;
+        let txn_id = header.transaction_id;
 
         let idx = match self.txn_map.get(&txn_id) {
             Some(&i) => i,

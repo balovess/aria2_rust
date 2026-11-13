@@ -26,7 +26,8 @@ fn http2_session_pool_count_uses_its_own_limit() {
 
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&DownloadOptions::default()),
-        crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER
+        crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+            .max(crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER)
     );
 }
 

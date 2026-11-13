@@ -47,6 +47,32 @@ async fn startup_availability_matches_fast_extension_capabilities() {
 }
 
 #[tokio::test]
+async fn invalid_remote_upload_request_is_a_recoverable_peer_failure() {
+    let provider = InMemoryPieceProvider::new(16, 1);
+    let mut state = BtUploadState::new(&BtSeedingConfig::default());
+    state.configure_message_validator(1, 16);
+    let mut transport = TestUploadTransport::default();
+
+    let error = state
+        .handle_message(
+            &mut transport,
+            BtMessage::Request {
+                request: PieceBlockRequest::new(1, 0, 8),
+            },
+            &provider,
+        )
+        .await
+        .expect_err("out-of-range remote requests must be rejected");
+
+    assert!(matches!(
+        error,
+        crate::error::Aria2Error::Recoverable(
+            crate::error::RecoverableError::TemporaryNetworkFailure { .. }
+        )
+    ));
+}
+
+#[tokio::test]
 async fn outstanding_upload_count_tracks_queued_piece_responses() {
     let mut provider = InMemoryPieceProvider::new(32, 1);
     provider.set_piece_data(0, vec![0x5a; 32]);

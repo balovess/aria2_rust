@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod client;
+pub mod connect;
 pub mod content_disposition;
 pub mod cookie;
 pub mod digest;

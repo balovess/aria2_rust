@@ -18,7 +18,6 @@
 //! - **Forward**: Absolute-URI forwarding — `GET http://target/path HTTP/1.1`
 //!   for plain HTTP through a proxy.
 
-pub mod auth;
 pub mod connect;
 
 #[cfg(test)]

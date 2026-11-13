@@ -16,9 +16,9 @@ impl DownloadEngine {
     /// Construct an engine with process-wide settings applied before its loop
     /// starts and before protocol-owned sockets are created.
     ///
-    /// This is shared by the CLI and the C API so protocol-facing transports,
-    /// resolver settings, scheduler limits, and server statistics use one
-    /// configuration boundary.
+    /// The CLI, C API, and Rust library callers use this boundary to apply
+    /// protocol-facing transports, resolver settings, scheduler limits, and
+    /// server statistics before any process-owned services start.
     pub async fn from_process_options(
         options: &HashMap<String, OptionValue>,
         request_man: Arc<RequestGroupMan>,
@@ -233,19 +233,29 @@ mod tests {
         let options = HashMap::from([
             ("bt-max-open-files".to_string(), OptionValue::Int(17)),
             ("dht-message-timeout".to_string(), OptionValue::Int(23)),
+            (
+                "dht-listen-port".to_string(),
+                OptionValue::Str("49001-49002".to_string()),
+            ),
+            (
+                "dht-file-path".to_string(),
+                OptionValue::Str("process-dht.dat".to_string()),
+            ),
         ]);
         let engine =
             DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
 
         assert_eq!(engine.open_file_budget.max_open_files(), 17);
+        let dht_options = engine
+            .bt_registry
+            .read()
+            .expect("BT registry should be readable")
+            .global_dht_options();
+        assert_eq!(dht_options.dht_message_timeout, 23);
+        assert_eq!(dht_options.dht_listen_port.as_deref(), Some("49001-49002"));
         assert_eq!(
-            engine
-                .bt_registry
-                .read()
-                .expect("BT registry should be readable")
-                .dht_options_for_download(&DownloadOptions::default())
-                .dht_message_timeout,
-            23
+            dht_options.dht_file_path.as_deref(),
+            Some("process-dht.dat")
         );
     }
 }

@@ -502,6 +502,11 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
             Some(&snapshot),
         );
         let wire_name = session_wire_name(name);
+        let expected_wire_value = if *name == "header" {
+            raw.replace(',', "\n")
+        } else {
+            raw.clone()
+        };
         let reaches_all_entry_points = [
             ("config-file", &file_session),
             ("cli", &cli_session),
@@ -510,13 +515,13 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         ]
         .into_iter()
         .all(|(source, map)| {
-            if map.get(wire_name) != Some(&raw) {
+            if map.get(wire_name) != Some(&expected_wire_value) {
                 eprintln!(
                     "initial option '{}' from {} serialized as {:?}, expected {:?}",
                     name,
                     source,
                     map.get(wire_name),
-                    raw
+                    expected_wire_value
                 );
                 false
             } else {

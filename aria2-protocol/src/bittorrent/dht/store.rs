@@ -215,15 +215,7 @@ impl DhtItemStore {
 
     pub fn save_to_file_sync(&self, path: &Path) -> Result<(), String> {
         let data = self.serialize()?;
-        let temp_path = path.with_extension(format!("items.tmp{}", rand::random::<u32>()));
-        std::fs::write(&temp_path, data)
-            .map_err(|e| format!("write {}: {e}", temp_path.display()))?;
-        #[cfg(windows)]
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&temp_path, path).map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            format!("replace {}: {e}", path.display())
-        })
+        super::persistence::write_atomic_file_sync(path, &data)
     }
 
     pub fn load_from_file_sync(path: &Path) -> Result<Self, String> {

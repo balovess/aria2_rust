@@ -138,9 +138,9 @@ fn initial_option_projection_keeps_request_options_only() {
 fn task_policy_matches_runtime_changeability_axes() {
     assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
     #[cfg(feature = "bittorrent")]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 153);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 131);
     #[cfg(not(feature = "bittorrent"))]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 152);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 130);
     assert_eq!(
         is_option_changeable("max-download-limit", true),
         ChangeableKind::Immediate
@@ -214,7 +214,7 @@ fn task_policy_matches_runtime_changeability_axes() {
     );
     assert_eq!(
         is_option_changeable("max-retries", false),
-        ChangeableKind::NotChangeable
+        ChangeableKind::Immediate
     );
     assert_eq!(
         is_option_changeable("bt-force-encrypt", false),
@@ -224,4 +224,44 @@ fn task_policy_matches_runtime_changeability_axes() {
         is_option_changeable("bt-detach-seed-only", false),
         ChangeableKind::NotChangeable
     );
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn dht_engine_options_are_not_changeable_per_download() {
+    for name in [
+        "enable-dht",
+        "enable-dht6",
+        "dht-listen-port",
+        "dht-listen-addr",
+        "dht-listen-addr6",
+        "dht-entry-point",
+        "dht-entry-point-host",
+        "dht-entry-point-port",
+        "dht-entry-point6",
+        "dht-entry-point-host6",
+        "dht-entry-point-port6",
+        "dht-file-path",
+        "dht-file-path6",
+        "dht-message-timeout",
+        "dht-refresh-check-interval",
+        "dht-token-rotation-interval",
+        "dht-node-contact-interval",
+        "dht-cleanup-interval",
+        "dht-save-interval",
+        "dht-bootstrap-timeout",
+        "dht-max-concurrent-lookups",
+        "dht-persistence-max-age",
+    ] {
+        assert_eq!(
+            is_option_changeable(name, false),
+            ChangeableKind::NotChangeable,
+            "DHT process option '{name}' must not be changeable on a reserved task"
+        );
+        assert_eq!(
+            is_option_changeable(name, true),
+            ChangeableKind::NotChangeable,
+            "DHT process option '{name}' must not be pending on an active task"
+        );
+    }
 }

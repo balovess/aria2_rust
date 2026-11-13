@@ -1,6 +1,6 @@
 //! Engine adapter from the process-owned uTP actor to BitTorrent peer sessions.
 
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, RecoverableError, Result};
 use aria2_protocol::bittorrent::peer::session::{PeerTransport, PeerWireSession};
 
 use super::super::utp_transport::{UtpConnectionHandle, UtpTransportHandle};
@@ -132,16 +132,7 @@ impl UtpPeerConnection {
         self.session
             .receive_bt_message()
             .await
-            .map_err(|error| {
-                match error {
-                aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::Transport(
-                    message,
-                ) => network_error(message),
-                aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::InvalidMessage(
-                    message,
-                ) => Aria2Error::Fatal(FatalError::Config(message)),
-            }
-            })
+            .map_err(map_peer_message_receive_error)
     }
 
     pub async fn close(&mut self) -> Result<()> {
@@ -168,4 +159,37 @@ fn network_error(error: impl ToString) -> Aria2Error {
     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
         message: error.to_string(),
     })
+}
+
+fn map_peer_message_receive_error(
+    error: aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError,
+) -> Aria2Error {
+    match error {
+        aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::Transport(message) => {
+            network_error(message)
+        }
+        aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::InvalidMessage(
+            message,
+        ) => network_error(format!("invalid BitTorrent peer message: {message}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_utp_peer_frame_is_a_recoverable_network_failure() {
+        let error = map_peer_message_receive_error(
+            aria2_protocol::bittorrent::peer::session::PeerMessageReceiveError::InvalidMessage(
+                "unknown message id".to_string(),
+            ),
+        );
+
+        assert!(matches!(
+            error,
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message })
+                if message.contains("invalid BitTorrent peer message")
+        ));
+    }
 }

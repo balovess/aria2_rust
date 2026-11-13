@@ -352,27 +352,24 @@ impl SftpDownloadCommand {
 
     /// Map an SshError to the appropriate Aria2Error for engine-level handling.
     pub(super) fn map_ssh_error(err: &SshError, host: &str, port: u16, _path: &str) -> Aria2Error {
+        if err.is_retryable() {
+            return Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: err.to_string(),
+            });
+        }
+
         match err {
             SshError::AuthFailed { .. } => Aria2Error::Fatal(FatalError::PermissionDenied {
                 path: format!("{}:{}", host, port),
             }),
-            SshError::ConnectTimeout { .. } | SshError::ConnectFailed { .. } => {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: err.to_string(),
-                })
-            }
-            SshError::Handshake { .. } | SshError::ConnectionLost { .. } => {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: err.to_string(),
-                })
-            }
             SshError::NoCredentials { .. } => Aria2Error::Fatal(FatalError::Config(format!(
                 "No SSH credentials provided for {}:{}",
                 host, port
             ))),
-            _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("SFTP error [{}:{}]: {}", host, port, err),
-            }),
+            _ => Aria2Error::Fatal(FatalError::Config(format!(
+                "SFTP connection to {}:{} failed: {}",
+                host, port, err
+            ))),
         }
     }
 

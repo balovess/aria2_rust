@@ -231,6 +231,38 @@ mod tests {
     use tokio::sync::RwLock;
 
     #[tokio::test]
+    async fn dht_process_options_are_ignored_by_global_runtime_changes() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "dht-message-timeout".to_string(),
+                serde_json::json!(23),
+            )]))
+            .await
+            .expect("unsupported global runtime changes should be ignored");
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("dht-message-timeout")
+                .await,
+            Some(10),
+            "DHT process configuration must retain its configured value"
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn global_option_alias_updates_canonical_concurrency_setting() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, mut receiver) = channel();

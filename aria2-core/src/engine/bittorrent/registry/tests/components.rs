@@ -12,23 +12,52 @@ use crate::segment::piece_storage::PieceStorage;
 #[test]
 fn dht_engine_configuration_uses_process_options_over_task_overrides() {
     let mut registry = BtRegistry::new();
-    let mut process_options = DownloadOptions::default();
-    process_options.dht_message_timeout = 17;
-    process_options.dht_listen_port = Some("49000-49001".to_string());
-    process_options.dht_file_path = Some("process-dht.dat".to_string());
+    let process_options = DownloadOptions {
+        dht_message_timeout: 17,
+        dht_listen_port: Some("49000-49001".to_string()),
+        dht_file_path: Some("process-dht.dat".to_string()),
+        ..Default::default()
+    };
     registry.set_global_dht_options(Arc::new(
         crate::engine::bittorrent::dht::config::DhtEngineOptions::from(&process_options),
     ));
 
-    let mut task_options = DownloadOptions::default();
-    task_options.dht_message_timeout = 3;
-    task_options.dht_listen_port = Some("50000".to_string());
-    task_options.dht_file_path = Some("task-dht.dat".to_string());
-    let options = registry.dht_options_for_download(&task_options);
+    let task_options = DownloadOptions {
+        dht_message_timeout: 3,
+        dht_listen_port: Some("50000".to_string()),
+        dht_file_path: Some("task-dht.dat".to_string()),
+        ..Default::default()
+    };
+    let options = registry.global_dht_options();
 
     assert_eq!(options.dht_message_timeout, 17);
     assert_eq!(options.dht_listen_port.as_deref(), Some("49000-49001"));
     assert_eq!(options.dht_file_path.as_deref(), Some("process-dht.dat"));
+    assert_ne!(
+        options.dht_message_timeout,
+        task_options.dht_message_timeout
+    );
+}
+
+#[test]
+fn registry_default_dht_configuration_does_not_inherit_task_overrides() {
+    let registry = BtRegistry::new();
+    let task_options = DownloadOptions {
+        dht_message_timeout: 3,
+        dht_listen_port: Some("50000".to_string()),
+        dht_file_path: Some("task-dht.dat".to_string()),
+        ..Default::default()
+    };
+    let options = registry.global_dht_options();
+    let defaults = crate::engine::bittorrent::dht::config::DhtEngineOptions::default();
+
+    assert_eq!(options.dht_message_timeout, defaults.dht_message_timeout);
+    assert_eq!(options.dht_listen_port, defaults.dht_listen_port);
+    assert_eq!(options.dht_file_path, defaults.dht_file_path);
+    assert_ne!(
+        options.dht_message_timeout,
+        task_options.dht_message_timeout
+    );
 }
 
 /// Helper: create a BtObject with DownloadContext and TorrentAttribute.

@@ -92,8 +92,10 @@ impl SftpDownloadCommand {
         let conn_result = connect_with_timeout(host, port, connect_timeout, async move {
             match outbound_network_policy.connect_host(host, port).await {
                 Ok(stream) => SshConnection::connect_with_stream(ssh_options, stream).await,
-                Err(error) => Err(SshError::Handshake {
-                    message: format!("SFTP TCP connection failed: {error}"),
+                Err(error) => Err(SshError::ConnectFailed {
+                    host: host.to_string(),
+                    port,
+                    message: error.to_string(),
                 }),
             }
         })

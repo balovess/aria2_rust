@@ -227,6 +227,7 @@ async fn e2e_sftp_rejects_a_mismatched_host_key_fingerprint() {
     let server = MockSftpServer::start().await;
     let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
     let options = DownloadOptions {
+        max_retries: 0,
         ssh_host_key_md: Some("sha-1=0000000000000000000000000000000000000000".to_string()),
         ..DownloadOptions::default()
     };
@@ -245,6 +246,11 @@ async fn e2e_sftp_rejects_a_mismatched_host_key_fingerprint() {
         "a mismatched SFTP host key must reject the connection"
     );
     assert!(!output_dir.path().join("download.bin").exists());
+    assert_eq!(
+        server.peer_addresses().len(),
+        1,
+        "untrusted host keys must not trigger repeated SSH connection attempts"
+    );
 }
 
 #[tokio::test]

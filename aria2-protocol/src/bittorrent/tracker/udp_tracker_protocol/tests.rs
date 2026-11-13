@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn response_header_decodes_common_fields_and_preserves_unknown_actions() {
+    let mut data = [0u8; 8];
+    data[..4].copy_from_slice(&99i32.to_be_bytes());
+    data[4..].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+
+    assert_eq!(
+        decode_response_header(&data),
+        Some(UdpTrackerResponseHeader {
+            action: 99,
+            transaction_id: 0x1234_5678,
+        })
+    );
+    assert_eq!(decode_response_header(&data[..7]), None);
+}
+
+#[test]
 fn test_build_connect_request_length_and_magic() {
     let req = build_connect_request(0x12345678);
     assert_eq!(req.len(), 16);

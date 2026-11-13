@@ -212,6 +212,7 @@ async fn inferred_content_disposition_name_enters_collision_policy() {
     let options = DownloadOptions {
         dir: Some(directory.path().to_string_lossy().into_owned()),
         force_sequential: true,
+        continue_download: false,
         ..DownloadOptions::default()
     };
     let uri = format!("http://{address}/download");
@@ -286,6 +287,7 @@ async fn redirected_content_disposition_name_enters_collision_policy() {
     let options = DownloadOptions {
         dir: Some(directory.path().to_string_lossy().into_owned()),
         force_sequential: true,
+        continue_download: false,
         ..DownloadOptions::default()
     };
     let uri = format!("http://{address}/download");

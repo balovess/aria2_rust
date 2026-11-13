@@ -16,13 +16,13 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::http::proxy_tunnel::connect::{HttpProxyTunnel, ProxyResponse};
+use crate::http::proxy_tunnel::HttpProxyTunnelConfig;
+use crate::http::proxy_tunnel::connect::HttpProxyTunnel;
 use crate::network::OutboundNetworkPolicy;
 
 /// Configuration for establishing an FTP-over-HTTP-proxy tunnel.
@@ -130,7 +130,7 @@ impl FtpProxyTunnel {
                     .map_err(|error| Aria2Error::Network(error.to_string()))
             }
         };
-        let mut stream = timeout(config.connect_timeout, connect)
+        let stream = timeout(config.connect_timeout, connect)
             .await
             .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
             .map_err(|e: Aria2Error| {
@@ -142,231 +142,26 @@ impl FtpProxyTunnel {
                 })
             })?;
 
-        stream.set_nodelay(true).map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("set_nodelay failed: {}", e),
-            })
-        })?;
-
-        // Step 2: Send CONNECT request (without auth first)
-        let connect_request = Self::build_connect_request(config, None);
-        Self::send_request(&mut stream, &connect_request, config.write_timeout()).await?;
-
-        // Step 3: Read proxy response
-        let response = Self::read_proxy_response(&mut stream, config.read_timeout).await?;
-
-        match response.status_code {
-            200 => {
-                // Tunnel established successfully
-                info!(
-                    "FTP proxy tunnel established: {}:{} -> {}:{}",
-                    config.proxy_host, config.proxy_port, config.target_host, config.target_port
-                );
-                Ok(stream)
-            }
-            407 => {
-                // Proxy authentication required
-                Self::handle_proxy_auth(stream, config, &response).await
-            }
-            status => {
-                // Proxy rejected the CONNECT request
-                Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!(
-                            "Proxy {}:{} rejected CONNECT to {}:{}: {} {}",
-                            config.proxy_host,
-                            config.proxy_port,
-                            config.target_host,
-                            config.target_port,
-                            status,
-                            response.reason_phrase
-                        ),
-                    },
-                ))
-            }
-        }
-    }
-
-    /// Handle 407 Proxy Authentication Required response.
-    ///
-    /// Parses the Proxy-Authenticate header and retries the CONNECT
-    /// request with appropriate credentials.
-    async fn handle_proxy_auth(
-        mut stream: TcpStream,
-        config: &FtpProxyTunnelConfig,
-        response: &ProxyResponse,
-    ) -> Result<TcpStream> {
-        if config.proxy_username.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: format!(
-                        "Proxy {}:{} requires authentication but no credentials provided",
-                        config.proxy_host, config.proxy_port
-                    ),
-                },
-            ));
-        }
-
-        // Consume any remaining response body
-        Self::consume_response_body(&mut stream, config.read_timeout).await?;
-
-        // Check what auth scheme the proxy supports
-        let proxy_authenticate = response
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("Proxy-Authenticate"))
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
-
-        let scheme = proxy_authenticate
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default();
-        let auth_header = if scheme.eq_ignore_ascii_case("Basic") {
-            aria2_protocol::http::auth::basic_authorization(
-                &config.proxy_username,
-                &config.proxy_password,
-            )
-        } else if scheme.eq_ignore_ascii_case("Digest") {
-            // Digest authentication
-            Self::build_digest_auth_header(
-                &config.proxy_username,
-                &config.proxy_password,
-                proxy_authenticate,
-                &format!("{}:{}", config.target_host, config.target_port),
-            )
-        } else {
-            // Unknown or unsupported auth scheme
-            warn!(
-                "Unsupported proxy auth scheme: {}",
-                proxy_authenticate
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("unknown")
-            );
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: format!(
-                        "Proxy requires unsupported authentication scheme: {}",
-                        proxy_authenticate
-                    ),
-                },
-            ));
+        let http_config = HttpProxyTunnelConfig {
+            proxy_host: config.proxy_host.clone(),
+            proxy_port: config.proxy_port,
+            target_host: config.target_host.clone(),
+            target_port: config.target_port,
+            username: (!config.proxy_username.is_empty()).then(|| config.proxy_username.clone()),
+            password: Some(config.proxy_password.clone()),
+            connect_timeout: config.connect_timeout,
+            read_timeout: config.read_timeout,
+            write_timeout: config.write_timeout(),
+            user_agent: config.user_agent.clone(),
         };
+        let stream =
+            HttpProxyTunnel::establish_tunnel_on_stream(stream, &http_config, false).await?;
 
-        // Retry CONNECT with auth
-        let connect_request = Self::build_connect_request(config, Some(&auth_header));
-        Self::send_request(&mut stream, &connect_request, config.write_timeout()).await?;
-
-        let retry_response = Self::read_proxy_response(&mut stream, config.read_timeout).await?;
-
-        match retry_response.status_code {
-            200 => {
-                info!(
-                    "FTP proxy tunnel established with authentication: {}:{} -> {}:{}",
-                    config.proxy_host, config.proxy_port, config.target_host, config.target_port
-                );
-                Ok(stream)
-            }
-            407 => Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: format!(
-                        "Proxy authentication failed for {}:{}",
-                        config.proxy_host, config.proxy_port
-                    ),
-                },
-            )),
-            status => Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: format!(
-                        "Proxy rejected CONNECT after auth: {} {}",
-                        status, retry_response.reason_phrase
-                    ),
-                },
-            )),
-        }
-    }
-
-    /// Build the HTTP CONNECT request string.
-    fn build_connect_request(config: &FtpProxyTunnelConfig, auth_header: Option<&str>) -> String {
-        let target = format!("{}:{}", config.target_host, config.target_port);
-        let mut headers = vec![
-            ("Host", target.as_str()),
-            ("User-Agent", config.user_agent.as_str()),
-        ];
-        if let Some(auth) = auth_header {
-            headers.push(("Proxy-Authorization", auth));
-        }
-        String::from_utf8(aria2_protocol::http::request::serialize_http_request(
-            "CONNECT", &target, &headers, None,
-        ))
-        .expect("HTTP CONNECT fields are UTF-8")
-    }
-
-    /// Send the CONNECT request to the proxy.
-    async fn send_request(
-        stream: &mut TcpStream,
-        request: &str,
-        write_timeout: Duration,
-    ) -> Result<()> {
-        debug!("Sending CONNECT request to proxy:\n{}", request.trim_end());
-        timeout(write_timeout, stream.write_all(request.as_bytes()))
-            .await
-            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Failed to send CONNECT request: {}", e),
-                })
-            })?;
-        stream.flush().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("Failed to flush CONNECT request: {}", e),
-            })
-        })?;
-        Ok(())
-    }
-
-    /// Read the proxy's HTTP response to the CONNECT request.
-    async fn read_proxy_response(
-        stream: &mut TcpStream,
-        read_timeout: Duration,
-    ) -> Result<ProxyResponse> {
-        HttpProxyTunnel::read_proxy_response(stream, read_timeout).await
-    }
-
-    /// Consume any response body data (for 407 responses).
-    async fn consume_response_body(stream: &mut TcpStream, _read_timeout: Duration) -> Result<()> {
-        // Read any remaining data with a short timeout
-        let mut buf = [0u8; 4096];
-        match timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
-            Ok(Ok(n)) => {
-                debug!("Consumed {} bytes of proxy response body", n);
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                debug!("Error consuming proxy response body: {}", e);
-                Ok(())
-            }
-            Err(_) => {
-                debug!("Timeout consuming proxy response body (acceptable)");
-                Ok(())
-            }
-        }
-    }
-
-    /// Build a Digest proxy-auth header value.
-    ///
-    /// Parses the Proxy-Authenticate challenge and generates
-    /// a Proxy-Authorization response.
-    fn build_digest_auth_header(
-        username: &str,
-        password: &str,
-        challenge: &str,
-        uri: &str,
-    ) -> String {
-        crate::http::proxy_tunnel::auth::build_digest_auth_header(
-            username, password, challenge, uri,
-        )
+        info!(
+            "FTP proxy tunnel established: {}:{} -> {}:{}",
+            config.proxy_host, config.proxy_port, config.target_host, config.target_port
+        );
+        Ok(stream)
     }
 }
 
@@ -475,37 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_connect_request_without_auth() {
-        let config = FtpProxyTunnelConfig {
-            proxy_host: "proxy.example.com".to_string(),
-            proxy_port: 8080,
-            target_host: "ftp.example.com".to_string(),
-            target_port: 21,
-            user_agent: crate::constants::USER_AGENT.to_string(),
-            ..Default::default()
-        };
-
-        let request = FtpProxyTunnel::build_connect_request(&config, None);
-        assert!(request.starts_with("CONNECT ftp.example.com:21 HTTP/1.1\r\n"));
-        assert!(request.contains("Host: ftp.example.com:21\r\n"));
-        assert!(request.contains(&format!("User-Agent: {}\r\n", crate::constants::USER_AGENT)));
-        assert!(!request.contains("Proxy-Authorization"));
-        assert!(request.ends_with("\r\n\r\n"));
-    }
-
-    #[test]
-    fn test_build_connect_request_with_auth() {
-        let config = FtpProxyTunnelConfig {
-            target_host: "ftp.example.com".to_string(),
-            target_port: 21,
-            ..Default::default()
-        };
-
-        let request = FtpProxyTunnel::build_connect_request(&config, Some("Basic dXNlcjpwYXNz"));
-        assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
-    }
-
-    #[test]
     fn test_build_basic_auth_header() {
         let header = aria2_protocol::http::auth::basic_authorization("user", "pass");
         assert!(header.starts_with("Basic "));
@@ -522,21 +286,60 @@ mod tests {
         assert!(config.proxy_password.is_empty());
     }
 
-    #[test]
-    fn test_build_digest_auth_header() {
-        let challenge = r#"Digest realm="test, private", nonce="abc123", qop="auth-int", algorithm=SHA-256-sess"#;
-        let header = FtpProxyTunnel::build_digest_auth_header(
-            "user",
-            "pass",
-            challenge,
-            "ftp.example.com:21",
-        );
-        assert!(header.starts_with("Digest"));
-        assert!(header.contains("username=\"user\""));
-        assert!(header.contains("realm=\"test, private\""));
-        assert!(header.contains("nonce=\"abc123\""));
-        assert!(header.contains("qop=auth-int"));
-        assert!(header.contains("algorithm=SHA-256-sess"));
-        assert!(header.contains("response=\""));
+    #[tokio::test]
+    async fn ftp_proxy_tunnel_retries_auth_without_sending_credentials_preemptively() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy fixture should bind");
+        let address = listener.local_addr().expect("proxy fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("proxy should accept");
+            let mut request = [0; 2048];
+            let length = stream.read(&mut request).await.expect("read first CONNECT");
+            let first = String::from_utf8_lossy(&request[..length]);
+            assert!(first.starts_with("CONNECT ftp.example.com:21 HTTP/1.1\r\n"));
+            assert!(!first.contains("Proxy-Authorization:"));
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"test\"\r\nContent-Length: 1\r\n\r\nx",
+                )
+                .await
+                .expect("send proxy challenge");
+
+            let length = stream
+                .read(&mut request)
+                .await
+                .expect("read authenticated CONNECT");
+            let retry = String::from_utf8_lossy(&request[..length]);
+            assert!(retry.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n220 FTP ready\r\n")
+                .await
+                .expect("complete tunnel");
+        });
+
+        let config = FtpProxyTunnelConfig {
+            proxy_host: "127.0.0.1".into(),
+            proxy_port: address.port(),
+            target_host: "ftp.example.com".into(),
+            target_port: 21,
+            proxy_username: "user".into(),
+            proxy_password: "pass".into(),
+            ..Default::default()
+        };
+        let mut stream = FtpProxyTunnel::establish(&config)
+            .await
+            .expect("challenge retry should establish the tunnel");
+        let mut greeting = [0; 15];
+        stream
+            .read_exact(&mut greeting)
+            .await
+            .expect("read FTP greeting through tunnel");
+        assert_eq!(&greeting, b"220 FTP ready\r\n");
+        server.await.expect("proxy fixture should finish");
     }
 }

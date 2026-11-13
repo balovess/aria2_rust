@@ -417,7 +417,13 @@ mod tests {
 
         let registry = ActiveOutputRegistry::new();
         let resolved = registry
-            .resolve_with_policy(&desired, OutputPathPolicy::default())
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    continue_download: false,
+                    ..OutputPathPolicy::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -433,7 +439,13 @@ mod tests {
 
         let registry = ActiveOutputRegistry::new();
         let resolved = registry
-            .resolve_with_policy(&desired, OutputPathPolicy::default())
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    continue_download: false,
+                    ..OutputPathPolicy::default()
+                },
+            )
             .await
             .unwrap();
         let expected = format!("{}{}", "a".repeat(249), ".1.bin");
@@ -544,6 +556,7 @@ mod tests {
                 &desired,
                 OutputPathPolicy {
                     auto_file_renaming: false,
+                    continue_download: false,
                     ..OutputPathPolicy::default()
                 },
             )

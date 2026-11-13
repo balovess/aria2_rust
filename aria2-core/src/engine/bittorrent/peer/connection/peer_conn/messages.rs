@@ -1,7 +1,7 @@
 //! Protocol message senders, message reading, and connection state queries for
 //! [`BtPeerConn`].
 
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, RecoverableError, Result};
 use aria2_protocol::bittorrent::message::types::BtMessage;
 
 use super::{BtPeerConn, InnerConnection};
@@ -287,11 +287,7 @@ impl BtPeerConn {
                 } else {
                     Ok(())
                 };
-                validation.map_err(|error| {
-                    Aria2Error::Fatal(FatalError::Config(format!(
-                        "invalid BitTorrent peer message: {error}"
-                    )))
-                })?;
+                validation.map_err(invalid_peer_message_error)?;
             }
 
             if let Some(aria2_protocol::bittorrent::message::types::BtMessage::Extended {
@@ -373,6 +369,12 @@ impl BtPeerConn {
     }
 }
 
+fn invalid_peer_message_error(error: impl std::fmt::Display) -> Aria2Error {
+    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+        message: format!("invalid BitTorrent peer message: {error}"),
+    })
+}
+
 #[async_trait::async_trait]
 impl crate::engine::bittorrent::peer::upload_session::BtUploadTransport for BtPeerConn {
     fn supports_fast_extension(&self) -> bool {
@@ -408,5 +410,26 @@ impl crate::engine::bittorrent::peer::upload_session::BtUploadTransport for BtPe
             self.record_outbound_activity();
         }
         result.map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod validation_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_peer_geometry_is_a_recoverable_network_failure() {
+        let error = invalid_peer_message_error(
+            aria2_protocol::bittorrent::peer::message_validation::BtMessageValidationError::IndexOutOfRange {
+                index: 2,
+                num_pieces: 1,
+            },
+        );
+
+        assert!(matches!(
+            error,
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message })
+                if message.contains("invalid BitTorrent peer message")
+        ));
     }
 }

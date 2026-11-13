@@ -60,6 +60,12 @@ impl From<&DownloadOptions> for DhtEngineOptions {
     }
 }
 
+impl Default for DhtEngineOptions {
+    fn default() -> Self {
+        Self::from(&DownloadOptions::default())
+    }
+}
+
 /// Convert DHT options into the protocol engine configuration.
 ///
 /// IPv4 and IPv6 use the corresponding address, bootstrap, and persistence

@@ -14,6 +14,10 @@ behavior. An unlisted behavior has not been audited here.
   RPC task-option merging (including an explicit false override) are covered by
   focused tests. The full external aria2 CLI/config/RPC differential suite has
   not been run against an original aria2 binary.
+- **Session persistence:** a task's explicit `continue=false` is written to the
+  session file and restored as false. Omitting it would silently reactivate the
+  user-directed true default when the session is resumed. The initial-option
+  contract and a focused session round-trip test cover this path.
 
 ## HTTP split and piece geometry
 
@@ -239,8 +243,9 @@ behavior. An unlisted behavior has not been audited here.
   challenge parameters are handled by the shared parser.
 - **Verification:** protocol tests cover the RFC 2617 MD5 vector, supported
   challenge syntax and algorithm selection; proxy tests cover `auth-int` with
-  SHA-256-sess and exercise both CONNECT integrations. Core provider tests cover
-  legacy challenge fields, qop calculations, nonce counting, and zeroization.
+  SHA-256-sess, exercise both CONNECT integrations, and pin an MD5-sess CONNECT
+  response vector. Core provider tests cover legacy challenge fields, qop
+  calculations, nonce counting, and zeroization.
   No external authenticated proxy interoperability test was run.
 
 ## SOCKS connection handshake ownership
@@ -361,19 +366,42 @@ behavior. An unlisted behavior has not been audited here.
 - **Behavior:** the shared IPv4/IPv6 DHT engines take their listen, bootstrap,
   persistence, and timing settings from the process option snapshot. Per-task
   `enable-dht` and `enable-dht6` still decide whether that task joins each
-  family. This avoids first-task order deciding process-wide engine settings.
+  family. Explicit bootstrap endpoints are resolved by core before startup;
+  absent explicit endpoints, the protocol engine resolves its built-in public
+  bootstrap list in the background. This avoids first-task order deciding
+  process-wide engine settings. `DownloadEngine::new` uses process defaults;
+  library callers supply custom process settings through
+  `DownloadEngine::from_process_options`.
 - **Compatibility reference:** original aria2's `DHTSetup.cc` reads these
   engine settings from `DownloadEngine::getOption()`, while `RequestGroup.cc`
   reads the per-task DHT enable flags. DHT options are not marked with
   `setChangeGlobalOption(true)` in `OptionHandlerFactory.cc`.
-- **Runtime contract:** DHT engine startup options are excluded from the
-  `changeGlobalOption` allowlist because the live DHT engine has no runtime
-  reconfiguration command. CLI and config process options supply engine
-  settings; RPC-created and session-restored tasks retain their per-task enable
-  flags but cannot override shared engine settings.
+- **Runtime contract:** DHT engine settings are excluded from both
+  `changeGlobalOption` and task `changeOption` allowlists. The live DHT engine
+  has no runtime reconfiguration command, and original aria2 does not mark the
+  DHT handlers changeable for either operation. CLI and config process options
+  supply engine settings; RPC-created and session-restored tasks retain their
+  per-task enable flags but cannot override shared engine settings.
 - **Verification:** focused core tests cover process-option precedence over a
   task override and the runtime allowlist contract. DHT network interoperability
   under simultaneous tasks with conflicting DHT overrides has not been run.
+
+## BitTorrent peer input error classification
+
+- **Behavior:** invalid peer frames, unnegotiated message capabilities, and
+  messages outside the active torrent geometry are classified as recoverable
+  peer/network failures. The peer actor disconnects that connection; malformed
+  remote data is not a local configuration error. TCP and uTP use the same
+  classification, and upload-side validation follows it as well.
+- **Compatibility reference:** `aria2_original/src/PeerConnection.cc` aborts
+  the peer read on invalid framing, while `aria2_original/src/AbstractCommand.cc`
+  handles `DlAbortEx` as an abort of the affected command. The Rust code had
+  classified validly framed but semantically invalid remote messages as
+  `FatalError::Config`; it now follows the peer-failure path.
+- **Verification:** a core regression test verifies that an out-of-range
+  remote upload request is recoverable, and focused mapping tests cover invalid
+  uTP frames and torrent-geometry validation. Full peer interoperability with
+  malformed remote implementations has not been run.
 
 ## BitTorrent DHT outbound source binding
 
@@ -511,15 +539,19 @@ behavior. An unlisted behavior has not been audited here.
   `~/.ssh/known_hosts` by default; library callers can supply another file.
   The engine uses `AcceptNew` when `ssh-host-key-md` is absent and pins the
   configured fingerprint when present. Newly accepted engine host keys are
-  persisted, and changed keys are rejected. This strengthens the prior
-  implementation, which accepted every key without checking or recording it.
+  persisted, and changed keys are rejected without retrying the untrusted
+  handshake. The protocol reports trust-policy failures as non-retryable
+  configuration errors; transport connect failures remain retryable. This
+  strengthens the prior implementation, which accepted every key without
+  checking or recording it.
 - **Verification:** protocol tests cover unknown-key rejection, first-use
   recording, known-key acceptance, and changed-key rejection. End-to-end
-  loopback tests use the local mock SFTP server; the latest full SFTP download
-  run passed 21/21 tests, including authentication, fingerprint checks,
-  cancellation, resume, and transfer lifecycle. No public remote SFTP server
-  interoperability run has been performed. SSH trust behavior is not claimed
-  compatible with original aria2 beyond explicit fingerprint checks.
+  loopback tests use the local mock SFTP server; focused tests verify host-key
+  rejection is terminal even when retries are unlimited. The latest full SFTP
+  download run passed 21/21 tests, including authentication, fingerprint
+  checks, cancellation, resume, and transfer lifecycle. No public remote SFTP
+  server interoperability run has been performed. SSH trust behavior is not
+  claimed compatible with original aria2 beyond explicit fingerprint checks.
 - **Malformed packet handling:** length-prefixed fields are collected from
   bytes actually present before their contents are allocated, and a directory
   entry count is checked against the minimum possible encoded payload before
@@ -536,22 +568,25 @@ behavior. An unlisted behavior has not been audited here.
   EPRT/PORT handling. Core retains address selection and outbound policy, proxy
   setup, data-channel connection/listener policy, task lifecycle, and
   file state.
-- FTP-over-HTTP-CONNECT now shares the HTTP tunnel response reader and protocol
-  header parser instead of maintaining a separate unbounded line parser. The
-  FTP path retains its own outbound-policy connection, authentication, retry,
-  and tunnel lifecycle. Informational 1xx responses are skipped consistently
-  with the HTTP CONNECT path. Header reads stop exactly after the terminator so
-  tunneled bytes coalesced with the final 200 response remain available to FTP.
-  The FTP 407 path now uses the protocol HTTP Basic-auth serializer instead of
-  maintaining a second Base64 implementation; Digest formatting continues
-  through the core compatibility facade backed by the protocol implementation.
-- **Verification:** HTTP proxy tests and FTP CONNECT loopback tests cover 1xx
-  responses followed by 200 in one write and confirm the immediate FTP 220
-  greeting remains readable from the returned tunnel stream.
+- HTTP and FTP CONNECT callers now supply their established proxy streams to
+  `aria2-protocol::http::connect`. The protocol session owns CONNECT framing,
+  status handling, informational responses, bounded authentication retry, and
+  response-head parsing; callers retain socket and network policy. FTP sends
+  credentials only after a 407 challenge, while HTTP retains preemptive Basic
+  behavior. Header reads stop exactly after the terminator so tunneled bytes
+  coalesced with the final 200 response remain available to FTP. Digest
+  computation uses the shared protocol implementation.
+- **Verification:** protocol CONNECT tests cover 1xx followed by 200, tunneled
+  bytes preserved after the header terminator, challenge-only and preemptive
+  Basic authentication, and a fixed MD5-sess response vector. Core HTTP and
+  FTP CONNECT loopback tests confirm the FTP greeting remains readable, FTP
+  credentials are absent on the first CONNECT and sent only after 407, and
+  FTP's policy-selected source address is used.
 - **Compatibility intent:** this is an internal relocation. FTP command order,
-  FTP control response acceptance, passive-address policy, retries, and output
-  behavior are intended to remain unchanged. FTP HTTP CONNECT now skips
-  informational 1xx responses, matching the existing HTTP CONNECT path.
+  FTP control response acceptance, passive-address policy, CONNECT
+  authentication timing, retries, and output behavior are intended to remain
+  unchanged. FTP HTTP CONNECT skips informational 1xx responses, matching the
+  existing HTTP CONNECT path.
 - **Response bound:** standalone `FtpConnection` and injected
   `FtpControlSession` now share the original aria2 64 KiB maximum FTP response
   size. Bounded reads enforce the cap before appending an oversized line, so a
