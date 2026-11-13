@@ -61,6 +61,7 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{
     AtomicProgress, BtPeerSnapshot, BtPeerSource, ConnectionState,
 };
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Discovery and connection state transferred from download execution to the
 /// long-lived seeding coordinator. This keeps torrent-scoped peer discovery
@@ -75,7 +76,17 @@ pub(crate) struct SeedPeerDiscovery {
     pub(crate) utp_transport:
         Option<crate::engine::bittorrent::peer::utp_transport::UtpTransportHandle>,
     pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
-    pub(crate) enable_peer_exchange: bool,
+    pub(crate) peer_exchange_allowed: bool,
+}
+
+impl SeedPeerDiscovery {
+    pub(crate) fn peer_exchange_enabled(&self) -> bool {
+        self.peer_exchange_allowed && self.group.recover().options().enable_peer_exchange
+    }
+
+    pub(crate) fn peer_exchange_option(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.group.recover().bt_peer_exchange_enabled()
+    }
 }
 
 pub(super) struct SeedPeerConnectionAttempt {

@@ -8,16 +8,16 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
-
-use crate::crypto::ensure_ring_provider;
+use tracing::{info, warn};
 
 mod parse;
+mod source_fetcher;
 
 #[cfg(test)]
 mod tests;
 
 use parse::EMBEDDED_TRACKER_LIST;
+use source_fetcher::{ReqwestTrackerSourceFetcher, fetch_tracker_source};
 
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
 pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(604_800);
@@ -537,65 +537,6 @@ impl PublicTrackerList {
             sources: self.sources().await,
             disabled: !self.config.read().await.enabled,
         }
-    }
-}
-
-async fn fetch_tracker_source(
-    fetcher: &dyn TrackerSourceFetcher,
-    source: &str,
-    request_timeout: Duration,
-) -> Result<Vec<TrackerEntry>, String> {
-    debug!("Fetching public tracker list from {}", source);
-    let body = tokio::time::timeout(request_timeout, fetcher.fetch(source, request_timeout))
-        .await
-        .map_err(|_| {
-            format!(
-                "Tracker source request timed out after {} seconds",
-                request_timeout.as_secs_f64()
-            )
-        })??;
-    let entries = PublicTrackerList::parse(&body);
-    if entries.is_empty() {
-        return Err("Parsed 0 entries from response".to_string());
-    }
-    Ok(entries)
-}
-
-struct ReqwestTrackerSourceFetcher {
-    client: reqwest::Client,
-}
-
-impl ReqwestTrackerSourceFetcher {
-    fn new() -> Self {
-        ensure_ring_provider();
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("public tracker HTTP client should be constructible");
-        Self { client }
-    }
-}
-
-impl TrackerSourceFetcher for ReqwestTrackerSourceFetcher {
-    fn fetch<'a>(
-        &'a self,
-        source: &'a str,
-        _timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
-        Box::pin(async move {
-            let response = self
-                .client
-                .get(source)
-                .send()
-                .await
-                .map_err(|error| format!("HTTP GET failed: {error}"))?;
-            if !response.status().is_success() {
-                return Err(format!("HTTP error: {}", response.status()));
-            }
-            response
-                .text()
-                .await
-                .map_err(|error| format!("Read body failed: {error}"))
-        })
     }
 }
 

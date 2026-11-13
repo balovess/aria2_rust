@@ -3,8 +3,91 @@
 //! Contains [`AnnounceTier`] and [`AnnounceList`] which manage tracker URL
 //! lists with tier-based failover, matching the C++ aria2 behavior.
 
-use super::types::AnnounceEvent;
 use std::collections::{HashSet, VecDeque};
+
+#[cfg(test)]
+#[path = "tests/announce_list.rs"]
+mod tests;
+
+/// Announce events defined by the BitTorrent tracker protocol.
+///
+/// Core schedules when to announce; this type defines the event state and
+/// wire values shared by tracker transports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnounceEvent {
+    /// Initial announce when a download starts.
+    Started,
+    /// Start after completion without sending a duplicate completed event.
+    StartedAfterCompletion,
+    /// Regular announce while downloading.
+    Downloading,
+    /// Announce when the client is stopping.
+    Stopped,
+    /// Announce when the download has just completed.
+    Completed,
+    /// Regular announce while seeding.
+    Seeding,
+    /// Terminal state after stopped.
+    Halted,
+}
+
+impl AnnounceEvent {
+    /// Advance the event state after a successful announce.
+    pub fn next_event(self) -> Self {
+        match self {
+            Self::Started => Self::Downloading,
+            Self::StartedAfterCompletion => Self::Seeding,
+            Self::Stopped => Self::Halted,
+            Self::Completed => Self::Seeding,
+            other => other,
+        }
+    }
+
+    /// Advance terminal lifecycle events after a failed announce.
+    pub fn next_event_if_after_started(self) -> Self {
+        match self {
+            Self::Stopped => Self::Halted,
+            Self::Completed => Self::Seeding,
+            other => other,
+        }
+    }
+
+    /// Whether this tier should receive a stopped announce.
+    pub fn accepts_stopped_event(self) -> bool {
+        matches!(
+            self,
+            Self::Downloading | Self::Stopped | Self::Completed | Self::Seeding
+        )
+    }
+
+    /// Whether this tier should receive a completed announce.
+    pub fn accepts_completed_event(self) -> bool {
+        matches!(self, Self::Downloading | Self::Completed)
+    }
+
+    /// Convert the event to its tracker announce wire value.
+    pub fn as_event_string(self) -> &'static str {
+        match self {
+            Self::Started | Self::StartedAfterCompletion => "started",
+            Self::Stopped => "stopped",
+            Self::Completed => "completed",
+            Self::Downloading | Self::Seeding | Self::Halted => "",
+        }
+    }
+}
+
+impl From<AnnounceEvent> for super::udp_tracker_protocol::UdpEvent {
+    fn from(event: AnnounceEvent) -> Self {
+        match event {
+            AnnounceEvent::Started | AnnounceEvent::StartedAfterCompletion => Self::Started,
+            AnnounceEvent::Completed => Self::Completed,
+            AnnounceEvent::Stopped => Self::Stopped,
+            AnnounceEvent::Downloading | AnnounceEvent::Seeding | AnnounceEvent::Halted => {
+                Self::None
+            }
+        }
+    }
+}
 
 // ======================================================================
 // AnnounceTier (from C++ AnnounceTier)

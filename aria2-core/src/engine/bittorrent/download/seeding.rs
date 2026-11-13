@@ -153,7 +153,7 @@ impl BtDownloadCommand {
             total_size,
             utp_transport: self.utp_transport.clone(),
             outbound_network_policy: std::sync::Arc::clone(&self.outbound_network_policy),
-            enable_peer_exchange: group_options.enable_peer_exchange && !self.is_private,
+            peer_exchange_allowed: !self.is_private,
         };
 
         let upload_rate = swarm.upload_rate();

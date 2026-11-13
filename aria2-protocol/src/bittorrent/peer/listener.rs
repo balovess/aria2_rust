@@ -37,6 +37,34 @@ pub struct AcceptedPeer {
     pub addr: SocketAddr,
 }
 
+/// Bound TCP socket for BitTorrent peer connections.
+///
+/// This transport primitive can be used by an engine-level listener manager
+/// that owns torrent routing and peer admission.
+pub struct PeerTcpListener {
+    listener: TcpListener,
+}
+
+impl PeerTcpListener {
+    /// Bind the TCP socket to the requested local address.
+    pub async fn bind(addr: SocketAddr) -> std::io::Result<Self> {
+        Ok(Self {
+            listener: TcpListener::bind(addr).await?,
+        })
+    }
+
+    /// Accept one TCP peer and return its stream and remote endpoint.
+    pub async fn accept(&self) -> std::io::Result<AcceptedPeer> {
+        let (stream, addr) = self.listener.accept().await?;
+        Ok(AcceptedPeer { stream, addr })
+    }
+
+    /// Return the address assigned to this listener.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+}
+
 /// BitTorrent TCP listener for incoming peer connections.
 ///
 /// Binds one wildcard IPv4 socket and sends accepted streams through a
@@ -45,7 +73,7 @@ pub struct AcceptedPeer {
 /// This is the Rust equivalent of C++ `PeerListenCommand`.
 pub struct PeerListener {
     /// The TCP listener socket.
-    listener: TcpListener,
+    listener: PeerTcpListener,
     /// Sender for accepted peer notifications.
     tx: mpsc::Sender<AcceptedPeer>,
     /// The port actually bound (may differ from requested port if 0).
@@ -62,8 +90,7 @@ impl PeerListener {
     ///
     /// Returns `std::io::Error` if binding fails (e.g. port already in use).
     pub async fn bind(port: u16, tx: mpsc::Sender<AcceptedPeer>) -> std::io::Result<Self> {
-        let addr = format!("0.0.0.0:{}", port);
-        let listener = TcpListener::bind(&addr).await?;
+        let listener = PeerTcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
         let actual_port = listener.local_addr()?.port();
         info!(
             port = actual_port,
@@ -96,10 +123,10 @@ impl PeerListener {
                 }
                 result = self.listener.accept() => {
                     match result {
-                        Ok((stream, addr)) => {
+                        Ok(peer) => {
+                            let addr = peer.addr;
                             retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
                             debug!(addr = %addr, "Accepted incoming peer connection");
-                            let peer = AcceptedPeer { stream, addr };
                             if self.tx.send(peer).await.is_err() {
                                 warn!("Peer receiver dropped, stopping listener");
                                 break;
@@ -148,9 +175,9 @@ impl PeerListener {
             )
             .await
             {
-                Ok(Ok((stream, addr))) => {
+                Ok(Ok(peer)) => {
+                    let addr = peer.addr;
                     debug!(addr = %addr, "Accepted incoming peer connection (drain)");
-                    let peer = AcceptedPeer { stream, addr };
                     if self.tx.send(peer).await.is_err() {
                         warn!("Peer receiver dropped during drain");
                         return false;
@@ -191,6 +218,27 @@ async fn wait_for_retry(
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn peer_tcp_listener_binds_requested_address_and_accepts_peer() {
+        let listener = PeerTcpListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        assert_eq!(
+            listener_addr.ip(),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+
+        let client = tokio::net::TcpStream::connect(listener_addr);
+        let (accepted, client) = tokio::join!(listener.accept(), client);
+        let accepted = accepted.unwrap();
+        client.unwrap();
+        assert_eq!(
+            accepted.addr.ip(),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn test_bind_port_zero_gets_assigned() {

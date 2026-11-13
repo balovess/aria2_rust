@@ -172,6 +172,9 @@ pub struct BtPeerConn {
     pub(crate) pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     /// Whether this connection may receive and accumulate BEP 11 peers.
     pub(crate) pex_enabled: bool,
+    /// Live task option for PEX. The bool above is the immutable torrent
+    /// policy gate (for example, private torrents disable PEX).
+    pub(crate) peer_exchange_option: Option<Arc<std::sync::atomic::AtomicBool>>,
 
     /// Upload state for pieces already verified during an active download.
     /// This is intentionally kept on the duplex peer connection so upload
@@ -503,8 +506,16 @@ impl BtPeerConn {
         }
     }
 
+    pub(crate) fn set_peer_exchange_option(&mut self, enabled: Arc<std::sync::atomic::AtomicBool>) {
+        self.peer_exchange_option = Some(enabled);
+    }
+
     pub(crate) fn is_pex_enabled(&self) -> bool {
         self.pex_enabled
+            && self
+                .peer_exchange_option
+                .as_ref()
+                .is_none_or(|enabled| enabled.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Returns the remote peer ID learned during the protocol handshake.

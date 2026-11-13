@@ -56,7 +56,7 @@ impl BtSeedManager {
                 if self
                     .peer_discovery
                     .as_ref()
-                    .is_some_and(|discovery| discovery.enable_peer_exchange)
+                    .is_some_and(|discovery| discovery.peer_exchange_enabled())
                 {
                     self.store_peer_addresses(
                         peers,

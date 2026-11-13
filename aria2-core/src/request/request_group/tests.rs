@@ -1140,6 +1140,22 @@ fn test_runtime_option_updates_populate_execution_fields() {
 }
 
 #[test]
+fn peer_exchange_runtime_option_updates_the_live_actor_signal() {
+    let mut group = RequestGroup::new(GroupId::new(3), Vec::new(), DownloadOptions::default());
+    let enabled = group.bt_peer_exchange_enabled();
+
+    assert!(enabled.load(std::sync::atomic::Ordering::Acquire));
+    group
+        .try_update_option("enable-peer-exchange", serde_json::json!(false))
+        .unwrap();
+    assert!(!enabled.load(std::sync::atomic::Ordering::Acquire));
+    group
+        .try_update_option("enable-peer-exchange", serde_json::json!(true))
+        .unwrap();
+    assert!(enabled.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
 fn test_runtime_option_enum_validation_is_shared_with_registry() {
     assert!(
         RequestGroup::validate_option_update(

@@ -97,7 +97,7 @@ impl BtSeedManager {
             let peer_exchange_enabled = self
                 .peer_discovery
                 .as_ref()
-                .is_some_and(|discovery| discovery.enable_peer_exchange);
+                .is_some_and(|discovery| discovery.peer_exchange_enabled());
             crate::engine::bittorrent::download::execute::send_periodic_pex_to_swarm(
                 &mut self.swarm,
                 &mut self.last_pex_send,
@@ -183,7 +183,7 @@ impl BtSeedManager {
         if self
             .peer_discovery
             .as_ref()
-            .is_some_and(|discovery| discovery.enable_peer_exchange)
+            .is_some_and(|discovery| discovery.peer_exchange_enabled())
         {
             deadline = deadline.min(
                 self.last_pex_send

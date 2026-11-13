@@ -11,10 +11,12 @@
 //! i.e. the bytes **after** the 1-byte `ext_id` field.
 
 mod handshake;
+mod metadata_collector;
 mod ut_metadata;
 mod ut_pex;
 
 pub use handshake::*;
+pub use metadata_collector::*;
 pub use ut_metadata::*;
 pub use ut_pex::*;
 

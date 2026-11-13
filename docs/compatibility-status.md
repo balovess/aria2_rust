@@ -123,6 +123,24 @@ behavior. An unlisted behavior has not been audited here.
   rejected, and mismatched responses; the core local WebSocket tracker fixture
   echoes the request identity for both started and stopped announces.
 
+## BitTorrent dynamic tracker tiers
+
+- **Extension behavior:** a bencoded HTTP tracker response may include an
+  `announce-list`. The protocol parser preserves its URL tier grouping and
+  ignores non-string, blank, and empty tier entries. Core appends unseen URLs
+  after the configured tiers without replacing or reordering existing torrent
+  trackers; an appended tier becomes eligible after earlier tiers fail.
+- **Compatibility impact:** this is a Rust extension. Original aria2's
+  `DefaultBtAnnounce::processAnnounceResponse` consumes tracker status,
+  warning, ID, interval, swarm counts, and peers, but does not consume a
+  response-level `announce-list`. This behavior applies to bencoded HTTP
+  tracker responses; it does not establish support for such an extension from
+  UDP or WebSocket trackers.
+- **Verification:** protocol parser tests verify nested tier extraction. A
+  core loopback HTTP fixture returns dynamic tiers, rejects the next primary
+  announce, then verifies that the newly advertised tracker is selected and
+  accepted. No interoperability test against a live tracker has been run.
+
 ## HTTP Content-Range parser
 
 - **Protocol library behavior:** `aria2-protocol::http::ContentRange::parse`
@@ -287,7 +305,9 @@ behavior. An unlisted behavior has not been audited here.
   protocol library's existing socket defaults.
 - **Verification:** a core test confirms the configured connection cap is
   enforced by the shared transport socket; CLI parsing and RPC option-to-engine
-  command propagation have focused tests. C API paths are compile-checked.
+  command propagation have focused tests. A C API FFI regression verifies that
+  runtime handshake-timeout and uTP-cap changes produce the corresponding
+  engine commands.
 
 ## Public BitTorrent tracker source timeout
 
@@ -367,6 +387,10 @@ behavior. An unlisted behavior has not been audited here.
   fan-out too; the default remains capped at 15 concurrent pings.
 - **Verification:** focused task construction coverage checks zero, a lower
   configured value, and a value above the safety ceiling.
+- CLI conversion now uses a checked `usize` to `i64` conversion, matching other
+  numeric options. Values outside the signed registry representation report an
+  explicit out-of-range error instead of wrapping before the registry rejects
+  them. CLI tests cover a valid value and the 64-bit overflow case.
 
 ## BitTorrent Local Peer Discovery parsing
 
@@ -393,22 +417,28 @@ behavior. An unlisted behavior has not been audited here.
 
 ## Incoming BitTorrent listener ownership
 
-- **Protocol library interface:** `aria2-protocol::bittorrent::peer::listener::PeerListener`
-  binds one wildcard IPv4 TCP socket and forwards raw accepted streams. It does
-  not parse handshakes, select torrent routes, or admit peers into engine state;
-  standalone library users can use it when they need only TCP acceptance.
-- **Engine interface:** `BtPeerListenerManager` owns process-wide TCP listener
-  sockets, info-hash routes, TCP/uTP handshake admission, peer-storage
-  admission, and shutdown/draining. It shares the listening port across torrent
-  routes and uses protocol-owned handshake parsers and connection types. Keeping
-  this manager in core avoids moving task lifecycle and peer-storage policy
-  into the protocol crate.
-- **Verification:** protocol loopback tests cover port binding and raw stream
-  delivery. Core loopback tests cover shared multi-torrent routing, IPv4 peers
+- **Protocol library interface:** `PeerTcpListener` owns binding a specified
+  TCP endpoint and accepting a stream with its remote endpoint. The standalone
+  `PeerListener` remains a channel-driven helper built on that primitive.
+  Neither listener parses handshakes or selects torrent routes.
+- **Engine interface:** `BtPeerListenerManager` owns process-wide listener
+  lifecycle, info-hash routes, TCP/uTP handshake admission, peer-storage
+  admission, and shutdown/draining. It uses `PeerTcpListener` for TCP socket
+  binding and accept, while route policy and peer-storage state remain in core.
+- **Compatibility impact:** no CLI, RPC, C API, or wire behavior change is
+  intended; the engine now consumes the protocol library's TCP listener
+  primitive instead of binding Tokio sockets directly.
+- **Verification:** protocol loopback tests cover endpoint binding and raw
+  accept; core loopback tests cover shared multi-torrent routing, IPv4 peers
   through IPv6 registration, route removal, blocked-delivery cancellation,
   handshake limits, accept-error recovery, and socket release on shutdown.
   These tests do not establish interoperability against an upstream aria2
   binary or a remote peer swarm.
+- Incoming route registration precedes initial DHT startup. After discovery,
+  each route now refreshes its IPv4 and IPv6 DHT handshake capability bits;
+  incoming TCP/uTP handshakes choose the bit for the normalized remote address
+  family. Private torrents keep both bits disabled. A core loopback regression
+  test verifies that the advertised bit changes after route registration.
 
 ## SFTP connection and transport options
 
@@ -592,11 +622,12 @@ behavior. An unlisted behavior has not been audited here.
   and uTP runtime extensions. RPC and C API now use the same core
   `runtime_commands_for_global_option_changes` projection after their respective
   parsing and configuration commit steps. Focused RPC tests verify command
-  updates. C API now returns `INTERNAL_ERROR` when the engine command queue
+  updates. C API FFI tests verify projected BitTorrent handshake and uTP option
+  commands. C API returns `INTERNAL_ERROR` when the engine command queue
   rejects a projected runtime update instead of reporting success; validated
   option values remain committed, matching RPC's commit-then-dispatch ordering.
   A focused FFI-side test covers a closed command receiver. This does not claim
-  end-to-end C ABI interoperability.
+  end-to-end C ABI interoperability with an external C consumer.
 - **Option aliases:** runtime whitelist, feature availability, task changeability,
   and command projection use the registry's canonical option name. For example,
   the accepted `max-downloads` alias updates the `max-concurrent-downloads`

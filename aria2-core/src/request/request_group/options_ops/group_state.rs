@@ -4,6 +4,10 @@ use std::sync::Arc;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl super::super::RequestGroup {
+    pub(crate) fn bt_peer_exchange_enabled(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.bt_peer_exchange_enabled)
+    }
+
     // ── Basic Accessors ─────────────────────────────────────────────────
 
     /// Resolve the effective minimum range split size from the task snapshot,
@@ -87,6 +91,10 @@ impl super::super::RequestGroup {
         }
         self.bt_max_peers_limit.store(
             typed_options.bt_max_peers,
+            std::sync::atomic::Ordering::Release,
+        );
+        self.bt_peer_exchange_enabled.store(
+            typed_options.enable_peer_exchange,
             std::sync::atomic::Ordering::Release,
         );
         self.option_snapshot = Some(snapshot);

@@ -437,11 +437,7 @@ impl App {
         set_u64!("dht-cleanup-interval", b.dht_cleanup_interval);
         set_u64!("dht-save-interval", b.dht_save_interval);
         set_u64!("dht-bootstrap-timeout", b.dht_bootstrap_timeout);
-        if let Some(value) = b.dht_max_concurrent_lookups {
-            conf.set_global_option("dht-max-concurrent-lookups", OptionValue::Int(value as i64))
-                .await
-                .map_err(|e| format!("--dht-max-concurrent-lookups: {}", e))?;
-        }
+        set_u64!("dht-max-concurrent-lookups", b.dht_max_concurrent_lookups);
         set_u64!("dht-persistence-max-age", b.dht_persistence_max_age);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);

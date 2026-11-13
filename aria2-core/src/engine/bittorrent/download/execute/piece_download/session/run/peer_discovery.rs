@@ -54,7 +54,7 @@ impl PieceDownloadSession<'_> {
         .await;
 
         let pex_peers = std::mem::take(&mut self.pending_pex_peers);
-        if !pex_peers.is_empty() {
+        if self.command.peer_exchange_enabled() && !pex_peers.is_empty() {
             info!(
                 "[PEX] Drained {} inbound peers from connections, attempting to connect",
                 pex_peers.len()

@@ -29,7 +29,7 @@ async fn connect_for_test(
 #[test]
 fn test_peer_addr_compact_roundtrip() {
     let addr = PeerAddr::new("192.168.1.100", 6881);
-    let compact = addr.to_compact();
+    let compact = addr.to_compact_v4().expect("valid IPv4 peer address");
     let parsed = PeerAddr::from_compact(&compact).unwrap();
     assert_eq!(parsed.ip, addr.ip);
     assert_eq!(parsed.port, addr.port);

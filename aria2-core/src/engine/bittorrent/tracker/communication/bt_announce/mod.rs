@@ -20,8 +20,7 @@ mod tests;
 
 pub use tracker_url::{is_udp_tracker, urlencode_infohash};
 
-use super::announce_list::AnnounceList;
-use super::types::AnnounceEvent;
+use super::{AnnounceEvent, AnnounceList};
 
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -414,7 +413,7 @@ impl BtAnnounce {
         // response. Append it after the configured tiers; never replace the
         // torrent/user/public tiers that were already discovered.
         if !response.announce_list.is_empty() {
-            let added = self.announce_list.append_tiers(&response.announce_list);
+            let added = self.append_tracker_tiers(&response.announce_list);
             if !added.is_empty() {
                 debug!(
                     "[BT] Added {} tracker(s) from tracker response",

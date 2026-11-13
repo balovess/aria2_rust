@@ -1,4 +1,5 @@
 use super::*;
+use tokio::net::TcpListener;
 
 #[cfg(test)]
 mod route_lifecycle;
@@ -227,6 +228,43 @@ async fn shared_manager_routes_two_torrents_on_one_socket() {
 
     drop(route_a);
     drop(route_b);
+}
+
+#[tokio::test]
+async fn route_dht_capabilities_update_after_registration() {
+    use aria2_protocol::bittorrent::message::handshake::Handshake;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let manager = BtPeerListenerManager::new();
+    let info_hash = [31; 20];
+    let (port, mut incoming_peers, route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash,
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 31,
+            max_peers: 1,
+            peer_storage: Arc::new(Mutex::new(DefaultPeerStorage::new())),
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    route.set_dht_capabilities(true, false);
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream
+        .write_all(&Handshake::new(&info_hash, &[2; 20]).to_bytes())
+        .await
+        .unwrap();
+    let mut response = [0u8; 68];
+    stream.read_exact(&mut response).await.unwrap();
+    assert!(Handshake::parse(&response).unwrap().supports_dht());
+    incoming_peers.recv().await.unwrap();
 }
 
 #[tokio::test]

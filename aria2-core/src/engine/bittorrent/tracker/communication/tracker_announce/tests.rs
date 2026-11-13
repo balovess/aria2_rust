@@ -139,7 +139,10 @@ async fn stopped_announce_respects_total_shutdown_budget() {
     announcer.set_timeouts(Duration::from_secs(10), Duration::from_secs(10));
     announcer.set_stopped_timeout(Duration::from_millis(100));
     announcer.announce.set_runtime_halted(true);
-    announcer.announce.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    announcer
+        .announce
+        .announce_list_mut()
+        .set_event(AnnounceEvent::Downloading);
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -424,7 +427,10 @@ async fn http_tracker_client_cache_separates_direct_and_proxy_routes() {
         .expect("first tracker announce should use direct route");
 
     let proxy_tracker = "http://tracker-source.invalid/announce";
-    announcer.announce.announce_list_mut().tiers[0].urls[0] = proxy_tracker.to_string();
+    announcer
+        .announce
+        .announce_list_mut()
+        .reconfigure(&[vec![proxy_tracker.to_string()]]);
     announcer
         .announce_http(
             &[0u8; 20],

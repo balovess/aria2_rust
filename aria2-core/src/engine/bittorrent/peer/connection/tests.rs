@@ -8,6 +8,42 @@ use super::session_resource::PeerSessionResource;
 use super::types::SendBuffer;
 
 #[tokio::test]
+async fn peer_connection_observes_runtime_peer_exchange_changes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let client =
+        tokio::spawn(async move { tokio::net::TcpStream::connect(endpoint).await.unwrap() });
+    let (server, remote_endpoint) = listener.accept().await.unwrap();
+    let protocol =
+        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+            server, [0x71; 20], false, false,
+        );
+    let mut connection = BtPeerConn::from_incoming_tcp(protocol, remote_endpoint);
+    let mut group = crate::request::request_group::RequestGroup::new(
+        crate::request::request_group::GroupId::new(901),
+        Vec::new(),
+        crate::request::request_group::DownloadOptions::default(),
+    );
+    let enabled = group.bt_peer_exchange_enabled();
+    connection.set_pex_enabled(true);
+    connection.set_peer_exchange_option(enabled);
+
+    assert!(connection.is_pex_enabled());
+    group
+        .try_update_option("enable-peer-exchange", serde_json::json!(false))
+        .unwrap();
+    assert!(!connection.is_pex_enabled());
+    group
+        .try_update_option("enable-peer-exchange", serde_json::json!(true))
+        .unwrap();
+    assert!(connection.is_pex_enabled());
+
+    connection.set_pex_enabled(false);
+    assert!(!connection.is_pex_enabled());
+    drop(client.await.unwrap());
+}
+
+#[tokio::test]
 async fn plain_peer_connection_uses_the_outbound_policy_source() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

@@ -10,8 +10,8 @@ use aria2_protocol::bittorrent::tracker::url::{
     TrackerTransport, classify_tracker_url, is_udp_tracker_url,
 };
 
+use super::super::AnnounceEvent;
 use super::super::bt_announce::BtAnnounce;
-use super::super::types::AnnounceEvent;
 use crate::engine::bittorrent::tracker::udp_client::{
     UdpAnnounceParams, UdpError, UdpTrackerClient, resolve_udp_tracker_addr,
 };

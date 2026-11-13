@@ -239,10 +239,14 @@ impl BtSeedManager {
             .peer_discovery
             .as_ref()
             .map(|discovery| discovery.dht_engines.clone());
-        let pex_enabled = self
+        let pex_allowed = self
             .peer_discovery
             .as_ref()
-            .is_some_and(|discovery| discovery.enable_peer_exchange);
+            .is_some_and(|discovery| discovery.peer_exchange_allowed);
+        let pex_option = self
+            .peer_discovery
+            .as_ref()
+            .map(|discovery| discovery.peer_exchange_option());
 
         for mut connection in connection_result.connections {
             let Some(endpoint) = connection.remote_endpoint() else {
@@ -266,7 +270,10 @@ impl BtSeedManager {
                 .copied()
                 .unwrap_or(BtPeerSource::Unknown);
             connection.set_source(source);
-            connection.set_pex_enabled(pex_enabled);
+            connection.set_pex_enabled(pex_allowed);
+            if let Some(pex_option) = &pex_option {
+                connection.set_peer_exchange_option(Arc::clone(pex_option));
+            }
             connection.configure_upload_with_auto_unchoke(
                 &self.config,
                 self.torrent_upload_limiter.clone(),

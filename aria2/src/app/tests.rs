@@ -612,6 +612,43 @@ async fn test_load_cli_args_rejects_invalid_split() {
 }
 
 #[tokio::test]
+async fn dht_max_concurrent_lookups_cli_value_reaches_global_config() {
+    let cli = CliArgs::try_parse_from(["aria2", "--dht-max-concurrent-lookups=32"])
+        .expect("clap should parse the DHT concurrency value");
+    let mut app = App::new();
+
+    app.load_cli_args(cli)
+        .await
+        .expect("the registry should accept the configured DHT concurrency");
+
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("dht-max-concurrent-lookups")
+            .await,
+        Some(32)
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[tokio::test]
+async fn dht_max_concurrent_lookups_cli_rejects_integer_conversion_overflow() {
+    let argument = format!("--dht-max-concurrent-lookups={}", usize::MAX);
+    let cli = CliArgs::try_parse_from(["aria2", argument.as_str()])
+        .expect("clap should parse usize::MAX on a 64-bit target");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("usize values outside i64 must not be cast and wrapped");
+
+    assert!(error.contains("--dht-max-concurrent-lookups"));
+    assert!(error.contains("out of range"), "unexpected error: {error}");
+}
+
+#[tokio::test]
 async fn test_load_cli_args_accepts_min_http_range_size() {
     let cli = CliArgs::try_parse_from(["aria2", "--min-http-range-size=32K"])
         .expect("clap should parse the HTTP Range size before registry validation");

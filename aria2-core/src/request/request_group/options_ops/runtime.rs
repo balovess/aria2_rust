@@ -138,6 +138,12 @@ impl super::super::RequestGroup {
             self.bt_max_peers_limit
                 .store(opts.bt_max_peers, std::sync::atomic::Ordering::Release);
         }
+        if key == "enable-peer-exchange" {
+            self.bt_peer_exchange_enabled.store(
+                opts.enable_peer_exchange,
+                std::sync::atomic::Ordering::Release,
+            );
+        }
 
         match key {
             "max-download-limit" => {

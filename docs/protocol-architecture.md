@@ -133,7 +133,7 @@ retry admission.
 | HTTP/HTTPS | `ProtocolAdapterRegistry` → `engine::http::command_adapter` → `command_factory` → `download_command`; range probing and concurrent requests use `segment_downloader`, `concurrent_download`, and `request_executor`; sequential bodies use `sequential_download`. | `aria2-protocol::http` owns reusable HTTP response types, HTTP/1.1 request serialization and incremental response-header parsing, Content-Disposition parsing, Basic/Bearer/Digest authentication syntax and header generation, Cookie and Set-Cookie wire syntax, Retry-After value parsing, and Metalink/HTTP Link/Digest parsing. Core's public HTTP request/response structs map through the protocol request serializer and response-head parser while retaining their historical API shapes. `aria2-core::http` owns cookie acceptance, scope, expiry, persistence and matching policy; request/response task policy; credential resolution and challenge retry state; filename destination policy; TLS identity; and client pools. Both HTTP and FTP CONNECT paths reuse the protocol Digest implementation. `engine::http::client_config` composes options, DNS answers, proxy settings, and outbound-address policy into reqwest clients. The standalone `aria2-protocol::http::HttpClient` remains a separate public client. | Range leases use `WorkScheduler`; chunks are intermediate writes, and completed ranges cross `sync_all` before scheduler completion. Sequential response checks establish HTTP protocol validity, not cryptographic integrity; file finalization and checkpoints use stable-storage barriers. HTTP mirror/range policy remains in the HTTP adapter. |
 | FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::proxy` serializes FTP-over-HTTP-proxy GET requests; `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. `aria2-protocol::ftp::tls::FtpsClient` owns reusable TLS configuration, TLS handshakes, and RFC 4217 protection negotiation. Core composes proxy selection and sockets, DNS/address policy, data sockets, active bind/accept policy, task lifecycle, and filesystem state. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. The adapter supplies URI/auth resolution, address policy, retry classification, and the task's current remote read offset. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
-| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, LPD announcement encoding/parsing, wire messages, TCP plain/MSE peer handshakes, DHT, tracker primitives and announce URL scheme classification, UDP tracker URL syntax/default port, WebSocket tracker URL parsing/validation and handshake/framing/announce exchange, uTP packet/connection state machines, and BitTorrent peer handshake/framing. `PublicTrackerList` owns tracker-source catalog state, parsing, refresh scheduling, and health; it accepts an injected source fetcher. Core supplies the engine fetcher, which applies its DNS cache, outbound source-address policy, TLS options, scheme-specific HTTP/HTTPS proxies, proxy credentials, and `no-proxy` rules. HTTP tracker announces use the same option-aware proxy selection and bind through the selected proxy endpoint; the announce client cache separates direct requests from proxy routes and HTTP from HTTPS. Core also owns tracker URL selection and announce transport policy, process-level TCP/uTP listeners and the async uTP socket actor, shared info-hash routes, address/port binding policy, handshake admission limits, and peer-storage admission. The core LPD adapter attaches the observed sender and applies local-address classification; the core uTP peer adapter bridges actor handles to the protocol `PeerTransport` interface and maps errors without parsing BitTorrent handshakes or frames. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
+| BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, LPD announcement encoding/parsing, wire messages, TCP peer-listener bind/accept primitives, TCP plain/MSE peer handshakes, DHT, tracker announce URL classification and the `AnnounceList` tier/event state machine, UDP tracker URL syntax/default port, WebSocket tracker URL parsing/validation and handshake/framing/announce exchange, uTP packet/connection state machines, BitTorrent peer handshake/framing, and BEP 9 metadata piece collection. `PublicTrackerList` owns tracker-source catalog state, parsing, refresh scheduling, and health; it accepts an injected source fetcher. Core supplies the engine fetcher, which applies its DNS cache, outbound source-address policy, TLS options, scheme-specific HTTP/HTTPS proxies, proxy credentials, and `no-proxy` rules. HTTP tracker announces use the same option-aware proxy selection and bind through the selected proxy endpoint; the announce client cache separates direct requests from proxy routes and HTTP from HTTPS. Core owns announce timing and task lifecycle, selects event-eligible tiers, merges newly announced tiers, and applies transport/network policy. It also owns the process-level TCP/uTP listener manager, shared info-hash routes, address/port binding policy, handshake admission limits, peer-storage admission, and async uTP socket actor. The core LPD adapter attaches the observed sender and applies local-address classification; the core uTP peer adapter bridges actor handles to the protocol `PeerTransport` interface and maps errors without parsing BitTorrent handshakes or frames. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
 | Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `engine::metalink::download_command`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | The adapter expands mirrors, hashes, and MetaURLs into payload tasks; metadata and payload retries use the shared single-item runner. Its HTTP client consumes the task `connect-timeout` while preserving the legacy 30-second fallback for direct core callers without that option. | Payload chunks pass through `SequentialWorkCommitter`, then each payload enters its supported URI source adapter, including HTTP, FTP, SFTP, or BitTorrent; Metalink does not implement a second byte-transfer protocol. |
 
 ### HTTP assembly and transfer path
@@ -293,7 +293,9 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    `discovery` owns tracker/DHT peer lookup; core `metadata` owns saved files
    and info-hash checks. `aria2-protocol::bittorrent::torrent::metainfo` owns
    the pure bencode transformations that wrap BEP 9 info dictionaries and
-   merge magnet WebSeeds into torrent metainfo.
+   merge magnet WebSeeds into torrent metainfo. Protocol `MetadataCollector`
+   validates piece boundaries and assembles BEP 9 metadata; core owns peer
+   selection, retry limits, and exchange lifecycle.
 3. Before payload transfer, the command enforces the private-torrent DHT rule,
    optionally saves the complete torrent metadata, and completes immediately
    for metadata-only requests. Otherwise it constructs `BtDownloadCommand`
@@ -347,11 +349,16 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    against the supplied route set). Core selects the
    current route, asks the protocol result to complete the local handshake,
    and applies peer-storage/mailbox admission without reparsing wire bytes.
+   Routes are installed before initial peer discovery; core refreshes their
+   address-family-specific DHT capability bits after the DHT engines are
+   started or joined, so later TCP and uTP handshakes advertise the active
+   family capability.
 6. `TrackerAnnouncer` selects one tracker URL from `BtAnnounce`, resolves UDP
    tracker addresses through the outbound policy, and calls the core UDP
-   client. The retained `AnnounceList` manages multi-tier URL order and failure
-   rotation; the UDP client sends CONNECT then ANNOUNCE/SCRAPE using the
-   protocol crate's packet codecs. Only the redundant UDP-specific manager and
+   client. Protocol `AnnounceList` manages tier order and failure rotation;
+   core `TrackerAnnouncer` manages task lifecycle and transport selection. The
+   UDP client sends CONNECT then ANNOUNCE/SCRAPE using the protocol crate's
+   packet codecs. Only the redundant UDP-specific manager and
    duplicate synchronous protocol client were removed.
    If a bencoded HTTP tracker response includes an `announce-list` field, the
    client treats it as an additional tracker extension and appends unseen
@@ -716,13 +723,20 @@ Do not add pass-through engine clients around these public interfaces.
   carries `PeerWireSession`, so BitTorrent handshake and message framing stay
   in protocol. Require explicit outbound network policy for peer and UDP
   tracker entry points; remove direct-connect shortcuts, duplicate encrypted
-  connection forwarding, and redundant incoming constructors. Core retains
-  torrent-specific peer state at the engine seam.
+  connection forwarding, and redundant incoming constructors. Protocol owns
+  `PeerState`, `PeerSessionResource`, and torrent-geometry/capability message
+  validation. Core owns actor lifecycle, peer identity and statistics, peer
+  selection/admission, upload policy, piece scheduling, and bad-peer feedback.
 - **Narrow** BitTorrent metainfo responsibilities: the protocol crate owns
   parsing and pure bencode transformations, including `url-list` extraction,
   BEP 9 info-dictionary wrapping, and magnet WebSeed merging. Core retains
   metadata-source selection, saved-file I/O, expected-info-hash validation,
   and download lifecycle decisions.
+- **Narrow** BEP 9 metadata piece assembly into
+  `aria2_protocol::bittorrent::message::extension::MetadataCollector`.
+  Core retains its historical `magnet::metadata_collector` public path as a
+  re-export; metadata exchange state, peer retries, and source selection
+  remain in core.
 - **Keep** `aria2_protocol::bittorrent::message::factory` as the public typed
   frame parser. It owns length-prefix validation, message-specific payload
   parsing, incremental byte-buffer parsing, and the zero-copy `Piece` payload
@@ -734,14 +748,24 @@ Do not add pass-through engine clients around these public interfaces.
   the BEP 14 multicast address and UDP port have protocol-library definitions,
   while public core constants remain aliases. Core retains announce cadence,
   socket lifecycle, local-address classification, and peer admission policy.
-- **Narrow** UDP tracker ownership: protocol owns BEP 15 packet encoding and
-  decoding plus UDP tracker URL syntax and the default port. Core owns
-  policy-based DNS and binding, one-shot announce/scrape exchanges, transaction
-  state, and timeout/retry handling. `AnnounceList` keeps URL order, tiers, and
-  failure rotation; the UDP client receives only the currently selected URL.
-  Keep this multi-tier tracker manager; remove only the duplicate synchronous
-  client and UDP-specific execution manager. Resolve the selected URL once and
-  reuse its address; DNS failures stay inside the outbound-policy boundary.
+- **Narrow** tracker tier and event ownership: protocol owns `AnnounceEvent`
+  wire values and transitions, plus `AnnounceList` tier order, URL rotation,
+  failover, and eligible-tier searches. Core retains announce timing and task
+  lifecycle, chooses when stopped/completed events are due, admits newly
+  announced tiers, and selects policy-controlled transports. The core
+  communication module re-exports the protocol types under the existing
+  `AnnounceEvent`, `AnnounceList`, and `AnnounceTier` names. The UDP client
+  receives only the currently selected URL. Protocol also owns BEP 15 packet
+  encoding/decoding and UDP URL syntax/default port; core owns policy-based DNS
+  and binding, one-shot announce/scrape exchanges, transaction state, and
+  timeout/retry handling. Resolve the selected URL once and reuse its address;
+  DNS failures stay inside the outbound-policy boundary.
+- **Keep** `aria2_protocol::bittorrent::tracker::response::TrackerResponse`
+  as the bencoded HTTP tracker response parser. It owns response keys,
+  compact and dictionary peer decoding, IPv6 peers, tracker IDs, and optional
+  response-supplied tiers. Core consumes that parsed value for announce
+  lifecycle, tracker failure classification, statistics, and peer admission;
+  it does not parse tracker response bytes.
 - **Keep** `bittorrent::utp::packet` and
   `bittorrent::tracker::udp_tracker_protocol` as protocol-owned wire codecs.
   The former validates uTP packet fields and extensions; the latter encodes
@@ -753,8 +777,9 @@ Do not add pass-through engine clients around these public interfaces.
   policy-controlled DNS, proxy, and socket setup.
 - **Narrow** `PublicTrackerList` source organization: keep catalog state,
   refresh lifecycle, health backoff, and the existing public types at their
-  original module paths; move URL parsing and embedded tracker data to a private
-  parser submodule and unit tests to `public_list/tests.rs`.
+  original module paths; keep URL parsing and embedded tracker data in a private
+  parser submodule, source-fetch deadline/default HTTP transport in a private
+  source-fetcher submodule, and unit tests in `public_list/tests.rs`.
 - **Narrow** HTTP client and protocol test source layout: retain the HTTP
   request/response client interface while moving its tests beside the client;
   group Content-Disposition compatibility cases and DHT UDP pressure coverage
@@ -799,15 +824,16 @@ Do not add pass-through engine clients around these public interfaces.
   capability or a useful ownership boundary. Remove aliases and forwarding
   variants that duplicate the canonical entry point. The `engine` module
   layout follows internal ownership.
-- **Keep** `aria2_protocol::bittorrent::peer::listener::PeerListener`, a public
-  standalone TCP accept helper. It binds one wildcard IPv4 socket and forwards
-  raw accepted streams; it performs no handshake or torrent routing, and the
-  built-in engine does not use it. Keep this public helper for callers that want
-  standalone acceptance. The core `BtPeerListenerManager` owns process-level
-  binding, shared torrent routes, handshake admission, storage admission, and
-  shutdown/draining across TCP listeners and uTP actors. Protocol handshake
-  operations remain in `aria2-protocol`; moving the manager there would pull
-  core peer-storage and task-admission policy into the lower-level crate.
+- **Narrow** TCP listener ownership: `PeerTcpListener` in
+  `aria2-protocol::bittorrent::peer::listener` owns address binding and raw
+  accepts, and both the standalone `PeerListener` and core's
+  `BtPeerListenerManager` use that primitive. The process-level manager remains
+  in core because it coordinates torrent routes, task cancellation, handshake
+  limits, peer-storage admission, and uTP actors.
+- **Keep** the public standalone `PeerListener` API for callers that want
+  channel-driven raw TCP accepts; preserve its existing wildcard IPv4 binding
+  behavior. The new `PeerTcpListener` interface supports engine-selected bind
+  addresses without moving engine routing or admission policy into protocol.
 - **Narrow** `DownloadManager` source organization into its submission/query facade,
   per-download handle, and engine-lifecycle handle. Keep the crate-root
   re-exports and observable behavior unchanged; organize its interface tests by
@@ -836,6 +862,10 @@ Do not add pass-through engine clients around these public interfaces.
   pairs at its own boundary; both converge on the public core option-update
   contract. Core owns immediate versus pending application and active-task
   restart semantics, which depend on request-group state.
+  The immediate BitTorrent `enable-peer-exchange` option is published through
+  a request-group atomic signal to existing peer connections; core applies
+  that live task policy at PEX receive, admission, and send boundaries, while
+  the immutable private-torrent rule remains a separate gate.
 - **Narrow** `aria2-rpc::engine`: method policy and ordered read-only batch
   dispatch live in private child modules. Keep the existing crate-internal
   `engine::dispatch_wire_entries` path used by HTTP and WebSocket servers; the

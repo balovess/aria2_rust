@@ -51,7 +51,7 @@ fn test_bt_announce_default_ready_when_interval_zero() {
 fn test_bt_announce_stopped_ready_when_halted() {
     let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
     // Advance the tier to Downloading so it accepts stopped
-    bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    bt.announce_list_mut().set_event(AnnounceEvent::Downloading);
 
     assert!(!bt.is_stopped_announce_ready()); // not halted
 
@@ -63,7 +63,7 @@ fn test_bt_announce_stopped_ready_when_halted() {
 fn test_bt_announce_completed_ready() {
     let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
     // Advance the tier to Downloading so it accepts completed
-    bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    bt.announce_list_mut().set_event(AnnounceEvent::Downloading);
 
     assert!(!bt.is_completed_announce_ready()); // not complete
 
@@ -82,7 +82,7 @@ fn test_bt_announce_no_more_announce() {
     assert!(bt.no_more_announce());
 
     // Advance tier to Downloading (accepts stopped)
-    bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    bt.announce_list_mut().set_event(AnnounceEvent::Downloading);
     assert!(!bt.no_more_announce());
 }
 
@@ -109,7 +109,7 @@ fn test_bt_announce_adjust_stopped_priority() {
     let mut bt = BtAnnounce::new(&[vec!["http://tracker.test/announce".to_string()]], &None);
 
     // Set up both stopped and completed as ready
-    bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    bt.announce_list_mut().set_event(AnnounceEvent::Downloading);
     bt.set_runtime_halted(true);
     bt.set_download_complete(true);
     bt.min_interval = Duration::ZERO;
@@ -220,7 +220,7 @@ fn test_current_udp_event_mapping_matches_wire_values() {
         (AnnounceEvent::Seeding, UdpEvent::None),
         (AnnounceEvent::Halted, UdpEvent::None),
     ] {
-        bt.announce_list_mut().tiers[0].event = event;
+        bt.announce_list_mut().set_event(event);
         assert_eq!(bt.current_udp_event(), expected);
     }
 }
@@ -229,7 +229,7 @@ fn test_current_udp_event_mapping_matches_wire_values() {
 fn test_get_announce_url_numwant_zero_when_halted() {
     let mut bt = BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string()));
     bt.set_runtime_halted(true);
-    bt.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    bt.announce_list_mut().set_event(AnnounceEvent::Downloading);
 
     let info_hash = [0u8; 20];
     let peer_id = [0u8; 20];
@@ -419,6 +419,21 @@ fn test_process_announce_response_appends_dynamic_trackers() {
         bt.announce_list()
             .contains_url("udp://discovered.test:6969/announce")
     );
+}
+
+#[test]
+fn appending_trackers_after_tier_exhaustion_resets_announce_deadline() {
+    let mut bt = BtAnnounce::new(&[], &Some("http://failed.test/announce".to_string()));
+    bt.prev_announce_time = Some(Instant::now());
+    bt.announce_failure();
+
+    assert!(bt.is_all_announce_failed());
+    assert!(!bt.is_default_announce_ready());
+
+    let added = bt.append_tracker_tiers(&[vec!["http://new.test/announce".to_string()]]);
+
+    assert_eq!(added, vec!["http://new.test/announce"]);
+    assert!(bt.is_default_announce_ready());
 }
 
 #[test]

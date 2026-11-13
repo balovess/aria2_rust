@@ -69,7 +69,7 @@ async fn seeding_discovery_sources_survive_storage_and_actor_admission() {
         total_size: 16,
         utp_transport: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
-        enable_peer_exchange: true,
+        peer_exchange_allowed: true,
     };
     let provider = Arc::new(
         crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1),
@@ -302,7 +302,7 @@ async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
         total_size: 16,
         utp_transport: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
-        enable_peer_exchange: false,
+        peer_exchange_allowed: false,
     };
     let provider = Arc::new(
         crate::engine::bittorrent::peer::upload_session::InMemoryPieceProvider::new(16, 1),

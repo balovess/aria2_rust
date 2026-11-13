@@ -103,11 +103,12 @@ impl BtSeedManager {
                 discovery.connection_options.peer_timeout,
             );
         }
-        connection.set_pex_enabled(
-            self.peer_discovery
-                .as_ref()
-                .is_some_and(|discovery| discovery.enable_peer_exchange),
-        );
+        if let Some(discovery) = self.peer_discovery.as_ref() {
+            connection.set_pex_enabled(discovery.peer_exchange_allowed);
+            connection.set_peer_exchange_option(discovery.peer_exchange_option());
+        } else {
+            connection.set_pex_enabled(false);
+        }
         connection.configure_upload_with_auto_unchoke(
             &self.config,
             self.torrent_upload_limiter.clone(),

@@ -76,6 +76,8 @@ pub struct RequestGroup {
     /// Live peer limit shared with the BT runtime and incoming listener.
     /// Runtime option changes publish here before returning to their caller.
     pub(crate) bt_max_peers_limit: Arc<AtomicUsize>,
+    /// Live peer-exchange option observed by long-lived BitTorrent actors.
+    pub(crate) bt_peer_exchange_enabled: Arc<AtomicBool>,
     /// Canonical option values captured when this task was created.
     ///
     /// The task owns this immutable snapshot so external adapters can report
@@ -272,6 +274,7 @@ impl RequestGroup {
     pub fn new(gid: GroupId, uris: Vec<String>, options: DownloadOptions) -> Self {
         info!("Creating request group #{}", gid.value());
         let bt_max_peers_limit = Arc::new(AtomicUsize::new(options.bt_max_peers));
+        let bt_peer_exchange_enabled = Arc::new(AtomicBool::new(options.enable_peer_exchange));
 
         RequestGroup {
             gid,
@@ -281,6 +284,7 @@ impl RequestGroup {
             resolved_output_path: std::sync::RwLock::new(None),
             options: Arc::new(options),
             bt_max_peers_limit,
+            bt_peer_exchange_enabled,
             option_snapshot: None,
             runtime_options: std::sync::RwLock::new(HashMap::new()),
             pending_options: std::sync::RwLock::new(HashMap::new()),

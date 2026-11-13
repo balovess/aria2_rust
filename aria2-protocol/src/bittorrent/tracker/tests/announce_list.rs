@@ -1,6 +1,6 @@
 //! Tests for AnnounceEvent, AnnounceTier, and AnnounceList.
 
-use super::super::*;
+use super::*;
 
 // ------------------------------------------------------------------
 // AnnounceEvent Tests
@@ -98,6 +98,23 @@ fn test_announce_event_string() {
     assert_eq!(AnnounceEvent::Downloading.as_event_string(), "");
     assert_eq!(AnnounceEvent::Seeding.as_event_string(), "");
     assert_eq!(AnnounceEvent::Halted.as_event_string(), "");
+}
+
+#[test]
+fn test_announce_events_convert_to_udp_tracker_events() {
+    use crate::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
+
+    for (event, expected) in [
+        (AnnounceEvent::Started, UdpEvent::Started),
+        (AnnounceEvent::StartedAfterCompletion, UdpEvent::Started),
+        (AnnounceEvent::Downloading, UdpEvent::None),
+        (AnnounceEvent::Stopped, UdpEvent::Stopped),
+        (AnnounceEvent::Completed, UdpEvent::Completed),
+        (AnnounceEvent::Seeding, UdpEvent::None),
+        (AnnounceEvent::Halted, UdpEvent::None),
+    ] {
+        assert_eq!(UdpEvent::from(event), expected);
+    }
 }
 
 // ------------------------------------------------------------------

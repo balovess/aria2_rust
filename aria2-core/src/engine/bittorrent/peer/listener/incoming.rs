@@ -6,19 +6,19 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 
-use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::super::storage::{DefaultPeerStorage, PeerEntry};
 use super::{IncomingPeer, IncomingPeerConnection, SharedRoute};
+use aria2_protocol::bittorrent::peer::listener::{AcceptedPeer, PeerTcpListener};
 
 const ACCEPT_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const ACCEPT_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(super) async fn run_shared_listener(
-    listener: Arc<TcpListener>,
+    listener: Arc<PeerTcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
     incoming_handshake_slots: Arc<Semaphore>,
     incoming_handshake_timeout_nanos: Arc<std::sync::atomic::AtomicU64>,
@@ -26,7 +26,7 @@ pub(super) async fn run_shared_listener(
 ) {
     enum Event {
         Shutdown,
-        Accepted(io::Result<(tokio::net::TcpStream, SocketAddr)>),
+        Accepted(io::Result<AcceptedPeer>),
         AcceptRetryElapsed,
         ConnectionFinished(Result<OwnedSemaphorePermit, JoinError>),
     }
@@ -49,7 +49,10 @@ pub(super) async fn run_shared_listener(
         match event {
             Event::Shutdown => break,
             Event::AcceptRetryElapsed => accept_retry_deadline = None,
-            Event::Accepted(Ok((stream, endpoint))) => {
+            Event::Accepted(Ok(AcceptedPeer {
+                stream,
+                addr: endpoint,
+            })) => {
                 accept_retry_deadline = None;
                 accept_retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
                 let permit = match Arc::clone(&incoming_handshake_slots).try_acquire_owned() {
@@ -150,7 +153,11 @@ async fn process_incoming_tcp_peer(
             tracing::debug!(%endpoint, "Dropping incoming peer after torrent route was unregistered");
             return;
         }
-        result = incoming.complete(route.local_peer_id, route.info_hash_v2, route.dht_enabled) => {
+        result = incoming.complete(
+            route.local_peer_id,
+            route.info_hash_v2,
+            route.dht_enabled_for(endpoint),
+        ) => {
             match result {
                 Ok(connection) => connection,
                 Err(error) => {
@@ -294,7 +301,7 @@ async fn route_incoming_utp_peer(
         result = connection.complete_incoming_handshake(
             &route.local_peer_id,
             route.info_hash_v2,
-            route.dht_enabled,
+            route.dht_enabled_for(endpoint),
         ) => result,
     };
     if let Err(error) = handshake_result {

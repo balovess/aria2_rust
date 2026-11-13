@@ -5,7 +5,7 @@ use tracing::debug;
 
 use aria2_protocol::bittorrent::tracker::url::is_udp_tracker_url;
 
-use super::{AnnounceEvent, BtAnnounce};
+use super::BtAnnounce;
 
 impl BtAnnounce {
     // ==================================================================
@@ -40,16 +40,7 @@ impl BtAnnounce {
     pub fn current_udp_event(
         &self,
     ) -> aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent {
-        use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
-        match self.announce_list.get_event() {
-            AnnounceEvent::Started | AnnounceEvent::StartedAfterCompletion => UdpEvent::Started,
-            AnnounceEvent::Completed => UdpEvent::Completed,
-            AnnounceEvent::Stopped => UdpEvent::Stopped,
-            // Downloading, Seeding, Halted are periodic announces with no event
-            AnnounceEvent::Downloading | AnnounceEvent::Seeding | AnnounceEvent::Halted => {
-                UdpEvent::None
-            }
-        }
+        self.announce_list.get_event().into()
     }
 
     /// Process a UDP tracker announce response and update internal state.

@@ -2,6 +2,9 @@ use super::*;
 use std::ffi::CString;
 use std::sync::Mutex;
 
+#[cfg(feature = "bittorrent")]
+#[path = "tests/bittorrent_options.rs"]
+mod bittorrent_options;
 #[path = "tests/ftp_proxy_options.rs"]
 mod ftp_proxy_options;
 #[path = "tests/http_adaptive_options.rs"]

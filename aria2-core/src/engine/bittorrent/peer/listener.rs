@@ -3,14 +3,15 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use aria2_protocol::bittorrent::utp::UtpSocketOptions;
 use rand::seq::SliceRandom;
-use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
+
+use aria2_protocol::bittorrent::peer::listener::PeerTcpListener;
 
 use super::storage::DefaultPeerStorage;
 
@@ -52,12 +53,13 @@ struct SharedRoute {
     sender: mpsc::Sender<IncomingPeer>,
     crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
     info_hash_v2: Option<[u8; 32]>,
-    dht_enabled: bool,
+    dht_enabled_ipv4: Arc<AtomicBool>,
+    dht_enabled_ipv6: Arc<AtomicBool>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
 struct SharedListenerState {
-    listeners: Vec<Arc<TcpListener>>,
+    listeners: Vec<Arc<PeerTcpListener>>,
     listener_tasks: Vec<tokio::task::JoinHandle<()>>,
     local_addr: Option<SocketAddr>,
     next_route_id: u64,
@@ -105,6 +107,36 @@ pub struct BtPeerRouteHandle {
     routes: Weak<RwLock<HashMap<[u8; 20], SharedRoute>>>,
     info_hash: [u8; 20],
     id: u64,
+}
+
+impl BtPeerRouteHandle {
+    pub(crate) fn set_dht_capabilities(&self, ipv4: bool, ipv6: bool) {
+        let Some(routes) = self.routes.upgrade() else {
+            return;
+        };
+        let routes = routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(route) = routes
+            .get(&self.info_hash)
+            .filter(|route| route.id == self.id)
+        else {
+            return;
+        };
+        route.dht_enabled_ipv4.store(ipv4, Ordering::Release);
+        route.dht_enabled_ipv6.store(ipv6, Ordering::Release);
+    }
+}
+
+impl SharedRoute {
+    fn dht_enabled_for(&self, endpoint: SocketAddr) -> bool {
+        let enabled = if endpoint.is_ipv6() {
+            &self.dht_enabled_ipv6
+        } else {
+            &self.dht_enabled_ipv4
+        };
+        enabled.load(Ordering::Acquire)
+    }
 }
 
 impl BtPeerListenerManager {
@@ -256,7 +288,7 @@ impl BtPeerListenerManager {
             // aria2_original starts one peer listener per address family. On
             // Windows, an IPv6 socket is commonly v6-only, so an IPv4 peer
             // returned by a tracker would otherwise receive ECONNREFUSED.
-            if let Ok(listener) = TcpListener::bind(SocketAddr::new(
+            if let Ok(listener) = PeerTcpListener::bind(SocketAddr::new(
                 IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 local_addr.port(),
             ))
@@ -376,7 +408,8 @@ impl BtPeerListenerManager {
                 sender,
                 crypto_policy,
                 info_hash_v2,
-                dht_enabled,
+                dht_enabled_ipv4: Arc::new(AtomicBool::new(dht_enabled)),
+                dht_enabled_ipv6: Arc::new(AtomicBool::new(dht_enabled)),
                 cancellation: tokio_util::sync::CancellationToken::new(),
             },
         );
@@ -434,12 +467,12 @@ impl Drop for BtPeerRouteHandle {
 async fn bind_ports(
     bind_ip: IpAddr,
     ports: impl IntoIterator<Item = u16>,
-) -> io::Result<TcpListener> {
+) -> io::Result<PeerTcpListener> {
     let mut ports = ports.into_iter().collect::<Vec<_>>();
     ports.shuffle(&mut rand::rng());
     let mut last_error = None;
     for port in ports {
-        match TcpListener::bind(SocketAddr::new(bind_ip, port)).await {
+        match PeerTcpListener::bind(SocketAddr::new(bind_ip, port)).await {
             Ok(listener) => return Ok(listener),
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => last_error = Some(error),
             Err(error) => return Err(error),

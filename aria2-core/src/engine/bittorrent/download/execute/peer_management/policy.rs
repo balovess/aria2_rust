@@ -30,7 +30,8 @@ impl BtDownloadCommand {
         &self,
         conn: &mut BtPeerConn,
     ) {
-        conn.set_pex_enabled(self.peer_exchange_enabled());
+        conn.set_pex_enabled(!self.is_private);
+        conn.set_peer_exchange_option(self.group.recover().bt_peer_exchange_enabled());
     }
 
     /// Return the number of peers currently owned by this torrent's storage.
