@@ -32,10 +32,13 @@ mod tests;
 
 pub use types::{BtObject, BtObjectBuilder};
 
+use crate::engine::bittorrent::dht::config::DhtEngineOptions;
 use crate::engine::bittorrent::dht::engine_set::DhtEngineSet;
 use crate::engine::bittorrent::peer::blocklist::BtPeerBlocklist;
+use crate::request::request_group::DownloadOptions;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 // ===========================================================================
 // BtRegistry
@@ -74,6 +77,11 @@ pub struct BtRegistry {
     /// independent IPv4 and IPv6 DHT registries.
     global_dht_engines: DhtEngineSet,
 
+    /// Process option snapshot used when lazily starting a shared DHT engine.
+    /// Per-download options still decide whether a family is joined, but must
+    /// not configure the process-owned engine.
+    global_dht_options: Option<Arc<DhtEngineOptions>>,
+
     /// Serialize first-use startup independently for IPv4 and IPv6. The
     /// registry's outer lock must not be held across asynchronous socket or
     /// persistence I/O.
@@ -109,6 +117,7 @@ impl BtRegistry {
             info_hash_index: HashMap::new(),
             dht_external_ips: HashMap::new(),
             global_dht_engines: DhtEngineSet::default(),
+            global_dht_options: None,
             dht_engine_start_locks: [
                 std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -118,6 +127,20 @@ impl BtRegistry {
             udp_port: 0,
             peer_blocklist: BtPeerBlocklist::new(),
         }
+    }
+
+    pub(crate) fn set_global_dht_options(&mut self, options: Arc<DhtEngineOptions>) {
+        self.global_dht_options = Some(options);
+    }
+
+    pub(crate) fn dht_options_for_download(
+        &self,
+        download_options: &DownloadOptions,
+    ) -> Arc<DhtEngineOptions> {
+        self.global_dht_options
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(DhtEngineOptions::from(download_options)))
     }
 }
 

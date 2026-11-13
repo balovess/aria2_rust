@@ -134,30 +134,6 @@ impl fmt::Debug for AnnounceResponse {
     }
 }
 
-fn parse_compact_peers(data: &[u8]) -> Vec<(String, u16)> {
-    if data.is_empty() || !data.len().is_multiple_of(6) {
-        return Vec::new();
-    }
-    let mut peers = Vec::with_capacity(data.len() / 6);
-    // Use as_chunks (stable since Rust 1.88) instead of chunks_exact with a
-    // constant to satisfy clippy::chunks_exact_with_constant. The length is
-    // already verified to be a multiple of 6 above, so the remainder is empty.
-    let (chunks, _remainder) = data.as_chunks::<6>();
-    for chunk in chunks {
-        let ip = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-        let ip_str = format!(
-            "{}.{}.{}.{}",
-            (ip >> 24) & 0xFF,
-            (ip >> 16) & 0xFF,
-            (ip >> 8) & 0xFF,
-            ip & 0xFF
-        );
-        peers.push((ip_str, port));
-    }
-    peers
-}
-
 pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
     if data.len() < 8 {
         return Err(format!(
@@ -194,7 +170,11 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
     let leechers = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
     let seeders = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
     let peers = if data.len() > 20 {
-        parse_compact_peers(&data[20..])
+        crate::bittorrent::peer::address::decode_compact_v4_peers(&data[20..])
+            .expect("compact peer list length was validated")
+            .into_iter()
+            .map(|peer| (peer.ip().to_string(), peer.port()))
+            .collect()
     } else {
         Vec::new()
     };

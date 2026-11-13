@@ -40,6 +40,39 @@ pub fn parse_cookie_header(header: &str) -> Vec<CookiePair> {
         .collect()
 }
 
+/// Format selected cookie name/value pairs as an HTTP `Cookie` field value.
+pub fn format_cookie_header<'a>(cookies: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let mut header = String::new();
+    for (name, value) in cookies {
+        if !header.is_empty() {
+            header.push_str("; ");
+        }
+        header.push_str(name);
+        header.push('=');
+        header.push_str(value);
+    }
+    header
+}
+
+/// Format a `Set-Cookie` field value from its name, value, and ordered
+/// attributes.
+pub fn format_set_cookie_header<'a>(
+    name: &str,
+    value: &str,
+    attributes: &[(&'a str, Option<&'a str>)],
+) -> String {
+    let mut header = format!("{name}={value}");
+    for (attribute_name, attribute_value) in attributes {
+        header.push_str("; ");
+        header.push_str(attribute_name);
+        if let Some(attribute_value) = attribute_value {
+            header.push('=');
+            header.push_str(attribute_value);
+        }
+    }
+    header
+}
+
 /// Parse the wire syntax of a `Set-Cookie` field value.
 ///
 /// This does not validate cookie names, domains, or attribute semantics.
@@ -144,6 +177,22 @@ pub fn path_matches(cookie_path: &str, request_path: &str) -> bool {
     // The first character of request_path not included in cookie_path must be /
     let remaining = &request_path[cookie_path.len()..];
     remaining.starts_with('/')
+}
+
+/// Compute the default cookie path for a request URI path per RFC 6265
+/// Section 5.1.4.
+pub fn default_path(request_uri_path: &str) -> String {
+    if request_uri_path.is_empty() || !request_uri_path.starts_with('/') {
+        return "/".to_owned();
+    }
+    let Some(last_slash) = request_uri_path.rfind('/') else {
+        return "/".to_owned();
+    };
+    if last_slash == 0 {
+        "/".to_owned()
+    } else {
+        request_uri_path[..last_slash].to_owned()
+    }
 }
 
 /// Check whether a host string is a numeric IP address (IPv4 or IPv6).
@@ -394,8 +443,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        domain_matches, format_http_date, parse_cookie_header, parse_http_date,
-        parse_set_cookie_header, path_matches,
+        default_path, domain_matches, format_cookie_header, format_http_date,
+        format_set_cookie_header, parse_cookie_header, parse_http_date, parse_set_cookie_header,
+        path_matches,
     };
 
     #[test]
@@ -466,6 +516,27 @@ mod tests {
     }
 
     #[test]
+    fn formats_request_cookie_pairs() {
+        assert_eq!(format_cookie_header([]), "");
+        assert_eq!(
+            format_cookie_header([("sid", "abc"), ("theme", "dark")]),
+            "sid=abc; theme=dark"
+        );
+    }
+
+    #[test]
+    fn formats_set_cookie_attributes_in_order() {
+        assert_eq!(
+            format_set_cookie_header(
+                "sid",
+                "abc",
+                &[("Path", Some("/")), ("Secure", None), ("HttpOnly", None)],
+            ),
+            "sid=abc; Path=/; Secure; HttpOnly"
+        );
+    }
+
+    #[test]
     fn parses_cookie_and_http_date_forms() {
         assert_eq!(
             parse_http_date("Wed, 09 Jun 2021 10:18:14 GMT"),
@@ -484,5 +555,15 @@ mod tests {
         assert!(domain_matches("download.example.test", "example.test"));
         assert!(path_matches("/files", "/files/item.bin"));
         assert!(!path_matches("/files", "/files-other/item.bin"));
+    }
+
+    #[test]
+    fn computes_default_cookie_paths() {
+        assert_eq!(default_path(""), "/");
+        assert_eq!(default_path("relative/path"), "/");
+        assert_eq!(default_path("/"), "/");
+        assert_eq!(default_path("/file.bin"), "/");
+        assert_eq!(default_path("/a/b"), "/a");
+        assert_eq!(default_path("/a/b/"), "/a/b");
     }
 }

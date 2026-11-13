@@ -330,7 +330,6 @@ impl OptionRegistry {
             | "bt-optimistic-unchoke-interval"
             | "bt-snubbed-timeout"
             | "bt-request-peer-speed-limit"
-            | "bt-max-open-files"
             | "bt-seed-unverified"
             | "bt-save-metadata"
             | "bt-force-encryption"
@@ -357,9 +356,6 @@ impl OptionRegistry {
             | "bt-require-crypto"
             | "bt-stop-timeout"
             | "bt-tracker"
-            | "bt-tracker-source"
-            | "bt-tracker-update-interval"
-            | "enable-public-trackers"
             | "bt-tracker-connect-timeout"
             | "bt-tracker-interval"
             | "bt-tracker-timeout"
@@ -396,8 +392,8 @@ impl OptionRegistry {
             | "dht-listen-addr"
             | "listen-port" => Some(OptionOwner::DownloadTask),
 
-            // Process-wide scheduler, resolver, socket, persistence, and
-            // statistics settings.
+            // Process-wide scheduler, resolver, socket, file-budget,
+            // persistence, and statistics settings.
             "async-dns-server"
             | "dns-timeout"
             | "event-poll"
@@ -424,7 +420,11 @@ impl OptionRegistry {
             | "log-max-files"
             | "lpd-listen-port"
             | "bt-lpd-interface"
+            | "bt-max-open-files"
             | "bt-incoming-peer-handshake-timeout"
+            | "bt-tracker-source"
+            | "bt-tracker-update-interval"
+            | "enable-public-trackers"
             | "bt-tracker-source-timeout"
             | "bt-utp-max-connections"
             | "bt-utp-connect-timeout"
@@ -562,6 +562,7 @@ mod tests {
             ("startup-idle-time", OptionOwner::DownloadTask),
             ("async-dns-server", OptionOwner::ProcessEngine),
             ("dns-timeout", OptionOwner::ProcessEngine),
+            ("bt-max-open-files", OptionOwner::ProcessEngine),
             (
                 "bt-incoming-peer-handshake-timeout",
                 OptionOwner::ProcessEngine,
@@ -570,6 +571,9 @@ mod tests {
             ("bt-utp-connect-timeout", OptionOwner::ProcessEngine),
             ("bt-utp-idle-timeout", OptionOwner::ProcessEngine),
             ("bt-utp-keepalive-interval", OptionOwner::ProcessEngine),
+            ("bt-tracker-source", OptionOwner::ProcessEngine),
+            ("bt-tracker-update-interval", OptionOwner::ProcessEngine),
+            ("enable-public-trackers", OptionOwner::ProcessEngine),
             ("bt-tracker-source-timeout", OptionOwner::ProcessEngine),
         ];
 

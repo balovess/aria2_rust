@@ -732,6 +732,46 @@ async fn every_global_runtime_policy_reaches_config_manager_storage() {
 
 #[cfg(feature = "bittorrent")]
 #[test]
+fn dht_engine_options_are_not_change_global_options() {
+    use super::runtime::RUNTIME_GLOBAL_CHANGEABLE_OPTIONS;
+
+    for name in [
+        "enable-dht",
+        "enable-dht6",
+        "dht-listen-port",
+        "dht-listen-addr",
+        "dht-listen-addr6",
+        "dht-entry-point",
+        "dht-entry-point-host",
+        "dht-entry-point-port",
+        "dht-entry-point6",
+        "dht-entry-point-host6",
+        "dht-entry-point-port6",
+        "dht-file-path",
+        "dht-file-path6",
+        "dht-message-timeout",
+        "dht-refresh-check-interval",
+        "dht-token-rotation-interval",
+        "dht-node-contact-interval",
+        "dht-cleanup-interval",
+        "dht-save-interval",
+        "dht-bootstrap-timeout",
+        "dht-max-concurrent-lookups",
+        "dht-persistence-max-age",
+    ] {
+        assert!(
+            !RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&name),
+            "DHT option '{name}' must not be accepted by changeGlobalOption"
+        );
+        assert!(
+            !super::is_global_option_changeable(name),
+            "DHT option '{name}' must not be marked globally runtime-changeable"
+        );
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
 fn bittorrent_options_share_config_cli_rpc_and_session_contract() {
     use crate::request::request_group::DownloadOptions;
     use crate::session::session_entry::download_options_to_map;

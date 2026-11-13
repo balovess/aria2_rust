@@ -92,9 +92,23 @@ impl MagnetDownloadCommand {
                 continue;
             }
 
+            let dht_options = self
+                .bt_registry
+                .as_ref()
+                .map(|registry| {
+                    registry
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .dht_options_for_download(options)
+                })
+                .unwrap_or_else(|| {
+                    Arc::new(
+                        crate::engine::bittorrent::dht::config::DhtEngineOptions::from(options),
+                    )
+                });
             let config =
                 crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family(
-                    options,
+                    &dht_options,
                     &self.outbound_network_policy,
                     use_ipv6,
                 )

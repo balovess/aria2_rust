@@ -354,31 +354,15 @@ fn parse_compact_peers(encoded: &str, family: CompactPeerFamily) -> Vec<SocketAd
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
         return Vec::new();
     };
-    let mut peers = Vec::new();
-    match family {
-        CompactPeerFamily::V4 if bytes.len().is_multiple_of(6) => {
-            for chunk in bytes.as_chunks::<6>().0 {
-                let ip = IpAddr::from([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-                if port > 0 {
-                    peers.push(SocketAddr::new(ip, port));
-                }
-            }
-        }
-        CompactPeerFamily::V6 if bytes.len().is_multiple_of(18) => {
-            for chunk in bytes.as_chunks::<18>().0 {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(&chunk[..16]);
-                let ip = IpAddr::from(octets);
-                let port = u16::from_be_bytes([chunk[16], chunk[17]]);
-                if port > 0 {
-                    peers.push(SocketAddr::new(ip, port));
-                }
-            }
-        }
-        _ => {}
-    }
+    let peers = match family {
+        CompactPeerFamily::V4 => crate::bittorrent::peer::address::decode_compact_v4_peers(&bytes),
+        CompactPeerFamily::V6 => crate::bittorrent::peer::address::decode_compact_v6_peers(&bytes),
+    };
     peers
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|peer| peer.port() > 0)
+        .collect()
 }
 
 fn tracker_peer_socket_addr(ip: &str, port: u16) -> Option<SocketAddr> {

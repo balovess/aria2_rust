@@ -210,4 +210,37 @@ mod tests {
             [EngineCommand::SetBtMaxOpenFiles { max: 17 }]
         ));
     }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn public_tracker_catalog_options_project_to_process_commands() {
+        let changed = HashSet::from([
+            "bt-tracker-source".to_string(),
+            "bt-tracker-update-interval".to_string(),
+            "enable-public-trackers".to_string(),
+        ]);
+        let effective = HashMap::from([
+            (
+                "bt-tracker-source".to_string(),
+                OptionValue::List(Vec::new()),
+            ),
+            (
+                "bt-tracker-update-interval".to_string(),
+                OptionValue::Int(604_800),
+            ),
+            (
+                "enable-public-trackers".to_string(),
+                OptionValue::Bool(false),
+            ),
+        ]);
+
+        assert!(matches!(
+            runtime_commands_for_global_option_changes(&changed, &effective).as_slice(),
+            [
+                EngineCommand::SetPublicTrackerSources { sources },
+                EngineCommand::SetPublicTrackerUpdateInterval { seconds: 604_800 },
+                EngineCommand::SetPublicTrackersEnabled { enabled: false },
+            ] if sources.is_empty()
+        ));
+    }
 }

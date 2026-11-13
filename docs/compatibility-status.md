@@ -320,6 +320,12 @@ behavior. An unlisted behavior has not been audited here.
   fetch keeps the timeout captured when it started. The public
   `TrackerCatalogConfig` layout remains source-compatible; the protocol library
   exposes separate timeout accessors.
+- **Configuration ownership:** `bt-tracker-source`,
+  `bt-tracker-update-interval`, and `enable-public-trackers` configure the
+  process-shared public tracker catalog and are process-engine options.
+  `bt-tracker` remains a per-download option for that download's announce
+  tiers. Runtime changes to the catalog options are projected to the shared
+  catalog through the engine command path.
 - **Transport ownership:** `PublicTrackerList` accepts an injected source
   fetcher. The process engine supplies one using its DNS cache, configured
   outbound source-address policy, and TLS verification/identity options;
@@ -349,6 +355,25 @@ behavior. An unlisted behavior has not been audited here.
   the configured proxy, carries the configured proxy credentials, and binds to
   the selected outbound source address. A second announce test verifies one
   tracker announcer does not reuse a direct client for a later proxied tracker.
+
+## BitTorrent DHT process configuration
+
+- **Behavior:** the shared IPv4/IPv6 DHT engines take their listen, bootstrap,
+  persistence, and timing settings from the process option snapshot. Per-task
+  `enable-dht` and `enable-dht6` still decide whether that task joins each
+  family. This avoids first-task order deciding process-wide engine settings.
+- **Compatibility reference:** original aria2's `DHTSetup.cc` reads these
+  engine settings from `DownloadEngine::getOption()`, while `RequestGroup.cc`
+  reads the per-task DHT enable flags. DHT options are not marked with
+  `setChangeGlobalOption(true)` in `OptionHandlerFactory.cc`.
+- **Runtime contract:** DHT engine startup options are excluded from the
+  `changeGlobalOption` allowlist because the live DHT engine has no runtime
+  reconfiguration command. CLI and config process options supply engine
+  settings; RPC-created and session-restored tasks retain their per-task enable
+  flags but cannot override shared engine settings.
+- **Verification:** focused core tests cover process-option precedence over a
+  task override and the runtime allowlist contract. DHT network interoperability
+  under simultaneous tasks with conflicting DHT overrides has not been run.
 
 ## BitTorrent DHT outbound source binding
 

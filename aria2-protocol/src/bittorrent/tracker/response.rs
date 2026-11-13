@@ -165,25 +165,15 @@ impl TrackerResponse {
     }
 
     fn parse_compact_peers(data: &[u8]) -> Vec<PeerInfo> {
-        if !data.len().is_multiple_of(6) {
-            return Vec::new();
-        }
-
-        let mut peers = Vec::new();
-        // Use as_chunks (stable since Rust 1.88) instead of chunks_exact with a
-        // constant to satisfy clippy::chunks_exact_with_constant. The length is
-        // already verified to be a multiple of 6 above, so the remainder is empty.
-        let (chunks, _remainder) = data.as_chunks::<6>();
-        for chunk in chunks {
-            let ip = format!("{}.{}.{}.{}", chunk[0], chunk[1], chunk[2], chunk[3]);
-            let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-            peers.push(PeerInfo {
-                ip,
-                port,
+        crate::bittorrent::peer::address::decode_compact_v4_peers(data)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|peer| PeerInfo {
+                ip: peer.ip().to_string(),
+                port: peer.port(),
                 peer_id: None,
-            });
-        }
-        peers
+            })
+            .collect()
     }
 
     fn parse_normal_peers(
@@ -238,29 +228,15 @@ impl TrackerResponse {
 
     /// Decode compact IPv6 peer data (18 bytes per peer: 16-byte IP + 2-byte port).
     fn parse_compact_peers_v6(data: &[u8]) -> Vec<PeerInfo> {
-        use crate::bittorrent::peer::address::PeerAddr;
-
-        if data.is_empty() {
-            return Vec::new();
-        }
-        if !data.len().is_multiple_of(PeerAddr::COMPACT_SIZE_V6) {
-            return Vec::new();
-        }
-
-        let count = data.len() / PeerAddr::COMPACT_SIZE_V6;
-        let mut peers = Vec::with_capacity(count);
-        for i in 0..count {
-            let start = i * PeerAddr::COMPACT_SIZE_V6;
-            let end = start + PeerAddr::COMPACT_SIZE_V6;
-            if let Some(addr) = PeerAddr::from_compact_v6(&data[start..end]) {
-                peers.push(PeerInfo {
-                    ip: addr.ip,
-                    port: addr.port,
-                    peer_id: None,
-                });
-            }
-        }
-        peers
+        crate::bittorrent::peer::address::decode_compact_v6_peers(data)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|peer| PeerInfo {
+                ip: peer.ip().to_string(),
+                port: peer.port(),
+                peer_id: None,
+            })
+            .collect()
     }
 
     pub fn is_failure(&self) -> bool {

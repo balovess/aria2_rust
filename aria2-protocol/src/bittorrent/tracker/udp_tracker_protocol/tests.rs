@@ -187,16 +187,20 @@ fn test_parse_announce_rejects_non_announce_action() {
 
 #[test]
 fn test_parse_compact_peer_format() {
-    let data = [
+    let peer_data = [
         127, 0, 0, 1, 0x1F, 0x90, // 127.0.0.1:8080
         255, 255, 255, 255, 0x00, 0x50, // 255.255.255.255:80
         10, 0, 0, 1, 0xBB, 0x82, // 10.0.0.1:48002
     ];
-    let peers = parse_compact_peers(&data);
-    assert_eq!(peers.len(), 3);
-    assert_eq!(peers[0], ("127.0.0.1".into(), 8080));
-    assert_eq!(peers[1], ("255.255.255.255".into(), 80));
-    assert_eq!(peers[2], ("10.0.0.1".into(), 48002));
+    let mut response = vec![0; 20];
+    response[0..4].copy_from_slice(&(UdpAction::Announce as i32).to_be_bytes());
+    response.extend_from_slice(&peer_data);
+
+    let parsed = parse_announce_response(&response).unwrap();
+    assert_eq!(parsed.peers.len(), 3);
+    assert_eq!(parsed.peers[0], ("127.0.0.1".into(), 8080));
+    assert_eq!(parsed.peers[1], ("255.255.255.255".into(), 80));
+    assert_eq!(parsed.peers[2], ("10.0.0.1".into(), 48002));
 }
 
 #[test]

@@ -556,11 +556,11 @@ impl CookieStorage {
         if cookies.is_empty() {
             return String::new();
         }
-        cookies
-            .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect::<Vec<_>>()
-            .join("; ")
+        aria2_protocol::http::cookie::parsing::format_cookie_header(
+            cookies
+                .iter()
+                .map(|cookie| (cookie.name.as_str(), cookie.value.as_str())),
+        )
     }
 
     pub fn is_empty(&self) -> bool {

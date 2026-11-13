@@ -147,6 +147,12 @@ impl DownloadEngine {
             .map(|(name, value)| (name.clone(), value.to_string()))
             .collect();
         let download_options = DownloadOptions::from_option_strings(&option_strings);
+        self.bt_registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_global_dht_options(Arc::new(
+                crate::engine::bittorrent::dht::config::DhtEngineOptions::from(&download_options),
+            ));
         let source_fetcher = Arc::new(CoreTrackerSourceFetcher::new(
             Arc::clone(&self.dns_cache),
             Arc::clone(&self.outbound_network_policy),
@@ -223,12 +229,24 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn process_option_initializes_shared_open_file_budget() {
-        let options = HashMap::from([("bt-max-open-files".to_string(), OptionValue::Int(17))]);
+    async fn process_options_initialize_shared_bt_and_dht_configuration() {
+        let options = HashMap::from([
+            ("bt-max-open-files".to_string(), OptionValue::Int(17)),
+            ("dht-message-timeout".to_string(), OptionValue::Int(23)),
+        ]);
         let engine =
             DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
 
         assert_eq!(engine.open_file_budget.max_open_files(), 17);
+        assert_eq!(
+            engine
+                .bt_registry
+                .read()
+                .expect("BT registry should be readable")
+                .dht_options_for_download(&DownloadOptions::default())
+                .dht_message_timeout,
+            23
+        );
     }
 }
 

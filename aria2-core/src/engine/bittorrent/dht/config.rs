@@ -1,4 +1,4 @@
-//! Build the protocol DHT configuration from one download option snapshot.
+//! Translate process DHT options and network policy into protocol configuration.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -8,17 +8,75 @@ use crate::config::parse_integer_segments;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::DownloadOptions;
 
-/// Convert the task-level DHT options into the protocol engine configuration.
+/// The subset of process options that configures the shared DHT engines.
+#[derive(Clone, Debug)]
+pub(crate) struct DhtEngineOptions {
+    pub(crate) dht_listen_port: Option<String>,
+    pub(crate) dht_listen_addr: Option<String>,
+    pub(crate) dht_listen_addr6: Option<String>,
+    pub(crate) dht_entry_point: Option<Vec<String>>,
+    pub(crate) dht_entry_point_host: Option<String>,
+    pub(crate) dht_entry_point_port: Option<u16>,
+    pub(crate) dht_entry_point6: Option<String>,
+    pub(crate) dht_entry_point_host6: Option<String>,
+    pub(crate) dht_entry_point_port6: Option<u16>,
+    pub(crate) dht_file_path: Option<String>,
+    pub(crate) dht_file_path6: Option<String>,
+    pub(crate) dht_message_timeout: u64,
+    pub(crate) dht_refresh_check_interval: u64,
+    pub(crate) dht_token_rotation_interval: u64,
+    pub(crate) dht_node_contact_interval: u64,
+    pub(crate) dht_cleanup_interval: u64,
+    pub(crate) dht_save_interval: u64,
+    pub(crate) dht_bootstrap_timeout: u64,
+    pub(crate) dht_max_concurrent_lookups: usize,
+    pub(crate) dht_persistence_max_age: u64,
+}
+
+impl From<&DownloadOptions> for DhtEngineOptions {
+    fn from(options: &DownloadOptions) -> Self {
+        Self {
+            dht_listen_port: options.dht_listen_port.clone(),
+            dht_listen_addr: options.dht_listen_addr.clone(),
+            dht_listen_addr6: options.dht_listen_addr6.clone(),
+            dht_entry_point: options.dht_entry_point.clone(),
+            dht_entry_point_host: options.dht_entry_point_host.clone(),
+            dht_entry_point_port: options.dht_entry_point_port,
+            dht_entry_point6: options.dht_entry_point6.clone(),
+            dht_entry_point_host6: options.dht_entry_point_host6.clone(),
+            dht_entry_point_port6: options.dht_entry_point_port6,
+            dht_file_path: options.dht_file_path.clone(),
+            dht_file_path6: options.dht_file_path6.clone(),
+            dht_message_timeout: options.dht_message_timeout,
+            dht_refresh_check_interval: options.dht_refresh_check_interval,
+            dht_token_rotation_interval: options.dht_token_rotation_interval,
+            dht_node_contact_interval: options.dht_node_contact_interval,
+            dht_cleanup_interval: options.dht_cleanup_interval,
+            dht_save_interval: options.dht_save_interval,
+            dht_bootstrap_timeout: options.dht_bootstrap_timeout,
+            dht_max_concurrent_lookups: options.dht_max_concurrent_lookups,
+            dht_persistence_max_age: options.dht_persistence_max_age,
+        }
+    }
+}
+
+/// Convert DHT options into the protocol engine configuration.
 ///
 /// IPv4 and IPv6 use the corresponding address, bootstrap, and persistence
 /// fields. Hostname bootstrap entries are resolved before the UDP engine is
-/// started so invalid configuration is reported at the task boundary.
+/// started so invalid configuration is reported during engine startup.
 #[cfg(test)]
 pub(crate) async fn build_dht_engine_config(
     options: &DownloadOptions,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
-    build_dht_engine_config_with_policy(options, &crate::network::OutboundNetworkPolicy::direct())
-        .await
+    let dht_options = DhtEngineOptions::from(options);
+    build_dht_engine_config_for_family(
+        &dht_options,
+        &crate::network::OutboundNetworkPolicy::direct(),
+        options.enable_dht6,
+    )
+    .await?
+    .ok_or_else(|| config_error("no compatible outbound source for DHT".to_string()))
 }
 
 #[cfg(test)]
@@ -26,13 +84,17 @@ pub(crate) async fn build_dht_engine_config_with_policy(
     options: &DownloadOptions,
     policy: &crate::network::OutboundNetworkPolicy,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
-    build_dht_engine_config_for_family(options, policy, options.enable_dht6)
-        .await?
-        .ok_or_else(|| config_error("no compatible outbound source for DHT".to_string()))
+    build_dht_engine_config_for_family(
+        &DhtEngineOptions::from(options),
+        policy,
+        options.enable_dht6,
+    )
+    .await?
+    .ok_or_else(|| config_error("no compatible outbound source for DHT".to_string()))
 }
 
 pub(crate) async fn build_dht_engine_config_for_family(
-    options: &DownloadOptions,
+    options: &DhtEngineOptions,
     policy: &crate::network::OutboundNetworkPolicy,
     use_ipv6: bool,
 ) -> Result<Option<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig>> {
@@ -103,7 +165,7 @@ pub(crate) async fn build_dht_engine_config_for_family(
     ))
 }
 
-fn selected_listen_addr(options: &DownloadOptions, use_ipv6: bool) -> Result<Option<IpAddr>> {
+fn selected_listen_addr(options: &DhtEngineOptions, use_ipv6: bool) -> Result<Option<IpAddr>> {
     let raw = if use_ipv6 {
         options.dht_listen_addr6.as_deref()
     } else {
@@ -125,7 +187,7 @@ fn selected_listen_addr(options: &DownloadOptions, use_ipv6: bool) -> Result<Opt
     Ok(Some(address))
 }
 
-fn selected_file_path(options: &DownloadOptions, use_ipv6: bool) -> Option<&str> {
+fn selected_file_path(options: &DhtEngineOptions, use_ipv6: bool) -> Option<&str> {
     if use_ipv6 {
         options.dht_file_path6.as_deref()
     } else {
@@ -171,7 +233,7 @@ fn default_dht_file_path(use_ipv6: bool) -> PathBuf {
     cache.join("aria2").join(filename)
 }
 
-fn selected_bootstrap_specs(options: &DownloadOptions, use_ipv6: bool) -> Result<Vec<String>> {
+fn selected_bootstrap_specs(options: &DhtEngineOptions, use_ipv6: bool) -> Result<Vec<String>> {
     let mut specs = if use_ipv6 {
         options
             .dht_entry_point6
@@ -312,11 +374,12 @@ mod tests {
         };
         let policy = crate::network::OutboundNetworkPolicy::direct();
 
-        let config4 = build_dht_engine_config_for_family(&options, &policy, false)
+        let dht_options = DhtEngineOptions::from(&options);
+        let config4 = build_dht_engine_config_for_family(&dht_options, &policy, false)
             .await
             .expect("IPv4 DHT options should build independently")
             .expect("direct IPv4 DHT should be available");
-        let config6 = build_dht_engine_config_for_family(&options, &policy, true)
+        let config6 = build_dht_engine_config_for_family(&dht_options, &policy, true)
             .await
             .expect("IPv6 DHT options should build independently")
             .expect("direct IPv6 DHT should be available");
@@ -335,10 +398,11 @@ mod tests {
         };
         let policy = crate::network::OutboundNetworkPolicy::single("::1".parse().unwrap());
 
-        let config4 = build_dht_engine_config_for_family(&options, &policy, false)
+        let dht_options = DhtEngineOptions::from(&options);
+        let config4 = build_dht_engine_config_for_family(&dht_options, &policy, false)
             .await
             .expect("an unavailable address family should be skipped");
-        let config6 = build_dht_engine_config_for_family(&options, &policy, true)
+        let config6 = build_dht_engine_config_for_family(&dht_options, &policy, true)
             .await
             .expect("the configured address family should build");
 
@@ -354,7 +418,8 @@ mod tests {
         };
         let policy = crate::network::OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap());
 
-        let error = build_dht_engine_config_for_family(&options, &policy, false)
+        let dht_options = DhtEngineOptions::from(&options);
+        let error = build_dht_engine_config_for_family(&dht_options, &policy, false)
             .await
             .expect_err("DHT must not bind outside the selected source address");
 
@@ -387,6 +452,7 @@ mod tests {
             dht_file_path: Some("v4.dat".to_string()),
             ..Default::default()
         };
+        let options = DhtEngineOptions::from(&options);
 
         assert_eq!(selected_file_path(&options, true), None);
         assert_eq!(selected_file_path(&options, false), Some("v4.dat"));

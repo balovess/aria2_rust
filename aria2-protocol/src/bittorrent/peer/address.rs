@@ -73,3 +73,73 @@ impl PeerAddr {
         Some(buf)
     }
 }
+
+/// Decode a complete list of IPv4 compact peer endpoints.
+///
+/// Returns `None` when the byte length is not a multiple of six. An empty
+/// list is valid and returns `Some(Vec::new())`.
+pub fn decode_compact_v4_peers(data: &[u8]) -> Option<Vec<std::net::SocketAddr>> {
+    if !data.len().is_multiple_of(PeerAddr::COMPACT_SIZE_V4) {
+        return None;
+    }
+
+    let (chunks, _) = data.as_chunks::<6>();
+    Some(
+        chunks
+            .iter()
+            .map(|chunk| {
+                let ip = std::net::Ipv4Addr::from([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+                std::net::SocketAddr::new(ip.into(), port)
+            })
+            .collect(),
+    )
+}
+
+/// Decode a complete list of IPv6 compact peer endpoints.
+///
+/// Returns `None` when the byte length is not a multiple of eighteen. An
+/// empty list is valid and returns `Some(Vec::new())`.
+pub fn decode_compact_v6_peers(data: &[u8]) -> Option<Vec<std::net::SocketAddr>> {
+    if !data.len().is_multiple_of(PeerAddr::COMPACT_SIZE_V6) {
+        return None;
+    }
+
+    let (chunks, _) = data.as_chunks::<18>();
+    Some(
+        chunks
+            .iter()
+            .map(|chunk| {
+                let mut octets = [0; 16];
+                octets.copy_from_slice(&chunk[..16]);
+                let ip = std::net::Ipv6Addr::from(octets);
+                let port = u16::from_be_bytes([chunk[16], chunk[17]]);
+                std::net::SocketAddr::new(ip.into(), port)
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_compact_v4_peers, decode_compact_v6_peers};
+
+    #[test]
+    fn decodes_complete_compact_peer_lists_and_rejects_trailing_bytes() {
+        assert_eq!(
+            decode_compact_v4_peers(&[192, 0, 2, 1, 0x1a, 0xe1]),
+            Some(vec!["192.0.2.1:6881".parse().unwrap()])
+        );
+        assert_eq!(decode_compact_v4_peers(&[]), Some(Vec::new()));
+        assert_eq!(decode_compact_v4_peers(&[1]), None);
+
+        assert_eq!(
+            decode_compact_v6_peers(&[
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1a, 0xe1,
+            ]),
+            Some(vec!["[2001:db8::1]:6881".parse().unwrap()])
+        );
+        assert_eq!(decode_compact_v6_peers(&[]), Some(Vec::new()));
+        assert_eq!(decode_compact_v6_peers(&[1]), None);
+    }
+}
