@@ -378,6 +378,19 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
             }
 
             #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackerSourceConcurrency {
+                max_concurrent_sources,
+            } => {
+                ctx.public_tracker_catalog
+                    .set_source_fetch_concurrency_limit(max_concurrent_sources);
+                mark_session_dirty(ctx);
+                info!(
+                    max_concurrent_sources,
+                    "Public tracker source concurrency limit changed"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
             EngineCommand::SetPublicTrackersEnabled { enabled } => {
                 let mut config = ctx.public_tracker_catalog.config().await;
                 config.enabled = enabled;

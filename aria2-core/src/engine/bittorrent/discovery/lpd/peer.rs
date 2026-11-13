@@ -1,5 +1,6 @@
 //! Data model for peers discovered through Local Peer Discovery.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -58,4 +59,30 @@ impl std::hash::Hash for LpdPeer {
         self.info_hash.hash(state);
         self.addr.hash(state);
     }
+}
+
+pub(super) fn insert_or_refresh_peer(
+    peers: &mut HashSet<LpdPeer>,
+    peer: LpdPeer,
+    max_peers: usize,
+) -> bool {
+    if peers.contains(&peer) {
+        let _ = peers.replace(peer);
+        return false;
+    }
+
+    if max_peers == 0 {
+        return false;
+    }
+
+    if peers.len() >= max_peers
+        && let Some(oldest) = peers
+            .iter()
+            .max_by_key(|existing| existing.last_seen.elapsed())
+            .cloned()
+    {
+        peers.remove(&oldest);
+    }
+
+    peers.insert(peer)
 }

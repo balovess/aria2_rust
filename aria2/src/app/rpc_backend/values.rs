@@ -536,6 +536,76 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "bittorrent")]
+    #[tokio::test]
+    async fn global_tracker_source_concurrency_updates_config_and_engine_command() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        backend
+            .change_global_option(HashMap::from([(
+                "bt-tracker-source-concurrency".to_string(),
+                serde_json::json!(2),
+            )]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("bt-tracker-source-concurrency")
+                .await,
+            Some(2)
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            EngineCommand::SetPublicTrackerSourceConcurrency {
+                max_concurrent_sources: 2
+            }
+        ));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[tokio::test]
+    async fn tracker_source_concurrency_rejects_values_above_the_protocol_cap() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, mut receiver) = channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        assert!(
+            backend
+                .change_global_option(HashMap::from([(
+                    "bt-tracker-source-concurrency".to_string(),
+                    serde_json::json!(5),
+                )]))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_i64("bt-tracker-source-concurrency")
+                .await,
+            Some(4)
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn global_bt_max_open_files_updates_config_and_engine_command() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));

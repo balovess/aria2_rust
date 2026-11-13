@@ -81,6 +81,49 @@ async fn test_lpd_manager_update_and_get_peers() {
 }
 
 #[tokio::test]
+async fn test_lpd_manager_refreshes_known_peer_without_eviction() {
+    let manager = LpdManager::default();
+    let info_hash = test_info_hash();
+    manager.register_torrent(info_hash, false).await.unwrap();
+
+    let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 49));
+    manager
+        .update_peers(
+            info_hash,
+            (0..super::super::MAX_PEERS_PER_HASH)
+                .map(|index| {
+                    LpdPeer::new(
+                        info_hash,
+                        6881,
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, index as u8)),
+                    )
+                })
+                .collect(),
+        )
+        .await;
+
+    let previous_seen = manager
+        .get_peers_for(info_hash)
+        .await
+        .into_iter()
+        .find(|peer| peer.addr == address)
+        .expect("target peer should be stored")
+        .last_seen;
+    manager
+        .update_peers(info_hash, vec![LpdPeer::new(info_hash, 6999, address)])
+        .await;
+
+    let peers = manager.get_peers_for(info_hash).await;
+    assert_eq!(peers.len(), super::super::MAX_PEERS_PER_HASH);
+    let refreshed = peers
+        .iter()
+        .find(|peer| peer.addr == address)
+        .expect("refreshed peer should remain present");
+    assert_eq!(refreshed.port, 6999);
+    assert!(refreshed.last_seen > previous_seen);
+}
+
+#[tokio::test]
 async fn test_lpd_manager_multiple_torrents_independent() {
     let manager = LpdManager::default();
 

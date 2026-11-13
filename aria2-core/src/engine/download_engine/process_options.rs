@@ -96,7 +96,8 @@ impl DownloadEngine {
     fn configure_bittorrent_process_options(&mut self, options: &HashMap<String, OptionValue>) {
         use crate::engine::bittorrent::tracker::source_fetcher::CoreTrackerSourceFetcher;
         use aria2_protocol::bittorrent::tracker::public_list::{
-            DEFAULT_TRACKER_SOURCE_TIMEOUT, DEFAULT_TRACKER_UPDATE_INTERVAL, TrackerCatalogConfig,
+            DEFAULT_TRACKER_SOURCE_TIMEOUT, DEFAULT_TRACKER_UPDATE_INTERVAL,
+            MAX_TRACKER_SOURCE_CONCURRENCY, TrackerCatalogConfig,
         };
 
         if let Some(max_open_files) = option_i64(options, "bt-max-open-files")
@@ -164,12 +165,18 @@ impl DownloadEngine {
             Arc::clone(&self.outbound_network_policy),
             download_options,
         ));
-        self.public_tracker_catalog = Arc::new(
+        let tracker_catalog = Arc::new(
             aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new_with_config_and_fetcher(
                 tracker_config,
                 source_fetcher,
             ),
         );
+        tracker_catalog.set_source_fetch_concurrency_limit(
+            option_i64(options, "bt-tracker-source-concurrency")
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(MAX_TRACKER_SOURCE_CONCURRENCY),
+        );
+        self.public_tracker_catalog = tracker_catalog;
         self.set_public_tracker_source_timeout(source_timeout);
     }
 }
@@ -247,6 +254,10 @@ mod tests {
     async fn process_options_initialize_shared_bt_and_dht_configuration() {
         let options = HashMap::from([
             ("bt-max-open-files".to_string(), OptionValue::Int(17)),
+            (
+                "bt-tracker-source-concurrency".to_string(),
+                OptionValue::Int(2),
+            ),
             ("dht-message-timeout".to_string(), OptionValue::Int(23)),
             (
                 "dht-listen-port".to_string(),
@@ -269,6 +280,12 @@ mod tests {
             DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
 
         assert_eq!(engine.open_file_budget.max_open_files(), 17);
+        assert_eq!(
+            engine
+                .public_tracker_catalog()
+                .source_fetch_concurrency_limit(),
+            2
+        );
         let dht_options = engine
             .bt_registry
             .read()

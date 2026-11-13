@@ -511,15 +511,7 @@ impl LpdManager {
         for peer in new_peers {
             let mut peer = peer;
             peer.info_hash = Arc::clone(&shared_hash);
-            // Limit total peers per hash
-            if entry.len() >= MAX_PEERS_PER_HASH {
-                // Remove oldest expired peer first
-                let oldest = entry.iter().max_by_key(|p| p.last_seen.elapsed()).cloned();
-                if let Some(oldest_peer) = oldest {
-                    entry.remove(&oldest_peer);
-                }
-            }
-            entry.insert(peer);
+            peer::insert_or_refresh_peer(entry, peer, MAX_PEERS_PER_HASH);
         }
     }
 

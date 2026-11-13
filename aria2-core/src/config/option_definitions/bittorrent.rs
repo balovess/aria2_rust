@@ -384,6 +384,23 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-tracker-source-concurrency".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::tracker::public_list::MAX_TRACKER_SOURCE_CONCURRENCY
+                    as i64,
+            ),
+            min: Some(1),
+            max: Some(
+                aria2_protocol::bittorrent::tracker::public_list::MAX_TRACKER_SOURCE_CONCURRENCY
+                    as u64,
+            ),
+            description: "Maximum concurrent downloads of remote public tracker lists".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: true,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "enable-public-trackers".into(),
             opt_type: OptionType::Boolean,
             default_value: OptionValue::Bool(true),

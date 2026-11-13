@@ -20,6 +20,8 @@ fn policy_matches_original_wire_names() {
         "bt-incoming-peer-handshake-timeout"
     ));
     #[cfg(feature = "bittorrent")]
+    assert!(is_global_option_changeable("bt-tracker-source-concurrency"));
+    #[cfg(feature = "bittorrent")]
     for name in ["dht-max-peer-info-hashes", "dht-max-peers-per-info-hash"] {
         assert!(is_global_option_changeable(name));
     }

@@ -326,9 +326,15 @@ behavior. An unlisted behavior has not been audited here.
   fetch keeps the timeout captured when it started. The public
   `TrackerCatalogConfig` layout remains source-compatible; the protocol library
   exposes separate timeout accessors.
+- **Concurrency:** `bt-tracker-source-concurrency` defaults to 4 and accepts
+  `1..=4`, preserving the protocol library's hard safety ceiling while letting
+  users lower bursts for multi-source refreshes. Runtime changes apply to
+  future refreshes; an in-progress refresh keeps its captured limit. CLI/config,
+  C API, and `changeGlobalOption` pass the process setting to `PublicTrackerList`.
 - **Configuration ownership:** `bt-tracker-source`,
-  `bt-tracker-update-interval`, and `enable-public-trackers` configure the
-  process-shared public tracker catalog and are process-engine options.
+  `bt-tracker-update-interval`, `bt-tracker-source-concurrency`, and
+  `enable-public-trackers` configure the process-shared public tracker catalog
+  and are process-engine options.
   `bt-tracker` remains a per-download option for that download's announce
   tiers. Runtime changes to the catalog options are projected to the shared
   catalog through the engine command path.
@@ -348,15 +354,18 @@ behavior. An unlisted behavior has not been audited here.
   `List([])` in configuration instead of a one-element list containing an empty
   string. The catalog skips source fetching and retains its current snapshot as
   a fallback.
-- **Compatibility impact:** this is a Rust extension; original aria2 does not
-  provide a public tracker-list source timeout option. The default preserves
-  the previous 15-second limit.
+- **Compatibility impact:** these are Rust extensions; original aria2 does not
+  provide public tracker-list source timeout or concurrency options. Defaults
+  preserve the prior 15-second timeout and four-fetch concurrency ceiling.
 - **Verification:** protocol tests delay an HTTP response body and assert the
   configured deadline aborts the complete fetch; CLI, RPC, and C API tests
   verify empty tracker sources remain an empty list through their configuration
-  boundaries. A core loopback test verifies that the engine fetcher reaches the
-  tracker source using the selected local source address. A second loopback
-  test verifies HTTP proxy absolute-form requests and Basic proxy credentials.
+  boundaries. A custom-fetcher protocol test measures the configured concurrent
+  source ceiling; CLI, RPC, and C API tests cover propagation and reject values
+  above the protocol cap. A core loopback test verifies that the engine fetcher
+  reaches the tracker source using the selected local source address. A second
+  loopback test verifies HTTP proxy absolute-form requests and Basic proxy
+  credentials.
   An announce-specific loopback test verifies the tracker request traverses
   the configured proxy, carries the configured proxy credentials, and binds to
   the selected outbound source address. A second announce test verifies one
@@ -485,9 +494,13 @@ behavior. An unlisted behavior has not been audited here.
   address classification, peer registration, and torrent activity lifecycle.
 - **Compatibility intent:** the accepted BEP 14 and legacy message formats,
   hash normalization, and port validation remain unchanged.
+- **Peer registry behavior:** core retains the existing limit of 50 peers per
+  info hash. Repeated announcements for a known peer refresh its port and
+  `last_seen` without evicting a different peer; a new peer at capacity replaces
+  the oldest entry.
 - **Verification:** protocol tests cover valid BEP 14 and legacy messages,
   invalid UTF-8, hash and port rejection; core tests exercise the historical
-  parser path and sender attachment.
+  parser path and sender attachment, plus bounded-registry refresh and eviction.
 
 ## Incoming BitTorrent handshake admission
 

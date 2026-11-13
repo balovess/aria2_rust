@@ -355,6 +355,10 @@ pub struct BitTorrentArgs {
     #[arg(long = "bt-tracker-source-timeout")]
     pub bt_tracker_source_timeout: Option<u64>,
 
+    /// Maximum concurrent downloads of remote public tracker lists
+    #[arg(long = "bt-tracker-source-concurrency")]
+    pub bt_tracker_source_concurrency: Option<u64>,
+
     /// Connect timeout for tracker in seconds
     #[arg(long = "bt-tracker-connect-timeout")]
     pub bt_tracker_connect_timeout: Option<u64>,

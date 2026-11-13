@@ -465,6 +465,10 @@ pub enum EngineCommand {
     #[cfg(feature = "bittorrent")]
     SetPublicTrackerSourceTimeout { seconds: u64 },
 
+    /// Change the process-wide limit for concurrent public tracker source fetches.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackerSourceConcurrency { max_concurrent_sources: usize },
+
     /// Enable or disable the process-wide public tracker catalog.
     #[cfg(feature = "bittorrent")]
     SetPublicTrackersEnabled { enabled: bool },
@@ -530,6 +534,7 @@ impl EngineCommand {
                 Self::SetPublicTrackerSources { .. }
                     | Self::SetPublicTrackerUpdateInterval { .. }
                     | Self::SetPublicTrackerSourceTimeout { .. }
+                    | Self::SetPublicTrackerSourceConcurrency { .. }
                     | Self::SetPublicTrackersEnabled { .. }
                     | Self::SetIncomingPeerHandshakeTimeout { .. }
                     | Self::SetUtpSocketOptions { .. }

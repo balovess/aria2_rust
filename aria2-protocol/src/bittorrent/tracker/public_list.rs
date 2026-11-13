@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
@@ -139,6 +139,7 @@ pub struct PublicTrackerList {
     source_fetcher: tokio::sync::RwLock<Arc<dyn TrackerSourceFetcher>>,
     config: tokio::sync::RwLock<TrackerCatalogConfig>,
     source_request_timeout: tokio::sync::RwLock<Duration>,
+    source_fetch_concurrency: AtomicUsize,
     health: Mutex<HashMap<String, TrackerHealth>>,
     last_updated: tokio::sync::RwLock<Option<Instant>>,
     last_refresh_error: tokio::sync::RwLock<Option<String>>,
@@ -176,6 +177,7 @@ impl PublicTrackerList {
             source_fetcher: tokio::sync::RwLock::new(source_fetcher),
             config: tokio::sync::RwLock::new(config),
             source_request_timeout: tokio::sync::RwLock::new(DEFAULT_TRACKER_SOURCE_TIMEOUT),
+            source_fetch_concurrency: AtomicUsize::new(MAX_TRACKER_SOURCE_CONCURRENCY),
             health: Mutex::new(HashMap::new()),
             last_updated: tokio::sync::RwLock::new(Some(Instant::now())),
             last_refresh_error: tokio::sync::RwLock::new(None),
@@ -209,6 +211,22 @@ impl PublicTrackerList {
     /// Return the timeout applied to each complete tracker-source HTTP fetch.
     pub async fn source_request_timeout(&self) -> Duration {
         *self.source_request_timeout.read().await
+    }
+
+    /// Set the maximum number of public tracker sources fetched concurrently.
+    ///
+    /// The value is clamped to `1..=MAX_TRACKER_SOURCE_CONCURRENCY`. A refresh
+    /// already in progress keeps the limit captured when it began.
+    pub fn set_source_fetch_concurrency_limit(&self, limit: usize) {
+        self.source_fetch_concurrency.store(
+            limit.clamp(1, MAX_TRACKER_SOURCE_CONCURRENCY),
+            Ordering::Release,
+        );
+    }
+
+    /// Return the maximum concurrency used by future refreshes.
+    pub fn source_fetch_concurrency_limit(&self) -> usize {
+        self.source_fetch_concurrency.load(Ordering::Acquire)
     }
 
     /// Set the timeout for future tracker-source fetches.
@@ -379,6 +397,7 @@ impl PublicTrackerList {
 
         let fetcher = self.source_fetcher.read().await.clone();
         let request_timeout = self.source_request_timeout().await;
+        let source_concurrency = self.source_fetch_concurrency.load(Ordering::Acquire);
         let results = stream::iter(sources.iter().cloned().map(|source| {
             let fetcher = Arc::clone(&fetcher);
             async move {
@@ -386,7 +405,7 @@ impl PublicTrackerList {
                 (source, result)
             }
         }))
-        .buffer_unordered(MAX_TRACKER_SOURCE_CONCURRENCY)
+        .buffer_unordered(source_concurrency)
         .collect::<Vec<_>>()
         .await;
         let mut errors = Vec::new();

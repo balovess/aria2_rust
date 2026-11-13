@@ -208,6 +208,7 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--bt-utp-idle-timeout=46",
         "--bt-utp-keepalive-interval=19",
         "--bt-tracker-source-timeout=47",
+        "--bt-tracker-source-concurrency=2",
         "--bt-peer-blocklist=blocked-peers.txt",
         "--enable-dht6=true",
         "--dht-listen-addr=127.0.0.1",
@@ -260,6 +261,14 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
             .get_global_i64("bt-tracker-source-timeout")
             .await,
         Some(47)
+    );
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("bt-tracker-source-concurrency")
+            .await,
+        Some(2)
     );
     assert_eq!(
         options.bt_peer_blocklist.as_deref(),

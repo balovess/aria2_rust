@@ -64,6 +64,18 @@ pub fn runtime_commands_for_global_option_changes(
         {
             commands.push(EngineCommand::SetPublicTrackerSourceTimeout { seconds });
         }
+        if changed_options.contains("bt-tracker-source-concurrency")
+            && let Some(max_concurrent_sources) =
+                option_i64(effective_options, "bt-tracker-source-concurrency")
+                    .and_then(|value| usize::try_from(value).ok())
+            && (1
+                ..=aria2_protocol::bittorrent::tracker::public_list::MAX_TRACKER_SOURCE_CONCURRENCY)
+                .contains(&max_concurrent_sources)
+        {
+            commands.push(EngineCommand::SetPublicTrackerSourceConcurrency {
+                max_concurrent_sources,
+            });
+        }
         if changed_options.contains("enable-public-trackers")
             && let Some(enabled) = option_bool(effective_options, "enable-public-trackers")
         {
@@ -257,6 +269,7 @@ mod tests {
         let changed = HashSet::from([
             "bt-tracker-source".to_string(),
             "bt-tracker-update-interval".to_string(),
+            "bt-tracker-source-concurrency".to_string(),
             "enable-public-trackers".to_string(),
         ]);
         let effective = HashMap::from([
@@ -269,6 +282,10 @@ mod tests {
                 OptionValue::Int(604_800),
             ),
             (
+                "bt-tracker-source-concurrency".to_string(),
+                OptionValue::Int(2),
+            ),
+            (
                 "enable-public-trackers".to_string(),
                 OptionValue::Bool(false),
             ),
@@ -279,6 +296,9 @@ mod tests {
             [
                 EngineCommand::SetPublicTrackerSources { sources },
                 EngineCommand::SetPublicTrackerUpdateInterval { seconds: 604_800 },
+                EngineCommand::SetPublicTrackerSourceConcurrency {
+                    max_concurrent_sources: 2,
+                },
                 EngineCommand::SetPublicTrackersEnabled { enabled: false },
             ] if sources.is_empty()
         ));

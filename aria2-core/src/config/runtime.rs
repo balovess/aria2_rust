@@ -158,6 +158,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-tracker-update-interval",
     #[cfg(feature = "bittorrent")]
     "bt-tracker-source-timeout",
+    #[cfg(feature = "bittorrent")]
+    "bt-tracker-source-concurrency",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",

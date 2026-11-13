@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::constants;
-use crate::engine::bittorrent::discovery::lpd::{LpdPeer, parse_lpd_announcement};
+use crate::engine::bittorrent::discovery::lpd::{LpdPeer, parse_lpd_announcement, peer};
 
 #[path = "receive_socket.rs"]
 mod socket;
@@ -343,15 +343,11 @@ async fn update_peer_registry(
     for peer in relevant_peers {
         let entry = peers_map.entry(peer.info_hash.clone()).or_default();
 
-        // Limit total peers per hash (same as LpdManager::MAX_PEERS_PER_HASH).
-        // If at capacity, remove the oldest peer to make room.
-        if entry.len() >= crate::engine::bittorrent::discovery::lpd::MAX_PEERS_PER_HASH
-            && let Some(oldest) = entry.iter().max_by_key(|p| p.last_seen.elapsed()).cloned()
-        {
-            entry.remove(&oldest);
-        }
-
-        if entry.insert(peer.clone()) {
+        if peer::insert_or_refresh_peer(
+            entry,
+            peer.clone(),
+            crate::engine::bittorrent::discovery::lpd::MAX_PEERS_PER_HASH,
+        ) {
             debug!(
                 info_hash = %&peer.info_hash[..8.min(peer.info_hash.len())],
                 addr = %peer.addr,
@@ -487,6 +483,59 @@ mod tests {
             "Should not exceed MAX_PEERS_PER_HASH (got {})",
             stored.len()
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_peer_registry_refreshes_known_peer_without_eviction() {
+        let peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let info_hash = "0123456789abcdef0123456789abcdef01234567";
+        let active_hashes: Arc<RwLock<HashSet<Arc<str>>>> =
+            Arc::new(RwLock::new(HashSet::from([Arc::from(info_hash)])));
+        let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 49));
+
+        update_peer_registry(
+            &peers,
+            &active_hashes,
+            (0..crate::engine::bittorrent::discovery::lpd::MAX_PEERS_PER_HASH)
+                .map(|index| {
+                    LpdPeer::new(
+                        info_hash,
+                        6881,
+                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, index as u8)),
+                    )
+                })
+                .collect(),
+        )
+        .await;
+
+        let previous_seen = peers
+            .read()
+            .await
+            .get(info_hash)
+            .and_then(|stored| stored.iter().find(|peer| peer.addr == address))
+            .expect("target peer should be stored")
+            .last_seen;
+
+        update_peer_registry(
+            &peers,
+            &active_hashes,
+            vec![LpdPeer::new(info_hash, 6999, address)],
+        )
+        .await;
+
+        let peers_map = peers.read().await;
+        let stored = peers_map.get(info_hash).expect("hash should exist");
+        assert_eq!(
+            stored.len(),
+            crate::engine::bittorrent::discovery::lpd::MAX_PEERS_PER_HASH
+        );
+        let refreshed = stored
+            .iter()
+            .find(|peer| peer.addr == address)
+            .expect("refreshed peer should remain present");
+        assert_eq!(refreshed.port, 6999);
+        assert!(refreshed.last_seen > previous_seen);
     }
 
     /// Test LpdReceiveLoop lifecycle: new -> start -> stop.

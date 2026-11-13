@@ -426,6 +426,10 @@ impl App {
         set_str!("bt-tracker-source", b.bt_tracker_source);
         set_u64!("bt-tracker-update-interval", b.bt_tracker_update_interval);
         set_u64!("bt-tracker-source-timeout", b.bt_tracker_source_timeout);
+        set_u64!(
+            "bt-tracker-source-concurrency",
+            b.bt_tracker_source_concurrency
+        );
         set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
         set_u64!("bt-tracker-interval", b.bt_tracker_interval);
         set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);

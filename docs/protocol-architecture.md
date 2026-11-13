@@ -841,7 +841,10 @@ Do not add pass-through engine clients around these public interfaces.
   refresh lifecycle, health backoff, and the existing public types at their
   original module paths; keep URL parsing and embedded tracker data in a private
   parser submodule, source-fetch deadline/default HTTP transport in a private
-  source-fetcher submodule, and unit tests in `public_list/tests.rs`.
+  source-fetcher submodule, and unit tests in `public_list/tests.rs`. Make the
+  maximum concurrent source fetches a bounded protocol setting: retain the
+  default safety ceiling of four and let the process option lower it for future
+  refreshes without changing the public `TrackerCatalogConfig` layout.
 - **Narrow** HTTP client and protocol test source layout: retain the HTTP
   request/response client interface while moving its tests beside the client;
   group Content-Disposition compatibility cases and DHT UDP pressure coverage
@@ -1009,7 +1012,10 @@ Do not add pass-through engine clients around these public interfaces.
   filtering, and peer admission in core. `aria2-protocol` owns BEP 14 message
   encoding/parsing; core enriches received peers with sender address policy and
   stores engine-facing discovery state. Keep the `LpdPeer` public module path
-  while placing its data model in the private `lpd::peer` child module.
+  while placing its data model in the private `lpd::peer` child module. Both
+  receive-loop and direct manager updates use one bounded insert/refresh policy:
+  duplicates refresh port and age without evicting another peer, and new peers
+  at capacity evict the oldest entry.
 - **Narrow** tracker announce source organization: UDP event/response adaptation
   lives beside the announce state machine in a private child module; tracker
   state and its existing public API remain owned by `BtAnnounce`.

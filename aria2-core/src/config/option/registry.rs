@@ -428,6 +428,7 @@ impl OptionRegistry {
             | "bt-tracker-update-interval"
             | "enable-public-trackers"
             | "bt-tracker-source-timeout"
+            | "bt-tracker-source-concurrency"
             | "bt-utp-max-connections"
             | "bt-utp-connect-timeout"
             | "bt-utp-idle-timeout"
@@ -577,6 +578,7 @@ mod tests {
             ("bt-utp-keepalive-interval", OptionOwner::ProcessEngine),
             ("bt-tracker-source", OptionOwner::ProcessEngine),
             ("bt-tracker-update-interval", OptionOwner::ProcessEngine),
+            ("bt-tracker-source-concurrency", OptionOwner::ProcessEngine),
             ("enable-public-trackers", OptionOwner::ProcessEngine),
             ("bt-tracker-source-timeout", OptionOwner::ProcessEngine),
         ];
@@ -622,6 +624,10 @@ mod tests {
                 serde_json::json!(604800),
             );
             options.insert(
+                "bt-tracker-source-concurrency".to_string(),
+                serde_json::json!(2),
+            );
+            options.insert(
                 "enable-public-trackers".to_string(),
                 serde_json::json!(true),
             );
@@ -653,6 +659,10 @@ mod tests {
             assert_eq!(
                 projected.get("bt-tracker-update-interval"),
                 Some(&serde_json::json!(604800))
+            );
+            assert_eq!(
+                projected.get("bt-tracker-source-concurrency"),
+                Some(&serde_json::json!(2))
             );
             assert_eq!(
                 projected.get("enable-public-trackers"),

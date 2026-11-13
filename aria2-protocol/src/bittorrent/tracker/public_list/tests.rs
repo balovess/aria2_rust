@@ -1,5 +1,51 @@
 use super::*;
 
+struct ConcurrencyRecordingFetcher {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl TrackerSourceFetcher for ConcurrencyRecordingFetcher {
+    fn fetch<'a>(
+        &'a self,
+        _source: &'a str,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+            self.max_active.fetch_max(active, Ordering::AcqRel);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            Ok("udp://tracker.test:6969/announce".to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn source_fetch_concurrency_limit_bounds_refresh_requests() {
+    let fetcher = Arc::new(ConcurrencyRecordingFetcher {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+    });
+    let catalog = PublicTrackerList::new_with_config_and_fetcher(
+        TrackerCatalogConfig {
+            enabled: true,
+            sources: (0..6).map(|index| format!("source-{index}")).collect(),
+            update_interval: DEFAULT_TRACKER_UPDATE_INTERVAL,
+        },
+        fetcher.clone(),
+    );
+
+    catalog.set_source_fetch_concurrency_limit(2);
+    assert_eq!(catalog.refresh().await.unwrap(), 1);
+    assert_eq!(fetcher.max_active.load(Ordering::Acquire), 2);
+    catalog.set_source_fetch_concurrency_limit(usize::MAX);
+    assert_eq!(
+        catalog.source_fetch_concurrency_limit(),
+        MAX_TRACKER_SOURCE_CONCURRENCY
+    );
+}
+
 #[tokio::test]
 async fn source_request_timeout_covers_the_complete_response_body() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
