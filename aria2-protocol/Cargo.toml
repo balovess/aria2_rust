@@ -86,6 +86,7 @@ sftp = ["dep:russh", "dep:dirs"]
 tempfile.workspace = true
 mockito = "1.7"
 criterion.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "protocol_bench"

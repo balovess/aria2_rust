@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::request::UdpTrackerRequest;
 use super::{UdpError, UdpTrackerClient};
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
+use crate::bittorrent::tracker::udp_tracker_protocol::{
     ScrapeResult, UdpEvent, build_scrape_request,
 };
 

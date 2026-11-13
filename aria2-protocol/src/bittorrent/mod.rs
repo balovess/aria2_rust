@@ -10,3 +10,4 @@ pub mod piece;
 pub mod torrent;
 pub mod tracker;
 pub mod utp;
+pub mod web_seed;

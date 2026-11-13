@@ -1,11 +1,9 @@
 //! HTTP client for downloading individual BT pieces from a web-seed URL.
 
 use std::collections::HashSet;
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
 use tracing::{debug, warn};
 
 use super::stats::WebSeedStats;
@@ -14,22 +12,7 @@ use crate::request::request_group::AtomicProgress;
 
 pub(super) const DEFAULT_WEB_SEED_TIMEOUT_SECS: u64 = 60;
 
-#[derive(Debug)]
-pub(super) enum WebSeedError {
-    HttpStatus(u16),
-    Failure(String),
-}
-
-impl fmt::Display for WebSeedError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::HttpStatus(status) => {
-                write!(formatter, "Unexpected HTTP status {status} from web-seed")
-            }
-            Self::Failure(message) => formatter.write_str(message),
-        }
-    }
-}
+pub(super) type WebSeedError = aria2_protocol::bittorrent::web_seed::WebSeedRequestError;
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
 ///
@@ -38,16 +21,14 @@ impl fmt::Display for WebSeedError {
 pub struct WebSeedClient {
     /// Base URL of the web-seed (e.g., `<http://example.com/files/>`).
     base_url: String,
-    /// Reusable reqwest HTTP client with connection pooling
-    client: reqwest::Client,
+    /// Protocol-owned Range exchange over the engine-configured HTTP client.
+    protocol_client: aria2_protocol::bittorrent::web_seed::WebSeedHttpClient,
     /// Pieces currently being requested (for concurrency control).
     /// Uses std::sync::Mutex because the lock is only held for short synchronous
     /// operations (insert/remove/check) and never across .await points.
     active_requests: Arc<std::sync::Mutex<HashSet<u32>>>,
     /// Statistics for this web seed
     stats: Arc<WebSeedStats>,
-    /// Inactivity timeout for response headers and each response-body read.
-    timeout: Duration,
 }
 
 impl WebSeedClient {
@@ -78,10 +59,14 @@ impl WebSeedClient {
 
         Ok(Self {
             base_url: base_url.to_string(),
-            client,
+            protocol_client: aria2_protocol::bittorrent::web_seed::WebSeedHttpClient::new(
+                base_url,
+                client,
+                timeout,
+                crate::constants::USER_AGENT,
+            ),
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats: Arc::new(WebSeedStats::new()),
-            timeout,
         })
     }
 
@@ -103,10 +88,14 @@ impl WebSeedClient {
 
         Ok(Self {
             base_url: base_url.to_string(),
-            client,
+            protocol_client: aria2_protocol::bittorrent::web_seed::WebSeedHttpClient::new(
+                base_url,
+                client,
+                timeout,
+                crate::constants::USER_AGENT,
+            ),
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
-            timeout,
         })
     }
 
@@ -118,10 +107,14 @@ impl WebSeedClient {
     ) -> Self {
         Self {
             base_url: base_url.to_string(),
-            client,
+            protocol_client: aria2_protocol::bittorrent::web_seed::WebSeedHttpClient::new(
+                base_url,
+                client,
+                timeout,
+                crate::constants::USER_AGENT,
+            ),
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
-            timeout,
         }
     }
 
@@ -271,74 +264,27 @@ impl WebSeedClient {
         if length == 0 {
             return Ok(0);
         }
-        let range_end = piece_offset.saturating_add(length - 1);
-        let range_header = format!("bytes={}-{}", piece_offset, range_end);
-
         debug!(
             piece_index,
             offset = piece_offset,
             length,
             url = self.base_url,
-            range = %range_header,
             "Web-seed HTTP Range request"
         );
-
-        let response = tokio::time::timeout(
-            self.timeout,
-            self.client
-                .get(&self.base_url)
-                .header("Range", &range_header)
-                .header("User-Agent", crate::constants::USER_AGENT)
-                .send(),
-        )
-        .await
-        .map_err(|_| {
-            WebSeedError::Failure(format!(
-                "Web-seed response headers timed out after {} seconds",
-                self.timeout.as_secs()
-            ))
-        })?
-        .map_err(|e| WebSeedError::Failure(format!("HTTP request failed: {}", e)))?;
-
-        let status = response.status().as_u16();
-        on_response_status(status);
-
-        // Accept 200 OK or 206 Partial Content
-        if status != 200 && status != 206 {
-            return Err(WebSeedError::HttpStatus(status));
-        }
-
-        let mut received = 0usize;
-        let mut stream = response.bytes_stream();
-        loop {
-            let next_chunk = tokio::time::timeout(self.timeout, stream.next())
-                .await
-                .map_err(|_| {
-                    WebSeedError::Failure(format!(
-                        "Web-seed response body stalled for {} seconds",
-                        self.timeout.as_secs()
-                    ))
-                })?;
-            let Some(chunk) = next_chunk else {
-                break;
-            };
-            let chunk = chunk.map_err(|e| {
-                WebSeedError::Failure(format!("Failed to read response body: {}", e))
-            })?;
-            if received.saturating_add(chunk.len()) > destination.len() {
-                return Err(WebSeedError::Failure(format!(
-                    "Web-seed response exceeded requested range: expected at most {length} bytes"
-                )));
-            }
-            if !chunk.is_empty()
-                && let Some(progress) = network_activity
-            {
-                progress.record_download_payload(chunk.len() as u64);
-            }
-            let next = received + chunk.len();
-            destination[received..next].copy_from_slice(&chunk);
-            received = next;
-        }
+        let received = self
+            .protocol_client
+            .download_range_into(
+                piece_index,
+                piece_offset,
+                destination,
+                on_response_status,
+                |chunk_length| {
+                    if let Some(progress) = network_activity {
+                        progress.record_download_payload(chunk_length as u64);
+                    }
+                },
+            )
+            .await?;
 
         // Record statistics
         self.stats.record_bytes(received as u64);

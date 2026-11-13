@@ -7,7 +7,7 @@ use super::request::UdpTrackerRequest;
 use super::{
     AnnounceResponse, ConnectionState, MAX_RETRIES, UdpAnnounceParams, UdpError, UdpTrackerClient,
 };
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
+use crate::bittorrent::tracker::udp_tracker_protocol::{
     ConnectResponse, UdpAction, UdpEvent, build_announce_request, build_connect_request,
     decode_response_header, parse_announce_response, parse_connect_response, parse_scrape_response,
 };
@@ -81,7 +81,7 @@ impl UdpTrackerClient {
 
                 if let Some(conn) = self.conn_cache.get(&host_key) {
                     if conn.updated_at.elapsed().as_secs()
-                        < aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_ID_TTL_SECS
+                        < crate::bittorrent::tracker::udp_tracker_protocol::CONNECTION_ID_TTL_SECS
                     {
                         if !req.scrape_info_hashes.is_empty() {
                             return self.send_scrape(&mut req, conn.id).await;
@@ -472,7 +472,7 @@ impl UdpTrackerClient {
             .iter()
             .filter(|(_, s)| {
                 s.updated_at.elapsed().as_secs()
-                    > aria2_protocol::bittorrent::tracker::udp_tracker_protocol::CONNECTION_ID_TTL_SECS
+                    > crate::bittorrent::tracker::udp_tracker_protocol::CONNECTION_ID_TTL_SECS
             })
             .map(|(&a, _)| a)
             .collect();

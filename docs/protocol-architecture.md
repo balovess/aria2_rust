@@ -329,6 +329,11 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    payload sync. Complete pieces pass their v1/v2 hash validator, are written
    and synced, then become live-complete and eligible for checkpoint publication
    through `WorkCommitter`.
+   The protocol crate's `bittorrent::web_seed::WebSeedHttpClient` constructs
+   BEP 17/19 byte-range requests, accepts the established 200/206 response
+   behavior, and bounds response-body reads. Core configures and injects the
+   HTTP client with its TLS and outbound-network policy, then owns URI fallback,
+   availability, statistics, and task-progress updates.
    Peer wire messages, TCP peer protocol, torrent-geometry and negotiated-
    capability validation, and per-peer protocol-session state use
    `aria2-protocol::bittorrent`;
@@ -369,13 +374,13 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    address-family-specific DHT capability bits after the DHT engines are
    started or joined, so later TCP and uTP handshakes advertise the active
    family capability.
-6. `TrackerAnnouncer` selects one tracker URL from `BtAnnounce`, resolves UDP
-   tracker addresses through the outbound policy, and calls the core UDP
-   client. Protocol `AnnounceList` manages tier order and failure rotation;
-   core `TrackerAnnouncer` manages task lifecycle and transport selection. The
-   UDP client sends CONNECT then ANNOUNCE/SCRAPE using the protocol crate's
-   packet codecs. Only the redundant UDP-specific manager and
-   duplicate synchronous protocol client were removed.
+6. `TrackerAnnouncer` selects one tracker URL from `BtAnnounce`; core resolves
+   UDP addresses and binds a socket under the outbound-network policy, then
+   passes that socket to the protocol `UdpTrackerClient`. Protocol owns the
+   BEP 15 CONNECT/ANNOUNCE/SCRAPE transaction state, connection-ID cache,
+   transaction matching, retries, and codecs. Protocol `AnnounceList` manages
+   tier order and failure rotation; core `TrackerAnnouncer` manages task
+   lifecycle, transport selection, and engine error classification.
    If a bencoded HTTP tracker response includes an `announce-list` field, the
    client treats it as an additional tracker extension and appends unseen
    tiers without replacing configured primary tiers; the actor's separate
@@ -766,6 +771,11 @@ Do not add pass-through engine clients around these public interfaces.
   `PeerState`, `PeerSessionResource`, and torrent-geometry/capability message
   validation. Core owns actor lifecycle, peer identity and statistics, peer
   selection/admission, upload policy, piece scheduling, and bad-peer feedback.
+- **Narrow** the BitTorrent WebSeed client: protocol owns HTTP Range request
+  construction, accepted status handling, body-size enforcement, and read
+  deadlines through `WebSeedHttpClient`. Core retains the configured reqwest
+  client and source-address/TLS policy, URI selection and fallback, health
+  state, statistics, and task progress callbacks.
 - **Narrow** BitTorrent metainfo responsibilities: the protocol crate owns
   parsing and pure bencode transformations, including `url-list` extraction,
   BEP 9 info-dictionary wrapping, and magnet WebSeed merging. Core retains

@@ -2,9 +2,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
-    AnnounceResponse, ScrapeResult, UdpEvent,
-};
+use crate::bittorrent::tracker::udp_tracker_protocol::{AnnounceResponse, UdpEvent};
+
+pub use crate::bittorrent::tracker::udp_tracker_protocol::ScrapeResult;
 
 #[derive(Debug, Clone, Copy)]
 pub struct UdpAnnounceParams<'a> {

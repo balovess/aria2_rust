@@ -361,6 +361,26 @@ behavior. An unlisted behavior has not been audited here.
   the selected outbound source address. A second announce test verifies one
   tracker announcer does not reuse a direct client for a later proxied tracker.
 
+## UDP tracker transaction ownership
+
+- **Protocol interface:** `aria2_protocol::bittorrent::tracker::udp_client::UdpTrackerClient`
+  owns BEP 15 CONNECT, ANNOUNCE, and SCRAPE transaction state, including
+  connection-ID reuse, transaction IDs, source/action validation, and retries.
+  It receives a caller-bound `tokio::net::UdpSocket`.
+- **Engine policy:** core retains tracker URL resolution through
+  `OutboundNetworkPolicy`, binds the socket to the selected address family and
+  local source, and maps protocol errors into tracker lifecycle outcomes. UDP
+  remains direct UDP and is not routed through HTTP proxy settings.
+- **Compatibility impact:** the existing core `UdpTrackerClient` constructors,
+  `announce` and `scrape` methods remain as policy adapters. Retry count,
+  initial/retry response deadlines, 60-second connection-ID lifetime, response
+  validation, and tracker error classification are preserved.
+- **Verification:** protocol UDP client loopback tests cover transaction
+  matching, unexpected-source rejection, malformed/action-mismatched packets,
+  retry deadlines, connection-ID expiry, ANNOUNCE, and SCRAPE. Core tests cover
+  source-address/address-family binding and URL-to-policy resolution. External
+  tracker interoperability remains unverified.
+
 ## BitTorrent DHT process configuration
 
 - **Behavior:** the shared IPv4/IPv6 DHT engines take their listen, bootstrap,
@@ -492,6 +512,24 @@ behavior. An unlisted behavior has not been audited here.
   incoming TCP/uTP handshakes choose the bit for the normalized remote address
   family. Private torrents keep both bits disabled. A core loopback regression
   test verifies that the advertised bit changes after route registration.
+
+## BitTorrent WebSeed HTTP exchange
+
+- **Protocol interface:** `aria2_protocol::bittorrent::web_seed::WebSeedHttpClient`
+  builds byte-range requests over a caller-configured `reqwest::Client`, accepts
+  HTTP 200 and 206, enforces the requested body-size ceiling, and bounds waits
+  for response headers and each body chunk. The core reports 404 availability
+  changes as soon as response headers arrive and counts received chunks toward
+  task network activity.
+- **Compatibility impact:** preserves the existing `Range` and `User-Agent`
+  headers, the 200/206 acceptance rule, per-read timeout behavior, short-body
+  return behavior, oversized-body rejection, and URI fallback policy. No
+  CLI/RPC/C API or wire contract change is intended.
+- **Verification:** protocol loopback tests cover range/header construction,
+  partial and full-content responses, status reporting, and oversized bodies.
+  Existing core WebSeed tests cover source-address selection, URI fallback,
+  timeout/cancellation, statistics, and task integration. Remote WebSeed
+  interoperability remains unverified.
 
 ## SFTP connection and transport options
 
