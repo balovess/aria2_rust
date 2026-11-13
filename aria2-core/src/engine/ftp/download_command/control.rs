@@ -75,11 +75,13 @@ impl RawFtpControl {
     /// outbound-address policy. PASV's advertised address is intentionally
     /// ignored; the control peer address is used for NAT and bounce protection.
     pub(super) async fn enter_passive_mode(&mut self) -> Result<tokio::net::TcpStream> {
-        let port = self
-            .reader
-            .passive_data_port(command_timeout())
-            .await
-            .map_err(map_session_error)?;
+        let timeout = command_timeout();
+        let port = if self.connection.peer_addr.is_ipv6() {
+            self.reader.passive_data_port(timeout).await
+        } else {
+            self.reader.pasv_data_port(timeout).await
+        }
+        .map_err(map_session_error)?;
         let data_addr = SocketAddr::new(self.connection.peer_addr.ip(), port);
         tokio::time::timeout(
             Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),

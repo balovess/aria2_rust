@@ -205,9 +205,12 @@ retry admission.
    directory with PWD/CWD, and queries optional MDTM and SIZE metadata. Before
    RETR, core reconciles the remote size with the local file, continuation
    state, and checkpoint; dry-run and already-complete targets can finish here.
-5. The protocol session negotiates EPSV/PASV or EPRT/PORT, applies REST when
-   resuming, and sends RETR. Core establishes the data socket under its outbound
-   policy and asks the FTPS client to upgrade data TLS when configured. Active-mode listening and acceptance use the shared
+5. Core chooses PASV for an IPv4 control connection and EPSV for IPv6, matching
+   aria2's FTP negotiation path. The protocol session owns each command and
+   response and supports EPSV-to-PASV fallback; it negotiates EPRT/PORT for
+   active mode, applies REST when resuming, and sends RETR. Core establishes the
+   data socket under its outbound policy and asks the FTPS client to upgrade
+   data TLS when configured. Active-mode listening and acceptance use the shared
    `FtpActiveDataListener`; the core still controls bind address and advertised
    endpoint selection.
 6. `receive_data_transfer` passes source chunks through the core
@@ -715,8 +718,9 @@ Do not add pass-through engine clients around these public interfaces.
 - **Narrow** FTP duplication by sharing injected control-stream line I/O and
   active data listener acceptance between the standalone protocol client and
   task engine. PASV/EPSV response syntax has one parser in the protocol crate;
-  callers retain their command-status handling, EPSV fallback, endpoint trust,
-  and connection policy. The core retains address binding, proxy selection,
+  core selects PASV for IPv4 or EPSV for IPv6 based on the established control
+  peer family; the session provides explicit command paths and IPv6 fallback.
+  Callers retain endpoint trust and connection policy. Core retains address binding, proxy selection,
   data-socket policy, and task lifecycle. FTPS TLS and RFC 4217 negotiation
   live in the protocol crate. The standalone client remains a distinct
   public client rather than a forwarding stage in the engine route.

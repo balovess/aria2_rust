@@ -655,8 +655,11 @@ behavior. An unlisted behavior has not been audited here.
 - **Compatibility intent:** this is an internal relocation. FTP command order,
   FTP control response acceptance, passive-address policy, CONNECT
   authentication timing, retries, and output behavior are intended to remain
-  unchanged. FTP HTTP CONNECT skips informational 1xx responses, matching the
-  existing HTTP CONNECT path.
+  unchanged. Passive negotiation matches original aria2: IPv4 uses PASV, IPv6
+  tries EPSV and falls back to PASV after a server response that does not yield
+  an EPSV port. EPSV transport/read errors propagate without sending a second
+  command on a possibly desynchronized control stream. FTP HTTP CONNECT skips
+  informational 1xx responses, matching the existing HTTP CONNECT path.
 - **Response bound:** standalone `FtpConnection` and injected
   `FtpControlSession` now share the original aria2 64 KiB maximum FTP response
   size. Bounded reads enforce the cap before appending an oversized line, so a
@@ -664,8 +667,11 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol-layer FTP tests (19), core FTP tests (72), FTP
   download end-to-end tests (34), FTP proxy tests (2), and the legacy FTP
   integration tests (13) pass. A mock control stream verifies the injected
-  session command sequence; an explicit FTPS mock verifies TLS on both control
-  and data channels with certificate checking disabled in that local test.
+  session command sequence; protocol tests cover EPSV response fallback and
+  propagation of a closed control stream; a core IPv4 loopback verifies that
+  the command is PASV without an EPSV probe. An explicit FTPS mock verifies TLS
+  on both control and data channels with certificate checking disabled in that
+  local test.
   Windows test runs set `TEMP` and `TMP` to the writable
   `target/ftp-test-tmp` directory; the default OS temp directory does not allow
   the required control-file replacement in this sandbox. `cargo check -p

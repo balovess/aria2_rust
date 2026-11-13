@@ -249,15 +249,21 @@ where
         &mut self,
         timeout: Duration,
     ) -> Result<u16, FtpControlSessionError> {
-        if let Some(port) = self
-            .command("EPSV", timeout)
-            .await
-            .ok()
-            .filter(|response| response.code == 229)
-            .and_then(|response| parse_epsv_response(&response.message))
+        let response = self.command("EPSV", timeout).await?;
+        if response.code == 229
+            && let Some(port) = parse_epsv_response(&response.message)
         {
             return Ok(port);
         }
+
+        self.pasv_data_port(timeout).await
+    }
+
+    /// Request a PASV data port from the server.
+    pub async fn pasv_data_port(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<u16, FtpControlSessionError> {
         let response = self.command("PASV", timeout).await?;
         if response.code != 227 {
             return Err(FtpControlSessionError::Rejected {
@@ -533,6 +539,61 @@ mod tests {
         assert_eq!(session.passive_data_port(timeout).await.unwrap(), 50001);
         assert!(session.set_restart_offset(8, timeout).await.unwrap());
         session.retrieve("file.bin", timeout).await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn falls_back_from_epsv_response_to_pasv() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let server_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut server);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), "EPSV");
+            reader
+                .get_mut()
+                .write_all(b"500 EPSV unsupported\r\n")
+                .await
+                .unwrap();
+
+            command.clear();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), "PASV");
+            reader
+                .get_mut()
+                .write_all(b"227 Entering Passive Mode (127,0,0,1,195,80)\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut session = FtpControlSession::new(client);
+        assert_eq!(
+            session
+                .passive_data_port(Duration::from_secs(1))
+                .await
+                .unwrap(),
+            50000
+        );
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn propagates_epsv_transport_errors_without_sending_pasv() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let server_task = tokio::spawn(async move {
+            let mut command = String::new();
+            BufReader::new(&mut server)
+                .read_line(&mut command)
+                .await
+                .unwrap();
+            assert_eq!(command.trim_end(), "EPSV");
+        });
+
+        let mut session = FtpControlSession::new(client);
+        assert!(matches!(
+            session.passive_data_port(Duration::from_secs(1)).await,
+            Err(FtpControlSessionError::IncompleteResponse)
+        ));
         server_task.await.unwrap();
     }
 }
