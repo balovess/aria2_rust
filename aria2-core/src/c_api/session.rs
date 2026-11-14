@@ -4,7 +4,7 @@ impl Aria2RustSession {
     pub(super) fn new(raw_options: Vec<(String, String)>) -> std::result::Result<Self, String> {
         let runtime = Runtime::new().map_err(|error| format!("runtime init failed: {error}"))?;
         let (config, keep_running) = runtime.block_on(async {
-            let mut config = ConfigManager::new();
+            let mut config = ConfigManager::new_without_config();
             let mut keep_running = false;
             for (name, value) in raw_options {
                 if name == "keep-running" {

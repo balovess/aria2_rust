@@ -17,6 +17,7 @@ use aria2_protocol::ftp::tls::FtpDataStream;
 use super::control::RawFtpControl;
 use super::execution::FtpAttemptError;
 use super::types::FtpDownloadCommand;
+use crate::ftp::connection_pool::ControlSessionKey;
 
 impl FtpDownloadCommand {
     pub(super) async fn receive_data_transfer(
@@ -27,6 +28,7 @@ impl FtpDownloadCommand {
         in_memory_download: bool,
         remote_modified_time: Option<SystemTime>,
         write_offset: u64,
+        reuse_key: Option<ControlSessionKey>,
     ) -> std::result::Result<(), FtpAttemptError> {
         // Step 11: Select a disk or memory writer, then apply optional rate
         // limiting. The memory writer is the FTP/SFTP equivalent of aria2's
@@ -299,12 +301,13 @@ impl FtpDownloadCommand {
         }
 
         // Read transfer completion response from control channel
-        ctrl.read_transfer_complete().await?;
+        let transfer_synchronized = ctrl.read_transfer_complete().await?;
 
         self.complete_checkpoint().await;
 
         // Disconnect gracefully
-        ctrl.quit().await.ok();
+        self.release_control_connection(ctrl, transfer_synchronized.then_some(reuse_key).flatten())
+            .await;
 
         // Calculate final statistics
         let final_speed = {

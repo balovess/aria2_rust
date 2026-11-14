@@ -9,7 +9,7 @@ use tracing::debug;
 
 use super::control_io::{
     BoundedControlReadError, FtpControlReadError, FtpControlWriteError, MAX_RESPONSE_BYTES,
-    read_control_line_bounded, write_control_command,
+    command_for_log, read_control_line_bounded, write_control_command,
 };
 use super::parsing::{
     cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
@@ -107,7 +107,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     pub async fn send_command(&mut self, command: &str) -> Result<(), FtpControlSessionError> {
-        debug!(command = %command.trim(), "FTP command");
+        debug!(command = %command_for_log(command), "FTP command");
         write_control_command(self.get_mut(), command)
             .await
             .map_err(FtpControlSessionError::Write)

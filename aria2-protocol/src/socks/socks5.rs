@@ -2,7 +2,7 @@ use super::SocksConnector;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 
-/// Core compatibility wrapper for the protocol crate's SOCKS5 handshake.
+/// A SOCKS5 connector configured with optional username/password auth.
 pub struct Socks5Connector {
     pub(super) username: Option<String>,
     pub(super) password: Option<String>,
@@ -23,7 +23,7 @@ impl Socks5Connector {
 
 impl SocksConnector for Socks5Connector {
     fn connect<S: Read + Write>(&self, stream: S, target: &SocketAddr) -> Result<S, String> {
-        aria2_protocol::socks::connect_socks5(
+        super::connect_socks5(
             stream,
             target,
             self.username.as_deref(),

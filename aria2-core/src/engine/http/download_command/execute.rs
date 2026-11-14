@@ -66,6 +66,11 @@ impl DownloadCommand {
             .or(head_resp.as_ref())
             .map(|prepared| prepared.effective_uri.clone())
             .unwrap_or_else(|| uri.to_owned());
+        let mut origin_sensitive_headers_allowed = prepared_get
+            .as_ref()
+            .or(head_resp.as_ref())
+            .map(|prepared| prepared.origin_auth_allowed)
+            .unwrap_or(true);
 
         // An explicit output name is authoritative. For an inferred HTTP
         // name, the first successful response is the metadata seam at which
@@ -147,6 +152,10 @@ impl DownloadCommand {
 
         let mut supports_range = false;
         let mut probed_http_version = None;
+        let mut range_auth_factory = prepared_get
+            .as_ref()
+            .or(head_resp.as_ref())
+            .map(|prepared| Arc::clone(&prepared.auth_factory));
         let metadata_allows_probe = response_for_metadata
             .map(|response| response.status().is_success())
             .unwrap_or(known_total_length > 0);
@@ -176,8 +185,13 @@ impl DownloadCommand {
             };
             let prober =
                 HttpSegmentDownloader::new_with_policy(&self.client, self.request_policy.clone())
-                    .with_cookie_helper(cookie_helper)
-                    .with_auth_options(auth_options, options.netrc_path.clone());
+                    .with_cookie_helper(cookie_helper);
+            let prober = if let Some(auth_factory) = &range_auth_factory {
+                prober.with_shared_auth_options(auth_options, Arc::clone(auth_factory))
+            } else {
+                prober.with_auth_options(auth_options, options.netrc_path.clone())
+            }
+            .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
             let probe_retry_policy =
                 RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
             let probe = {
@@ -191,7 +205,9 @@ impl DownloadCommand {
                 };
                 run_single_work_item(&mut work).await?
             };
+            range_auth_factory = Some(prober.shared_auth_factory());
             supports_range = probe.supports_range;
+            origin_sensitive_headers_allowed &= probe.origin_sensitive_headers_allowed;
             if probe.total_length > 0 {
                 total_length = probe.total_length;
             }
@@ -525,6 +541,8 @@ impl DownloadCommand {
                     proxy_user,
                     proxy_passwd,
                 };
+                let fallback_auth_factory = range_auth_factory.clone();
+                let fallback_auth_options = auth_options.clone();
                 let progress_arc = Arc::clone(&self.progress);
                 let mut concurrent_downloader = ConcurrentDownloader::new(
                     Arc::clone(&self.client),
@@ -541,7 +559,12 @@ impl DownloadCommand {
                     self.global_limiter.clone(),
                 )
                 .with_range_clients(Arc::clone(&self.range_clients))
+                .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed)
                 .with_initial_http_version(&effective_uri, probed_http_version);
+                if let Some(auth_factory) = range_auth_factory.as_ref() {
+                    concurrent_downloader =
+                        concurrent_downloader.with_shared_auth_factory(Arc::clone(auth_factory));
+                }
                 match concurrent_downloader.execute_with_retry(
                     uri,
                     &effective_uri,
@@ -568,7 +591,14 @@ impl DownloadCommand {
                         )
                         .with_outbound_network_policy(Arc::clone(
                             &self.outbound_network_policy,
-                        ));
+                        ))
+                        .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
+                        if let Some(auth_factory) = fallback_auth_factory {
+                            sequential_downloader = sequential_downloader.with_shared_auth_options(
+                                auth_factory,
+                                fallback_auth_options,
+                            );
+                        }
                         let result = sequential_downloader.execute_with_gaps_with_retry(
                             uri,
                             total_length,
@@ -593,7 +623,8 @@ impl DownloadCommand {
                 Arc::clone(&self.progress),
                 self.global_limiter.clone(),
             )
-            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
+            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy))
+            .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
             if let Some(prepared) = prepared_get.take() {
                 sequential_downloader = sequential_downloader.with_prepared_response(prepared);
             }

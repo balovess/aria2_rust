@@ -19,9 +19,7 @@ pub use types::{FtpActiveDataListener, FtpConnection, FtpOptions, FtpResponse, F
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
-use self::control_io::{
-    BoundedControlReadError, FtpControlWriteError, MAX_RESPONSE_BYTES, read_control_line_bounded,
-};
+use self::control_io::{FtpControlReadError, FtpControlWriteError};
 
 impl FtpConnection {
     /// Establish a control connection and consume the server welcome response.
@@ -64,7 +62,7 @@ impl FtpConnection {
     }
 
     async fn send_command(&mut self, command: &str) -> Result<(), String> {
-        debug!("FTP command: {}", command.trim());
+        debug!("FTP command: {}", control_io::command_for_log(command));
         control_io::write_control_command(&mut self.stream, command)
             .await
             .map_err(|error| match error {
@@ -83,71 +81,29 @@ impl FtpConnection {
 
     /// Read one FTP response, including multiline responses.
     pub async fn read_response(&mut self) -> Result<FtpResponse, String> {
-        let mut line = String::new();
-        let mut code: Option<u16> = None;
-        let mut message = String::new();
-        let mut is_multiline = false;
-        let mut total_bytes = 0;
-
-        loop {
-            line.clear();
-            let remaining = MAX_RESPONSE_BYTES.saturating_sub(total_bytes);
-            let bytes_read = read_control_line_bounded(
-                &mut self.stream,
-                &mut line,
-                self.options.read_timeout,
-                remaining,
-            )
+        let response = session::read_response(&mut self.stream, self.options.read_timeout)
             .await
-            .map_err(|error| match error {
-                BoundedControlReadError::Timeout => "FTP read timeout".to_string(),
-                BoundedControlReadError::Io(error) => {
-                    format!("Failed to read FTP response: {}", error)
-                }
-                BoundedControlReadError::TooLarge(bytes) => format!(
-                    "Max FTP recv buffer reached. length={}",
-                    total_bytes + bytes
-                ),
-            })?;
-
-            if bytes_read == 0 {
-                break;
-            }
-            total_bytes += bytes_read;
-
-            let trimmed = line.trim_end();
-            if trimmed.len() < 4 {
-                continue;
-            }
-
-            let response_code: u16 = trimmed[..3].parse().unwrap_or(0);
-
-            if code.is_none() {
-                code = Some(response_code);
-            }
-
-            let separator = trimmed.as_bytes()[3];
-            if separator == b'-' && !is_multiline {
-                is_multiline = true;
-                message.push_str(&trimmed[4..]);
-                message.push('\n');
-            } else if separator == b' '
-                || (is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))))
-            {
-                message.push_str(&trimmed[4..]);
-                break;
-            } else if is_multiline {
-                message.push_str(&trimmed[4..]);
-                message.push('\n');
-            }
-        }
-
-        let code_val = code.unwrap_or(0);
-        debug!("FTP response: {} {}", code_val, message.trim());
+            .map_err(standalone_response_error)?;
         Ok(FtpResponse {
-            code: code_val,
-            message,
+            code: response.code,
+            message: response.message,
         })
+    }
+}
+
+fn standalone_response_error(error: FtpControlSessionError) -> String {
+    match error {
+        FtpControlSessionError::ReadTimeout(_)
+        | FtpControlSessionError::Read(FtpControlReadError::Timeout) => {
+            "FTP read timeout".to_string()
+        }
+        FtpControlSessionError::Read(FtpControlReadError::Io(error)) => {
+            format!("Failed to read FTP response: {error}")
+        }
+        FtpControlSessionError::ResponseTooLarge(bytes) => {
+            format!("Max FTP recv buffer reached. length={bytes}")
+        }
+        error => error.to_string(),
     }
 }
 
@@ -165,7 +121,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut response = b"220 ".to_vec();
-            response.extend(std::iter::repeat_n(b'x', MAX_RESPONSE_BYTES));
+            response.extend(std::iter::repeat_n(b'x', control_io::MAX_RESPONSE_BYTES));
             response.extend_from_slice(b"\r\n");
             stream.write_all(&response).await.unwrap();
         });
@@ -179,6 +135,27 @@ mod tests {
 
         let error = connection.read_response().await.unwrap_err();
         assert!(error.starts_with("Max FTP recv buffer reached. length="));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn standalone_connection_rejects_malformed_response_instead_of_returning_code_zero() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"bad response\r\n").await.unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut connection = FtpConnection {
+            stream: tokio::io::BufReader::new(stream),
+            options: FtpOptions::default(),
+            host: "localhost".to_string(),
+            port: address.port(),
+        };
+
+        let error = connection.read_response().await.unwrap_err();
+        assert_eq!(error, "bad response");
         server.await.unwrap();
     }
 

@@ -93,7 +93,7 @@ pub(super) async fn run_deadline_maintenance(
                     if let Some(context) = request_context
                         && group.recover().options().async_dns
                     {
-                        let mut dns = ctx.dns_cache.lock().await;
+                        let dns = ctx.dns_cache.lock().await;
                         dns.mark_bad_context(&context);
                         if !dns.has_good_address(&context.endpoint) {
                             dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());

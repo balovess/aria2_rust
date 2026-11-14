@@ -132,7 +132,11 @@ impl MagnetDownloadCommand {
             .timeout(Duration::from_secs(request_timeout))
             .connect_timeout(Duration::from_secs(connect_timeout))
             .gzip(false)
-            .user_agent(crate::constants::USER_AGENT)
+            .user_agent(
+                options
+                    .http_user_agent()
+                    .unwrap_or(crate::constants::USER_AGENT),
+            )
             .redirect(reqwest::redirect::Policy::limited(5));
         if let Some(address) = policy.addresses().into_iter().next() {
             builder = builder.local_address(address);

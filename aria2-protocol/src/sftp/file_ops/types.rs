@@ -117,6 +117,11 @@ impl OpenFlags {
         Self(SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC)
     }
 
+    /// Open for writing, creating the file if missing without truncating it.
+    pub fn write_create_no_truncate() -> Self {
+        Self(SSH_FXF_WRITE | SSH_FXF_CREAT)
+    }
+
     /// Open for reading and writing.
     pub fn read_write() -> Self {
         Self(SSH_FXF_READ | SSH_FXF_WRITE)
@@ -252,18 +257,23 @@ impl FileAttributes {
     }
 
     /// Convert back to the wire-format `SftpFileAttrs` for SETSTAT operations.
+    ///
+    /// Zero values are treated as unknown and omitted from the wire flags. The
+    /// UID/GID and access/modification time fields are paired on the wire, so
+    /// the whole pair is omitted if either value is zero. Use
+    /// [`FileAttributePatch`] to set an explicit zero or a pair containing one.
     pub fn to_wire(&self) -> SftpFileAttrs {
         let mut flags = 0;
         if self.size != 0 {
             flags |= SSH_FILEXFER_ATTR_SIZE;
         }
-        if self.uid != 0 || self.gid != 0 {
+        if self.uid != 0 && self.gid != 0 {
             flags |= SSH_FILEXFER_ATTR_UIDGID;
         }
         if self.permissions != 0 {
             flags |= SSH_FILEXFER_ATTR_PERMISSIONS;
         }
-        if self.atime != 0 || self.mtime != 0 {
+        if self.atime != 0 && self.mtime != 0 {
             flags |= SSH_FILEXFER_ATTR_ACMODTIME;
         }
         SftpFileAttrs {
@@ -274,6 +284,69 @@ impl FileAttributes {
             permissions: Some(self.permissions),
             atime: Some(self.atime),
             mtime: Some(self.mtime),
+        }
+    }
+}
+
+/// User and group IDs, which SFTP v3 sets together using one wire flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileOwner {
+    /// Owner user ID.
+    pub uid: u32,
+    /// Owner group ID.
+    pub gid: u32,
+}
+
+/// Access and modification times, which SFTP v3 sets together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTimestamps {
+    /// Last access time in Unix epoch seconds.
+    pub atime: u32,
+    /// Last modification time in Unix epoch seconds.
+    pub mtime: u32,
+}
+
+/// Attributes to set on a remote file.
+///
+/// `Some(0)` explicitly sets a field to zero; `None` leaves it unchanged.
+/// Use this patch type when zero is a meaningful value, such as truncating a
+/// file to zero bytes or setting permissions to `0000`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileAttributePatch {
+    /// Set the file size, including zero to truncate the file.
+    pub size: Option<u64>,
+    /// Set both owner IDs, including zero values.
+    pub owner: Option<FileOwner>,
+    /// Set POSIX permission bits, including zero.
+    pub permissions: Option<u32>,
+    /// Set both access and modification times, including zero values.
+    pub timestamps: Option<FileTimestamps>,
+}
+
+impl FileAttributePatch {
+    /// Convert the selected fields to the SFTP v3 attribute representation.
+    pub fn to_wire(&self) -> SftpFileAttrs {
+        let mut flags = 0;
+        if self.size.is_some() {
+            flags |= SSH_FILEXFER_ATTR_SIZE;
+        }
+        if self.owner.is_some() {
+            flags |= SSH_FILEXFER_ATTR_UIDGID;
+        }
+        if self.permissions.is_some() {
+            flags |= SSH_FILEXFER_ATTR_PERMISSIONS;
+        }
+        if self.timestamps.is_some() {
+            flags |= SSH_FILEXFER_ATTR_ACMODTIME;
+        }
+        SftpFileAttrs {
+            flags,
+            size: self.size,
+            uid: self.owner.map(|owner| owner.uid),
+            gid: self.owner.map(|owner| owner.gid),
+            permissions: self.permissions,
+            atime: self.timestamps.map(|timestamps| timestamps.atime),
+            mtime: self.timestamps.map(|timestamps| timestamps.mtime),
         }
     }
 }

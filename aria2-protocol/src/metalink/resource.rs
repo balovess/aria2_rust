@@ -46,7 +46,9 @@ impl ResourceType {
             Self::Http
         } else if lower.starts_with("https://") {
             Self::Https
-        } else if lower.starts_with("ftp://") {
+        } else if lower.starts_with("ftp://") || lower.starts_with("sftp://") {
+            // Preserve the public enum shape: FTP-family Metalink resources
+            // share `Ftp`, while the original URI scheme selects the adapter.
             Self::Ftp
         } else if lower.starts_with("magnet:") || lower.ends_with(".torrent") {
             Self::BitTorrent
@@ -58,7 +60,7 @@ impl ResourceType {
     /// Classify from a V3 `type` attribute value.
     ///
     /// In Metalink V3, each `<url>` element has a `type` attribute
-    /// ("http", "https", "ftp", "bittorrent"). Unrecognized types are
+    /// ("http", "https", "ftp", "sftp", "bittorrent"). Unrecognized types are
     /// classified as `NotSupported`, matching C++ `MetalinkParserController::setTypeOfResource()`.
     pub fn from_v3_type(type_attr: &str) -> Self {
         match type_attr.to_lowercase().as_str() {
@@ -73,7 +75,8 @@ impl ResourceType {
     /// Whether this resource type is supported for downloading.
     ///
     /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()` — only
-    /// HTTP, HTTPS, FTP, and BitTorrent are kept; the rest are dropped.
+    /// HTTP, HTTPS, FTP-family (including SFTP), and BitTorrent are kept;
+    /// the rest are dropped.
     pub fn is_supported(&self) -> bool {
         matches!(
             self,
@@ -81,7 +84,7 @@ impl ResourceType {
         )
     }
 
-    /// Whether this is a non-P2P resource type (HTTP, HTTPS, FTP).
+    /// Whether this is a non-P2P resource type (HTTP, HTTPS, FTP, or SFTP).
     ///
     /// Mirrors C++ `AccumulateNonP2PUri` which only collects HTTP/HTTPS/FTP
     /// URLs for the URI list (BitTorrent goes through a separate dependency
@@ -115,6 +118,10 @@ mod tests {
             ResourceType::Ftp
         );
         assert_eq!(
+            ResourceType::from_url("sftp://example.com/file"),
+            ResourceType::Ftp
+        );
+        assert_eq!(
             ResourceType::from_url("magnet:?xt=urn:btih:abc"),
             ResourceType::BitTorrent
         );
@@ -133,6 +140,7 @@ mod tests {
         assert_eq!(ResourceType::from_v3_type("http"), ResourceType::Http);
         assert_eq!(ResourceType::from_v3_type("HTTPS"), ResourceType::Https);
         assert_eq!(ResourceType::from_v3_type("ftp"), ResourceType::Ftp);
+        assert_eq!(ResourceType::from_v3_type("sftp"), ResourceType::Ftp);
         assert_eq!(
             ResourceType::from_v3_type("bittorrent"),
             ResourceType::BitTorrent

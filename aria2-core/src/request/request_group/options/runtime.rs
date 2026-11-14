@@ -104,6 +104,21 @@ impl DownloadOptions {
         result
     }
 
+    /// Return the effective User-Agent for HTTP protocol clients that do not
+    /// use [`crate::http::HttpRequestPolicy`]. An explicit `header` entry takes precedence
+    /// over the dedicated `user-agent` option, matching [`Self::parsed_headers`].
+    pub fn http_user_agent(&self) -> Option<&str> {
+        self.header
+            .iter()
+            .filter_map(|raw| raw.split_once(':'))
+            .find_map(|(name, value)| {
+                name.trim()
+                    .eq_ignore_ascii_case("User-Agent")
+                    .then(|| value.trim())
+            })
+            .or(self.user_agent.as_deref())
+    }
+
     /// Build the internal HTTP request policy shared by every HTTP request
     /// path. The option names and defaults remain exposed through the aria2
     /// compatible configuration/RPC surfaces.

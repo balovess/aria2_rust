@@ -1,10 +1,12 @@
 //! Incremental HTTP/1.x response-header parsing for protocol transports.
 
 mod error;
+mod io;
 mod processor;
 mod types;
 
 pub use error::HttpHeaderError;
+pub use io::{HttpResponseHeadReadError, read_response_head};
 pub use processor::HttpHeaderProcessor;
 pub use types::{HttpHeaderParseState, HttpResponseHead};
 

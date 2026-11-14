@@ -2,17 +2,18 @@
 //!
 //! Protocol implementations for the aria2-rust download utility.
 //!
-//! Provides client-side protocol handlers for HTTP/HTTPS, FTP, SFTP, BitTorrent,
-//! and Metalink. Optional protocol modules are feature-gated to allow minimal
-//! builds when only specific protocols are needed.
+//! Provides reusable protocol implementations for HTTP/HTTPS, FTP, SFTP,
+//! BitTorrent, and Metalink. HTTP, FTP, SOCKS, and identity modules are always
+//! available; BitTorrent, Metalink, and SFTP are enabled by their respective
+//! crate features.
 //!
 //! ## Modules
 //!
-//! - **[`http`]** — HTTP/HTTPS client built on reqwest/hyper: request construction,
-//!   Range header handling, BASIC/Digest authentication, proxy support (HTTP/SOCKS5),
-//!   gzip/deflate decompression, Cookie management, chunked transfer decoding,
-//!   incremental HTTP/1.x response-header parsing, custom headers, and redirect
-//!   following.
+//! - **[`http`]** — HTTP/HTTPS client built on reqwest/hyper, plus reusable request,
+//!   response, authentication, proxy-configuration, CONNECT, cookie, content
+//!   decoding, and header-parsing helpers. The standalone `HttpClient` does not
+//!   configure proxies; the download engine composes proxy and network policy
+//!   around its task-facing client.
 //!
 //! - **[`ftp`]** — FTP client: control connection (USER/PASS/CWD/SIZE/PASV/EPSV),
 //!   passive mode data transfer, anonymous and authenticated login, REST-based resume.

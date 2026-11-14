@@ -97,6 +97,67 @@ async fn test_process_one_needs_connection() {
 }
 
 #[tokio::test]
+async fn cancel_pending_requests_discards_transactions_but_keeps_connection_cache() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind local UDP tracker");
+    let tracker_addr = tracker.local_addr().unwrap();
+    let cached_addr = "127.0.0.1:1".parse().unwrap();
+    let mut client = new_direct_client(0).await.unwrap();
+    client.conn_cache.insert(
+        cached_addr,
+        ConnectionState {
+            id: 0x1234,
+            updated_at: Instant::now(),
+        },
+    );
+
+    client.add_announce(
+        &tracker_addr,
+        &[0x12; 20],
+        &[0x34; 20],
+        0,
+        1,
+        0,
+        UdpEvent::Started,
+        50,
+        6881,
+    );
+    client.add_announce(
+        &tracker_addr,
+        &[0x56; 20],
+        &[0x78; 20],
+        0,
+        1,
+        0,
+        UdpEvent::Started,
+        50,
+        6881,
+    );
+
+    assert!(client.process_one().await);
+    assert!(!client.process_one().await);
+    let mut packet = [0u8; 64];
+    let (length, _) = tokio::time::timeout(Duration::from_secs(1), tracker.recv_from(&mut packet))
+        .await
+        .expect("client should send its CONNECT request")
+        .expect("receive CONNECT request");
+    assert_eq!(length, 16);
+    assert_eq!(client.inflight.len(), 1);
+    assert_eq!(client.waiting_for_conn.len(), 2);
+    assert_eq!(client.txn_map.len(), 1);
+
+    client.cancel_pending_requests();
+
+    assert!(client.pending.is_empty());
+    assert!(client.inflight.is_empty());
+    assert!(client.waiting_for_conn.is_empty());
+    assert!(client.txn_map.is_empty());
+    assert!(client.conn_cache.contains_key(&cached_addr));
+    assert!(!client.process_one().await);
+}
+
+#[tokio::test]
 async fn test_no_pending_returns_false_when_empty() {
     let mut client = new_direct_client(0).await.unwrap();
     assert!(client.pending.is_empty());
@@ -550,6 +611,34 @@ async fn test_handle_scrape_response_multi_hash() {
     assert_eq!(scrape_results.len(), 2);
     assert_eq!(scrape_results[0].seeders, 100);
     assert_eq!(scrape_results[1].seeders, 5);
+}
+
+#[tokio::test]
+async fn scrape_response_with_wrong_hash_count_is_malformed() {
+    let mut client = new_direct_client(0).await.unwrap();
+    let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
+    let hashes = [[0x22u8; 20], [0x33u8; 20]];
+    let txn_id = client.next_txn();
+    let mut request =
+        UdpTrackerRequest::new(addr, hashes[0], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+    request.txn_id = txn_id;
+    request.dispatched_at = Some(Instant::now());
+    request.scrape_info_hashes = hashes.to_vec();
+    client.inflight.push_back(request);
+    client.txn_map.insert(txn_id, 0);
+
+    let mut response = vec![0u8; 20];
+    response[0..4].copy_from_slice(&(UdpAction::Scrape as i32).to_be_bytes());
+    response[4..8].copy_from_slice(&txn_id.to_be_bytes());
+    response[8..12].copy_from_slice(&100u32.to_be_bytes());
+    response[12..16].copy_from_slice(&50u32.to_be_bytes());
+    response[16..20].copy_from_slice(&200u32.to_be_bytes());
+
+    client.handle_response(&response, &addr).await;
+
+    assert_eq!(client.pending.len(), 1);
+    assert!(client.pending[0].scrape_results.is_none());
+    assert_eq!(client.pending[0].error, Some(UdpError::MalformedResponse));
 }
 
 #[tokio::test]

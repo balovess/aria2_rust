@@ -69,14 +69,19 @@ impl MetalinkDownloadCommand {
 
         let mut last_error = None;
 
-        for url_entry in &sorted_urls_owned {
+        for (source_index, url_entry) in sorted_urls_owned.iter().enumerate() {
             debug!(
                 "Trying mirror [priority={}] : {}",
                 url_entry.priority, url_entry.url
             );
 
             match self
-                .download_payload_with_retry(&resolved_output_path, &url_entry.url, expected_size)
+                .download_payload_with_retry(
+                    &resolved_output_path,
+                    &url_entry.url,
+                    expected_size,
+                    source_index,
+                )
                 .await
             {
                 Ok(payload) => {
@@ -140,7 +145,15 @@ impl MetalinkDownloadCommand {
                         continue;
                     }
 
-                    self.complete_checkpoint().await;
+                    if let Err(error) = crate::filesystem::durability::replace_file(
+                        &payload.path,
+                        &resolved_output_path,
+                    )
+                    .await
+                    {
+                        global_registry().release(&resolved_output_path).await;
+                        return Err(error);
+                    }
                     self.completed_bytes = payload.completed_length;
 
                     {
@@ -178,8 +191,17 @@ impl MetalinkDownloadCommand {
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
                     ) || self.should_stop_after_not_found(&e)
                     {
+                        let stage_path = self.stage_path(&resolved_output_path, source_index);
+                        self.discard_checkpoint(&stage_path).await;
                         global_registry().release(&resolved_output_path).await;
                         return Err(e);
+                    }
+                    if matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                    ) {
+                        let stage_path = self.stage_path(&resolved_output_path, source_index);
+                        self.discard_checkpoint(&stage_path).await;
                     }
                     last_error = Some(e);
                 }
@@ -194,7 +216,10 @@ impl MetalinkDownloadCommand {
         #[cfg(feature = "bittorrent")]
         if allow_torrent_fallback && !torrent_metaurls_owned.is_empty() {
             warn!("All HTTP mirrors failed, falling back to torrent metaurl");
-            self.discard_checkpoint(&resolved_output_path).await;
+            for (source_index, _) in sorted_urls_owned.iter().enumerate() {
+                let stage = self.stage_path(&resolved_output_path, source_index);
+                self.discard_checkpoint(&stage).await;
+            }
             return self.try_torrent_metaurl(&torrent_metaurls_owned).await;
         }
 

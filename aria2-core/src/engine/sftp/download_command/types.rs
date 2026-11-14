@@ -9,6 +9,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::constants;
+use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -21,6 +22,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use aria2_protocol::sftp::connection::{HostKeyCheckingMode, SshError, SshOptions};
 use aria2_protocol::sftp::file_ops::FileOpError;
+use aria2_protocol::sftp::session::SftpSessionError;
 use aria2_protocol::sftp::uri::SftpUriError;
 
 /// Command that executes an SFTP file download from a remote server to local disk.
@@ -58,6 +60,8 @@ pub struct SftpDownloadCommand {
     pub(super) checkpoint: Option<ProgressCheckpoint>,
     /// Process-wide policy used to create the SSH TCP stream.
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    /// Shared resolver used when `async-dns` is enabled for this task.
+    pub(super) dns_cache: Option<Arc<tokio::sync::Mutex<DnsCache>>>,
 }
 
 /// Source-compatible SFTP URI fields before credential resolution.
@@ -156,6 +160,7 @@ impl SftpDownloadCommand {
             global_limiter: None,
             checkpoint: None,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_cache: None,
         })
     }
 
@@ -199,11 +204,17 @@ impl SftpDownloadCommand {
             global_limiter: None,
             checkpoint: None,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_cache: None,
         })
     }
 
     pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
         self.outbound_network_policy = policy;
+    }
+
+    /// Use the engine's shared resolver when `async-dns` is enabled.
+    pub fn set_dns_cache(&mut self, dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) {
+        self.dns_cache = Some(dns_cache);
     }
 
     /// Parse an sftp:// URI into its component parts.
@@ -373,6 +384,18 @@ impl SftpDownloadCommand {
         }
     }
 
+    /// Retry SFTP session failures only when the protocol layer classifies
+    /// them as connectivity or timeout failures.
+    pub(super) fn map_session_error(err: &SftpSessionError) -> Aria2Error {
+        if err.is_network() {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("SFTP session init failed: {err}"),
+            })
+        } else {
+            Aria2Error::DownloadFailed(format!("SFTP session init failed: {err}"))
+        }
+    }
+
     /// Map a FileOpError to the appropriate Aria2Error for engine-level handling.
     pub(super) fn map_file_op_error(err: &FileOpError, host: &str, path: &str) -> Aria2Error {
         match err {
@@ -394,9 +417,7 @@ impl SftpDownloadCommand {
                     message: err.to_string(),
                 })
             }
-            _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("SFTP file op error: {}", err),
-            }),
+            _ => Aria2Error::DownloadFailed(format!("SFTP file op error: {err}")),
         }
     }
 }

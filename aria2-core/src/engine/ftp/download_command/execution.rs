@@ -277,7 +277,7 @@ impl FtpDownloadCommand {
 
     pub(super) async fn refresh_control_addresses(&mut self) -> Result<()> {
         if let Some(cache) = self.dns_cache.as_ref() {
-            let mut cache = cache.lock().await;
+            let cache = cache.lock().await.clone();
             let addresses = cache.resolve_with_refresh(&self.host, self.port).await?;
             if addresses.is_empty() {
                 return Err(Aria2Error::NameResolve(format!(

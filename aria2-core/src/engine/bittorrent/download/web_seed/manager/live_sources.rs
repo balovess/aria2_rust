@@ -195,6 +195,7 @@ impl WebSeedManager {
             Arc::clone(&self.stats),
             client,
             self.request_timeout,
+            &self.user_agent,
         ))
     }
 }

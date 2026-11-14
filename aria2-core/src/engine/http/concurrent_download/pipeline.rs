@@ -378,7 +378,9 @@ pub async fn execute_with_coordinator(
                 .await?;
                 match action {
                     completion::CompletionAction::Continue => {}
-                    completion::CompletionAction::Fallback => should_fallback = true,
+                    completion::CompletionAction::Fallback => {
+                        should_fallback = true;
+                    }
                     completion::CompletionAction::Abort(error) => {
                         work_queue.cancel();
                         super::segment::cancel_and_persist(

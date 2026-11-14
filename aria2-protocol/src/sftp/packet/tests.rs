@@ -125,6 +125,23 @@ fn test_decode_partial_payload_returns_error() {
 }
 
 #[test]
+fn malformed_packet_trailing_payload_is_rejected() {
+    let packet = SftpPacket::Status {
+        request_id: 1,
+        code: SSH_FX_OK,
+        message: "ok".to_string(),
+        language: "en".to_string(),
+    };
+    let mut encoded = packet.encode().unwrap();
+    encoded.push(0xff);
+    let payload_length = (encoded.len() - 4) as u32;
+    encoded[..4].copy_from_slice(&payload_length.to_be_bytes());
+
+    let error = SftpPacket::decode(&encoded).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
 fn malformed_string_length_does_not_reserve_declared_size() {
     // Outer packet: DATA, request id 1, string length u32::MAX, no string data.
     let bytes = [
@@ -150,6 +167,19 @@ fn malformed_name_count_is_rejected_before_reserving_entries() {
 
     let error = SftpPacket::decode(&bytes).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn frame_length_addition_rejects_platform_size_overflow() {
+    let error = super::codec::checked_frame_length(usize::MAX).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn wire_lengths_reject_values_larger_than_u32() {
+    let error = super::wire::checked_u32_length(u32::MAX as usize + 1, "test length").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]

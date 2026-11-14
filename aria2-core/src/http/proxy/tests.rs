@@ -3,15 +3,32 @@
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
-use crate::http::digest_auth::DigestAuthChallenge;
 use crate::http::header_processor::HttpHeaderProcessor;
-use crate::http::proxy::auth::{build_proxy_auth_header, proxy_basic_auth, proxy_digest_auth};
+use crate::http::proxy::auth::build_proxy_auth_header;
 use crate::http::proxy::config::HttpProxyConfig;
-use crate::http::proxy::forward::HttpProxyForward;
+use crate::http::proxy::forward::{HttpProxyForward, forward_get_with_auth};
 use crate::http::proxy::response::ProxyResponse;
 use crate::http::proxy::tunnel::HttpProxyTunnel;
 use crate::http::socks_connector::ProxyUrl;
+
+async fn read_request_head(stream: &mut TcpStream) -> Vec<u8> {
+    let mut request = Vec::with_capacity(512);
+    loop {
+        let mut byte = [0; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        request.push(byte[0]);
+        if request.ends_with(b"\r\n\r\n") {
+            return request;
+        }
+        assert!(
+            request.len() <= 16 * 1024,
+            "request header exceeded test limit"
+        );
+    }
+}
 
 // ==================== HttpProxyConfig tests ====================
 
@@ -173,7 +190,7 @@ fn test_proxy_response_500_error() {
 
 #[test]
 fn test_proxy_basic_auth_encoding() {
-    let auth = proxy_basic_auth("user", "pass");
+    let auth = aria2_protocol::http::auth::basic_authorization("user", "pass");
     assert!(auth.starts_with("Basic "));
     // Verify Base64: "user:pass" -> "dXNlcjpwYXNz"
     assert_eq!(auth, "Basic dXNlcjpwYXNz");
@@ -181,7 +198,7 @@ fn test_proxy_basic_auth_encoding() {
 
 #[test]
 fn test_proxy_basic_auth_special_chars() {
-    let auth = proxy_basic_auth("admin@corp", "p@ss:w0rd");
+    let auth = aria2_protocol::http::auth::basic_authorization("admin@corp", "p@ss:w0rd");
     assert!(auth.starts_with("Basic "));
     // Decode to verify
     let encoded = &auth["Basic ".len()..];
@@ -258,68 +275,6 @@ fn test_build_proxy_auth_header_no_auth_header() {
     assert!(auth.is_none());
 }
 
-// ==================== HttpProxyTunnel request building tests ====================
-
-#[test]
-fn test_tunnel_build_connect_request_no_auth() {
-    let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 443);
-    let tunnel = HttpProxyTunnel::new(config);
-    let req = tunnel.build_connect_request(None);
-
-    assert!(req.starts_with("CONNECT target.com:443 HTTP/1.1\r\n"));
-    assert!(req.contains("Host: target.com:443\r\n"));
-    assert!(req.contains("Proxy-Connection: keep-alive\r\n"));
-    assert!(!req.contains("Proxy-Authorization"));
-    assert!(req.ends_with("\r\n\r\n"));
-}
-
-#[test]
-fn test_tunnel_build_connect_request_with_basic_auth() {
-    let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 443);
-    let tunnel = HttpProxyTunnel::new(config);
-    let req = tunnel.build_connect_request(Some("Basic dXNlcjpwYXNz"));
-
-    assert!(req.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
-}
-
-#[test]
-fn test_tunnel_build_connect_request_with_digest_auth() {
-    let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 443);
-    let tunnel = HttpProxyTunnel::new(config);
-    let digest_value = r#"Digest username="admin", realm="Proxy", nonce="abc", uri="target.com:443", nc=00000001, cnonce="x", qop="auth", response="h", algorithm="MD5", opaque="o""#;
-    let req = tunnel.build_connect_request(Some(digest_value));
-
-    assert!(req.contains("Proxy-Authorization: Digest "));
-    assert!(req.contains(r#"username="admin""#));
-}
-
-#[test]
-fn test_tunnel_get_credentials() {
-    let config = HttpProxyConfig::new("p".into(), 3128, "t".into(), 443)
-        .with_credentials("user".into(), "pass".into());
-    let tunnel = HttpProxyTunnel::new(config);
-    let (u, p) = tunnel.get_credentials().unwrap();
-    assert_eq!(u, "user");
-    assert_eq!(p, "pass");
-}
-
-#[test]
-fn test_tunnel_get_credentials_missing() {
-    let config = HttpProxyConfig::new("p".into(), 3128, "t".into(), 443);
-    let tunnel = HttpProxyTunnel::new(config);
-    assert!(tunnel.get_credentials().is_err());
-}
-
-#[test]
-fn test_tunnel_get_credentials_username_only() {
-    let mut config = HttpProxyConfig::new("p".into(), 3128, "t".into(), 443);
-    config.proxy_username = Some("user".into());
-    let tunnel = HttpProxyTunnel::new(config);
-    let (u, p) = tunnel.get_credentials().unwrap();
-    assert_eq!(u, "user");
-    assert_eq!(p, "");
-}
-
 // ==================== HttpProxyForward request building tests ====================
 
 #[test]
@@ -372,10 +327,19 @@ fn test_forward_get_credentials() {
 
 #[test]
 fn test_proxy_digest_auth_produces_header() {
-    let challenge =
-        DigestAuthChallenge::parse(r#"Digest realm="Proxy", nonce="abc123", qop="auth""#).unwrap();
-
-    let auth = proxy_digest_auth("user", "pass", "CONNECT", "target.com:443", &challenge, 1);
+    let challenge = aria2_protocol::http::digest::DigestChallenge::parse(
+        r#"Digest realm="Proxy", nonce="abc123", qop="auth""#,
+    )
+    .unwrap();
+    let auth = aria2_protocol::http::digest::DigestResponse::compute(
+        "user",
+        "pass",
+        "CONNECT",
+        "target.com:443",
+        &challenge,
+        1,
+    )
+    .to_header_value();
     assert!(auth.starts_with("Digest "));
     assert!(auth.contains(r#"username="user""#));
     assert!(auth.contains(r#"realm="Proxy""#));
@@ -443,15 +407,36 @@ fn test_build_proxy_auth_header_fallback_to_basic() {
     assert!(auth.starts_with("Basic "));
 }
 
-#[test]
-fn test_tunnel_connect_request_format_complete() {
-    let config = HttpProxyConfig::new("proxy.local".into(), 8080, "github.com".into(), 443);
-    let tunnel = HttpProxyTunnel::new(config);
-    let req = tunnel.build_connect_request(None);
+#[tokio::test]
+async fn public_connect_tunnel_uses_protocol_handshake_and_preserves_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_request_head(&mut stream).await;
+        assert_eq!(
+            request.as_slice(),
+            b"CONNECT target.example:443 HTTP/1.1\r\nHost: target.example:443\r\nProxy-Connection: keep-alive\r\n\r\n"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .unwrap();
+    });
 
-    // Verify exact format
-    let expected = "CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\nProxy-Connection: keep-alive\r\n\r\n";
-    assert_eq!(req, expected);
+    let mut config = HttpProxyConfig::new(
+        "127.0.0.1".into(),
+        address.port(),
+        "target.example".into(),
+        443,
+    );
+    config.connect_timeout = Duration::from_secs(2);
+    config.read_timeout = Duration::from_secs(2);
+    config.write_timeout = Duration::from_secs(2);
+    let tunnel = HttpProxyTunnel::new(config);
+    let stream = tunnel.connect().await.unwrap();
+    drop(stream);
+    server.await.unwrap();
 }
 
 #[test]
@@ -467,4 +452,97 @@ fn test_forward_request_target_port_80() {
 
     assert!(req.starts_with("GET http://example.com:80/index.html HTTP/1.1\r\n"));
     assert!(req.contains("Host: example.com:80\r\n"));
+}
+
+#[tokio::test]
+async fn forward_get_authentication_preserves_response_body_after_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let request = read_request_head(&mut first).await;
+        assert!(request.starts_with(b"GET http://example.com:80/file HTTP/1.1\r\n"));
+        first
+            .write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let request = read_request_head(&mut second).await;
+        assert!(
+            request
+                .windows(b"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n".len())
+                .any(|window| window == b"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n")
+        );
+        second
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nBODY")
+            .await
+            .unwrap();
+    });
+
+    let mut config =
+        HttpProxyConfig::new("127.0.0.1".into(), address.port(), "example.com".into(), 80)
+            .with_credentials("user".into(), "pass".into());
+    config.connect_timeout = Duration::from_secs(2);
+    config.read_timeout = Duration::from_secs(2);
+    config.write_timeout = Duration::from_secs(2);
+
+    let (mut stream, response) = forward_get_with_auth(&config, "/file").await.unwrap();
+    assert_eq!(response.status_code, 200);
+    let mut body = [0; 4];
+    stream.read_exact(&mut body).await.unwrap();
+    assert_eq!(&body, b"BODY");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn forward_connect_authenticates_probe_then_returns_fresh_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let request = read_request_head(&mut first).await;
+        assert!(request.starts_with(b"HEAD http://example.com:80 HTTP/1.1\r\n"));
+        assert!(
+            !request
+                .windows(b"Proxy-Authorization:".len())
+                .any(|window| window == b"Proxy-Authorization:")
+        );
+        first
+            .write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let request = read_request_head(&mut second).await;
+        assert!(
+            request
+                .windows(b"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n".len())
+                .any(|window| window == b"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n")
+        );
+        second
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        drop(second);
+
+        listener.accept().await.unwrap()
+    });
+
+    let mut config =
+        HttpProxyConfig::new("127.0.0.1".into(), address.port(), "example.com".into(), 80)
+            .with_credentials("user".into(), "pass".into());
+    config.connect_timeout = Duration::from_secs(2);
+    config.read_timeout = Duration::from_secs(2);
+    config.write_timeout = Duration::from_secs(2);
+
+    let stream = HttpProxyForward::new(config).connect(false).await.unwrap();
+    drop(stream);
+    server.await.unwrap();
 }

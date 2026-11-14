@@ -276,6 +276,12 @@ async fn run_tracker_actor(
     }
     drop(primary_announce);
     drop(public_announces);
+    if startup_command_channel_closed || stop_received_during_startup {
+        announcer.cancel_pending_announce();
+        for public_announcer in &mut public_announcers {
+            public_announcer.cancel_pending_announce();
+        }
+    }
     publish_tracker_runtime(
         tracker_runtime.as_ref(),
         &announcer,
@@ -285,12 +291,6 @@ async fn run_tracker_actor(
     let mut download_complete = false;
     if startup_command_channel_closed {
         return;
-    }
-    if stop_received_during_startup {
-        announcer.cancel_pending_announce();
-        for public_announcer in &mut public_announcers {
-            public_announcer.cancel_pending_announce();
-        }
     }
     loop {
         // Keep the tracker peer batch pending under bounded-channel

@@ -28,7 +28,11 @@ fn split_piece_hashes(text: &str, hex_len: usize) -> Vec<String> {
 /// of the Metalink file itself.
 pub fn resolve_url(base_uri: Option<&str>, url: &str) -> String {
     // If URL is already absolute, return as-is
-    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://") {
+    if url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("ftp://")
+        || url.starts_with("sftp://")
+    {
         return url.to_string();
     }
 
@@ -341,7 +345,7 @@ impl MetalinkDocument {
                                             }
                                         }
                                         "type" => {
-                                            // V3 <url type="http|https|ftp|bittorrent">
+                                            // V3 <url type="http|https|ftp|sftp|bittorrent">
                                             // Maps to MetalinkResource::TYPE.
                                             entry.resource_type = ResourceType::from_v3_type(val);
                                         }

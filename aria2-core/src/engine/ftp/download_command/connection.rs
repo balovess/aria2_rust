@@ -1,7 +1,7 @@
 //! FTP control connection establishment and data-channel TLS.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info};
 
@@ -11,6 +11,7 @@ use aria2_protocol::ftp::connection::{FtpControlSession, FtpControlSessionError}
 use aria2_protocol::ftp::tls::{self as tls, FtpControlStream, FtpDataStream, FtpsClient};
 
 use crate::ftp::connection::{FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig};
+use crate::ftp::connection_pool::PooledControlSession;
 use crate::network::{ConnectionContext, OutboundNetworkPolicy};
 
 // ---------------------------------------------------------------------------
@@ -24,9 +25,44 @@ pub(super) struct RawFtpControl {
     pub(super) connection: ConnectionContext,
     pub(super) ftps_client: Option<FtpsClient>,
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    request_timeout: Option<Duration>,
+    pool_lifetime: (Instant, u64),
 }
 
 impl RawFtpControl {
+    pub(super) fn from_pooled(session: PooledControlSession) -> Self {
+        let (
+            reader,
+            connection,
+            ftps_client,
+            outbound_network_policy,
+            created_at,
+            _last_used,
+            reuse_count,
+        ) = session.into_parts();
+        Self {
+            reader,
+            host: connection.endpoint.hostname().to_owned(),
+            connection,
+            ftps_client,
+            outbound_network_policy,
+            request_timeout: None,
+            pool_lifetime: (created_at, reuse_count),
+        }
+    }
+
+    pub(super) fn into_pooled(self) -> PooledControlSession {
+        let (created_at, reuse_count) = self.pool_lifetime;
+        let mut pooled = PooledControlSession::new(
+            self.reader,
+            self.connection,
+            self.ftps_client,
+            self.outbound_network_policy,
+        );
+        pooled.restore_lifetime(created_at, reuse_count);
+        pooled
+    }
+
     async fn connect_tcp_at(
         host: &str,
         port: u16,
@@ -73,12 +109,36 @@ impl RawFtpControl {
             connection,
             ftps_client,
             outbound_network_policy,
+            request_timeout: None,
+            pool_lifetime: (Instant::now(), 0),
         }
     }
 
-    async fn read_welcome(&mut self) -> Result<()> {
+    pub(super) fn set_request_timeout(&mut self, timeout: Option<Duration>) {
+        self.request_timeout = timeout;
+    }
+
+    pub(super) fn command_timeout(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(|| Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS))
+    }
+
+    pub(super) fn data_connection_timeout(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(|| Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS))
+    }
+
+    pub(super) fn transfer_completion_timeout(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(|| Duration::from_secs(constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS))
+    }
+
+    async fn read_welcome(&mut self, request_timeout: Option<Duration>) -> Result<()> {
         let welcome = self
-            .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
+            .read_response(
+                request_timeout
+                    .unwrap_or_else(|| Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS)),
+            )
             .await?;
 
         if welcome.0 != 220 {
@@ -95,7 +155,10 @@ impl RawFtpControl {
     /// Send a command to the FTP server.
     #[cfg(test)]
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        debug!("FTP CMD: {}", cmd.trim());
+        debug!(
+            "FTP CMD: {}",
+            cmd.split_whitespace().next().unwrap_or_default()
+        );
         self.reader
             .send_command(cmd)
             .await
@@ -147,6 +210,7 @@ impl RawFtpControl {
         port: u16,
         socket_addr: std::net::SocketAddr,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(
             host,
@@ -162,7 +226,7 @@ impl RawFtpControl {
             None,
             outbound_network_policy,
         );
-        ctrl.read_welcome().await?;
+        ctrl.read_welcome(request_timeout).await?;
 
         info!("Connected to FTP server {}:{}", host, port);
         Ok(ctrl)
@@ -180,6 +244,7 @@ impl RawFtpControl {
         ftps_client: Option<&FtpsClient>,
         ftps_implicit: bool,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let tunnel_config = FtpProxyTunnelConfig {
             proxy_host: proxy.proxy_host.clone(),
@@ -220,7 +285,7 @@ impl RawFtpControl {
                     Some(client.clone()),
                     Arc::clone(&outbound_network_policy),
                 );
-                ctrl.read_welcome().await?;
+                ctrl.read_welcome(request_timeout).await?;
                 tls::negotiate_protected_data_channel(ctrl.reader.reader_mut())
                     .await
                     .map_err(|error| {
@@ -236,7 +301,7 @@ impl RawFtpControl {
                 None,
                 Arc::clone(&outbound_network_policy),
             );
-            plain.read_welcome().await?;
+            plain.read_welcome(request_timeout).await?;
             let Self {
                 reader,
                 host,
@@ -261,7 +326,7 @@ impl RawFtpControl {
                 Some(client.clone()),
                 Arc::clone(&outbound_network_policy),
             );
-            ctrl.read_welcome().await?;
+            ctrl.read_welcome(request_timeout).await?;
             return Ok(ctrl);
         }
 
@@ -272,7 +337,7 @@ impl RawFtpControl {
             None,
             outbound_network_policy,
         );
-        ctrl.read_welcome().await?;
+        ctrl.read_welcome(request_timeout).await?;
         info!(
             "Connected to FTP server {}:{} through HTTP proxy {}:{}",
             host, port, proxy.proxy_host, proxy.proxy_port
@@ -287,6 +352,7 @@ impl RawFtpControl {
         socket_addr: std::net::SocketAddr,
         client: &FtpsClient,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(
             host,
@@ -302,7 +368,7 @@ impl RawFtpControl {
             None,
             Arc::clone(&outbound_network_policy),
         );
-        plain.read_welcome().await?;
+        plain.read_welcome(request_timeout).await?;
 
         let Self {
             reader,
@@ -338,6 +404,7 @@ impl RawFtpControl {
         socket_addr: std::net::SocketAddr,
         client: &FtpsClient,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(
             host,
@@ -359,7 +426,7 @@ impl RawFtpControl {
             Some(client.clone()),
             outbound_network_policy,
         );
-        ctrl.read_welcome().await?;
+        ctrl.read_welcome(request_timeout).await?;
 
         tls::negotiate_protected_data_channel(ctrl.reader.reader_mut())
             .await
@@ -451,5 +518,138 @@ pub(super) fn map_session_error(error: FtpControlSessionError) -> Aria2Error {
                 message: format!("Max FTP recv buffer reached. length={bytes}"),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn request_timeout_overrides_ftp_command_data_and_completion_fallbacks() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind FTP timeout test listener");
+        let address = listener.local_addr().expect("read listener address");
+        let client = TcpStream::connect(address)
+            .await
+            .expect("connect FTP timeout test stream");
+        let (server, _) = listener
+            .accept()
+            .await
+            .expect("accept FTP timeout test stream");
+        let peer = client.peer_addr().expect("read FTP peer address");
+        let connection = ConnectionContext::new("ftp.test", 21, peer);
+        let mut control = RawFtpControl::from_stream(
+            FtpControlStream::Plain(client),
+            "ftp.test",
+            connection,
+            None,
+            Arc::new(OutboundNetworkPolicy::direct()),
+        );
+
+        assert_eq!(
+            control.command_timeout(),
+            Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            control.data_connection_timeout(),
+            Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            control.transfer_completion_timeout(),
+            Duration::from_secs(constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS)
+        );
+
+        let configured_timeout = Duration::from_secs(7);
+        control.set_request_timeout(Some(configured_timeout));
+        assert_eq!(control.command_timeout(), configured_timeout);
+        assert_eq!(control.data_connection_timeout(), configured_timeout);
+        assert_eq!(control.transfer_completion_timeout(), configured_timeout);
+
+        drop(control);
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn configured_request_timeout_bounds_ftp_control_response() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind FTP timeout test listener");
+        let address = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept FTP timeout test stream");
+            let mut reader = BufReader::new(stream);
+            let mut command = String::new();
+            reader
+                .read_line(&mut command)
+                .await
+                .expect("read TYPE command");
+            assert_eq!(command, "TYPE I\r\n");
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        });
+
+        let client = TcpStream::connect(address)
+            .await
+            .expect("connect FTP timeout test stream");
+        let peer = client.peer_addr().expect("read FTP peer address");
+        let mut control = RawFtpControl::from_stream(
+            FtpControlStream::Plain(client),
+            "ftp.test",
+            ConnectionContext::new("ftp.test", 21, peer),
+            None,
+            Arc::new(OutboundNetworkPolicy::direct()),
+        );
+        control.set_request_timeout(Some(Duration::from_millis(30)));
+
+        let started_at = Instant::now();
+        let result = timeout(Duration::from_millis(100), control.set_transfer_type("I"))
+            .await
+            .expect("configured FTP timeout should fire before the outer guard");
+        assert!(result.is_err(), "FTP command unexpectedly succeeded");
+        assert!(started_at.elapsed() < Duration::from_millis(100));
+        server.await.expect("FTP timeout test server should finish");
+    }
+
+    #[tokio::test]
+    async fn configured_request_timeout_bounds_ftp_greeting() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind FTP greeting timeout test listener");
+        let address = listener
+            .local_addr()
+            .expect("read FTP greeting timeout listener address");
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener
+                .accept()
+                .await
+                .expect("accept FTP greeting timeout test stream");
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        });
+
+        let started_at = Instant::now();
+        let result = timeout(
+            Duration::from_millis(100),
+            RawFtpControl::connect_at(
+                "127.0.0.1",
+                address.port(),
+                address,
+                Arc::new(OutboundNetworkPolicy::direct()),
+                Some(Duration::from_millis(30)),
+            ),
+        )
+        .await
+        .expect("configured FTP timeout should fire before the outer guard");
+        assert!(result.is_err(), "FTP greeting unexpectedly succeeded");
+        assert!(started_at.elapsed() < Duration::from_millis(100));
+        server
+            .await
+            .expect("FTP greeting timeout server should finish");
     }
 }

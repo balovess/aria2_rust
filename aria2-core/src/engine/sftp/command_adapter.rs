@@ -32,6 +32,9 @@ impl ProtocolCommandAdapter for SftpCommandAdapter {
             request.options.out.as_deref(),
         )?;
         command.set_outbound_network_policy(Arc::clone(&services.outbound_network_policy));
+        if request.options.async_dns {
+            command.set_dns_cache(Arc::clone(&services.dns_cache));
+        }
         if let Some(limiter) = services.global_limiter.clone() {
             command.set_global_limiter(limiter);
         }

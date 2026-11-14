@@ -62,6 +62,18 @@ impl UdpTrackerClient {
         self.socket.local_addr()
     }
 
+    /// Discard all queued and in-flight announce or scrape transactions.
+    ///
+    /// Call this after dropping an `announce` or `scrape` future before reusing
+    /// the client. A cancelled future cannot remove its transaction from the
+    /// client's queues by itself. Valid cached connection IDs are retained.
+    pub fn cancel_pending_requests(&mut self) {
+        self.pending.clear();
+        self.inflight.clear();
+        self.waiting_for_conn.clear();
+        self.txn_map.clear();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_announce(
         &mut self,

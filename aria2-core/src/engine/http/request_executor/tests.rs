@@ -131,7 +131,10 @@ fn live_connection_counts_separate_h1_connections_from_h2_sessions_and_streams()
         request_policy: HttpRequestPolicy::default(),
         cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
         auth_options: AuthResolveOptions::default(),
-        netrc_path: None,
+        auth_factory: Arc::new(std::sync::Mutex::new(
+            crate::http::auth::AuthConfigFactory::new(),
+        )),
+        origin_sensitive_headers_allowed: true,
         state,
         total_limit: 16,
         tasks: Vec::new(),
@@ -200,7 +203,10 @@ async fn completion_event_reclaims_only_its_task() {
         request_policy: HttpRequestPolicy::default(),
         cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
         auth_options: AuthResolveOptions::default(),
-        netrc_path: None,
+        auth_factory: Arc::new(std::sync::Mutex::new(
+            crate::http::auth::AuthConfigFactory::new(),
+        )),
+        origin_sensitive_headers_allowed: true,
         state: Arc::new(ExecutorState::new(&[], 1, 1, 1)),
         total_limit: 1,
         tasks: vec![
@@ -266,7 +272,10 @@ async fn selecting_next_result_does_not_drop_a_received_completion() {
         request_policy: HttpRequestPolicy::default(),
         cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
         auth_options: AuthResolveOptions::default(),
-        netrc_path: None,
+        auth_factory: Arc::new(std::sync::Mutex::new(
+            crate::http::auth::AuthConfigFactory::new(),
+        )),
+        origin_sensitive_headers_allowed: true,
         state: Arc::clone(&state),
         total_limit: 1,
         tasks: vec![RunningTask {

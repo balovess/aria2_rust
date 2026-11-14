@@ -5,13 +5,21 @@
 //! for a request using URL-embedded creds, BasicCred cache, Netrc, and
 //! defaults — matching the C++ `AuthConfig` + `AuthConfigFactory` design).
 
+mod credentials;
 pub mod netrc;
+mod netrc_store;
+
+pub use credentials::{AuthConfig, BasicCred};
+pub use netrc_store::{NetrcEntry, NetrcStore};
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::Path;
 
 use tracing::{debug, info, warn};
 use url::Url;
+
+use crate::http::request::basic_auth;
 
 pub(crate) fn request_directory(path: &str) -> &str {
     match path.rfind('/') {
@@ -20,141 +28,6 @@ pub(crate) fn request_directory(path: &str) -> &str {
     }
 }
 
-use crate::http::request::basic_auth;
-
-// ---------------------------------------------------------------------------
-// AuthConfig — mirrors C++ AuthConfig
-// ---------------------------------------------------------------------------
-
-/// A resolved user:password pair ready for inclusion in an Authorization header.
-///
-/// Mirrors the C++ `AuthConfig` class.  Call [`AuthConfig::auth_text`] to get
-/// the `"user:password"` string, or pass it to `basic_auth()` /
-/// `DigestAuthResponse::compute()` for the actual header value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthConfig {
-    user: String,
-    password: String,
-}
-
-impl AuthConfig {
-    /// Create a new `AuthConfig`.  Returns `None` if `user` is empty,
-    /// matching the C++ `AuthConfig::create()` semantics.
-    pub fn new(user: String, password: String) -> Option<Self> {
-        if user.is_empty() {
-            None
-        } else {
-            Some(Self { user, password })
-        }
-    }
-
-    /// The username.
-    pub fn user(&self) -> &str {
-        &self.user
-    }
-
-    /// The password.
-    pub fn password(&self) -> &str {
-        &self.password
-    }
-
-    /// Returns `"user:password"`, matching C++ `getAuthText()`.
-    pub fn auth_text(&self) -> String {
-        format!("{}:{}", self.user, self.password)
-    }
-}
-
-impl std::fmt::Display for AuthConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.user, self.password)
-    }
-}
-// ---------------------------------------------------------------------------
-// BasicCred — mirrors C++ BasicCred
-// ---------------------------------------------------------------------------
-
-/// A cached Basic-auth credential scoped to a host:port + path prefix.
-///
-/// Matching the C++ `BasicCred`, the path is normalised to always end with
-/// `/` so that prefix-matching works correctly.
-#[derive(Debug, Clone)]
-pub struct BasicCred {
-    /// Username
-    pub user: String,
-    /// Password
-    pub password: String,
-    /// Hostname this credential applies to
-    pub host: String,
-    /// Port number
-    pub port: u16,
-    /// Path prefix (always ends with '/')
-    pub path: String,
-    /// Whether this credential has been activated by a 401 challenge
-    pub activated: bool,
-}
-
-impl BasicCred {
-    /// Create a new `BasicCred`, normalising the path to end with `/`.
-    pub fn new(
-        user: String,
-        password: String,
-        host: String,
-        port: u16,
-        path: String,
-        activated: bool,
-    ) -> Self {
-        let mut path = path;
-        if path.is_empty() || !path.ends_with('/') {
-            path.push('/');
-        }
-        Self {
-            user,
-            password,
-            host,
-            port,
-            path,
-            activated,
-        }
-    }
-
-    /// Activate this credential (called when a 401 challenge is received).
-    pub fn activate(&mut self) {
-        self.activated = true;
-    }
-
-    /// Whether this credential is activated.
-    pub fn is_activated(&self) -> bool {
-        self.activated
-    }
-}
-
-impl PartialEq for BasicCred {
-    fn eq(&self, other: &Self) -> bool {
-        self.host == other.host && self.port == other.port && self.path == other.path
-    }
-}
-
-impl Eq for BasicCred {}
-
-impl PartialOrd for BasicCred {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for BasicCred {
-    /// Ordering matches the C++ `operator<`:
-    /// host < host, then port < port, then path > path (longer paths first).
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.host.cmp(&other.host) {
-            std::cmp::Ordering::Equal => match self.port.cmp(&other.port) {
-                std::cmp::Ordering::Equal => other.path.cmp(&self.path), // reversed
-                ord => ord,
-            },
-            ord => ord,
-        }
-    }
-}
 // ---------------------------------------------------------------------------
 // AuthConfigFactory — mirrors C++ AuthConfigFactory
 // ---------------------------------------------------------------------------
@@ -182,7 +55,6 @@ const FTP_DEFAULT_PASSWD: &str = "ARIA2USER@";
 /// let auth = factory.resolve(&url, false, None, None, false);
 /// assert!(auth.is_some());
 /// ```
-#[derive(Debug)]
 pub struct AuthConfigFactory {
     /// Cached Basic-auth credentials, ordered by (host, port, path-reversed).
     basic_creds: BTreeSet<BasicCred>,
@@ -190,123 +62,13 @@ pub struct AuthConfigFactory {
     netrc: Option<NetrcStore>,
 }
 
-/// Simplified Netrc store — maps hostname to (login, password).
-///
-/// Built from the full [`netrc::NetrcParser`] via conversion. Machine entries
-/// are stored in `entries`; the `default` entry (which matches any host) is
-/// stored separately so that [`find_with_fallback`] can first try a machine
-/// match then fall back to the default, matching C++ `findAuthenticator()`.
-#[derive(Debug, Clone)]
-pub struct NetrcStore {
-    entries: Vec<NetrcEntry>,
-    default_entry: Option<NetrcEntry>,
-}
-
-/// A single .netrc entry.
-#[derive(Debug, Clone)]
-pub struct NetrcEntry {
-    /// Machine hostname
-    pub host: String,
-    /// Login username
-    pub login: String,
-    /// Login password
-    pub password: String,
-}
-
-impl NetrcStore {
-    /// Create an empty Netrc store.
-    pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            default_entry: None,
-        }
-    }
-
-    /// Create a Netrc store from a list of entries and an optional default.
-    pub fn from_entries(entries: Vec<NetrcEntry>) -> Self {
-        Self {
-            entries,
-            default_entry: None,
-        }
-    }
-
-    /// Create a Netrc store with machine entries and a default entry.
-    pub fn with_default(entries: Vec<NetrcEntry>, default: Option<NetrcEntry>) -> Self {
-        Self {
-            entries,
-            default_entry: default,
-        }
-    }
-
-    /// Look up credentials for a hostname (without default fallback).
-    ///
-    /// Machine names beginning with `.` match subdomains, but not the bare
-    /// domain or a numeric host, as in aria2's `.netrc` implementation.
-    pub fn find(&self, host: &str) -> Option<&NetrcEntry> {
-        self.entries
-            .iter()
-            .find(|e| netrc::no_proxy_domain_match(host, &e.host))
-    }
-
-    /// Look up credentials for a hostname, falling back to the default entry.
-    ///
-    /// This mirrors the C++ `Netrc::findAuthenticator()` logic.
-    pub fn find_with_fallback(&self, host: &str) -> Option<&NetrcEntry> {
-        self.find(host).or(self.default_entry.as_ref())
-    }
-
-    /// The default entry, if any.
-    pub fn default_entry(&self) -> Option<&NetrcEntry> {
-        self.default_entry.as_ref()
-    }
-
-    /// Check whether any entries exist.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.default_entry.is_none()
-    }
-}
-
-impl Default for NetrcStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Build a `NetrcStore` from a parsed [`netrc::NetrcParser`].
-///
-/// This replaces the old `From<NetrcParser>` conversion (which could not
-/// populate `default_entry`) with a proper builder that separates machine
-/// entries from the default entry.
-impl From<netrc::NetrcParser> for NetrcStore {
-    fn from(parser: netrc::NetrcParser) -> Self {
-        let mut entries = Vec::with_capacity(parser.entries().len());
-
-        for entry in parser.entries() {
-            if let (Some(login), Some(password)) = (&entry.login, &entry.password) {
-                entries.push(NetrcEntry {
-                    host: entry.machine.clone(),
-                    login: login.clone(),
-                    password: password.clone(),
-                });
-            }
-        }
-
-        let default_entry = parser.default_entry().and_then(|d| {
-            if let (Some(login), Some(password)) = (&d.login, &d.password) {
-                Some(NetrcEntry {
-                    host: String::new(),
-                    login: login.clone(),
-                    password: password.clone(),
-                })
-            } else {
-                None
-            }
-        });
-
-        NetrcStore {
-            entries,
-            default_entry,
-        }
+impl fmt::Debug for AuthConfigFactory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthConfigFactory")
+            .field("basic_credential_count", &self.basic_creds.len())
+            .field("has_netrc", &self.netrc.is_some())
+            .finish()
     }
 }
 
@@ -314,7 +76,7 @@ impl From<netrc::NetrcParser> for NetrcStore {
 ///
 /// These correspond to C++ `Option` prefs like `PREF_HTTP_USER`,
 /// `PREF_HTTP_PASSWD`, `PREF_NO_NETRC`, and `PREF_HTTP_AUTH_CHALLENGE`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AuthResolveOptions {
     /// Whether HTTP auth-challenge mode is enabled (C++ `PREF_HTTP_AUTH_CHALLENGE`).
     /// When true, 401 responses trigger BasicCred activation.
@@ -335,6 +97,22 @@ pub struct AuthResolveOptions {
     /// Credentials for an HTTP proxy protection space.
     pub proxy_user: Option<String>,
     pub proxy_passwd: Option<String>,
+}
+
+impl fmt::Debug for AuthResolveOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthResolveOptions")
+            .field("http_auth_challenge", &self.http_auth_challenge)
+            .field("no_netrc", &self.no_netrc)
+            .field("http_user_configured", &self.http_user.is_some())
+            .field("http_passwd_configured", &self.http_passwd.is_some())
+            .field("ftp_user_configured", &self.ftp_user.is_some())
+            .field("ftp_passwd_configured", &self.ftp_passwd.is_some())
+            .field("proxy_user_configured", &self.proxy_user.is_some())
+            .field("proxy_passwd_configured", &self.proxy_passwd.is_some())
+            .finish()
+    }
 }
 
 impl AuthConfigFactory {
@@ -472,10 +250,7 @@ impl AuthConfigFactory {
             && let Some(ref netrc) = self.netrc
             && let Some(entry) = netrc.find(host)
         {
-            debug!(
-                "Resolved HTTP auth for {} from Netrc (user={})",
-                host, entry.login
-            );
+            debug!("Resolved HTTP auth for {} from Netrc", host);
             return AuthConfig::new(entry.login.clone(), entry.password.clone());
         }
         None
@@ -521,10 +296,7 @@ impl AuthConfigFactory {
             && let Some(ref netrc) = self.netrc
             && let Some(entry) = netrc.find_with_fallback(host)
         {
-            debug!(
-                "Resolved FTP auth for {} from Netrc (user={})",
-                host, entry.login
-            );
+            debug!("Resolved FTP auth for {} from Netrc", host);
             return AuthConfig::new(entry.login.clone(), entry.password.clone());
         }
         // CLI fallback
@@ -682,14 +454,22 @@ impl Default for AuthConfigFactory {
 pub fn erase_confidential_info(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     for line in raw.lines() {
-        if line.len() >= 15 && line[..15].eq_ignore_ascii_case("authorization: ") {
-            result.push_str("Authorization: <snip>\n");
-        } else if line.len() >= 21 && line[..21].eq_ignore_ascii_case("proxy-authorization: ") {
-            result.push_str("Proxy-Authorization: <snip>\n");
-        } else if line.len() >= 8 && line[..8].eq_ignore_ascii_case("cookie: ") {
-            result.push_str("Cookie: <snip>\n");
-        } else if line.len() >= 12 && line[..12].eq_ignore_ascii_case("set-cookie: ") {
-            result.push_str("Set-Cookie: <snip>\n");
+        let confidential_header = line.split_once(':').and_then(|(name, _)| {
+            if name.eq_ignore_ascii_case("authorization") {
+                Some("Authorization: <snip>\n")
+            } else if name.eq_ignore_ascii_case("proxy-authorization") {
+                Some("Proxy-Authorization: <snip>\n")
+            } else if name.eq_ignore_ascii_case("cookie") {
+                Some("Cookie: <snip>\n")
+            } else if name.eq_ignore_ascii_case("set-cookie") {
+                Some("Set-Cookie: <snip>\n")
+            } else {
+                None
+            }
+        });
+
+        if let Some(replacement) = confidential_header {
+            result.push_str(replacement);
         } else {
             result.push_str(line);
             result.push('\n');

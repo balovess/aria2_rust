@@ -11,7 +11,7 @@ use tracing::debug;
 
 use super::auth::basic_authorization;
 use super::digest::{DigestChallenge, DigestResponse};
-use super::header_processor::{find_header_end, parse_response_head};
+use super::header_processor::{HttpResponseHeadReadError, read_response_head};
 use super::request::serialize_http_request;
 
 /// Settings for one HTTP CONNECT handshake.
@@ -32,6 +32,31 @@ pub struct HttpConnectOptions<'a> {
     pub write_timeout: Duration,
     /// Maximum time to read each proxy response head.
     pub read_timeout: Duration,
+}
+
+/// Authentication and request details for compatibility callers that need a
+/// CONNECT retry policy different from the engine default.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpConnectRetryPolicy {
+    /// Maximum number of CONNECT retries after a 407 response.
+    pub max_auth_retries: u32,
+    /// Prefer a Digest challenge over Basic when the proxy sends several.
+    pub prefer_digest: bool,
+    /// Fall back to Basic when the proxy advertises only an unknown scheme.
+    pub fallback_to_basic: bool,
+    /// Include the legacy `Proxy-Connection: keep-alive` request field.
+    pub proxy_connection_keep_alive: bool,
+}
+
+impl Default for HttpConnectRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_auth_retries: 1,
+            prefer_digest: false,
+            fallback_to_basic: false,
+            proxy_connection_keep_alive: false,
+        }
+    }
 }
 
 /// Failure while establishing an HTTP CONNECT tunnel.
@@ -82,6 +107,18 @@ pub async fn establish_connect_tunnel(
     stream: &mut TcpStream,
     options: &HttpConnectOptions<'_>,
 ) -> Result<(), HttpConnectError> {
+    establish_connect_tunnel_with_retry_policy(stream, options, &HttpConnectRetryPolicy::default())
+        .await
+}
+
+/// Complete a CONNECT handshake using an explicit proxy-authentication retry
+/// policy. This supports public compatibility facades without moving their
+/// protocol session logic back into the engine crate.
+pub async fn establish_connect_tunnel_with_retry_policy(
+    stream: &mut TcpStream,
+    options: &HttpConnectOptions<'_>,
+    retry_policy: &HttpConnectRetryPolicy,
+) -> Result<(), HttpConnectError> {
     let preemptive_auth = if options.preemptive_basic_auth {
         options
             .username
@@ -90,34 +127,42 @@ pub async fn establish_connect_tunnel(
     } else {
         None
     };
-    send_request(stream, options, preemptive_auth.as_deref()).await?;
+    send_request(
+        stream,
+        options,
+        preemptive_auth.as_deref(),
+        retry_policy.proxy_connection_keep_alive,
+    )
+    .await?;
 
     let mut auth_retries = 0;
     loop {
         let response = read_proxy_response(stream, options.read_timeout).await?;
         match response.status_code {
             200 => return Ok(()),
-            407 if auth_retries == 0 => {
+            407 if auth_retries < retry_policy.max_auth_retries => {
                 auth_retries += 1;
                 let username = options
                     .username
                     .filter(|username| !username.is_empty())
                     .ok_or(HttpConnectError::CredentialsRequired)?;
-                consume_response_body(stream).await;
-                let challenge = response
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("proxy-authenticate"))
-                    .map(|(_, value)| value.as_str())
-                    .unwrap_or_default();
+                consume_response_body(stream, &response.headers, options.read_timeout).await?;
                 let target = format!("{}:{}", options.target_host, options.target_port);
                 let auth = challenged_authentication(
                     username,
                     options.password.unwrap_or(""),
-                    challenge,
+                    &response.headers,
                     &target,
+                    auth_retries,
+                    retry_policy,
                 )?;
-                send_request(stream, options, Some(&auth)).await?;
+                send_request(
+                    stream,
+                    options,
+                    Some(&auth),
+                    retry_policy.proxy_connection_keep_alive,
+                )
+                .await?;
             }
             407 => return Err(HttpConnectError::AuthenticationFailed),
             status_code => {
@@ -133,50 +178,78 @@ pub async fn establish_connect_tunnel(
 fn challenged_authentication(
     username: &str,
     password: &str,
-    challenge: &str,
+    headers: &[(String, String)],
     target: &str,
+    nonce_count: u32,
+    retry_policy: &HttpConnectRetryPolicy,
 ) -> Result<String, HttpConnectError> {
-    let scheme = challenge
-        .split_ascii_whitespace()
-        .next()
-        .unwrap_or_default();
+    let challenges = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("proxy-authenticate"))
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    let challenge = if retry_policy.prefer_digest {
+        challenges
+            .iter()
+            .copied()
+            .find(|value| challenge_scheme(value).eq_ignore_ascii_case("digest"))
+            .or_else(|| challenges.first().copied())
+    } else {
+        challenges.first().copied()
+    }
+    .unwrap_or_default();
+    let scheme = challenge_scheme(challenge);
     if scheme.eq_ignore_ascii_case("basic") {
         return Ok(basic_authorization(username, password));
     }
     if scheme.eq_ignore_ascii_case("digest") {
         let Ok(challenge) = DigestChallenge::parse(challenge) else {
-            // Preserve the existing tunnel behavior for malformed or
-            // unsupported Digest challenges.
+            // Preserve the established behavior for malformed or unsupported
+            // Digest challenges by falling back to Basic.
             return Ok(basic_authorization(username, password));
         };
-        return Ok(DigestResponse::compute_with_cnonce(
+        return Ok(DigestResponse::compute(
             username,
             password,
             "CONNECT",
             target,
             &challenge,
-            1,
-            "aria2rustcnonce",
+            nonce_count,
         )
         .to_header_value());
+    }
+    if retry_policy.fallback_to_basic && !challenge.is_empty() {
+        return Ok(basic_authorization(username, password));
     }
     Err(HttpConnectError::UnsupportedAuthentication(
         challenge.to_string(),
     ))
 }
 
+fn challenge_scheme(challenge: &str) -> &str {
+    challenge
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or_default()
+}
+
 async fn send_request(
     stream: &mut TcpStream,
     options: &HttpConnectOptions<'_>,
     auth_header: Option<&str>,
+    proxy_connection_keep_alive: bool,
 ) -> Result<(), HttpConnectError> {
     let target = format!("{}:{}", options.target_host, options.target_port);
-    let mut headers = vec![
-        ("User-Agent", options.user_agent),
-        ("Host", target.as_str()),
-    ];
+    let mut headers = Vec::with_capacity(4);
+    if !options.user_agent.is_empty() {
+        headers.push(("User-Agent", options.user_agent));
+    }
+    headers.push(("Host", target.as_str()));
     if let Some(auth) = auth_header {
         headers.push(("Proxy-Authorization", auth));
+    }
+    if proxy_connection_keep_alive {
+        headers.push(("Proxy-Connection", "keep-alive"));
     }
     let request = serialize_http_request("CONNECT", &target, &headers, None);
     debug!(target = %target, authenticated = auth_header.is_some(), "Sending HTTP CONNECT request");
@@ -192,9 +265,19 @@ async fn read_proxy_response(
     read_timeout: Duration,
 ) -> Result<ProxyResponse, HttpConnectError> {
     loop {
-        let response = timeout(read_timeout, read_response_head(stream))
-            .await
-            .map_err(|_| HttpConnectError::Timeout)??;
+        let response =
+            read_response_head(stream, read_timeout)
+                .await
+                .map_err(|error| match error {
+                    HttpResponseHeadReadError::Timeout => HttpConnectError::Timeout,
+                    HttpResponseHeadReadError::Io(error) => HttpConnectError::Io(error),
+                    HttpResponseHeadReadError::HeaderTooLarge => {
+                        HttpConnectError::InvalidResponse("Too large HTTP header block".to_string())
+                    }
+                    HttpResponseHeadReadError::InvalidResponse(message) => {
+                        HttpConnectError::InvalidResponse(message)
+                    }
+                })?;
         if (100..200).contains(&response.status_code) {
             debug!(
                 status = response.status_code,
@@ -202,61 +285,154 @@ async fn read_proxy_response(
             );
             continue;
         }
-        return Ok(response);
+        let headers = response
+            .iter_headers()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        return Ok(ProxyResponse {
+            status_code: response.status_code,
+            reason_phrase: response.reason_phrase,
+            headers,
+        });
     }
 }
 
-async fn read_response_head(stream: &mut TcpStream) -> Result<ProxyResponse, HttpConnectError> {
-    const MAX_HEADER_BYTES: usize = 8 * 1024 + 4;
-    let mut header = Vec::with_capacity(512);
-    let mut peek_buffer = [0; MAX_HEADER_BYTES];
-
-    loop {
-        let remaining = MAX_HEADER_BYTES.saturating_sub(header.len());
-        if remaining == 0 {
-            return Err(HttpConnectError::InvalidResponse(
-                "header too large".to_string(),
-            ));
+async fn consume_response_body(
+    stream: &mut TcpStream,
+    headers: &[(String, String)],
+    read_timeout: Duration,
+) -> Result<(), HttpConnectError> {
+    const MAX_AUTH_RESPONSE_BODY_BYTES: usize = 64 * 1024;
+    if let Some((_, transfer_encoding)) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        if transfer_encoding
+            .split(',')
+            .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
+        {
+            timeout(read_timeout, consume_chunked_body(stream))
+                .await
+                .map_err(|_| HttpConnectError::Timeout)??;
+            return Ok(());
         }
-        let length = stream.peek(&mut peek_buffer[..remaining]).await?;
-        if length == 0 {
-            return Err(HttpConnectError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "connection closed while reading response head",
-            )));
-        }
-
-        let response_end = find_header_end(&peek_buffer[..length]).map(|index| index + 4);
-        let bytes_to_consume = response_end.unwrap_or(length);
-        let start = header.len();
-        header.resize(start + bytes_to_consume, 0);
-        stream.read_exact(&mut header[start..]).await?;
-
-        if response_end.is_some() {
-            break;
-        }
+        return Err(HttpConnectError::InvalidResponse(
+            "unsupported proxy authentication response transfer coding".to_string(),
+        ));
     }
 
-    let response = parse_response_head(&header)
-        .map_err(|error| HttpConnectError::InvalidResponse(error.to_string()))?;
-    let headers = response
-        .iter_headers()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    Ok(ProxyResponse {
-        status_code: response.status_code,
-        reason_phrase: response.reason_phrase,
-        headers,
-    })
-}
+    let content_length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok());
 
-async fn consume_response_body(stream: &mut TcpStream) {
+    if content_length == Some(0) {
+        return Ok(());
+    }
+    if let Some(length) = content_length.filter(|length| *length <= MAX_AUTH_RESPONSE_BODY_BYTES) {
+        let mut remaining = length;
+        let mut buffer = [0; 4096];
+        let result = timeout(read_timeout, async {
+            while remaining > 0 {
+                let chunk_length = remaining.min(buffer.len());
+                stream.read_exact(&mut buffer[..chunk_length]).await?;
+                remaining -= chunk_length;
+            }
+            Ok::<(), io::Error>(())
+        })
+        .await;
+        result
+            .map_err(|_| HttpConnectError::Timeout)?
+            .map_err(HttpConnectError::Io)?;
+        debug!(length, "Consumed proxy authentication response body");
+        return Ok(());
+    }
+
+    if content_length.is_some() {
+        return Err(HttpConnectError::InvalidResponse(
+            "proxy authentication response body exceeds the discard limit".to_string(),
+        ));
+    }
+
+    // Responses without a usable Content-Length may still carry a small body.
+    // Preserve the bounded legacy drain for these uncommon proxy responses.
     let mut buffer = [0; 4096];
-    match timeout(Duration::from_secs(2), stream.read(&mut buffer)).await {
+    match timeout(read_timeout, stream.read(&mut buffer)).await {
         Ok(Ok(length)) => debug!(length, "Consumed proxy authentication response body"),
         Ok(Err(error)) => debug!(%error, "Could not consume proxy authentication response body"),
         Err(_) => debug!("Timed out while consuming proxy authentication response body"),
     }
+    Ok(())
+}
+
+async fn consume_chunked_body(stream: &mut TcpStream) -> Result<(), HttpConnectError> {
+    const MAX_CHUNKED_BODY_BYTES: usize = 1024 * 1024;
+    const MAX_CHUNK_LINE_BYTES: usize = 1024;
+
+    let mut consumed = 0usize;
+    loop {
+        let line = read_crlf_line(stream, MAX_CHUNK_LINE_BYTES).await?;
+        let size_text = std::str::from_utf8(&line[..line.len() - 2])
+            .map_err(|error| HttpConnectError::InvalidResponse(error.to_string()))?;
+        let size_text = size_text.split(';').next().unwrap_or_default().trim();
+        let chunk_size = usize::from_str_radix(size_text, 16)
+            .map_err(|error| HttpConnectError::InvalidResponse(error.to_string()))?;
+        if chunk_size == 0 {
+            let mut trailer_bytes = 0usize;
+            loop {
+                let trailer = read_crlf_line(stream, MAX_CHUNK_LINE_BYTES).await?;
+                trailer_bytes = trailer_bytes.saturating_add(trailer.len());
+                if trailer_bytes > MAX_CHUNKED_BODY_BYTES {
+                    return Err(HttpConnectError::InvalidResponse(
+                        "proxy authentication response trailers exceed the discard limit"
+                            .to_string(),
+                    ));
+                }
+                if trailer == b"\r\n" {
+                    return Ok(());
+                }
+            }
+        }
+
+        consumed = consumed.saturating_add(chunk_size);
+        if consumed > MAX_CHUNKED_BODY_BYTES {
+            return Err(HttpConnectError::InvalidResponse(
+                "proxy authentication response body exceeds the discard limit".to_string(),
+            ));
+        }
+        let mut remaining = chunk_size;
+        let mut buffer = [0; 4096];
+        while remaining > 0 {
+            let length = remaining.min(buffer.len());
+            stream.read_exact(&mut buffer[..length]).await?;
+            remaining -= length;
+        }
+        let mut terminator = [0; 2];
+        stream.read_exact(&mut terminator).await?;
+        if terminator != *b"\r\n" {
+            return Err(HttpConnectError::InvalidResponse(
+                "invalid proxy authentication response chunk terminator".to_string(),
+            ));
+        }
+    }
+}
+
+async fn read_crlf_line(
+    stream: &mut TcpStream,
+    max_line_bytes: usize,
+) -> Result<Vec<u8>, HttpConnectError> {
+    let mut line = Vec::with_capacity(32);
+    while line.len() < max_line_bytes {
+        let mut byte = [0; 1];
+        stream.read_exact(&mut byte).await?;
+        line.push(byte[0]);
+        if line.ends_with(b"\r\n") {
+            return Ok(line);
+        }
+    }
+    Err(HttpConnectError::InvalidResponse(
+        "proxy authentication response chunk line exceeds the limit".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -349,6 +525,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_auth_body_drain_preserves_bytes_after_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"xNEXT").await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let headers = vec![("content-length".to_string(), "1".to_string())];
+        consume_response_body(&mut stream, &headers, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut remaining = [0; 4];
+        stream.read_exact(&mut remaining).await.unwrap();
+        assert_eq!(&remaining, b"NEXT");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_body_drain_uses_configured_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stream.write_all(b"x").await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let headers = vec![("content-length".to_string(), "1".to_string())];
+        let result = consume_response_body(&mut stream, &headers, Duration::from_millis(10)).await;
+
+        assert!(matches!(result, Err(HttpConnectError::Timeout)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_chunked_body_drain_preserves_bytes_after_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"1\r\nx\r\n0\r\nTrailer: done\r\n\r\nNEXT")
+                .await
+                .unwrap();
+        });
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let headers = vec![("transfer-encoding".to_string(), "chunked".to_string())];
+        consume_response_body(&mut stream, &headers, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut remaining = [0; 4];
+        stream.read_exact(&mut remaining).await.unwrap();
+        assert_eq!(&remaining, b"NEXT");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn preemptive_basic_auth_is_sent_on_the_first_request_when_enabled() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -399,5 +636,55 @@ mod tests {
 
         assert!(response.contains("cnonce=\"aria2rustcnonce\""));
         assert!(response.contains("response=\"3ac03d7149007bfa5959a930308906e0\""));
+    }
+
+    #[test]
+    fn compatibility_policy_prefers_digest_and_uses_retry_count() {
+        let headers = vec![
+            (
+                "proxy-authenticate".to_string(),
+                "Basic realm=\"test\"".to_string(),
+            ),
+            (
+                "proxy-authenticate".to_string(),
+                "Digest realm=\"test\", nonce=\"n1\", qop=\"auth\"".to_string(),
+            ),
+        ];
+        let auth = challenged_authentication(
+            "user",
+            "pass",
+            &headers,
+            "example.com:443",
+            2,
+            &HttpConnectRetryPolicy {
+                max_auth_retries: 2,
+                prefer_digest: true,
+                fallback_to_basic: true,
+                proxy_connection_keep_alive: true,
+            },
+        )
+        .unwrap();
+
+        assert!(auth.starts_with("Digest "));
+        assert!(auth.contains("nc=00000002"));
+    }
+
+    #[test]
+    fn compatibility_policy_falls_back_to_basic_for_unknown_challenge() {
+        let headers = vec![("proxy-authenticate".to_string(), "NTLM".to_string())];
+        let auth = challenged_authentication(
+            "user",
+            "pass",
+            &headers,
+            "example.com:443",
+            1,
+            &HttpConnectRetryPolicy {
+                fallback_to_basic: true,
+                ..HttpConnectRetryPolicy::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(auth, "Basic dXNlcjpwYXNz");
     }
 }

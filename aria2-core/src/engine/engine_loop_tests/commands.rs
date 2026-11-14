@@ -23,6 +23,7 @@ async fn state_changing_command_marks_dirty_and_persists() {
         group_man: man,
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         auto_save: Some(auto_save.clone()),
         auto_save_dirty_signal: Some(auto_save_dirty_signal),
         event_hooks: Arc::new(DownloadEventHooks::new()),

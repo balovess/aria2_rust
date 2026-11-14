@@ -128,6 +128,10 @@ impl Command for DownloadCommand {
             .into_iter()
             .find(|uri| attempted_uris.insert(uri.clone()))
         {
+            let output_length_before = tokio::fs::metadata(&self.output_path)
+                .await
+                .ok()
+                .map(|metadata| metadata.len());
             match self.execute_attempt(&uri).await {
                 Ok(()) => {
                     self.drain_progress_aggregator().await;
@@ -177,6 +181,42 @@ impl Command for DownloadCommand {
                     // the original command scheduler observes, so a newly
                     // added mirror must be eligible without recreating the
                     // whole command generation.
+                    let has_another_uri = self
+                        .candidate_uris()
+                        .into_iter()
+                        .any(|candidate| !attempted_uris.contains(&candidate));
+                    let output_length_after = tokio::fs::metadata(&self.output_path)
+                        .await
+                        .ok()
+                        .map(|metadata| metadata.len());
+                    let output_changed = match (output_length_before, output_length_after) {
+                        (Some(before), Some(after)) => before != after,
+                        (None, Some(_)) | (Some(_), None) => true,
+                        (None, None) => false,
+                    };
+                    if has_another_uri && output_changed {
+                        let control_path =
+                            crate::filesystem::control_file::ControlFile::control_path_for(
+                                &self.output_path,
+                            );
+                        match tokio::fs::try_exists(&control_path).await {
+                            Ok(false) => {
+                                if let Err(reset_error) = self.prepare_fresh_download().await {
+                                    last_error = Some(reset_error);
+                                    break;
+                                }
+                            }
+                            Ok(true) => {}
+                            Err(error) => {
+                                last_error = Some(Aria2Error::FileIo(format!(
+                                    "Failed to inspect control file {}: {}",
+                                    control_path.display(),
+                                    error
+                                )));
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }

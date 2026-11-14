@@ -14,7 +14,14 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
     let (utp_entry, utp_name, utp_value) = kv("bt-utp-max-connections", "73");
     let (file_limit_entry, file_limit_name, file_limit_value) = kv("bt-max-open-files", "17");
     let (dht_limit_entry, dht_limit_name, dht_limit_value) = kv("dht-max-peer-info-hashes", "128");
-    let entries = [timeout_entry, utp_entry, file_limit_entry, dht_limit_entry];
+    let (dht_items_entry, dht_items_name, dht_items_value) = kv("dht-max-items", "512");
+    let entries = [
+        timeout_entry,
+        utp_entry,
+        file_limit_entry,
+        dht_limit_entry,
+        dht_items_entry,
+    ];
     let result =
         unsafe { aria2_rust_change_global_option(&mut session, entries.as_ptr(), entries.len()) };
 
@@ -39,6 +46,12 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
             .block_on(session.config.get_global_i64("dht-max-peer-info-hashes")),
         Some(128)
     );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-items")),
+        Some(512)
+    );
     assert!(matches!(
         command_rx.try_recv(),
         Ok(
@@ -54,6 +67,7 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
     let expected_utp_options =
         aria2_protocol::bittorrent::utp::UtpSocketOptions::default().with_max_connections(73);
     let mut dht_update_seen = false;
+    let mut dht_items_update_seen = false;
     let mut utp_update_seen = false;
     while let Ok(command) = command_rx.try_recv() {
         match command {
@@ -66,6 +80,10 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
                 );
                 dht_update_seen = true;
             }
+            crate::engine::engine_command::EngineCommand::SetDhtItemStoreLimit { max_items } => {
+                assert_eq!(max_items, 512);
+                dht_items_update_seen = true;
+            }
             crate::engine::engine_command::EngineCommand::SetUtpSocketOptions { options } => {
                 assert_eq!(options, expected_utp_options);
                 utp_update_seen = true;
@@ -76,6 +94,10 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
     assert!(
         dht_update_seen,
         "DHT storage update command was not dispatched"
+    );
+    assert!(
+        dht_items_update_seen,
+        "DHT item-store limit update command was not dispatched"
     );
     assert!(utp_update_seen, "uTP update command was not dispatched");
     assert!(matches!(
@@ -92,6 +114,8 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
         file_limit_value,
         dht_limit_name,
         dht_limit_value,
+        dht_items_name,
+        dht_items_value,
     ));
     session.finalize();
 }

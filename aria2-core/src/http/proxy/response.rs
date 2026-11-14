@@ -26,11 +26,15 @@ pub enum ProxyResponse {
 impl ProxyResponse {
     /// Classify an [HttpResponseHead] from a proxy into a [ProxyResponse].
     pub(crate) fn from_head(head: HttpResponseHead) -> Self {
-        match head.status_code {
-            200 => ProxyResponse::Connected(head),
-            407 => ProxyResponse::AuthRequired { response: head },
-            code => ProxyResponse::Error {
-                status_code: code,
+        match aria2_protocol::http::proxy::classify_proxy_response(head.status_code) {
+            aria2_protocol::http::proxy::ProxyResponseKind::Connected => {
+                ProxyResponse::Connected(head)
+            }
+            aria2_protocol::http::proxy::ProxyResponseKind::AuthenticationRequired => {
+                ProxyResponse::AuthRequired { response: head }
+            }
+            aria2_protocol::http::proxy::ProxyResponseKind::Error => ProxyResponse::Error {
+                status_code: head.status_code,
                 reason: head.reason_phrase.clone(),
             },
         }

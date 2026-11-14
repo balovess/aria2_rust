@@ -26,7 +26,7 @@ pub(super) fn create(
 ) -> SegmentRequests {
     let (write_tx, write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let authorities = [authority_key.to_owned()];
-    let executor = HttpSegmentRequestExecutor::new_with_clients(
+    let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
         dl.range_clients.as_slice(),
         dl.request_policy.clone(),
@@ -37,6 +37,8 @@ pub(super) fn create(
         &authorities,
         max_conn,
     );
+    executor.set_shared_auth_factory(std::sync::Arc::clone(&dl.auth_factory));
+    executor.set_origin_sensitive_headers_allowed(dl.origin_sensitive_headers_allowed);
     if let Some((known_authority, version)) = &dl.initial_http_protocol
         && known_authority == authority_key
     {

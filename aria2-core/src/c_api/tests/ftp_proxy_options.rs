@@ -11,6 +11,7 @@ fn c_api_ftp_proxy_global_options_reach_new_downloads() {
     assert!(!session.is_null());
 
     let options = [
+        kv("all-proxy", "socks5://global-proxy.example:1080"),
         kv("ftp-proxy", "http://proxy.example:3128"),
         kv("ftp-proxy-user", "proxy-user"),
         kv("ftp-proxy-passwd", "proxy-password"),
@@ -41,6 +42,10 @@ fn c_api_ftp_proxy_global_options_reach_new_downloads() {
         .expect("C API should create the FTP request group");
     let group = group.read().unwrap();
     let options = group.options();
+    assert_eq!(
+        options.all_proxy.as_deref(),
+        Some("socks5://global-proxy.example:1080")
+    );
     assert_eq!(
         options.ftp_proxy.as_deref(),
         Some("http://proxy.example:3128")

@@ -14,6 +14,12 @@ fn c_api_sftp_timeout_global_options_reach_new_downloads() {
     let options = [
         kv("sftp-connect-timeout", "41"),
         kv("sftp-read-timeout", "73"),
+        kv("sftp-compression", "true"),
+        kv("sftp-keepalive-interval", "0"),
+        kv(
+            "sftp-preferred-ciphers",
+            "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com",
+        ),
     ];
     let entries = options
         .iter()
@@ -40,7 +46,55 @@ fn c_api_sftp_timeout_global_options_reach_new_downloads() {
     let options = group.options();
     assert_eq!(options.sftp_connect_timeout, Some(41));
     assert_eq!(options.sftp_read_timeout, Some(73));
+    assert!(options.sftp_compression);
+    assert_eq!(options.sftp_keepalive_interval, Some(0));
+    assert_eq!(
+        options.sftp_preferred_ciphers.as_deref(),
+        Some(
+            &[
+                "aes256-gcm@openssh.com".to_string(),
+                "chacha20-poly1305@openssh.com".to_string()
+            ][..]
+        )
+    );
     drop(group);
+
+    let task_options = [
+        kv("sftp-connect-timeout", "19"),
+        kv("sftp-compression", "false"),
+    ];
+    let task_entries = task_options
+        .iter()
+        .map(|(entry, _, _)| Aria2RustKeyValue {
+            name: entry.name,
+            value: entry.value,
+        })
+        .collect::<Vec<_>>();
+    let task_uri = CString::new("sftp://127.0.0.1:22/task-option-test").unwrap();
+    let task_uri_ptr = task_uri.as_ptr();
+    let mut task_gid = 0;
+    assert_eq!(
+        unsafe {
+            aria2_rust_add_uri(
+                session,
+                &task_uri_ptr,
+                1,
+                task_entries.as_ptr(),
+                task_entries.len(),
+                &mut task_gid,
+            )
+        },
+        0
+    );
+    let task_group = unsafe { (&*session).request_man.find_group(GroupId::new(task_gid)) }
+        .expect("C API should apply the per-task SFTP options");
+    let task_group = task_group.read().unwrap();
+    let task_options = task_group.options();
+    assert_eq!(task_options.sftp_connect_timeout, Some(19));
+    assert_eq!(task_options.sftp_read_timeout, Some(73));
+    assert!(!task_options.sftp_compression);
+    assert_eq!(task_options.sftp_keepalive_interval, Some(0));
+    drop(task_group);
 
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
     assert_eq!(aria2_rust_library_deinit(), 0);

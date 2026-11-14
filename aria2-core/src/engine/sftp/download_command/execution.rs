@@ -7,13 +7,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 use std::{future::Future, time::Duration};
+use tokio::net::TcpStream;
 
 use tracing::{debug, error, info, warn};
 
 use crate::checksum::checksum::Checksum;
 use crate::constants;
+use crate::dns::dns_cache::DnsCache;
 use crate::engine::work_commit::SequentialWorkCommitter;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::ActiveConnectionGuard;
@@ -26,6 +28,26 @@ use aria2_protocol::sftp::session::SftpSession;
 use super::types::SftpDownloadCommand;
 
 impl SftpDownloadCommand {
+    async fn await_with_lifecycle<T, F>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let notifier = self.group.recover().lifecycle_notifier();
+        tokio::pin!(future);
+        loop {
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            self.check_cancelled()?;
+
+            tokio::select! {
+                biased;
+                _ = &mut notified => self.check_cancelled()?,
+                result = &mut future => return result,
+            }
+        }
+    }
+
     pub(super) fn check_cancelled(&self) -> Result<()> {
         let group = self.group.recover();
         if group.is_removed() {
@@ -47,6 +69,7 @@ impl SftpDownloadCommand {
     /// the entire download lifecycle from connection establishment through data
     /// transfer to cleanup.
     pub(super) async fn execute_once(&mut self) -> Result<()> {
+        self.check_cancelled()?;
         let connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
         connection_guard.set(1);
         // -----------------------------------------------------------------
@@ -89,28 +112,31 @@ impl SftpDownloadCommand {
         let host = self.host.as_str();
         let port = self.port;
         let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
-        let conn_result = connect_with_timeout(host, port, connect_timeout, async move {
-            match outbound_network_policy.connect_host(host, port).await {
-                Ok(stream) => SshConnection::connect_with_stream(ssh_options, stream).await,
-                Err(error) => Err(SshError::ConnectFailed {
-                    host: host.to_string(),
-                    port,
-                    message: error.to_string(),
-                }),
-            }
-        })
-        .await;
+        let dns_cache = self.dns_cache.clone();
+        let host_for_error = self.host.clone();
+        let remote_path_for_error = self.remote_path.clone();
+        let conn_result = self
+            .await_with_lifecycle(async move {
+                connect_with_timeout(host, port, connect_timeout, async move {
+                    let stream = connect_sftp_host(
+                        host,
+                        port,
+                        dns_cache.as_deref(),
+                        &outbound_network_policy,
+                    )
+                    .await?;
+                    SshConnection::connect_with_stream(ssh_options, stream).await
+                })
+                .await
+                .map_err(|error| {
+                    Self::map_ssh_error(&error, &host_for_error, port, &remote_path_for_error)
+                })
+            })
+            .await;
 
         let mut conn = match conn_result {
             Ok(c) => c,
-            Err(e) => {
-                return Err(Self::map_ssh_error(
-                    &e,
-                    &self.host,
-                    self.port,
-                    &self.remote_path,
-                ));
-            }
+            Err(error) => return Err(error),
         };
 
         info!(
@@ -121,18 +147,20 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 2: SFTP Session Initialization
         // -----------------------------------------------------------------
-        let session_result = SftpSession::open(&mut conn).await;
+        let session_result = self
+            .await_with_lifecycle(async {
+                SftpSession::open(&mut conn)
+                    .await
+                    .map_err(|error| Self::map_session_error(&error))
+            })
+            .await;
 
         let session: SftpSession = match session_result {
             Ok(s) => s,
-            Err(e) => {
+            Err(error) => {
                 // Attempt graceful disconnect before returning error
                 let _ = conn.disconnect().await;
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!("SFTP session init failed: {}", e),
-                    },
-                ));
+                return Err(error);
             }
         };
 
@@ -146,11 +174,18 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
         let ops = SftpFileOps::new(&session);
 
-        let file_attrs = match ops.stat(&self.remote_path).await {
+        let file_attrs = match self
+            .await_with_lifecycle(async {
+                ops.stat(&self.remote_path)
+                    .await
+                    .map_err(|error| Self::map_file_op_error(&error, &self.host, &self.remote_path))
+            })
+            .await
+        {
             Ok(attrs) => attrs,
-            Err(e) => {
+            Err(error) => {
                 let _ = conn.disconnect().await;
-                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                return Err(error);
             }
         };
 
@@ -262,11 +297,18 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 4: Open Remote File for Reading
         // -----------------------------------------------------------------
-        let mut remote_file = match ops.open(&self.remote_path, OpenFlags::readonly(), 0).await {
+        let mut remote_file = match self
+            .await_with_lifecycle(async {
+                ops.open(&self.remote_path, OpenFlags::readonly(), 0)
+                    .await
+                    .map_err(|error| Self::map_file_op_error(&error, &self.host, &self.remote_path))
+            })
+            .await
+        {
             Ok(f) => f,
-            Err(e) => {
+            Err(error) => {
                 let _ = conn.disconnect().await;
-                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                return Err(error);
             }
         };
 
@@ -550,6 +592,197 @@ impl SftpDownloadCommand {
     }
 }
 
+async fn connect_sftp_host(
+    host: &str,
+    port: u16,
+    dns_cache: Option<&tokio::sync::Mutex<DnsCache>>,
+    network_policy: &crate::network::OutboundNetworkPolicy,
+) -> std::result::Result<TcpStream, SshError> {
+    if let Ok(address) = host.parse::<std::net::IpAddr>() {
+        return network_policy
+            .connect(std::net::SocketAddr::new(address, port))
+            .await
+            .map_err(|error| SshError::ConnectFailed {
+                host: host.to_string(),
+                port,
+                message: error.to_string(),
+            });
+    }
+
+    let Some(dns_cache) = dns_cache else {
+        return network_policy
+            .connect_host(host, port)
+            .await
+            .map_err(|error| SshError::ConnectFailed {
+                host: host.to_string(),
+                port,
+                message: error.to_string(),
+            });
+    };
+
+    let dns_cache = dns_cache.lock().await.clone();
+    let addresses = dns_cache
+        .resolve_with_refresh(host, port)
+        .await
+        .map_err(|error| SshError::ConnectFailed {
+            host: host.to_string(),
+            port,
+            message: error.to_string(),
+        })?;
+    let mut last_error = None;
+    for address in addresses {
+        match network_policy.connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(SshError::ConnectFailed {
+        host: host.to_string(),
+        port,
+        message: last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "DNS lookup returned no addresses".to_string()),
+    })
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn async_dns_sftp_connection_uses_the_shared_cache() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind local SSH endpoint");
+        let port = listener.local_addr().expect("read endpoint").port();
+        let accept = tokio::spawn(async move { listener.accept().await });
+        let dns_cache = tokio::sync::Mutex::new(DnsCache::new());
+
+        let stream = connect_sftp_host(
+            "localhost",
+            port,
+            Some(&dns_cache),
+            &crate::network::OutboundNetworkPolicy::direct(),
+        )
+        .await
+        .expect("shared DNS cache should resolve localhost and connect");
+
+        assert_eq!(dns_cache.lock().await.len(), 1);
+        drop(stream);
+        accept
+            .await
+            .expect("accept task should finish")
+            .expect("accept local connection");
+    }
+
+    #[tokio::test]
+    async fn explicit_dns_server_routes_sftp_hostname_to_resolved_tcp_peer() {
+        use tokio::net::UdpSocket;
+
+        let dns_socket = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind explicit DNS fixture");
+        let dns_address = dns_socket
+            .local_addr()
+            .expect("read explicit DNS fixture address");
+        let dns_server = tokio::spawn(async move {
+            let mut request = [0u8; 512];
+            for _ in 0..4 {
+                let (length, peer) = dns_socket
+                    .recv_from(&mut request)
+                    .await
+                    .expect("receive explicit DNS query");
+                assert!(length >= 17, "DNS query must contain its question");
+                let mut question_end = 12;
+                loop {
+                    let label_length = request[question_end] as usize;
+                    question_end += 1;
+                    if label_length == 0 {
+                        question_end += 4;
+                        break;
+                    }
+                    question_end += label_length;
+                }
+                let qtype =
+                    u16::from_be_bytes([request[question_end - 4], request[question_end - 3]]);
+                let has_address = qtype == 1;
+                let mut response = Vec::with_capacity(question_end + 16);
+                response.extend_from_slice(&request[..2]);
+                response.extend_from_slice(&[
+                    0x81,
+                    0x80,
+                    0,
+                    1,
+                    0,
+                    u8::from(has_address),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                response.extend_from_slice(&request[12..question_end]);
+                if has_address {
+                    response.extend_from_slice(&[
+                        0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1,
+                    ]);
+                }
+                dns_socket
+                    .send_to(&response, peer)
+                    .await
+                    .expect("send explicit DNS response");
+                if has_address {
+                    break;
+                }
+            }
+        });
+
+        let ssh_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind local SSH endpoint");
+        let ssh_address = ssh_listener.local_addr().expect("read SSH endpoint");
+        let accept = tokio::spawn(async move {
+            ssh_listener
+                .accept()
+                .await
+                .expect("accept SFTP TCP connection")
+                .1
+        });
+        let dns_cache = tokio::sync::Mutex::new(DnsCache::with_dns_servers(
+            Duration::from_secs(2),
+            vec![dns_address],
+        ));
+
+        let stream = tokio::time::timeout(
+            Duration::from_secs(3),
+            connect_sftp_host(
+                "sftp.explicit-dns.test",
+                ssh_address.port(),
+                Some(&dns_cache),
+                &crate::network::OutboundNetworkPolicy::direct(),
+            ),
+        )
+        .await
+        .expect("SFTP DNS-to-TCP connection should finish promptly")
+        .expect("configured DNS answer should connect to the local SSH endpoint");
+
+        assert_eq!(
+            stream.peer_addr().expect("read connected peer"),
+            ssh_address
+        );
+        assert_eq!(dns_cache.lock().await.len(), 1);
+        drop(stream);
+        assert_eq!(
+            accept.await.expect("SSH accept task should finish").ip(),
+            ssh_address.ip()
+        );
+        tokio::time::timeout(Duration::from_secs(2), dns_server)
+            .await
+            .expect("DNS fixture should finish promptly")
+            .expect("DNS fixture task should not fail");
+    }
+}
+
 async fn connect_with_timeout<T, F>(
     host: &str,
     port: u16,
@@ -573,6 +806,7 @@ where
 #[cfg(test)]
 mod timeout_tests {
     use super::*;
+    use crate::request::request_group::{DownloadOptions, GroupId};
 
     #[tokio::test]
     async fn connect_timeout_covers_a_pending_connection_and_keeps_target_context() {
@@ -592,5 +826,36 @@ mod timeout_tests {
                 timeout_secs: 0,
             }) if host == "sftp.example"
         ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_removal_interrupts_pending_sftp_setup() {
+        let command = SftpDownloadCommand::new(
+            GroupId::new(1),
+            "sftp://user:password@example.com/file.bin",
+            &DownloadOptions::default(),
+            None,
+            None,
+        )
+        .expect("construct SFTP command");
+        let group = Arc::clone(&command.group);
+        let removal = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            group
+                .write()
+                .unwrap()
+                .remove()
+                .expect("remove pending SFTP task");
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            command.await_with_lifecycle(std::future::pending::<Result<()>>()),
+        )
+        .await
+        .expect("lifecycle removal should interrupt setup promptly");
+
+        assert!(matches!(result, Err(Aria2Error::DownloadFailed(_))));
+        removal.await.expect("removal task should finish");
     }
 }

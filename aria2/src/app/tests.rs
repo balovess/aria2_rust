@@ -13,6 +13,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[tokio::test]
+async fn app_configuration_uses_binary_identity_and_protocol_peer_id_prefix() {
+    let app = App::new();
+    let config = app.config.read().await;
+
+    assert_eq!(
+        config.get_global_str("user-agent").await.as_deref(),
+        Some(crate::identity::DEFAULT_USER_AGENT)
+    );
+    #[cfg(feature = "bittorrent")]
+    {
+        assert_eq!(
+            config.get_global_str("peer-agent").await.as_deref(),
+            Some(crate::identity::DEFAULT_PEER_AGENT)
+        );
+        assert_eq!(
+            config.get_global_str("peer-id-prefix").await.as_deref(),
+            Some(aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX)
+        );
+    }
+}
+
 #[test]
 fn redirected_stdout_keeps_plain_console_progress_enabled() {
     assert!(
@@ -144,6 +166,7 @@ async fn test_cli_metalink_options_reach_download_options() {
 async fn test_cli_ftp_proxy_options_reach_download_options() {
     let cli = CliArgs::try_parse_from([
         "aria2",
+        "--all-proxy=socks5://global-proxy.invalid:1080",
         "--ftp-proxy=http://proxy.example:3128",
         "--ftp-proxy-user=proxy-user",
         "--ftp-proxy-passwd=proxy-password",
@@ -164,11 +187,59 @@ async fn test_cli_ftp_proxy_options_reach_download_options() {
         options.ftp_proxy.as_deref(),
         Some("http://proxy.example:3128")
     );
+    assert_eq!(
+        options.all_proxy.as_deref(),
+        Some("socks5://global-proxy.invalid:1080")
+    );
     assert_eq!(options.ftp_proxy_user.as_deref(), Some("proxy-user"));
     assert_eq!(options.ftp_proxy_passwd.as_deref(), Some("proxy-password"));
     assert_eq!(options.proxy_method, "tunnel");
     assert_eq!(options.user_agent.as_deref(), Some("task-agent/1.0"));
     assert_eq!(options.ftp_user.as_deref(), Some("download-user"));
+}
+
+#[tokio::test]
+async fn test_cli_ftp_reuse_connection_reaches_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--ftp-reuse-connection=false",
+        "ftp://example.test/file.bin",
+    ])
+    .expect("FTP connection reuse CLI option should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("FTP connection reuse option should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert!(!options.ftp_reuse_connection);
+}
+
+#[tokio::test]
+async fn test_cli_http_auth_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--http-user=download-user",
+        "--http-passwd=download-password",
+        "--http-auth-challenge=true",
+        "--no-netrc=true",
+        "--header=Authorization: Bearer cli",
+        "http://example.test/file.bin",
+    ])
+    .expect("HTTP auth CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("HTTP auth options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.http_user.as_deref(), Some("download-user"));
+    assert_eq!(options.http_passwd.as_deref(), Some("download-password"));
+    assert!(options.http_auth_challenge);
+    assert!(options.no_netrc);
+    assert_eq!(options.header, ["Authorization: Bearer cli"]);
 }
 
 #[cfg(feature = "bittorrent")]

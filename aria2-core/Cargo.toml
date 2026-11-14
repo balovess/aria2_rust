@@ -54,7 +54,7 @@ aria2-protocol = { workspace = true }
 # Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
 # The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
 # automatically use ring as the crypto provider.
-reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
+reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2", "socks"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio` enables the async resolver; `system-config` loads the operating system's DNS settings.
 # Uses 0.26: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`

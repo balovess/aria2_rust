@@ -1,8 +1,11 @@
+use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+const MAX_MEMORY_DOWNLOAD_PREALLOCATION: usize = 1024 * 1024;
 
 use super::connection::{FtpActiveDataListener, FtpConnection, FtpResponseClass};
 use super::listing::parse_ftp_list_response;
@@ -60,6 +63,60 @@ fn is_transient_io_error(error: &std::io::Error) -> bool {
             | ErrorKind::BrokenPipe
             | ErrorKind::TimedOut
     ) || error.to_string().to_lowercase().contains("temporary")
+}
+
+fn local_child_path(base: &Path, name: &str) -> Result<PathBuf, String> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(base.join(name)),
+        _ => Err(format!("Unsafe FTP listing entry name: {name:?}")),
+    }
+}
+
+fn memory_download_capacity(expected_size: Option<u64>) -> usize {
+    expected_size
+        .map(|size| {
+            usize::try_from(size)
+                .unwrap_or(MAX_MEMORY_DOWNLOAD_PREALLOCATION)
+                .min(MAX_MEMORY_DOWNLOAD_PREALLOCATION)
+        })
+        .unwrap_or(MAX_MEMORY_DOWNLOAD_PREALLOCATION)
+}
+
+fn validate_transfer_size(expected_size: Option<u64>, actual_size: u64) -> Result<(), String> {
+    if let Some(expected_size) = expected_size
+        && actual_size != expected_size
+    {
+        return Err(format!(
+            "FTP transfer size mismatch: expected {expected_size} bytes, received {actual_size} bytes"
+        ));
+    }
+    Ok(())
+}
+
+async fn prepare_resume_target(
+    file: &mut tokio::fs::File,
+    resume_offset: u64,
+) -> Result<(), String> {
+    let local_size = file
+        .metadata()
+        .await
+        .map_err(|error| format!("Failed to inspect local resume file: {error}"))?
+        .len();
+    if local_size < resume_offset {
+        return Err(format!(
+            "FTP resume offset {resume_offset} exceeds local file length {local_size}"
+        ));
+    }
+    if local_size > resume_offset {
+        file.set_len(resume_offset)
+            .await
+            .map_err(|error| format!("Failed to truncate local resume file: {error}"))?;
+    }
+    file.seek(SeekFrom::Start(resume_offset))
+        .await
+        .map_err(|error| format!("Failed to seek local resume file: {error}"))?;
+    Ok(())
 }
 
 impl<'a> FtpDownload<'a> {
@@ -289,7 +346,8 @@ impl<'a> FtpDownload<'a> {
             if entry.is_directory {
                 // Recursively download subdirectory
                 let sub_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
-                let sub_local = format!("{}/{}", local_base_dir.trim_end_matches('/'), entry.name);
+                let sub_local = local_child_path(Path::new(local_base_dir), &entry.name)?;
+                let sub_local = sub_local.to_string_lossy().into_owned();
 
                 let sub_results = Box::pin(self.download_directory_controlled(
                     &sub_remote,
@@ -302,7 +360,8 @@ impl<'a> FtpDownload<'a> {
             } else {
                 // Download individual file
                 let remote_file = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
-                let local_file = format!("{}/{}", local_base_dir.trim_end_matches('/'), entry.name);
+                let local_file = local_child_path(Path::new(local_base_dir), &entry.name)?;
+                let local_file = local_file.to_string_lossy().into_owned();
 
                 let result = self
                     .download_file_controlled(
@@ -359,37 +418,48 @@ impl<'a> FtpDownload<'a> {
         progress_callback: Option<fn(DownloadProgress)>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<DownloadResult, String> {
-        let mut data_stream = data_connection
+        let mut data_stream = match data_connection
             .open(self.options.data_connect_timeout)
-            .await?;
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return Err(self.abort_after_transfer_error(error).await),
+        };
 
         // Open/create local file
         let has_resume_offset = self.options.resume_offset.is_some_and(|offset| offset > 0);
-        let mut file = if has_resume_offset {
+        let file = if has_resume_offset {
             tokio::fs::OpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .write(true)
                 .open(local_path)
                 .await
-                .map_err(|e| format!("Failed to open local file for resume: {}", e))?
+                .map_err(|e| format!("Failed to open local file for resume: {}", e))
         } else {
             tokio::fs::File::create(local_path)
                 .await
-                .map_err(|e| format!("Failed to create local file: {}", e))?
+                .map_err(|e| format!("Failed to create local file: {}", e))
+        };
+        let mut file = match file {
+            Ok(file) => file,
+            Err(error) => {
+                drop(data_stream);
+                return Err(self.abort_after_transfer_error(error).await);
+            }
         };
 
         // Seek to resume offset if resuming
         if let Some(offset) = self.options.resume_offset
             && offset > 0
+            && let Err(error) = prepare_resume_target(&mut file, offset).await
         {
-            file.seek(SeekFrom::Start(offset))
-                .await
-                .map_err(|e| format!("Failed to seek file: {}", e))?;
+            drop(data_stream);
+            return Err(self.abort_after_transfer_error(error).await);
         }
 
         // Data receive loop with retry logic
-        let mut buffer = vec![0u8; self.options.buffer_size];
+        let mut buffer = vec![0u8; self.options.effective_buffer_size()];
         let mut total_downloaded = self.options.resume_offset.unwrap_or(0);
         let start_time = std::time::Instant::now();
         let mut read_retry_count = 0u32;
@@ -398,8 +468,9 @@ impl<'a> FtpDownload<'a> {
                 tokio::select! {
                     _ = token.cancelled() => {
                         drop(data_stream);
-                        let _ = self.conn.abor().await;
-                        return Err("FTP download cancelled".to_string());
+                        return Err(self.abort_after_transfer_error(
+                            "FTP download cancelled".to_string(),
+                        ).await);
                     }
                     result = data_stream.read(&mut buffer) => result,
                 }
@@ -416,9 +487,14 @@ impl<'a> FtpDownload<'a> {
                     }
 
                     // Write to local file
-                    file.write_all(&buffer[..bytes_read])
-                        .await
-                        .map_err(|e| format!("Failed to write to local file: {}", e))?;
+                    if let Err(error) = file.write_all(&buffer[..bytes_read]).await {
+                        drop(data_stream);
+                        return Err(self
+                            .abort_after_transfer_error(format!(
+                                "Failed to write to local file: {error}"
+                            ))
+                            .await);
+                    }
 
                     total_downloaded += bytes_read as u64;
 
@@ -451,21 +527,27 @@ impl<'a> FtpDownload<'a> {
                     continue;
                 }
                 Err(e) => {
-                    return Err(format!(
-                        "FTP data read failed after {} retries: {}",
-                        read_retry_count, e
-                    ));
+                    drop(data_stream);
+                    return Err(self
+                        .abort_after_transfer_error(format!(
+                            "FTP data read failed after {} retries: {}",
+                            read_retry_count, e
+                        ))
+                        .await);
                 }
             }
         }
 
         // Flush and close file
-        file.flush()
-            .await
-            .map_err(|e| format!("Failed to flush file: {}", e))?;
+        if let Err(error) = file.flush().await {
+            drop(data_stream);
+            let _ = self.read_transfer_complete().await;
+            return Err(format!("Failed to flush file: {error}"));
+        }
         drop(data_stream); // Close data connection
 
         self.read_transfer_complete().await?;
+        validate_transfer_size(file_size, total_downloaded)?;
 
         // Calculate statistics
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -492,14 +574,18 @@ impl<'a> FtpDownload<'a> {
         expected_size: Option<u64>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Vec<u8>, String> {
-        let mut data_stream = data_connection
+        let mut data_stream = match data_connection
             .open(self.options.data_connect_timeout)
-            .await?;
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return Err(self.abort_after_transfer_error(error).await),
+        };
 
-        // Pre-allocate buffer based on expected size
-        let capacity = expected_size.unwrap_or(1024 * 1024) as usize;
+        // The remote SIZE is untrusted; cap eager allocation and grow as data arrives.
+        let capacity = memory_download_capacity(expected_size);
         let mut result = Vec::with_capacity(capacity);
-        let mut buffer = vec![0u8; self.options.buffer_size];
+        let mut buffer = vec![0u8; self.options.effective_buffer_size()];
 
         let mut read_retry_count = 0u32;
         loop {
@@ -507,8 +593,9 @@ impl<'a> FtpDownload<'a> {
                 tokio::select! {
                     _ = token.cancelled() => {
                         drop(data_stream);
-                        let _ = self.conn.abor().await;
-                        return Err("FTP download cancelled".to_string());
+                        return Err(self.abort_after_transfer_error(
+                            "FTP download cancelled".to_string(),
+                        ).await);
                     }
                     result = data_stream.read(&mut buffer) => result,
                 }
@@ -534,10 +621,13 @@ impl<'a> FtpDownload<'a> {
                     tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                 }
                 Err(e) => {
-                    return Err(format!(
-                        "FTP memory read failed after {} retries: {}",
-                        read_retry_count, e
-                    ));
+                    drop(data_stream);
+                    return Err(self
+                        .abort_after_transfer_error(format!(
+                            "FTP memory read failed after {} retries: {}",
+                            read_retry_count, e
+                        ))
+                        .await);
                 }
             }
         }
@@ -545,20 +635,31 @@ impl<'a> FtpDownload<'a> {
         drop(data_stream);
 
         self.read_transfer_complete().await?;
+        let actual_size = self
+            .options
+            .resume_offset
+            .unwrap_or(0)
+            .saturating_add(result.len() as u64);
+        validate_transfer_size(expected_size, actual_size)?;
 
         Ok(result)
     }
 
     async fn read_transfer_complete(&mut self) -> Result<(), String> {
         let final_resp = self.conn.read_response().await?;
-        if final_resp.class() != FtpResponseClass::PositiveCompletion
-            && final_resp.class() != FtpResponseClass::PositivePreliminary
-        {
+        if final_resp.class() != FtpResponseClass::PositiveCompletion {
             return Err(format!(
                 "FTP transfer failed: {} {}",
                 final_resp.code, final_resp.message
             ));
         }
         Ok(())
+    }
+
+    async fn abort_after_transfer_error(&mut self, error: String) -> String {
+        if let Err(abort_error) = self.conn.abor().await {
+            warn!(%abort_error, "Failed to synchronize FTP control session after transfer error");
+        }
+        error
     }
 }

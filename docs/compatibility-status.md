@@ -87,7 +87,11 @@ behavior. An unlisted behavior has not been audited here.
   limits such as recovery successes or pacing intervals.
 - **Verification:** an engine-level pause/resume test lets a resumed range
   complete, then rate-limits subsequent ranges and verifies the command exits
-  with an error instead of remaining active.
+  with an error instead of remaining active. The multi-mirror capacity and
+  proxy-jitter soak completed once, and its extended eight-iteration soak
+  completed twice after the retry scheduling and output-reset fixes. Those
+  loopback runs verify exact output bytes and that recovered servers receive
+  no additional self-induced capacity rejections.
 
 ## HTTP mirror circuit-breaker recovery
 
@@ -105,6 +109,25 @@ behavior. An unlisted behavior has not been audited here.
   run, but its existing capacity-peak assertions failed because the dedicated
   test servers did not observe the expected 429 responses; this fix is not
   claimed as end-to-end acceptance for that separate scheduling behavior.
+
+## HTTP mirror failover output integrity
+
+- **Failure mechanism:** concurrent HTTP downloads preallocate the output to
+  the advertised entity length. If a URI attempt fails before a trustworthy
+  `.aria2` control file exists, a later mirror attempt must not interpret that
+  full-length allocation as completed content.
+- **Engine policy:** core compares the output length around a failed URI
+  attempt. If that attempt changed the output and no control sidecar exists,
+  core removes any stale sidecar, truncates and syncs the output, and resets
+  task progress before trying another URI. Failures before output mutation
+  preserve an existing partial file. When the sidecar exists, the normal
+  checkpoint/resume path remains responsible for deciding which bytes are
+  durable.
+- **Verification:** the adaptive capacity/proxy-jitter soak checks exact
+  output bytes and records each requested range/status for failure diagnosis.
+  The ordinary soak passed once and the extended soak passed eight repeated
+  iterations after this fix. This is local loopback simulation; it does not
+  establish behavior against arbitrary remote servers.
 
 ## HTTP/2 Range session and stream limits
 
@@ -146,10 +169,22 @@ behavior. An unlisted behavior has not been audited here.
   `announce` action and echo the requested 20-byte `info_hash`; malformed or
   mismatched responses are rejected before tracker statistics or peers are
   accepted. Core retains tracker selection, outbound connection policy, and
-  announce lifecycle.
+  announce lifecycle. A peer-close before a response is classified as a
+  transport failure; malformed frames and response payloads remain malformed
+  response failures.
 - **Verification:** protocol response-decoding tests cover valid, malformed,
   rejected, and mismatched responses; the core local WebSocket tracker fixture
   echoes the request identity for both started and stopped announces.
+
+## BitTorrent IPv6 tracker peer list compatibility
+
+- **Behavior:** HTTP tracker `peers6` accepts BEP 7 compact IPv6 entries and
+  dictionary-list peer entries. Compact remains the standard wire format; list
+  support preserves the behavior of the original `extractPeer` helper, which
+  handles peer dictionaries for either address family.
+- **Verification:** protocol response tests cover both compact and
+  dictionary-list IPv6 peers. The compatibility reference is
+  `aria2_original/src/bittorrent_helper.h::extractPeer`.
 
 ## BitTorrent dynamic tracker tiers
 
@@ -215,6 +250,16 @@ behavior. An unlisted behavior has not been audited here.
   map their existing policy fields into it. Request headers, absolute-form
   targets, body bytes, and ordering are covered by focused tests. The Linux
   splice transfer itself remains unverified on this Windows host.
+- HTTP proxy response status classification, Basic/Digest challenge selection,
+  and timeout-bound response-head reads now use protocol-owned implementations.
+  The response-head transport reader consumes exactly the header terminator,
+  preserving following response-body bytes for the public
+  `forward_get_with_auth` stream. Core retains proxy TCP connections,
+  reconnects, and the public `HttpProxyForward`/`ProxyResponse` interfaces.
+- **Verification:** 241 HTTP protocol tests and 33 core proxy tests pass. The
+  core loopback cases cover 407 authentication/reconnection, the HEAD probe's
+  fresh-stream contract, and reading a response body after the parsed headers.
+  No external authenticated-proxy interoperability test was run.
 
 ## Metalink/HTTP header parser ownership
 
@@ -254,8 +299,11 @@ behavior. An unlisted behavior has not been audited here.
 
 ## HTTP Digest authentication
 
-- **Layering:** Digest challenge parsing, response computation, and header
-  serialization are shared by `aria2-protocol::http::digest`. The protocol
+- **Layering:** Authentication scheme-token parsing plus Digest challenge
+  parsing, response computation, and header serialization live in
+  `aria2-protocol::http`. Core preserves its public `AuthScheme` and challenge
+  result types by mapping protocol values, and retains credential lookup,
+  nonce/retry state, and request policy. The protocol
   crate's older `HttpAuth` API, core HTTP types, and public
   `aria2_core::auth::digest_auth` provider delegate syntax and hashing to that
   implementation. Core retains public compatibility values, zeroizing secret
@@ -272,18 +320,128 @@ behavior. An unlisted behavior has not been audited here.
   calculations, nonce counting, and zeroization.
   No external authenticated proxy interoperability test was run.
 
+## HTTP redirect credential scope
+
+- **Selected behavior:** after any redirect changes scheme, host, or effective
+  port, core removes origin `Authorization`, cookies supplied as custom
+  headers, and conventional sensitive custom headers (auth, token, key,
+  password, secret, session, signature, and CSRF names) for the rest of that
+  redirect chain. Returning to the original origin does not restore them.
+  Cookie-jar cookies are selected for each current URL, and proxy credentials
+  remain governed by the configured proxy route and proxy challenge. Activated
+  Basic credentials are carried from metadata GET through Range probing,
+  concurrent segments, and sequential retries, scoped by host, port, and path,
+  and still gated by the redirect origin scope.
+- **Protocol library:** the same origin-scope and sensitive-header primitives
+  now live in `aria2-protocol::http::redirect`. The standalone public
+  `HttpClient` uses a bounded manual redirect loop so conventional custom
+  secrets are removed on cross-origin hops; core keeps its own redirect loop
+  because it must coordinate task auth, cookies, metadata, ranges, and URI
+  lifecycle.
+- **Reference comparison:** the local `aria2_original` source creates each
+  redirected `HttpRequest` through `AuthConfigFactory::createAuthConfig` and
+  resolves configured HTTP credentials for the request host. This supports
+  source-level evidence that forwarding may differ; this implementation
+  intentionally follows the selected safer cross-origin policy. No live
+  original-binary redirect capture was performed.
+- **Verification:** core loopback coverage verifies same-origin challenge
+  retry, then a cross-origin redirect where the destination receives no
+  origin Authorization or sensitive custom headers while a non-sensitive
+  trace header remains. In-memory metadata downloads also follow redirects
+  with the same origin filtering. A range-probe loopback case now also covers
+  a redirect returned by the authenticated retry and verifies that the target
+  receives neither source credentials nor sensitive custom headers. Protocol
+  core Range auth coverage also proves an activated Basic credential is reused
+  by a second Range downloader through their shared task cache. Metadata-GET
+  loopback tests confirm activated challenge credentials are preemptively sent
+  on the following Range probe and on the sequential GET when the prepared
+  response must be discarded. Sequential retries and concurrent-to-gap
+  fallback also retain the task cache. A loopback gap test verifies that the
+  activated source credential is sent to the source and stripped after a
+  cross-origin redirect while non-sensitive tracing headers remain. A
+  sequential transfer test interrupts the authenticated response body and
+  verifies the retry reuses the activated Basic credential.
+  loopback coverage uses different ports to prove the standalone client
+  removes Authorization, Cookie, and `X-API-Key` while preserving a trace
+  header; it also checks POST-to-GET
+  conversion and redirect-limit enforcement. Request-policy coverage pins
+  origin comparison, irreversible stripping after crossing and returning, and
+  independent proxy challenge credentials. HTTPS-to-HTTP downgrade is covered
+  by the shared scheme-aware origin comparison, not a live TLS integration
+  fixture.
+
+## HTTP authentication diagnostics
+
+- Core auth configuration, cached Basic credentials, `.netrc` storage/parser
+  values, and protocol `AuthCredentials` now redact usernames and passwords in
+  `Debug` output. `AuthConfig::auth_text()` and its explicit `Display`
+  implementation retain their existing credential-returning behavior.
+- Core Basic/Digest and `.netrc` resolution diagnostics no longer print
+  usernames. Malformed Digest challenges preserve their source status: proxy
+  challenges report 407, while origin challenges report 401.
+- Raw HTTP header log filtering now identifies confidential fields by parsed
+  header name rather than fixed byte offsets. This handles optional whitespace
+  after the colon and non-ASCII neighboring lines without panicking. It
+  continues to redact Authorization, Proxy-Authorization, Cookie, and
+  Set-Cookie values.
+- These changes affect diagnostics only; request headers and authentication
+  wire behavior is unchanged. Focused core and protocol tests cover redaction
+  and challenge status classification.
+- CLI parsing, RPC global/task option merging, and C API global/task option
+  merging each have focused coverage showing that HTTP credentials, challenge
+  mode, `no-netrc`, and custom Authorization headers reach the created task's
+  `DownloadOptions`.
+
 ## SOCKS connection handshake ownership
 
 - **Layering:** SOCKS4 and SOCKS5 greeting, username/password negotiation,
-  CONNECT framing, and reply parsing now live in `aria2-protocol::socks`.
-  Existing core connector types delegate to those functions; core retains
-  proxy URL/configuration parsing, connector selection, no-proxy rules, and
-  outbound network policy.
-- **Compatibility intent:** supported auth methods, address types, request
-  bytes, and error messages preserve the prior core connector behavior.
+  CONNECT framing, and reply parsing are available as synchronous reusable
+  primitives in `aria2-protocol::socks`. The async HTTP downloader uses
+  reqwest's SOCKS connector so proxying shares its HTTP client, connection
+  pool, and request lifecycle. Protocol owns reusable synchronous SOCKS
+  connectors, proxy URL parsing, and the reusable `NoProxyMatcher` for exact
+  host/IP and domain/CIDR matching. Core retains proxy precedence, per-task
+  `no-proxy` application, DNS pinning, and outbound address policy; the reqwest
+  proxy callback now uses that same matcher for actual request routing. This
+  avoids reqwest's broader suffix interpretation of unprefixed host entries,
+  which could disagree with core's first-hop address and source selection. The
+  public core module re-exports protocol APIs at their historical paths. The
+  standalone `ProxyManager` retains its legacy single-proxy behavior across URL
+  schemes; active download requests continue to use core's scheme-specific
+  proxy selection.
+- **Verification:** protocol tests cover case-insensitive domain matching,
+  IP/CIDR matching, and invalid CIDR prefix rejection. Core tests exercise the
+  historical `NoProxyMatcher` path for domains, IPs, and wildcard matching.
+  These helper tests do not exercise external proxy servers.
+- **Compatibility intent:** HTTP and HTTPS proxy transports and credential
+  handling remain unchanged. Unprefixed `no-proxy` host entries now follow
+  upstream exact-host matching instead of reqwest's broader suffix behavior;
+  this restores consistency with core's first-hop selection. SOCKS URLs remain
+  an additive extension to the upstream manual's documented HTTP proxy URL
+  format for `--all-proxy`.
+- **`no-proxy` comparison:** upstream `inNoProxy` uses exact matching for an
+  unprefixed hostname and suffix matching for a leading-dot entry; its CIDR
+  comparison applies to numeric URI hosts without DNS resolution. The shared
+  Rust matcher likewise uses exact matching for unprefixed names and applies
+  CIDR only to IP literals. It additionally accepts `*` and `*.domain`, and
+  treats a leading-dot suffix as including the apex domain; those are recorded
+  extensions. Request routing, first-hop selection, and DNS/source policy now
+  all use the shared matcher instead of mixing it with reqwest's default
+  suffix matcher.
+- **Verification:** a core loopback test uses separate target and proxy
+  listeners to verify that an unprefixed `example.test` exclusion does not
+  bypass the proxy for `download.example.test`, matching the first-hop
+  selector. These checks do not exercise external proxy servers.
 - **Verification:** protocol tests cover SOCKS4 success framing and SOCKS5
-  username/password plus IPv4 CONNECT framing; core connector tests exercise
-  the compatibility adapters and their existing error paths.
+  username/password plus IPv4 CONNECT framing; core adapter tests cover their
+  error paths. SOCKS5 also rejects a server-selected authentication method
+  that the client did not offer, rather than sending empty fallback
+  credentials. A live local SOCKS5 fixture verifies `all-proxy` routing,
+  resolved proxy address pinning, username/password authentication, and an
+  HTTP response carried through the SOCKS tunnel. External SOCKS proxy
+  interoperability remains unverified. CLI global, RPC global/per-task, and
+  C API global option tests verify that SOCKS `all-proxy` values reach the
+  resulting `DownloadOptions`.
 
 ## HTTP live connection status
 
@@ -352,8 +510,9 @@ behavior. An unlisted behavior has not been audited here.
   runtime handshake-timeout and uTP-cap changes produce the corresponding
   engine commands. Protocol unit tests cover ID-space wraparound, the sole
   free-ID case, complete exhaustion, idle retirement without pending
-  retransmissions, and preservation of a live connection after an inbound
-  connection-ID collision.
+  retransmissions, idle-deadline refresh on valid peer traffic, the fact that
+  local keepalive sends do not refresh that deadline, and preservation of a
+  live connection after an inbound connection-ID collision.
 
 ## Public BitTorrent tracker source timeout
 
@@ -417,6 +576,10 @@ behavior. An unlisted behavior has not been audited here.
   owns BEP 15 CONNECT, ANNOUNCE, and SCRAPE transaction state, including
   connection-ID reuse, transaction IDs, source/action validation, and retries.
   It receives a caller-bound `tokio::net::UdpSocket`.
+- **Response association:** a structurally valid SCRAPE payload is accepted
+  only when it contains exactly one result for each requested info hash;
+  truncated or excess result sets are reported as malformed responses instead
+  of returning values that cannot be associated with the request hashes.
 - **Engine policy:** core retains tracker URL resolution through
   `OutboundNetworkPolicy`, binds the socket to the selected address family and
   local source, and maps protocol errors into tracker lifecycle outcomes. UDP
@@ -427,9 +590,30 @@ behavior. An unlisted behavior has not been audited here.
   validation, and tracker error classification are preserved.
 - **Verification:** protocol UDP client loopback tests cover transaction
   matching, unexpected-source rejection, malformed/action-mismatched packets,
-  retry deadlines, connection-ID expiry, ANNOUNCE, and SCRAPE. Core tests cover
-  source-address/address-family binding and URL-to-policy resolution. External
-  tracker interoperability remains unverified.
+  retry deadlines, connection-ID expiry, ANNOUNCE, SCRAPE, and rejection of
+  SCRAPE result counts that differ from the requested hash count. Core tests
+  cover source-address/address-family binding and URL-to-policy resolution.
+  External tracker interoperability remains unverified.
+
+## BitTorrent tracker announce cancellation
+
+- **Lifecycle behavior:** cancelling a tracker announce during startup stop or
+  when the total stopped-announce budget expires clears the core announce
+  counter and per-URL in-flight state. The shared `aria2.getTrackers` snapshot
+  is republished after cleanup; cancellation does not count as a tracker
+  failure or advance the failover cursor.
+- **Ownership:** HTTP, UDP, and WebSocket protocol transports own their
+  respective exchanges and deadlines. Core owns cancellation of a task-level
+  announce, clears queued UDP transactions before reusing that client, and
+  reconciles the torrent-wide tracker snapshot.
+- **Verification:** a slow HTTP stopped-announce fixture checks the total
+  shutdown deadline and verifies the snapshot has no in-flight tracker after
+  cancellation. A UDP loopback fixture cancels a pending start transaction and
+  verifies the subsequent stopped event is the only announce sent. A protocol
+  client test verifies cancellation clears every transaction queue while
+  retaining valid connection IDs. A tracker-actor fixture verifies stop remains
+  serviceable while initial public announces are pending. External tracker
+  interoperability is not relevant to this local cancellation-state contract.
 
 ## BitTorrent DHT process configuration
 
@@ -460,7 +644,7 @@ behavior. An unlisted behavior has not been audited here.
   engine settings from `DownloadEngine::getOption()`, while `RequestGroup.cc`
   reads the per-task DHT enable flags. DHT options are not marked with
   `setChangeGlobalOption(true)` in `OptionHandlerFactory.cc`.
-- **Runtime contract:** These two Rust-specific resource bounds are available
+- **Runtime contract:** These Rust-specific resource bounds are available
   to `changeGlobalOption`, but remain excluded from task `changeOption`. Other
   DHT engine settings remain fixed after startup and are excluded from both
   runtime option allowlists. RPC-created and session-restored tasks retain
@@ -625,7 +809,10 @@ behavior. An unlisted behavior has not been audited here.
 - **Compatibility impact:** preserves the existing `Range` and `User-Agent`
   headers, the 200/206 acceptance rule, per-read timeout behavior, short-body
   return behavior, oversized-body rejection, and URI fallback policy. No
-  CLI/RPC/C API or wire contract change is intended.
+  CLI/RPC/C API or wire contract change is intended. The task's configured
+  `user-agent` now reaches live WebSeed range requests, with an explicit
+  `User-Agent` entry in `header` retaining precedence; standalone WebSeed
+  clients retain the library default.
 - **Verification:** protocol loopback tests cover range/header construction,
   partial and full-content responses, status reporting, and oversized bodies.
   Existing core WebSeed tests cover source-address selection, URI fallback,
@@ -669,24 +856,60 @@ behavior. An unlisted behavior has not been audited here.
   `DownloadOptions::from_option_strings` parser. Session restoration no longer
   reparses selected SFTP fields with different validation. `changeOption`
   stores changes for reserved downloads and defers them on active downloads
-  until the task is restarted.
-- **Verification:** focused CLI, RPC option validation, C API global-option
-  propagation, protocol option construction, and session restore tests cover
-  the path, including rejection of a persisted zero connect timeout and
+  until the task is restarted. RPC task creation converts list-valued global
+  `OptionValue`s to the newline-separated string form accepted by the shared
+  registry before merging them with per-task RPC options. This keeps global
+  list settings such as `sftp-preferred-ciphers` valid through task creation.
+- **Verification:** focused CLI, RPC option validation, C API global and
+  task-option propagation, protocol option construction, and session restore
+  tests cover the path, including global/task RPC overrides for all SFTP
+  transport settings, rejection of a persisted zero connect timeout, and
   timeout of a pending core connection future. The protocol `connect_with_stream`
   path applies its configured deadline to both SSH handshake and authentication,
   and SFTP channel opening uses that timeout. The initial SFTP packet exchange
   uses the separately configured read timeout. The core deadline includes
-  policy-based DNS/TCP and SSH negotiation/authentication. A loopback server
+  policy-based DNS/TCP and SSH negotiation/authentication. Core also observes
+  pause, remove, and halt notifications while connecting, initializing the
+  session, and opening the remote file; a focused regression test verifies a
+  pending setup operation exits promptly after removal. A loopback server
   test verifies that a stalled channel open and stalled SFTP INIT response
   time out. A separate protocol loopback test confirms the server has entered
   password authentication before stalling, then verifies
   `connect_with_stream` returns `ConnectTimeout` within the configured
-  connection deadline.
+  connection deadline. Standalone SFTP transfer tests pass 17/17, including
+  early-EOF regressions for a truncated remote download and a local upload
+  source that shrinks after its initial size is read; both paths return errors
+  and close the remote handle. The suite also includes a loopback upload that
+  reports a pre-existing remote prefix and verifies the
+  resumed OPEN omits `TRUNC` and the first WRITE starts at the remote file
+  size. Cancellation coverage also verifies explicit remote CLOSE. Buffer
+  bounds are checked at use time even when callers directly assign the public
+  `TransferOptions::buffer_size` field. SFTP INIT advertises v3, and the
+  implementation now accepts only the negotiated v3 wire format. Each packet
+  read uses a single `sftp-read-timeout` deadline across all fragments; a
+  slow-drip regression test verifies that periodic bytes do not reset it.
+  Cancelling a public SFTP request while its send/response exchange is in
+  flight invalidates the shared session, because a late response could
+  otherwise be consumed as the next request's response. Cloned sessions share
+  this invalidation state; later operations fail locally with
+  `SessionPoisoned`. Core cancellation continues to discard the SSH connection
+  instead of queueing CLOSE behind an outstanding read. A loopback regression
+  cancels a stalled STAT and verifies the next request is never sent.
   `cargo check -p aria2-protocol --features sftp` and
   `cargo check -p aria2-core --features "bittorrent metalink sftp"` pass.
   Original aria2 has no matching SFTP-specific timeout options; these are Rust
   extensions.
+- **Attribute updates:** existing `FileAttributes` keeps its zero-means-unknown
+  SETSTAT mapping for source compatibility and omits grouped UID/GID or time
+  fields if either member is zero. The additive `FileAttributePatch`
+  and `set_stat_patch` API distinguishes omitted fields from explicit zero
+  values; UID/GID and access/modification times are represented as pairs, as
+  required by their SFTP v3 wire flags. Standalone uploads use the patch API
+  when preserving permissions and timestamps.
+  Protocol tests cover zero-valued field masks and SETSTAT encode/decode; a
+  loopback SSH/SFTP fixture verifies the public `set_stat_patch` call sends
+  explicit zero values in all four attribute groups. No remote server
+  interoperability run has been performed.
 - **Host-key verification:** the protocol library now enforces the documented
   `Strict`, `AcceptNew`, and `Disable` modes using OpenSSH-format
   `~/.ssh/known_hosts` by default; library callers can supply another file.
@@ -708,10 +931,28 @@ behavior. An unlisted behavior has not been audited here.
 - **Malformed packet handling:** length-prefixed fields are collected from
   bytes actually present before their contents are allocated, and a directory
   entry count is checked against the minimum possible encoded payload before
-  reserving entries. This rejects impossible short packets without limiting
+  reserving entries. Known packet fields must consume the entire payload, so
+  unexplained trailing bytes are rejected. Encoding rejects field and packet
+  lengths that do not fit the u32 wire fields, rather than silently truncating
+  them; decoding checks the outer frame addition for platform-size overflow.
+  These checks reject malformed or unrepresentable packets without limiting
   valid packet sizes. The outer SFTP frame length still has no configured
   maximum; deciding whether to impose one requires a compatibility policy for
   unusually large but valid server responses.
+- **Version negotiation:** the client sends `SSH_FXP_INIT` with version 3 and
+  accepts the negotiated v3 version only, as required by the SFTP negotiation
+  rule that the server selects the lower of its version and the client's.
+  Versions above 3 are rejected because the current codec implements v3 only.
+  Retry classification now preserves the protocol session's typed distinction:
+  connection, channel I/O, and timeout failures are retryable; unsupported
+  versions, malformed or mismatched packets, and unclassified SFTP status
+  failures terminate the attempt without reconnecting. This matches the
+  original command's abort path for SFTP operation errors and avoids retrying
+  deterministic protocol/server failures. Focused core tests cover terminal
+  INIT/version and generic server-status failures alongside retryable timeout
+  and transport failures.
+  The [IETF SFTP draft's protocol initialization section](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-13#section-4)
+  is the primary reference for this negotiation behavior.
 
 ## FTP control-session layering
 
@@ -743,13 +984,66 @@ behavior. An unlisted behavior has not been audited here.
   an EPSV port. EPSV transport/read errors propagate without sending a second
   command on a possibly desynchronized control stream. FTP HTTP CONNECT skips
   informational 1xx responses, matching the existing HTTP CONNECT path.
+  Safety hardening rejects embedded CR/LF in FTP commands and unsafe
+  server-provided local child paths; valid command sequences and ordinary
+  single-component listing names are unchanged. FTP diagnostics omit `USER`
+  and `PASS` arguments in standalone and core session paths.
 - **Response bound:** standalone `FtpConnection` and injected
   `FtpControlSession` now share the original aria2 64 KiB maximum FTP response
   size. Bounded reads enforce the cap before appending an oversized line, so a
   peer cannot bypass the limit with one unterminated control line.
-- **Verification:** protocol-layer FTP tests (19), core FTP tests (72), FTP
-  download end-to-end tests (34), FTP proxy tests (2), and the legacy FTP
-  integration tests (13) pass. A mock control stream verifies the injected
+- **Response parsing:** standalone `FtpConnection` now adapts the same RFC 959
+  response parser used by `FtpControlSession`, removing duplicate framing and
+  multiline logic. Malformed or incomplete responses now return an error
+  instead of a successful response with code `0`; the public `String` error
+  type and legacy timeout, I/O, and size-limit messages remain.
+- **ABOR response synchronization:** standalone `FtpConnection::abor` consumes
+  the complete `426` then `226` abort sequence before allowing another command
+  to use the control stream. A loopback test follows ABOR with NOOP and verifies
+  the NOOP reads its own reply.
+- **Transfer failure cleanup:** after RETR/LIST has entered its data phase,
+  data-channel establishment, local file setup/write, exhausted transient-read
+  retries, and cancellation close the data stream and attempt ABOR. Cleanup
+  failure is logged while the original transfer error is preserved. A local
+  passive data-connection timeout fixture verifies the ABOR exchange and a
+  successful subsequent NOOP; a local file-setup failure fixture verifies the
+  data socket closes and the control session handles a subsequent NOOP. Local
+  file-write failure and exhausted data-read retry behavior are not separately
+  fault-injected yet.
+- **Transfer completion reply:** the standalone downloader accepts only a
+  positive-completion 2xx reply after data EOF. A preliminary 1xx reply cannot
+  be mistaken for successful completion; a loopback regression covers 150.
+- **Known transfer size:** when FTP `SIZE` succeeds, file and in-memory
+  downloads now require the transferred byte count plus any resume offset to
+  equal the advertised size. An integration fixture returns one byte followed
+  by 226 for a two-byte file and verifies the download fails while the control
+  stream remains synchronized.
+- **Standalone file resume:** before writing at a nonzero offset, the target
+  must contain at least that many bytes; an incomplete local prefix is rejected
+  instead of creating a hole. Any stale tail beyond the offset is truncated so
+  old bytes cannot survive a shorter resumed transfer. Focused filesystem
+  coverage verifies both cases; core's checkpoint-based resume remains managed
+  by its separate engine path.
+- **In-memory download allocation:** the standalone client caps the initial
+  `Vec` reservation derived from remote `SIZE` at 1 MiB. This prevents a
+  server-advertised size from forcing an immediate unbounded allocation; the
+  buffer still grows as payload bytes arrive.
+- **Transfer buffer allocation:** `FtpDownloadOptions::buffer_size` is public
+  and may be directly mutated, so both file and in-memory transfer paths clamp
+  it at use time to 1 byte through 1 MiB. This prevents zero-sized reads from
+  being mistaken for EOF and avoids allocating an unbounded caller-supplied
+  buffer; the default remains 64 KiB.
+- **Command and local-path safety:** the shared FTP command writer rejects
+  embedded CR/LF before writing any bytes. This blocks command injection from
+  decoded FTP URI paths and applies to both the standalone connection and the
+  core's injected control session. Recursive standalone downloads reject LIST
+  entry names that are not one normal local path component, preventing
+  absolute and parent-directory traversal from server-controlled names.
+  Authentication logs omit username and password values.
+- **Current focused verification:** `cargo test -p aria2-protocol --lib ftp::`
+  passes 81 tests, and
+  `cargo test -p aria2-core --lib engine::ftp::download_command::tests` passes
+  29 tests. A mock control stream verifies the injected
   session command sequence; protocol tests cover EPSV response fallback and
   propagation of a closed control stream; a core IPv4 loopback verifies that
   the command is PASV without an EPSV probe. An explicit FTPS mock verifies TLS
@@ -759,9 +1053,13 @@ behavior. An unlisted behavior has not been audited here.
   `target/ftp-test-tmp` directory; the default OS temp directory does not allow
   the required control-file replacement in this sandbox. `cargo check -p
   aria2-protocol -p aria2-core`, workspace formatting, and `git diff --check`
-  pass. A public remote FTP/FTPS server was not used for interoperability
+  pass. `cargo check -p aria2-core --features "bittorrent metalink sftp"`
+  passes after the current protocol changes. A public remote FTP/FTPS server was not used for interoperability
   testing. Focused tests cover bounded line reads and oversized responses in
-  both public FTP client paths.
+  both public FTP client paths, CR/LF rejection at the shared command writer,
+  rejection of unsafe recursive listing paths, and credential redaction in
+  command-log formatting. Earlier core FTP, FTP download end-to-end, proxy, and
+  legacy integration checks are recorded in their respective audit entries.
 
 - **FTPS TLS layering:** `aria2-protocol::ftp::tls::FtpsClient` builds a TLS
   connector once per download attempt and reuses it for the control and data
@@ -770,6 +1068,37 @@ behavior. An unlisted behavior has not been audited here.
   stay in the protocol crate. Existing FTPS wire order and certificate policy
   are unchanged. Focused local FTPS tests verify protected control and data
   channels; public remote-server interoperability remains unverified.
+
+- **FTP control-session reuse:** `ftp-reuse-connection` now controls a
+  process-scoped pool shared by core FTP download commands. The pool stores
+  `FtpControlSession` with its buffered input, TLS client, connection context,
+  and outbound policy. Its key isolates origin credentials, proxy credentials
+  and endpoint, FTPS certificate/TLS mode, and outbound source addresses.
+  Sessions return to the pool only after the transfer-completion response is
+  read as `226`; failed, interrupted, or unsynchronized transfers close the
+  session. The option description now correctly identifies the FTP control
+  connection. A local two-download FTP fixture verifies a single TCP login
+  serves both transfers and checks pool reuse statistics. Idle and maximum-age
+  bounds are retained across leases, and engine shutdown clears idle sessions.
+  Configuration reaches `DownloadOptions` from CLI, RPC global/task options,
+  and C API global/task options; focused adapter tests pin false global values
+  and task overrides. The RPC reserved-task update policy also carries the
+  option into `RequestGroup` before execution.
+  A second loopback fixture closes an idle pooled socket and verifies that the
+  next task retries with a fresh authenticated session. This is intended to
+  match original aria2's cross-download control-socket reuse while preserving
+  the Rust protocol session's buffered state. Proxy, FTPS, and public-server
+  interoperability cases remain unverified by these focused fixtures.
+
+- **FTP I/O timeout propagation:** a new FTP control connection uses the
+  request group's configured `timeout` while reading its greeting; each
+  control-session lease then uses it for FTP commands, passive data connection
+  or active accept, and the final transfer response. A pooled connection picks
+  up the current task's timeout on every lease. When no task timeout is set,
+  retain the previous 30-second greeting/command/data and 10-second completion
+  fallbacks. This follows original aria2's request-group timeout use in
+  `FtpNegotiationCommand.cc` and `FtpFinishDownloadCommand.cc`. Unit tests cover
+  fallbacks, per-lease override, and stalled greeting/control responses.
 
 ## Metalink parsed execution data
 
@@ -783,12 +1112,30 @@ behavior. An unlisted behavior has not been audited here.
 - **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
   BitTorrent metaurls use the same parser output as before. Parsing errors are
   still surfaced by command construction, before task execution.
+- **Transport and commit:** each mirror and torrent metadata URL uses the
+  ordinary source-protocol adapters, with the task's DNS cache, proxy rules,
+  outbound-address policy, and global limiter. HTTP, FTP, and feature-enabled
+  SFTP URIs retain their original schemes through parsing and dispatch. Each
+  source attempt writes to a mirror-specific sibling staging file; Metalink
+  verifies expected size, whole-file hashes, and piece hashes before a durable
+  atomic replacement publishes the destination. Metalink controls retries by
+  limiting each child protocol command to one attempt and relays pause, halt,
+  removal, and progress to that command. HTTP source commands preserve the
+  Metalink path's 30-second default connect timeout when the option is unset;
+  an explicit task value is passed through unchanged. They also retain the
+  former one-sequential-request-per-mirror pattern.
 - **Verification:** focused Metalink constructor and execution tests cover
   direct mirrors, torrent-metaurl-only inputs, integrity data, grouped files,
   manager-restored source handling, parsed-file handoff, and restored-source
   fallback. The initial-path regression deliberately provides invalid source
-  XML alongside a valid cached parsed file. No upstream binary comparison was
-  run for this internal ownership change.
+  XML alongside a valid cached parsed file. A local FTP-over-HTTP-proxy fixture
+  confirms FTP mirror dispatch and payload commit; a local HTTP proxy fixture
+  confirms engine-injected proxy policy reaches Metalink payload traffic. The
+  504 retry, pause, and torrent-metadata retry tests also pass through the new
+  source-command path. Parser tests cover SFTP URI retention and FTP-family
+  classification. No public remote-server or original-binary comparison was
+  run; Metalink-over-SFTP wire interoperability and custom-DNS end-to-end
+  behavior remain unverified.
 
 ## Pause and unpause lifecycle status
 
@@ -804,6 +1151,29 @@ behavior. An unlisted behavior has not been audited here.
   resume test, and the sequential pause/resume control-file test pass on
   Windows. Tests that atomically replace files must use a writable temporary
   directory; the sandbox system temp path denies `MoveFileExW` replacement.
+
+## Product and protocol identity defaults
+
+- **Ownership:** `aria2-protocol::identity` provides defaults for standalone
+  protocol and core-library consumers. `aria2-core::ConfigManager` can receive
+  embedding-product defaults; the `aria2` application supplies its binary
+  identity when constructing `App`, while the C API session uses the core
+  library defaults. RPC `aria2.getVersion` reports the binary package version.
+  The resulting CLI and C API default HTTP/peer-agent strings can differ by
+  product name and package version. This is intentional identity scoping; the
+  `user-agent`, `peer-agent`, and `peer-id-prefix` options can override their
+  respective defaults. The configured HTTP User-Agent is also applied to
+  magnet exact-source HTTP metadata retrieval, alongside ordinary HTTP and
+  WebSeed downloads. An explicit `User-Agent` value in the `header` list keeps
+  precedence on those auxiliary download paths.
+- **Verification:** protocol identity tests reject upstream `aria2/` strings;
+  core option-registry tests check protocol defaults, and `ConfigManager`
+  tests cover embedding identity injection with and without config-file
+  loading. CLI option parsing and C API global-option application are tested
+  through `DownloadOptions`; the RPC backend test covers global defaults and
+  per-call `aria2.addUri` override precedence. Loopback request tests verify
+  the configured header on WebSeed and magnet exact-source traffic. A
+  packet-level capture through each public adapter was not run in this audit.
 
 ## DNS resolver defaults
 
@@ -860,6 +1230,14 @@ behavior. An unlisted behavior has not been audited here.
   fixture also verifies that `async-dns=false` resolves a custom bootstrap
   hostname through system DNS even when the shared cache has a failing explicit
   server configured.
+- **SFTP:** with `async-dns=true`, the command adapter injects the engine's
+  shared `DnsCache` for hostnames; IP literals bypass DNS. Lookup and address
+  attempts run inside the configured SFTP connect deadline and TCP sockets
+  still pass through `OutboundNetworkPolicy`. With `async-dns=false`, that
+  policy uses Tokio's system resolver. Local tests confirm both shared-cache
+  lookup and explicit-DNS resolution through to the selected TCP peer. The
+  explicit-server fixture stops at TCP accept; SSH negotiation/authentication
+  against a remote SFTP server remains unverified.
 
 ## C API process-engine option setup
 
@@ -867,11 +1245,17 @@ behavior. An unlisted behavior has not been audited here.
   outbound interface policy (`interface` before `multiple-interface`), DNS
   timeout and explicit DNS servers, server-stat freshness and persistence,
   scheduler and global rate limits, plus BitTorrent tracker, uTP, handshake,
-  and LPD settings when that feature is enabled. CLI and C API use the same
-  `DownloadEngine::from_process_options` core boundary.
+  and LPD settings when that feature is enabled. The session starts from core
+  defaults without consulting process environment variables or an implicit
+  config file; only explicitly supplied session options affect its startup.
+  CLI and C API use the same `DownloadEngine::from_process_options` core
+  boundary after their entry-point-specific option loading.
 - **Verification:** a focused unit test inspects the constructed engine's
   outbound policy, DNS cache, and server-stat configuration with custom values;
-  it passes both with and without the BitTorrent feature.
+  it passes both with and without the BitTorrent feature. A configuration
+  constructor test verifies the no-config defaults; ambient environment and
+  implicit-file isolation are enforced by the constructor selected in C API
+  session setup.
 - **Runtime semantics:** global option updates issue commands only for
   settings with explicit runtime handling; other values update the option
   snapshot without rebuilding engine-owned objects. This is consistent with
@@ -965,6 +1349,18 @@ behavior. An unlisted behavior has not been audited here.
   Metalink tests cover task-option use and its legacy fallback. CLI, RPC option
   parsing/runtime update, and C API global-option tests cover propagation into
   `DownloadOptions`.
+
+## HTTP CONNECT authentication response timeout
+
+- **Behavior:** parsing the CONNECT response head and draining a 407
+  authentication body use the caller's configured `read_timeout`. This avoids
+  an internal fixed two-second deadline that could contradict the timeout
+  already applied to the response head. Body discard limits remain bounded.
+- **Scope:** HTTP CONNECT callers in core pass the same configured timeout to
+  the protocol session. This does not change proxy selection, auth retry count,
+  authentication scheme policy, or the ordinary tunnel success path.
+- **Verification:** protocol tests cover configured timeout enforcement and
+  preservation of bytes following Content-Length and chunked 407 bodies.
 
 ## RPC interface
 

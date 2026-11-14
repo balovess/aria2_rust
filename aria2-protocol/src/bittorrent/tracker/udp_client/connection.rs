@@ -384,7 +384,7 @@ impl UdpTrackerClient {
                 self.fail_connection_requests(*from, UdpError::MalformedResponse);
             }
             Some(UdpAction::Scrape) => match parse_scrape_response(data) {
-                Ok(results) => {
+                Ok(results) if results.len() == req.scrape_info_hashes.len() => {
                     info!(
                         "SCRAPE response from {}: {} info hashes scraped",
                         from,
@@ -392,6 +392,16 @@ impl UdpTrackerClient {
                     );
                     req.scrape_results = Some(results);
                     req.error = None;
+                    self.pending.push_back(req);
+                }
+                Ok(results) => {
+                    warn!(
+                        tracker = %from,
+                        expected = req.scrape_info_hashes.len(),
+                        received = results.len(),
+                        "SCRAPE response count does not match request"
+                    );
+                    req.error = Some(UdpError::MalformedResponse);
                     self.pending.push_back(req);
                 }
                 Err(e) => {

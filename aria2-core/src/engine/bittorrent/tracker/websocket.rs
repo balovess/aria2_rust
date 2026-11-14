@@ -139,16 +139,15 @@ fn classify_websocket_announce_error(error: WebSocketAnnounceError) -> AnnounceE
         }
         WebSocketAnnounceError::HandshakeRejected(_) => TrackerFailureKind::TrackerRejected,
         WebSocketAnnounceError::Protocol(_)
-        | WebSocketAnnounceError::Closed
         | WebSocketAnnounceError::Response(
             aria2_protocol::bittorrent::tracker::websocket::WebSocketAnnounceResponseError::Malformed(_),
         ) => TrackerFailureKind::MalformedResponse,
         WebSocketAnnounceError::Response(
             aria2_protocol::bittorrent::tracker::websocket::WebSocketAnnounceResponseError::Rejected(_),
         ) => TrackerFailureKind::TrackerRejected,
-        WebSocketAnnounceError::InvalidRequest(_) | WebSocketAnnounceError::Transport(_) => {
-            TrackerFailureKind::Network
-        }
+        WebSocketAnnounceError::Closed
+        | WebSocketAnnounceError::InvalidRequest(_)
+        | WebSocketAnnounceError::Transport(_) => TrackerFailureKind::Network,
     };
     AnnounceError::new(kind, error.to_string())
 }
@@ -274,6 +273,13 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use serde_json::Value;
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn classifies_close_without_response_as_transport_failure() {
+        let error = classify_websocket_announce_error(WebSocketAnnounceError::Closed);
+
+        assert_eq!(error.kind, TrackerFailureKind::Network);
+    }
 
     #[test]
     fn parses_json_and_compact_peers() {

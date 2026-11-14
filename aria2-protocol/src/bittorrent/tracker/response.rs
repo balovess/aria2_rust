@@ -14,12 +14,11 @@ pub struct TrackerResponse {
     pub downloaded: Option<u64>,
     /// Peers from the "peers" key (compact or dictionary format, typically IPv4).
     pub peers: Vec<PeerInfo>,
-    /// IPv6 peers from the "peers6" key (compact format, 18 bytes per peer).
+    /// IPv6 peers from the "peers6" key.
     ///
-    /// Matches the C++ `BtAnnounce::PEERS6` key and `extractPeer(peer6Data,
-    /// AF_INET6, ...)` call in `DefaultBtAnnounce::processAnnounceResponse`.
-    /// The compact format uses 16 bytes for the IPv6 address and 2 bytes for
-    /// the port (big-endian), per BEP 7.
+    /// BEP 7 compact entries use 16 bytes for the IPv6 address and 2 bytes for
+    /// the port (big-endian). Dictionary-list entries are also accepted for
+    /// compatibility with existing tracker responses.
     pub peers6: Vec<PeerInfo>,
     /// Tracker ID from the tracker response ("tracker id" key in bencode).
     /// The client must echo this back as the `trackerid` parameter in
@@ -213,15 +212,16 @@ impl TrackerResponse {
         peers
     }
 
-    /// Parse the "peers6" key from tracker response (IPv6 compact format).
-    /// The compact format is 18 bytes per peer: 16-byte IPv6 address + 2-byte port.
+    /// Parse the "peers6" key in compact or dictionary-list form.
+    /// Compact entries are 18 bytes: 16-byte IPv6 address + 2-byte port.
     fn parse_peers6(root: &crate::bittorrent::bencode::codec::BencodeValue) -> Vec<PeerInfo> {
         match root.dict_get(b"peers6") {
             Some(crate::bittorrent::bencode::codec::BencodeValue::Bytes(data)) => {
                 Self::parse_compact_peers_v6(data)
             }
-            // The "peers6" key only supports compact format per the protocol
-            // extension; dictionary/list format is not defined for IPv6.
+            Some(crate::bittorrent::bencode::codec::BencodeValue::List(list)) => {
+                Self::parse_normal_peers(list)
+            }
             _ => Vec::new(),
         }
     }
@@ -492,6 +492,27 @@ mod tests {
         assert_eq!(parsed.peers6[1].port, 6882);
 
         assert_eq!(parsed.peer_count(), 3);
+    }
+
+    #[test]
+    fn test_parse_peers6_dictionary_list() {
+        let mut peer = BTreeMap::new();
+        peer.insert(
+            b"ip".to_vec(),
+            BencodeValue::Bytes(b"2001:db8::10".to_vec()),
+        );
+        peer.insert(b"port".to_vec(), BencodeValue::Int(6881));
+        let mut response = BTreeMap::new();
+        response.insert(
+            b"peers6".to_vec(),
+            BencodeValue::List(vec![BencodeValue::Dict(peer)]),
+        );
+
+        let parsed = TrackerResponse::parse(&BencodeValue::Dict(response).encode()).unwrap();
+
+        assert_eq!(parsed.peers6.len(), 1);
+        assert_eq!(parsed.peers6[0].ip, "2001:db8::10");
+        assert_eq!(parsed.peers6[0].port, 6881);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Multi-tier tracker announce list management.
 //!
 //! Contains [`AnnounceTier`] and [`AnnounceList`] which manage tracker URL
-//! lists with tier-based failover, matching the C++ aria2 behavior.
+//! lists with ordered tiers, per-tier event state, and failover.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -90,15 +90,13 @@ impl From<AnnounceEvent> for super::udp_tracker_protocol::UdpEvent {
 }
 
 // ======================================================================
-// AnnounceTier (from C++ AnnounceTier)
+// AnnounceTier
 // ======================================================================
 
 /// A single announce tier containing a deque of tracker URLs and event state.
 ///
-/// Matches C++ AnnounceTier exactly: each tier has an event state machine
-/// and a list of tracker URLs. Within a tier, trackers are tried in order;
-/// if one fails, the next is tried. If all fail, the tier advances its
-/// event state and we move to the next tier.
+/// Each tier has an event state and an ordered list of tracker URLs. Trackers
+/// are tried in order; exhausting a tier advances to the next tier.
 #[derive(Debug, Clone)]
 pub struct AnnounceTier {
     /// Current event state for this tier
@@ -110,7 +108,7 @@ pub struct AnnounceTier {
 impl AnnounceTier {
     /// Create a new tier from a list of tracker URLs.
     ///
-    /// The event starts as `AnnounceEvent::Started` matching C++ behavior.
+    /// The event starts as `AnnounceEvent::Started`.
     pub fn new(urls: VecDeque<String>) -> Self {
         Self {
             event: AnnounceEvent::Started,
@@ -126,13 +124,12 @@ impl AnnounceTier {
         }
     }
 
-    /// Advance to next event state (matching C++ nextEvent).
+    /// Advance to the next event state after a successful announce.
     pub fn next_event(&mut self) {
         self.event = self.event.next_event();
     }
 
-    /// Advance event only if in STOPPED or COMPLETED state
-    /// (matching C++ nextEventIfAfterStarted).
+    /// Advance terminal events after an announce failure.
     pub fn next_event_if_after_started(&mut self) {
         self.event = self.event.next_event_if_after_started();
     }
@@ -149,15 +146,14 @@ impl AnnounceTier {
 }
 
 // ======================================================================
-// AnnounceList (from C++ AnnounceList)
+// AnnounceList
 // ======================================================================
 
-/// Announce list with multi-tier tracker management matching C++ behavior.
+/// Ordered tracker tiers with a cursor for announce selection and failover.
 ///
-/// Manages a list of [`AnnounceTier`] instances with an internal iterator
-/// (current_tier / current_tracker indices). This matches the C++ AnnounceList
-/// exactly, including the announce success/failure handling, event management,
-/// and wrap-around search for stopped/completed allowed tiers.
+/// Successful announces promote the responding URL within its tier. Failed
+/// announces advance through the tier and then to the next tier. Lifecycle
+/// events can select the next tier that accepts that event.
 #[derive(Debug, Clone)]
 pub struct AnnounceList {
     /// Tiers of tracker URLs
@@ -181,9 +177,9 @@ impl AnnounceList {
         }
     }
 
-    /// Create announce list from C++ format or single announce string.
+    /// Create announce tiers from metainfo tiers or a single announce URL.
     ///
-    /// C++ format: announce-list = [[tier1-url1, tier1-url2], [tier2-url1]]
+    /// Tier format: `[[tier1-url1, tier1-url2], [tier2-url1]]`.
     /// Single announce string becomes tier 0 with one entry.
     pub fn new(announce_list: &[Vec<String>], announce: &Option<String>) -> Self {
         let mut tiers = Vec::new();
@@ -234,7 +230,7 @@ impl AnnounceList {
 
     /// Returns the current event from the current tier.
     ///
-    /// If not initialized, returns `AnnounceEvent::Started` matching C++ behavior.
+    /// If not initialized, returns `AnnounceEvent::Started`.
     pub fn get_event(&self) -> AnnounceEvent {
         if self.current_tracker_initialized {
             self.tiers
@@ -267,7 +263,7 @@ impl AnnounceList {
         }
     }
 
-    /// Handle announce success (matching C++ AnnounceList::announceSuccess).
+    /// Handle announce success.
     ///
     /// - Advances the current tier's event via nextEvent()
     /// - Removes the current URL from its position and inserts at front of the tier
@@ -298,7 +294,7 @@ impl AnnounceList {
         }
     }
 
-    /// Handle announce failure (matching C++ AnnounceList::announceFailure).
+    /// Handle announce failure.
     ///
     /// - Advances to next tracker URL in current tier
     /// - If last URL in tier, force nextEventIfAfterStarted() and advance to next tier
@@ -345,8 +341,7 @@ impl AnnounceList {
 
     /// Move to a tier that accepts the "stopped" event using wrap-around search.
     ///
-    /// Matching C++ moveToStoppedAllowedTier: search from current position to end,
-    /// then from beginning to current position.
+    /// Search from the current tier to the end, then wrap to the beginning.
     pub fn move_to_stopped_allowed_tier(&mut self) {
         let start = self.current_tier.min(self.tiers.len());
         // First search: current position to end
@@ -371,8 +366,7 @@ impl AnnounceList {
 
     /// Move to a tier that accepts the "completed" event using wrap-around search.
     ///
-    /// Matching C++ moveToCompletedAllowedTier: search from current position to end,
-    /// then from beginning to current position.
+    /// Search from the current tier to the end, then wrap to the beginning.
     pub fn move_to_completed_allowed_tier(&mut self) {
         let start = self.current_tier.min(self.tiers.len());
         // First search: current position to end
@@ -424,12 +418,12 @@ impl AnnounceList {
         self.current_tier >= self.tiers.len()
     }
 
-    /// Reset the iterator to the beginning (matching C++ resetTier).
+    /// Reset the selection cursor to the beginning.
     pub fn reset_tier(&mut self) {
         self.reset_iterator();
     }
 
-    /// Shuffle all URLs in each tier randomly (matching C++ shuffle).
+    /// Shuffle tracker URLs within each tier.
     pub fn shuffle(&mut self) {
         use rand::seq::SliceRandom;
         let mut rng = rand::rng();
@@ -459,8 +453,7 @@ impl AnnounceList {
 
     /// Reconfigure the announce list from a new multi-tier list.
     ///
-    /// C++: `AnnounceList::reconfigure(const vector<vector<string>>& announceList)`
-    /// Replaces all tiers with the supplied list and resets the iterator. Live
+    /// Replaces all tiers with the supplied list and resets the cursor. Live
     /// tracker-response extensions use `append_tiers` instead, preserving the
     /// torrent, user, and public-tracker tiers already in the list.
     pub fn reconfigure(&mut self, announce_list: &[Vec<String>]) {
@@ -476,8 +469,7 @@ impl AnnounceList {
 
     /// Reconfigure the announce list from a single URL.
     ///
-    /// C++: `AnnounceList::reconfigure(const string& url)`
-    /// Adds the URL as a new tier and resets the iterator.
+    /// Adds the URL as a new tier and resets the cursor.
     pub fn reconfigure_from_url(&mut self, url: &str) {
         let mut urls = VecDeque::new();
         urls.push_back(url.to_string());

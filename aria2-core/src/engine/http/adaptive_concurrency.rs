@@ -384,12 +384,6 @@ impl HttpAdaptiveConcurrency {
         self.settings.enabled
     }
 
-    /// Capacity rejections can be retried without consuming ordinary retry
-    /// budget while another Range can still be admitted.
-    pub(crate) fn preserve_retry_budget(&self, is_http2: bool) -> bool {
-        self.range_target(is_http2) > 1
-    }
-
     /// Close the current round after all requests have drained. When adaptive
     /// mode is enabled, capacity rejection lowers the Range target and returns
     /// the new target.
@@ -446,17 +440,21 @@ impl HttpAdaptiveConcurrency {
     pub(crate) fn cooldown_remaining(&self) -> Option<Duration> {
         [false, true]
             .into_iter()
-            .flat_map(|is_http2| {
-                [
-                    self.protocol_target(is_http2)
-                        .cooldown_until
-                        .map(|until| until.saturating_duration_since(Instant::now())),
-                    self.request_start_wait(is_http2),
-                ]
-            })
-            .flatten()
-            .filter(|remaining| !remaining.is_zero())
+            .filter_map(|is_http2| self.cooldown_remaining_for(is_http2))
             .max()
+    }
+
+    pub(crate) fn cooldown_remaining_for(&self, is_http2: bool) -> Option<Duration> {
+        [
+            self.protocol_target(is_http2)
+                .cooldown_until
+                .map(|until| until.saturating_duration_since(Instant::now())),
+            self.request_start_wait(is_http2),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|remaining| !remaining.is_zero())
+        .max()
     }
 
     fn protocol_target(&self, is_http2: bool) -> &ProtocolTarget {

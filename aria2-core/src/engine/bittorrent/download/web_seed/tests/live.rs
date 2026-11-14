@@ -24,6 +24,7 @@ async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
             }
             let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
             assert!(request.contains("range: bytes=0-3"));
+            assert!(request.contains("user-agent: header-web-seed-client/1.0"));
             stream
                 .write_all(
                     format!(
@@ -52,7 +53,11 @@ async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
         crate::request::request_group::RequestGroup::new(
             crate::request::request_group::GroupId::new(7101),
             Vec::new(),
-            Default::default(),
+            crate::request::request_group::DownloadOptions {
+                user_agent: Some("test-web-seed-client/1.0".to_string()),
+                header: vec!["User-Agent: header-web-seed-client/1.0".to_string()],
+                ..Default::default()
+            },
         ),
     ));
     group

@@ -76,11 +76,11 @@ fn test_pooled_connection_health() {
 fn test_lru_entry_creation() {
     let key = ConnectionKey::new("example.com", 21, "user", "pass", "/");
     let entry = LruEntry {
-        key: key.clone(),
+        key: PoolKey::Raw(key.clone()),
         last_access: std::time::Instant::now(),
     };
 
-    assert_eq!(entry.key, key);
+    assert_eq!(entry.key, PoolKey::Raw(key));
     assert!(entry.last_access.elapsed() < Duration::from_secs(1));
 }
 

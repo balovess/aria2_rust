@@ -1,5 +1,8 @@
 use super::*;
-use crate::sftp::packet::{SSH_FXF_CREAT, SSH_FXF_READ, SSH_FXF_TRUNC, SSH_FXF_WRITE};
+use crate::sftp::packet::{
+    SSH_FILEXFER_ATTR_ACMODTIME, SSH_FILEXFER_ATTR_PERMISSIONS, SSH_FILEXFER_ATTR_SIZE,
+    SSH_FXF_CREAT, SSH_FXF_READ, SSH_FXF_TRUNC, SSH_FXF_WRITE, SftpPacket,
+};
 
 #[test]
 fn test_open_flags_readonly() {
@@ -17,6 +20,15 @@ fn test_open_flags_write_create() {
     assert!(flags.is_create());
     assert!(flags.is_trunc());
     assert_eq!(flags.bits(), SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC);
+}
+
+#[test]
+fn test_open_flags_write_create_without_truncate() {
+    let flags = OpenFlags::write_create_no_truncate();
+    assert!(flags.is_write());
+    assert!(flags.is_create());
+    assert!(!flags.is_trunc());
+    assert_eq!(flags.bits(), SSH_FXF_WRITE | SSH_FXF_CREAT);
 }
 
 #[test]
@@ -146,4 +158,77 @@ fn test_file_attributes_permissions_only_roundtrip() {
     let wire = attrs.to_wire();
     assert_eq!(wire.permissions, Some(0o644));
     assert_eq!(wire.size, Some(0)); // Default 0 is always populated in to_wire
+}
+
+#[test]
+fn legacy_file_attributes_omit_incomplete_zero_valued_pairs() {
+    let wire = FileAttributes {
+        uid: 1000,
+        gid: 0,
+        atime: 100,
+        mtime: 0,
+        ..FileAttributes::default()
+    }
+    .to_wire();
+
+    assert_eq!(
+        wire.flags & crate::sftp::packet::SSH_FILEXFER_ATTR_UIDGID,
+        0
+    );
+    assert_eq!(wire.flags & SSH_FILEXFER_ATTR_ACMODTIME, 0);
+}
+
+#[test]
+fn file_attribute_patch_preserves_explicit_zero_values() {
+    let wire = FileAttributePatch {
+        size: Some(0),
+        permissions: Some(0),
+        timestamps: Some(FileTimestamps { atime: 0, mtime: 0 }),
+        ..FileAttributePatch::default()
+    }
+    .to_wire();
+
+    assert_eq!(
+        wire.flags,
+        SSH_FILEXFER_ATTR_SIZE | SSH_FILEXFER_ATTR_PERMISSIONS | SSH_FILEXFER_ATTR_ACMODTIME
+    );
+    assert_eq!(wire.size, Some(0));
+    assert_eq!(wire.permissions, Some(0));
+    assert_eq!(wire.atime, Some(0));
+    assert_eq!(wire.mtime, Some(0));
+    assert_eq!(wire.uid, None);
+    assert_eq!(wire.gid, None);
+}
+
+#[test]
+fn file_attribute_patch_sets_owner_ids_as_a_pair() {
+    let wire = FileAttributePatch {
+        owner: Some(FileOwner { uid: 0, gid: 0 }),
+        ..FileAttributePatch::default()
+    }
+    .to_wire();
+
+    assert_eq!(wire.flags, crate::sftp::packet::SSH_FILEXFER_ATTR_UIDGID);
+    assert_eq!(wire.uid, Some(0));
+    assert_eq!(wire.gid, Some(0));
+}
+
+#[test]
+fn file_attribute_patch_roundtrips_explicit_zero_values_on_setstat_wire() {
+    let packet = SftpPacket::Setstat {
+        request_id: 7,
+        path: "/file".to_string(),
+        attrs: FileAttributePatch {
+            size: Some(0),
+            permissions: Some(0),
+            timestamps: Some(FileTimestamps { atime: 0, mtime: 0 }),
+            ..FileAttributePatch::default()
+        }
+        .to_wire(),
+    };
+
+    let encoded = packet.encode().unwrap();
+    let (decoded, consumed) = SftpPacket::decode(&encoded).unwrap();
+    assert_eq!(consumed, encoded.len());
+    assert_eq!(decoded, packet);
 }

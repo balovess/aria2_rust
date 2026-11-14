@@ -6,16 +6,12 @@ use std::time::Duration;
 use tracing::warn;
 
 use super::MetalinkDownloadCommand;
-#[cfg(feature = "bittorrent")]
-use super::classify_metalink_http_status;
 use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
 #[cfg(feature = "bittorrent")]
 use crate::engine::retry_policy::RetryPolicy;
 #[cfg(feature = "bittorrent")]
 use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
-#[cfg(feature = "bittorrent")]
-use crate::error::RecoverableError;
 use crate::error::{Aria2Error, Result};
 #[cfg(feature = "bittorrent")]
 use crate::util::rwlock_ext::RwLockRecover;
@@ -26,38 +22,16 @@ impl MetalinkDownloadCommand {
         if let Some(error) = self.lifecycle_error() {
             return Err(error);
         }
-
-        let response = tokio::select! {
-            response = self.client.get(url).send() => response.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("HTTP request failed: {e}"),
-                })
-            })?,
-            _ = self.wait_for_lifecycle_change() => {
-                return Err(self.lifecycle_error().unwrap_or_else(|| {
-                    Aria2Error::DownloadFailed("Metalink metadata download halted".into())
-                }));
-            }
-        };
-        let status = response.status();
-        if !status.is_success() && status.as_u16() != 206 {
-            return Err(classify_metalink_http_status(status.as_u16()));
-        }
-
-        tokio::select! {
-            bytes = response.bytes() => bytes
-                .map(|bytes| bytes.to_vec())
-                .map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("HTTP metadata read failed: {e}"),
-                    })
-                }),
-            _ = self.wait_for_lifecycle_change() => {
-                Err(self.lifecycle_error().unwrap_or_else(|| {
-                    Aria2Error::DownloadFailed("Metalink metadata download halted".into())
-                }))
-            }
-        }
+        let mut url_hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&url, &mut url_hasher);
+        let source_index = std::hash::Hasher::finish(&url_hasher) as usize;
+        let stage_path = self.stage_path(&self.output_path, source_index);
+        self.download_source_to_path(url, &stage_path).await?;
+        let bytes = tokio::fs::read(&stage_path)
+            .await
+            .map_err(|error| Aria2Error::FileIo(error.to_string()))?;
+        super::super::transport::discard_stage(&stage_path).await;
+        Ok(bytes)
     }
 
     #[cfg(feature = "bittorrent")]

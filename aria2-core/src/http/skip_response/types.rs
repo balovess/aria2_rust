@@ -5,6 +5,8 @@
 
 use url::Url;
 
+use aria2_protocol::http::auth::ChallengeScheme as ProtocolAuthScheme;
+
 use crate::http::digest_auth::DigestAuthChallenge;
 use crate::http::request::HttpMethod;
 
@@ -85,13 +87,11 @@ impl AuthScheme {
     /// - `"Basic realm=\"test\""` -> `AuthScheme::Basic`
     /// - `"Digest realm=\"test\", nonce=\"abc\""` -> `AuthScheme::Digest`
     pub fn from_header(value: &str) -> Option<Self> {
-        let scheme = value.split_whitespace().next()?;
-        match scheme.to_lowercase().as_str() {
-            "basic" => Some(AuthScheme::Basic),
-            "digest" => Some(AuthScheme::Digest),
-            "negotiate" => Some(AuthScheme::Negotiate),
-            "ntlm" => Some(AuthScheme::Ntlm),
-            _ => None,
+        match ProtocolAuthScheme::from_header(value)? {
+            ProtocolAuthScheme::Basic => Some(Self::Basic),
+            ProtocolAuthScheme::Digest => Some(Self::Digest),
+            ProtocolAuthScheme::Negotiate => Some(Self::Negotiate),
+            ProtocolAuthScheme::Ntlm => Some(Self::Ntlm),
         }
     }
 }

@@ -22,10 +22,10 @@ fn create_test_cache() -> DnsCache {
 
 #[test]
 fn test_mark_bad_removes_only_selected_address() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     let good: SocketAddr = "127.0.0.1:80".parse().unwrap();
     let bad: SocketAddr = "127.0.0.2:80".parse().unwrap();
-    cache.cache.insert(
+    cache.state.write().unwrap().cache.insert(
         EndpointKey::new("mirror.test", 80),
         entry("mirror.test", 80, vec![bad, good], Duration::from_secs(60)),
     );
@@ -38,36 +38,36 @@ fn test_mark_bad_removes_only_selected_address() {
 
 #[test]
 fn test_mark_bad_preserves_candidate_state_until_cache_removal() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     let address: SocketAddr = "127.0.0.1:80".parse().unwrap();
     let key = EndpointKey::new("mirror.test", 80);
-    cache.cache.insert(
+    cache.state.write().unwrap().cache.insert(
         key.clone(),
         entry("mirror.test", 80, vec![address], Duration::from_secs(60)),
     );
 
     cache.mark_bad("mirror.test", address);
 
-    assert!(cache.cache.contains_key(&key));
+    assert!(cache.state.read().unwrap().cache.contains_key(&key));
     assert!(
         cache
             .resolve_no_network("mirror.test", 80)
             .unwrap()
             .is_empty()
     );
-    assert!(!cache.cache[&key].addresses[0].is_good());
+    assert!(!cache.state.read().unwrap().cache[&key].addresses[0].is_good());
 }
 
 #[test]
 fn test_cache_keys_include_port() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     let http: SocketAddr = "127.0.0.1:80".parse().unwrap();
     let https: SocketAddr = "127.0.0.1:443".parse().unwrap();
-    cache.cache.insert(
+    cache.state.write().unwrap().cache.insert(
         EndpointKey::new("mirror.test", 80),
         entry("mirror.test", 80, vec![http], Duration::from_secs(60)),
     );
-    cache.cache.insert(
+    cache.state.write().unwrap().cache.insert(
         EndpointKey::new("mirror.test", 443),
         entry("mirror.test", 443, vec![https], Duration::from_secs(60)),
     );
@@ -94,7 +94,7 @@ fn test_cache_keys_include_port() {
 
 #[test]
 fn test_negative_cache_keys_include_port() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     cache.record_failure("mirror.test", 80);
 
     assert!(
@@ -115,7 +115,7 @@ fn test_negative_cache_keys_include_port() {
 
 #[test]
 fn test_remove_cached_clears_positive_and_negative_entries() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     cache.record_failure("mirror.test", 80);
     cache.remove_cached("mirror.test", 80);
     assert!(matches!(
@@ -203,7 +203,7 @@ fn test_dns_cache_with_custom_timeout() {
 
 #[test]
 fn test_dns_cache_clear() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     // Manually insert something into the cache
     let entry = entry(
         "example.com",
@@ -212,16 +212,22 @@ fn test_dns_cache_clear() {
         Duration::from_secs(60),
     );
     cache
+        .state
+        .write()
+        .unwrap()
         .cache
         .insert(EndpointKey::new("example.com", 80), entry);
     cache
+        .state
+        .write()
+        .unwrap()
         .negative_entries
         .insert(EndpointKey::new("failed.com", 80), Instant::now());
 
     assert_eq!(cache.len(), 1);
     cache.clear();
     assert!(cache.is_empty());
-    assert!(cache.negative_entries.is_empty());
+    assert!(cache.state.read().unwrap().negative_entries.is_empty());
 }
 
 /// Test J3.4 #1: Second call returns cached result without network I/O.
@@ -232,7 +238,7 @@ fn test_dns_cache_clear() {
 /// we verify the caching mechanism directly by manipulating the internal state.
 #[tokio::test]
 async fn test_resolve_caches_result() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
 
     // Resolve localhost (should always succeed)
     let result1 = cache.resolve("localhost", 80).await;
@@ -263,7 +269,7 @@ async fn test_resolve_caches_result() {
 /// Exhausted cached candidates must be discarded before the next resolution.
 #[tokio::test]
 async fn test_resolve_with_refresh_replaces_exhausted_candidates() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     let initial = cache
         .resolve("localhost", 80)
         .await
@@ -345,7 +351,7 @@ async fn test_explicit_dns_server_is_used_for_resolution() {
         }
     });
 
-    let mut cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
+    let cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
     let resolved = cache
         .resolve("custom.test", 80)
         .await
@@ -408,7 +414,7 @@ async fn test_explicit_dns_failure_does_not_fall_back_to_system_resolver() {
         }
     });
 
-    let mut cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
+    let cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
     let error = cache
         .resolve("explicit-only.invalid", 80)
         .await
@@ -421,6 +427,9 @@ async fn test_explicit_dns_failure_does_not_fall_back_to_system_resolver() {
     );
     assert!(
         cache
+            .state
+            .read()
+            .unwrap()
             .negative_entries
             .contains_key(&EndpointKey::new("explicit-only.invalid", 80))
     );
@@ -437,7 +446,7 @@ async fn test_explicit_dns_failure_does_not_fall_back_to_system_resolver() {
 /// fail immediately with the "recently failed" message.
 #[test]
 fn test_negative_cache_blocks_retry() {
-    let mut cache = DnsCache::with_ttl(300, 2); // 2-second negative TTL
+    let cache = DnsCache::with_ttl(300, 2); // 2-second negative TTL
 
     // Inject a negative cache entry directly (no network dependency)
     cache.record_failure("test-host.invalid", 80);
@@ -462,7 +471,7 @@ fn test_negative_cache_blocks_retry() {
 /// purge_expired removes them while keeping valid entries intact.
 #[test]
 fn test_purge_expired_removes_old() {
-    let mut cache = DnsCache::with_ttl(1, 60); // 1-second TTL
+    let cache = DnsCache::with_ttl(1, 60); // 1-second TTL
 
     // Insert an already-expired entry
     let expired_entry = DnsEntry::new(
@@ -473,6 +482,9 @@ fn test_purge_expired_removes_old() {
         true,
     );
     cache
+        .state
+        .write()
+        .unwrap()
         .cache
         .insert(EndpointKey::new("expired.example.com", 80), expired_entry);
 
@@ -484,6 +496,9 @@ fn test_purge_expired_removes_old() {
         Duration::from_secs(3600),
     );
     cache
+        .state
+        .write()
+        .unwrap()
         .cache
         .insert(EndpointKey::new("fresh.example.com", 80), fresh_entry);
 
@@ -494,12 +509,18 @@ fn test_purge_expired_removes_old() {
     assert_eq!(cache.len(), 1, "Should have 1 entry remaining");
     assert!(
         cache
+            .state
+            .read()
+            .unwrap()
             .cache
             .contains_key(&EndpointKey::new("fresh.example.com", 80)),
         "Fresh entry should still exist"
     );
     assert!(
         !cache
+            .state
+            .read()
+            .unwrap()
             .cache
             .contains_key(&EndpointKey::new("expired.example.com", 80)),
         "Expired entry should be removed"
@@ -512,7 +533,7 @@ fn test_purge_expired_removes_old() {
 /// addresses so that IPv4 addresses appear before IPv6 addresses.
 #[tokio::test]
 async fn test_ipv4_preferred_sorting() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
 
     // Resolve localhost which typically returns both [::1] and 127.0.0.1
     let result = cache.resolve("localhost", 8080).await;
@@ -554,7 +575,7 @@ async fn test_ipv4_preferred_sorting() {
 fn test_force_refresh_clears_cache_entry() {
     // Note: This test only verifies the cache clearing logic,
     // not the full async resolution (which requires tokio runtime)
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
 
     // Manually pre-populate cache
     let entry = entry(
@@ -564,6 +585,9 @@ fn test_force_refresh_clears_cache_entry() {
         Duration::from_secs(3600),
     );
     cache
+        .state
+        .write()
+        .unwrap()
         .cache
         .insert(EndpointKey::new("preloaded.com", 443), entry);
     assert_eq!(cache.len(), 1);
@@ -587,7 +611,7 @@ fn test_default_impl() {
 /// exercises the hickory code path without depending on external network reachability.
 #[tokio::test]
 async fn test_async_dns_resolves_localhost() {
-    let mut cache = DnsCache::with_ttl(300, 60);
+    let cache = DnsCache::with_ttl(300, 60);
     let result = cache.resolve("localhost", 80).await;
     assert!(
         result.is_ok(),
@@ -606,10 +630,16 @@ async fn test_async_dns_resolves_localhost() {
 /// 60s default TTL and verifies the cached entry's TTL does not exceed the default.
 #[tokio::test]
 async fn test_dns_ttl_capped_at_default() {
-    let mut cache = DnsCache::with_ttl(60, 10); // default 60s
+    let cache = DnsCache::with_ttl(60, 10); // default 60s
     let _ = cache.resolve("localhost", 80).await;
     // Verify the cached entry has ttl <= 60s (capped at default_ttl).
-    if let Some(entry) = cache.cache.get(&EndpointKey::new("localhost", 80)) {
+    if let Some(entry) = cache
+        .state
+        .read()
+        .unwrap()
+        .cache
+        .get(&EndpointKey::new("localhost", 80))
+    {
         assert!(
             entry.ttl <= Duration::from_secs(60),
             "ttl should be capped at default, got {:?}",

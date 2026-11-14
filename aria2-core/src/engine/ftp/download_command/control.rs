@@ -1,23 +1,36 @@
 //! Core integration for an FTP protocol control session.
 
-use std::net::SocketAddr;
-use std::time::Duration;
-
 use aria2_protocol::ftp::connection::FtpActiveDataListener;
+use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
-use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::active_data_bind_addr;
+use crate::ftp::connection_pool::ControlSessionKey;
 
 pub(super) use super::connection::RawFtpControl;
 use super::connection::map_session_error;
+use super::types::FtpDownloadCommand;
+
+impl FtpDownloadCommand {
+    pub(super) async fn release_control_connection(
+        &self,
+        ctrl: RawFtpControl,
+        reuse_key: Option<ControlSessionKey>,
+    ) {
+        if let (Some(pool), Some(key)) = (&self.connection_pool, reuse_key) {
+            pool.return_control_session(key, ctrl.into_pooled()).await;
+        } else {
+            ctrl.quit().await.ok();
+        }
+    }
+}
 
 impl RawFtpControl {
     pub(super) async fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
-        info!("Authenticating as user: {}", username);
+        info!("Authenticating FTP session");
         self.reader
-            .authenticate(username, password, command_timeout())
+            .authenticate(username, password, self.command_timeout())
             .await
             .map_err(map_session_error)?;
         info!("FTP login successful");
@@ -26,14 +39,14 @@ impl RawFtpControl {
 
     pub(super) async fn set_transfer_type(&mut self, transfer_type: &str) -> Result<()> {
         self.reader
-            .set_transfer_type(transfer_type, command_timeout())
+            .set_transfer_type(transfer_type, self.command_timeout())
             .await
             .map_err(map_session_error)
     }
 
     pub(super) async fn prepare_remote_path(&mut self, remote_path: &str) -> Result<String> {
         self.reader
-            .prepare_remote_path(remote_path, command_timeout())
+            .prepare_remote_path(remote_path, self.command_timeout())
             .await
             .map_err(map_session_error)
     }
@@ -43,7 +56,7 @@ impl RawFtpControl {
         remote_path: &str,
     ) -> Result<Option<std::time::SystemTime>> {
         self.reader
-            .modification_time(remote_path, command_timeout())
+            .modification_time(remote_path, self.command_timeout())
             .await
             .map_err(map_session_error)
     }
@@ -51,7 +64,7 @@ impl RawFtpControl {
     pub(super) async fn set_resume_offset(&mut self, offset: u64) -> Result<bool> {
         let accepted = self
             .reader
-            .set_restart_offset(offset, command_timeout())
+            .set_restart_offset(offset, self.command_timeout())
             .await
             .map_err(map_session_error)?;
         if !accepted {
@@ -66,7 +79,7 @@ impl RawFtpControl {
     pub(super) async fn get_file_size(&mut self, remote_path: &str) -> Result<Option<u64>> {
         debug!(remote_path, "Querying FTP file size");
         self.reader
-            .file_size(remote_path, command_timeout())
+            .file_size(remote_path, self.command_timeout())
             .await
             .map_err(map_session_error)
     }
@@ -75,7 +88,7 @@ impl RawFtpControl {
     /// outbound-address policy. PASV's advertised address is intentionally
     /// ignored; the control peer address is used for NAT and bounce protection.
     pub(super) async fn enter_passive_mode(&mut self) -> Result<tokio::net::TcpStream> {
-        let timeout = command_timeout();
+        let timeout = self.command_timeout();
         let port = if self.connection.peer_addr.is_ipv6() {
             self.reader.passive_data_port(timeout).await
         } else {
@@ -84,7 +97,7 @@ impl RawFtpControl {
         .map_err(map_session_error)?;
         let data_addr = SocketAddr::new(self.connection.peer_addr.ip(), port);
         tokio::time::timeout(
-            Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
+            self.data_connection_timeout(),
             self.outbound_network_policy.connect(data_addr),
         )
         .await
@@ -121,7 +134,7 @@ impl RawFtpControl {
             Aria2Error::Network(format!("FTP active listener address unavailable: {error}"))
         })?;
         self.reader
-            .advertise_active_endpoint(listener_addr, command_timeout())
+            .advertise_active_endpoint(listener_addr, self.command_timeout())
             .await
             .map_err(map_session_error)?;
         Ok(FtpActiveDataListener::new(listener, listener_addr))
@@ -129,40 +142,38 @@ impl RawFtpControl {
 
     pub(super) async fn initiate_retr(&mut self, remote_path: &str) -> Result<()> {
         self.reader
-            .retrieve(remote_path, command_timeout())
+            .retrieve(remote_path, self.command_timeout())
             .await
             .map_err(map_session_error)
     }
 
-    pub(super) async fn read_transfer_complete(&mut self) -> Result<()> {
+    pub(super) async fn read_transfer_complete(&mut self) -> Result<bool> {
         match self
             .reader
-            .read_response(Duration::from_secs(
-                constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS,
-            ))
+            .read_response(self.transfer_completion_timeout())
             .await
         {
             Ok(response) if response.code == 226 => {
                 debug!(message = %response.message, "FTP transfer complete");
+                Ok(true)
             }
             Ok(response) => {
                 warn!(code = response.code, message = %response.message, "Unexpected FTP transfer completion response");
+                Ok(false)
             }
-            Err(error) => debug!(error = ?error, "FTP transfer completion response unavailable"),
+            Err(error) => {
+                debug!(error = ?error, "FTP transfer completion response unavailable");
+                Ok(false)
+            }
         }
-        Ok(())
     }
 
     pub(super) async fn abort_transfer(&mut self) {
-        self.reader.abort(command_timeout()).await;
+        self.reader.abort(self.command_timeout()).await;
     }
 
     pub(super) async fn quit(mut self) -> Result<()> {
-        self.reader.quit(command_timeout()).await;
+        self.reader.quit(self.command_timeout()).await;
         Ok(())
     }
-}
-
-fn command_timeout() -> Duration {
-    Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS)
 }

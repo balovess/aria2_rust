@@ -358,6 +358,112 @@ async fn gap_download_retries_when_a_partial_response_ends_before_the_gap() {
     assert_eq!(&payload[3..], b"def");
 }
 
+#[tokio::test]
+async fn gap_fallback_reuses_cached_origin_auth_but_strips_it_after_redirect() {
+    let target_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind gap redirect target");
+    let target_address = target_listener
+        .local_addr()
+        .expect("read gap redirect target address");
+    let target = tokio::spawn(async move {
+        let (mut stream, _) = target_listener
+            .accept()
+            .await
+            .expect("accept gap redirect target request");
+        let request = read_request_headers(&mut stream).await;
+        let lower = request.to_ascii_lowercase();
+        assert!(lower.starts_with("get /asset.bin http/1.1\r\n"));
+        assert!(!lower.contains("authorization:"), "{request}");
+        assert!(!lower.contains("x-api-key:"), "{request}");
+        assert!(lower.contains("x-trace-id: trace-123\r\n"), "{request}");
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 3-5/6\r\nConnection: close\r\n\r\ndef",
+            )
+            .await
+            .expect("write redirected gap response");
+    });
+
+    let source_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind gap auth source");
+    let source_address = source_listener
+        .local_addr()
+        .expect("read gap auth source address");
+    let source = tokio::spawn(async move {
+        let (mut stream, _) = source_listener
+            .accept()
+            .await
+            .expect("accept gap auth source request");
+        let request = read_request_headers(&mut stream).await;
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: basic dxnlcjpwyxnzd29yza==\r\n"),
+            "cached source credentials should be reused: {request}"
+        );
+        assert!(lower.contains("x-api-key: source-secret\r\n"), "{request}");
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/asset.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("redirect gap request");
+    });
+
+    let directory = tempfile::tempdir().expect("create gap output directory");
+    let uri = format!("http://{source_address}/source.bin");
+    let (mut downloader, _) = make_downloader(&uri, directory.path().join("payload.bin"), 9_907);
+    downloader.request_policy = HttpRequestPolicy::new(
+        vec![
+            ("X-API-Key".into(), "source-secret".into()),
+            ("X-Trace-ID".into(), "trace-123".into()),
+        ],
+        false,
+        false,
+        false,
+        true,
+        false,
+    );
+    let mut auth_factory = crate::http::auth::AuthConfigFactory::new();
+    auth_factory.update_basic_cred(crate::http::auth::BasicCred::new(
+        "user".into(),
+        "password".into(),
+        "127.0.0.1".into(),
+        source_address.port(),
+        "/".into(),
+        true,
+    ));
+    downloader = downloader.with_shared_auth_options(
+        Arc::new(std::sync::Mutex::new(auth_factory)),
+        crate::http::AuthResolveOptions {
+            http_auth_challenge: true,
+            ..Default::default()
+        },
+    );
+
+    let result = downloader.execute_with_gaps(&uri, 6, &[(0, 3)]).await;
+    source.await.expect("gap auth source fixture should finish");
+    target
+        .await
+        .expect("gap redirect target fixture should finish");
+    assert!(
+        result.error.is_none(),
+        "gap fallback failed: {:?}",
+        result.error
+    );
+    assert_eq!(result.completed_gaps, vec![(3, 3)]);
+    assert_eq!(
+        tokio::fs::read(directory.path().join("payload.bin"))
+            .await
+            .expect("read completed gap output"),
+        b"\0\0\0def"
+    );
+}
+
 /// Serve one scripted response per connection, returning the requests.
 fn serve_scripted(
     listener: tokio::net::TcpListener,

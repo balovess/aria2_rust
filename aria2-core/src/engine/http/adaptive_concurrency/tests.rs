@@ -37,18 +37,14 @@ fn capacity_rejection_lowers_only_the_affected_protocol_target() {
 }
 
 #[test]
-fn retry_budget_is_preserved_until_single_range() {
+fn repeated_capacity_rejections_reduce_each_protocol_target_to_one() {
     let mut controller = controller();
-    assert!(controller.preserve_retry_budget(false));
-    assert!(controller.preserve_retry_budget(true));
-
     for expected in [12, 9, 7, 6, 5, 4, 3, 2, 1] {
         controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
         controller.record_capacity_failure(false, None);
         assert_eq!(controller.finish_round(false).range_target, Some(expected));
     }
     assert_eq!(controller.connection_target(false), 1);
-    assert!(!controller.preserve_retry_budget(false));
 
     for expected in [12, 9, 7, 6, 5, 4, 3, 2, 1] {
         controller.http2.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
@@ -58,7 +54,6 @@ fn retry_budget_is_preserved_until_single_range() {
     }
     assert_eq!(controller.connection_target(true), 1);
     assert_eq!(controller.range_target(true), 1);
-    assert!(!controller.preserve_retry_budget(true));
 }
 
 #[test]
@@ -73,7 +68,6 @@ fn capacity_rejection_reduces_target_and_paces_future_starts() {
     );
     assert!(controller.cooldown_remaining().is_some());
 
-    // The rest of the burst is coalesced into the active cooldown episode.
     controller.record_capacity_rejection(false, None);
     assert_eq!(controller.connection_target(false), 12);
     assert_eq!(controller.backoff_steps(), 1);
@@ -85,6 +79,15 @@ fn capacity_rejection_reduces_target_and_paces_future_starts() {
     );
     assert_eq!(controller.connection_target(false), 12);
     assert_eq!(controller.connection_target(true), 4);
+}
+
+#[test]
+fn capacity_cooldown_is_scoped_to_the_rejected_protocol() {
+    let mut controller = controller();
+    controller.record_capacity_failure(false, None);
+
+    assert!(controller.cooldown_remaining_for(false).is_some());
+    assert!(controller.cooldown_remaining_for(true).is_none());
 }
 
 #[test]

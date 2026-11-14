@@ -9,6 +9,7 @@ pub mod header;
 pub mod header_processor;
 pub mod metalink_http;
 pub mod proxy;
+pub mod redirect;
 pub mod request;
 pub mod response;
 pub mod stream_filter;

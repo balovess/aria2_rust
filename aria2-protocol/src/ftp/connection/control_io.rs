@@ -5,12 +5,22 @@
 //! engine injects address-bound, proxied, or TLS-protected streams.
 
 use std::time::Duration;
-use std::{fmt, io};
+use std::{borrow::Cow, fmt, io};
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 pub(super) const MAX_RESPONSE_BYTES: usize = 65_536;
+
+pub(super) fn command_for_log(command: &str) -> Cow<'_, str> {
+    let command = command.trim();
+    let verb = command.split_whitespace().next().unwrap_or_default();
+    if verb.eq_ignore_ascii_case("USER") || verb.eq_ignore_ascii_case("PASS") {
+        Cow::Owned(format!("{verb} <redacted>"))
+    } else {
+        Cow::Borrowed(command)
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum BoundedControlReadError {
@@ -146,6 +156,13 @@ pub async fn write_control_command<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    if command.contains(['\r', '\n']) {
+        return Err(FtpControlWriteError::Command(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "FTP command contains a line break",
+        )));
+    }
+
     writer
         .write_all(command.as_bytes())
         .await
@@ -173,5 +190,27 @@ mod tests {
             Err(BoundedControlReadError::TooLarge(9))
         ));
         assert!(line.is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_writer_rejects_line_breaks_before_writing() {
+        let mut writer = tokio::io::sink();
+
+        let error = write_control_command(&mut writer, "RETR file\r\nQUIT")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FtpControlWriteError::Command(error)
+                if error.kind() == io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[test]
+    fn command_log_redacts_ftp_credentials() {
+        assert_eq!(command_for_log("USER alice"), "USER <redacted>");
+        assert_eq!(command_for_log("pass hunter2"), "pass <redacted>");
+        assert_eq!(command_for_log("RETR file.bin"), "RETR file.bin");
     }
 }

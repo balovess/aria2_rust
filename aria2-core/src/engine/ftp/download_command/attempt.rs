@@ -1,10 +1,8 @@
 //! FTP control-plane attempt preparation.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::checksum::checksum::Checksum;
-use crate::constants;
 use tracing::{info, warn};
 
 use crate::error::{Aria2Error, RecoverableError};
@@ -30,94 +28,124 @@ impl FtpDownloadCommand {
             return self.execute_proxy_get_attempt(proxy).await;
         }
 
-        let control_address = if proxy_config.is_some() {
-            // The proxy resolves the FTP origin in tunnel mode. Resolving it
-            // locally would reject valid proxy-only DNS names and would make
-            // proxy failures look like origin failures.
-            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-        } else {
-            if self.resolved_addresses.is_empty() {
-                self.refresh_control_addresses().await?;
+        let reuse_enabled = self.group.recover().options().ftp_reuse_connection;
+        let pool = self.connection_pool.clone();
+        let pool_key = self.control_session_key(proxy_config.as_ref().map(|(proxy, _)| proxy));
+        let pooled = if reuse_enabled {
+            if let Some(pool) = &pool {
+                pool.try_get_control_session(&pool_key).await
+            } else {
+                None
             }
-            self.resolved_addresses[attempt_index as usize % self.resolved_addresses.len()]
+        } else {
+            None
         };
-        let context = ConnectionContext::new(&self.host, self.port, control_address);
-        let host = self.host.clone();
-        let port = self.port;
-        let ftps_config = self.ftps_config.clone();
-        let ftps_implicit = self.ftps_implicit;
-        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
-        let connect_timeout = self.connect_timeout;
-        let proxy_for_connection = proxy_config.as_ref().map(|(proxy, _)| proxy.clone());
-        let connect_result = tokio::time::timeout(connect_timeout, async move {
-            let ftps_client = ftps_config
-                .as_ref()
-                .map(FtpsClient::new)
-                .transpose()
-                .map_err(|error| {
-                    Aria2Error::Network(format!("FTPS TLS configuration failed: {error}"))
-                })?;
-            if let Some(proxy) = proxy_for_connection.as_ref() {
-                RawFtpControl::connect_via_http_proxy(
-                    &host,
-                    port,
-                    proxy,
-                    ftps_client.as_ref(),
-                    ftps_implicit,
-                    Arc::clone(&outbound_network_policy),
-                )
-                .await
-            } else if let Some(client) = ftps_client.as_ref() {
-                if ftps_implicit {
-                    RawFtpControl::connect_ftps_implicit_at(
+        let reuse_key = (reuse_enabled && pool.is_some()).then_some(pool_key.clone());
+        let reused = pooled.is_some();
+        let mut ctrl = if let Some(pooled) = pooled {
+            RawFtpControl::from_pooled(pooled)
+        } else {
+            let control_address = if proxy_config.is_some() {
+                // The proxy resolves the FTP origin in tunnel mode. Resolving
+                // it locally would reject valid proxy-only DNS names.
+                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+            } else {
+                if self.resolved_addresses.is_empty() {
+                    self.refresh_control_addresses().await?;
+                }
+                self.resolved_addresses[attempt_index as usize % self.resolved_addresses.len()]
+            };
+            let context = ConnectionContext::new(&self.host, self.port, control_address);
+            let host = self.host.clone();
+            let port = self.port;
+            let ftps_config = self.ftps_config.clone();
+            let ftps_implicit = self.ftps_implicit;
+            let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
+            let connect_timeout = self.connect_timeout;
+            let request_timeout = self.group.recover().timeout();
+            let proxy_for_connection = proxy_config.as_ref().map(|(proxy, _)| proxy.clone());
+            let connect_result = tokio::time::timeout(connect_timeout, async move {
+                let ftps_client = ftps_config
+                    .as_ref()
+                    .map(FtpsClient::new)
+                    .transpose()
+                    .map_err(|error| {
+                        Aria2Error::Network(format!("FTPS TLS configuration failed: {error}"))
+                    })?;
+                if let Some(proxy) = proxy_for_connection.as_ref() {
+                    RawFtpControl::connect_via_http_proxy(
                         &host,
                         port,
-                        control_address,
-                        client,
+                        proxy,
+                        ftps_client.as_ref(),
+                        ftps_implicit,
                         Arc::clone(&outbound_network_policy),
+                        request_timeout,
                     )
                     .await
+                } else if let Some(client) = ftps_client.as_ref() {
+                    if ftps_implicit {
+                        RawFtpControl::connect_ftps_implicit_at(
+                            &host,
+                            port,
+                            control_address,
+                            client,
+                            Arc::clone(&outbound_network_policy),
+                            request_timeout,
+                        )
+                        .await
+                    } else {
+                        RawFtpControl::connect_ftps_explicit_at(
+                            &host,
+                            port,
+                            control_address,
+                            client,
+                            Arc::clone(&outbound_network_policy),
+                            request_timeout,
+                        )
+                        .await
+                    }
                 } else {
-                    RawFtpControl::connect_ftps_explicit_at(
+                    RawFtpControl::connect_at(
                         &host,
                         port,
                         control_address,
-                        client,
-                        Arc::clone(&outbound_network_policy),
+                        outbound_network_policy,
+                        request_timeout,
                     )
                     .await
                 }
-            } else {
-                RawFtpControl::connect_at(&host, port, control_address, outbound_network_policy)
-                    .await
-            }
-        })
-        .await;
-        let mut ctrl = match connect_result {
-            Ok(Ok(ctrl)) => ctrl,
-            Ok(Err(error)) if proxy_config.is_some() => {
-                return Err(FtpAttemptError::from(error));
-            }
-            Ok(Err(error)) => return Err(FtpAttemptError::control(error, context)),
-            Err(_) => {
-                if proxy_config.is_some() {
+            })
+            .await;
+            match connect_result {
+                Ok(Ok(ctrl)) => ctrl,
+                Ok(Err(error)) if proxy_config.is_some() => {
+                    return Err(FtpAttemptError::from(error));
+                }
+                Ok(Err(error)) => return Err(FtpAttemptError::control(error, context)),
+                Err(_) if proxy_config.is_some() => {
                     return Err(FtpAttemptError::from(Aria2Error::Recoverable(
                         RecoverableError::Timeout,
                     )));
                 }
-                return Err(FtpAttemptError::control(
-                    Aria2Error::Recoverable(RecoverableError::Timeout),
-                    context,
-                ));
+                Err(_) => {
+                    return Err(FtpAttemptError::control(
+                        Aria2Error::Recoverable(RecoverableError::Timeout),
+                        context,
+                    ));
+                }
             }
         };
+        ctrl.set_request_timeout(self.group.recover().timeout());
         self.last_connection_context = Some(ctrl.connection_context().clone());
         self.group
             .recover()
             .set_connection_context(ctrl.connection_context().clone());
 
         // Step 2: Authenticate
-        ctrl.authenticate(&self.username, &self.password).await?;
+        if !reused {
+            ctrl.authenticate(&self.username, &self.password).await?;
+        }
 
         // Step 3: Set the configured transfer representation.
         let ftp_type = self.group.recover().options().ftp_type.clone();
@@ -152,7 +180,8 @@ impl FtpDownloadCommand {
                 g.set_checksum_verified(true);
             }
             self.group.recover_mut().complete()?;
-            ctrl.quit().await.ok();
+            self.release_control_connection(ctrl, reuse_key.clone())
+                .await;
             return Ok(());
         }
 
@@ -249,7 +278,8 @@ impl FtpDownloadCommand {
                         size = actual_size,
                         "FTP target already matches remote SIZE and checksum"
                     );
-                    ctrl.quit().await.ok();
+                    self.release_control_connection(ctrl, reuse_key.clone())
+                        .await;
                     return Ok(());
                 }
 
@@ -369,22 +399,19 @@ impl FtpDownloadCommand {
         } else {
             let listener =
                 active_listener.expect("active listener is present when passive mode is disabled");
-            tokio::time::timeout(
-                Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
-                listener.accept_with_peer(),
-            )
-            .await
-            .map_err(|_| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "Active FTP data connection timeout".into(),
-                })
-            })?
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Active FTP data connection failed: {}", e),
-                })
-            })?
-            .0
+            tokio::time::timeout(ctrl.data_connection_timeout(), listener.accept_with_peer())
+                .await
+                .map_err(|_| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: "Active FTP data connection timeout".into(),
+                    })
+                })?
+                .map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("Active FTP data connection failed: {}", e),
+                    })
+                })?
+                .0
         };
 
         // Upgrade the data channel after the server accepted RETR. For plain
@@ -400,6 +427,7 @@ impl FtpDownloadCommand {
             in_memory_download,
             remote_modified_time,
             write_offset,
+            reuse_key,
         )
         .await
     }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http::concurrent_download::pipeline::scheduler::{self, ActiveRangeWork};
@@ -8,7 +9,7 @@ use crate::engine::http::request_executor::{HttpSegmentRequestExecutor, HttpSegm
 use crate::engine::http::segment_downloader::{SegmentProgress, WriteChunk};
 use crate::engine::mirror_coordinator::MirrorCoordinator;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::engine::work_scheduler::WorkScheduler;
+use crate::engine::work_scheduler::{RetryOutcome, WorkScheduler};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -251,6 +252,11 @@ pub(super) async fn handle(
             let error_code = super::super::server_stat_error_code(&error);
             let is_capacity_limited = super::super::is_capacity_limited_error(&error);
             let is_http2 = context.executor.is_http2(&authority_key);
+            let adaptive_capacity_retry = is_capacity_limited
+                && context
+                    .adaptive
+                    .get(&authority_key)
+                    .is_some_and(|controller| controller.is_enabled());
             if let Some(controller) = context.adaptive.get_mut(&authority_key) {
                 if is_capacity_limited {
                     controller.record_capacity_failure(is_http2, retry_after);
@@ -278,19 +284,50 @@ pub(super) async fn handle(
                 *context.consecutive_416_count = 0;
             }
 
-            let adaptive_capacity_retry = is_capacity_limited
-                && context
+            if adaptive_capacity_retry {
+                let wait = context
                     .adaptive
                     .get(&authority_key)
-                    .is_some_and(|controller| controller.preserve_retry_budget(is_http2));
+                    .and_then(|controller| controller.cooldown_remaining_for(is_http2))
+                    .unwrap_or_default();
+                if !context.coordinator.requeue_segment(segment_index) {
+                    return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                        format!(
+                            "Multi-mirror scheduler could not requeue capacity-rejected parent {segment_index}"
+                        ),
+                    )));
+                }
+                // A zero `max-retries` means unlimited in the public option,
+                // but capacity feedback still needs a finite safety bound.
+                let configured_max_retries = context.retry_policy.max_tries();
+                let max_capacity_retries = if configured_max_retries == 0 {
+                    12
+                } else {
+                    configured_max_retries
+                };
+                let retry_at = Instant::now()
+                    .checked_add(wait)
+                    .unwrap_or_else(Instant::now);
+                let outcome = context
+                    .work_queue
+                    .retry_capacity_limited_at(lease, retry_at, max_capacity_retries)
+                    .map_err(|error| {
+                        http_work_scheduler_error("schedule a capacity-limited range", error)
+                    })?;
+                if matches!(outcome, RetryOutcome::Exhausted(_)) {
+                    return Ok(CompletionAction::Abort(error));
+                }
+                *context.consecutive_416_count = 0;
+                return Ok(CompletionAction::Continue);
+            }
+
             let retry_count = lease.attempt().saturating_sub(1);
-            let retry_allowed = adaptive_capacity_retry
-                || super::super::should_retry_segment(
-                    context.retry_policy,
-                    retry_count,
-                    &error,
-                    file_not_found_retry_allowed,
-                );
+            let retry_allowed = super::super::should_retry_segment(
+                context.retry_policy,
+                retry_count,
+                &error,
+                file_not_found_retry_allowed,
+            );
             if !retry_allowed {
                 let failed_over = context.coordinator.num_mirrors() > 1
                     && context
@@ -305,14 +342,6 @@ pub(super) async fn handle(
                     .work_queue
                     .retry_with_fresh_attempt_budget(lease)
                     .map_err(|error| http_work_scheduler_error("retry on another mirror", error))?;
-            } else if adaptive_capacity_retry {
-                context.coordinator.requeue_segment(segment_index);
-                context
-                    .work_queue
-                    .retry_without_consuming_attempt(lease)
-                    .map_err(|error| {
-                        http_work_scheduler_error("retry after capacity adaptation", error)
-                    })?;
             } else {
                 context
                     .coordinator

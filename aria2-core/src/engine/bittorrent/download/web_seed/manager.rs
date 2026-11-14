@@ -33,6 +33,7 @@ pub struct WebSeedManager {
     /// become visible without rebuilding the piece session.
     live_group: Option<Arc<std::sync::RwLock<RequestGroup>>>,
     tls: ClientTlsConfig,
+    user_agent: String,
     request_timeout: Duration,
     connect_timeout: Duration,
     network_policy: Option<Arc<OutboundNetworkPolicy>>,
@@ -102,6 +103,7 @@ impl WebSeedManager {
             total_length,
             live_group: None,
             tls: tls.clone(),
+            user_agent: crate::constants::USER_AGENT.to_string(),
             request_timeout,
             connect_timeout,
             network_policy: None,
@@ -120,7 +122,7 @@ impl WebSeedManager {
         tls: ClientTlsConfig,
         policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
-        let (request_timeout, connect_timeout) = {
+        let (request_timeout, connect_timeout, user_agent) = {
             let group = group.recover();
             let options = group.options();
             (
@@ -134,6 +136,10 @@ impl WebSeedManager {
                         .connect_timeout
                         .unwrap_or(super::client::DEFAULT_WEB_SEED_TIMEOUT_SECS),
                 ),
+                options
+                    .http_user_agent()
+                    .unwrap_or(crate::constants::USER_AGENT)
+                    .to_string(),
             )
         };
         Self {
@@ -143,6 +149,7 @@ impl WebSeedManager {
             total_length,
             live_group: Some(group),
             tls,
+            user_agent,
             request_timeout,
             connect_timeout,
             network_policy: Some(policy),

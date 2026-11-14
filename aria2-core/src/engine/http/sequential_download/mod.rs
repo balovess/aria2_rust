@@ -37,6 +37,8 @@ pub struct GapDownloadResult {
 pub(crate) struct PreparedHttpResponse {
     pub response: reqwest::Response,
     pub effective_uri: String,
+    pub origin_auth_allowed: bool,
+    pub auth_factory: std::sync::Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>,
 }
 
 pub struct SequentialDownloader {
@@ -52,10 +54,17 @@ pub struct SequentialDownloader {
     /// When `Some`, tokens are acquired after the per-download limiter
     /// in `download_flow.rs` and `gap_download.rs`.
     pub(crate) global_limiter: Option<RateLimiter>,
+    pub(crate) origin_sensitive_headers_allowed: bool,
     pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     /// The first GET response, when filename metadata had to be read before
     /// collision resolution and resume inspection.
     pub(crate) prepared_response: Option<PreparedHttpResponse>,
+    /// Per-download auth cache shared by prepared metadata, sequential
+    /// requests, and retries.
+    pub(crate) auth_factory: Option<Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>>,
+    /// Authentication policy paired with a shared auth cache when a
+    /// concurrent transfer falls back to gap-based sequential requests.
+    pub(crate) auth_options: Option<crate::http::AuthResolveOptions>,
     /// Set once a response body started writing the output with a control
     /// file, so a retry resumes from that checkpoint instead of from where
     /// the first attempt started.
@@ -83,8 +92,11 @@ impl SequentialDownloader {
             group,
             progress,
             global_limiter,
+            origin_sensitive_headers_allowed: true,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             prepared_response: None,
+            auth_factory: None,
+            auth_options: None,
             checkpoint_written: false,
         }
     }
@@ -98,7 +110,23 @@ impl SequentialDownloader {
     }
 
     pub(crate) fn with_prepared_response(mut self, response: PreparedHttpResponse) -> Self {
+        self.auth_factory = Some(Arc::clone(&response.auth_factory));
         self.prepared_response = Some(response);
+        self
+    }
+
+    pub(crate) fn with_shared_auth_options(
+        mut self,
+        auth_factory: Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>,
+        auth_options: crate::http::AuthResolveOptions,
+    ) -> Self {
+        self.auth_factory = Some(auth_factory);
+        self.auth_options = Some(auth_options);
+        self
+    }
+
+    pub(crate) fn with_origin_sensitive_headers_allowed(mut self, allowed: bool) -> Self {
+        self.origin_sensitive_headers_allowed = allowed;
         self
     }
 

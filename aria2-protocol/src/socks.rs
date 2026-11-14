@@ -1,7 +1,22 @@
 //! SOCKS4 and SOCKS5 connection handshakes over an injected byte stream.
 
+mod connector_enum;
+mod proxy_url;
+mod socks4;
+mod socks5;
+
+pub use connector_enum::SocksConnectorEnum;
+pub use proxy_url::{ProxyProtocol, ProxyUrl};
+pub use socks4::Socks4Connector;
+pub use socks5::Socks5Connector;
+
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
+
+/// Protocol connector interface for a SOCKS CONNECT handshake.
+pub trait SocksConnector: Send + Sync {
+    fn connect<S: Read + Write>(&self, stream: S, target: &SocketAddr) -> Result<S, String>;
+}
 
 /// Perform a SOCKS4 CONNECT handshake and return the tunneled stream.
 pub fn connect_socks4<S: Read + Write>(
@@ -66,11 +81,17 @@ pub fn connect_socks5<S: Read + Write>(
     }
     match reply[1] {
         0x00 => {}
-        0x02 => authenticate(
+        0x02 if has_credentials => authenticate(
             &mut stream,
-            username.unwrap_or_default(),
-            password.unwrap_or_default(),
+            username.expect("credentials are present"),
+            password.expect("credentials are present"),
         )?,
+        0x02 => {
+            return Err(
+                "SOCKS5 server selected username/password authentication that was not offered"
+                    .to_string(),
+            );
+        }
         method => {
             return Err(format!(
                 "SOCKS5 server returned unacceptable authentication method: 0x{method:02X}"
@@ -244,5 +265,19 @@ mod tests {
                 5, 2, 0, 2, 1, 1, b'u', 1, b'p', 5, 1, 0, 1, 10, 20, 30, 40, 0x1f, 0x90
             ]
         );
+    }
+
+    #[test]
+    fn socks5_rejects_authentication_method_that_was_not_offered() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let stream = MockStream::new(&[
+            5, 2, // invalidly select username/password when it was not offered
+            1, 0, // would accept the empty credentials sent by the old behavior
+            5, 0, 0, 1, 0, 0, 0, 0, 0, 0, // successful CONNECT reply
+        ]);
+
+        let result = connect_socks5(stream, &target, None, None);
+
+        assert!(matches!(result, Err(error) if error.contains("was not offered")));
     }
 }

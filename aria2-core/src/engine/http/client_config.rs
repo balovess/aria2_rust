@@ -167,15 +167,10 @@ pub(super) fn build_download_clients(
 pub(crate) fn http_proxy_origin(uri: &str, options: &DownloadOptions) -> Option<(String, u16)> {
     let parsed_uri = url::Url::parse(uri).ok()?;
     let hostname = parsed_uri.host_str()?;
-    let target_port = parsed_uri.port_or_known_default()?;
 
     if let Some(no_proxy) = options.no_proxy.as_deref() {
         let matcher = NoProxyMatcher::from_env_value(no_proxy);
-        let bypassed = hostname
-            .parse::<IpAddr>()
-            .map(|address| matcher.should_bypass(&std::net::SocketAddr::new(address, target_port)))
-            .unwrap_or_else(|_| matcher.should_bypass_hostname(hostname));
-        if bypassed {
+        if matcher.should_bypass_hostname(hostname) {
             return None;
         }
     }
@@ -204,13 +199,6 @@ pub(crate) fn http_proxy_origin(uri: &str, options: &DownloadOptions) -> Option<
         _ => None,
     }?;
     let proxy = ProxyUrl::parse(candidate).ok()?;
-    if !matches!(
-        proxy.protocol,
-        crate::http::socks_connector::ProxyProtocol::Http
-            | crate::http::socks_connector::ProxyProtocol::Https
-    ) {
-        return None;
-    }
     Some((proxy.host, proxy.port))
 }
 
@@ -385,19 +373,15 @@ pub(super) fn build_download_client(
         match ProxyUrl::parse(all_proxy) {
             Ok(parsed) => match parsed.protocol {
                 crate::http::socks_connector::ProxyProtocol::Http
-                | crate::http::socks_connector::ProxyProtocol::Https => {
+                | crate::http::socks_connector::ProxyProtocol::Https
+                | crate::http::socks_connector::ProxyProtocol::Socks4
+                | crate::http::socks_connector::ProxyProtocol::Socks5 => {
                     builder = add_reqwest_proxy(
                         builder,
                         ProxyTarget::All,
                         all_proxy,
                         options.proxy_credentials_for_scheme("all"),
                         no_proxy,
-                    );
-                }
-                _ => {
-                    tracing::info!(
-                        "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
-                        all_proxy
                     );
                 }
             },
@@ -447,10 +431,34 @@ pub(crate) fn build_reqwest_proxy(
     password: Option<&str>,
     no_proxy: Option<&str>,
 ) -> std::result::Result<reqwest::Proxy, reqwest::Error> {
-    let mut proxy = match target {
-        ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
-        ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
-        ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+    let mut proxy = if let Some(no_proxy) = no_proxy {
+        // Reqwest's built-in NO_PROXY rules treat an unprefixed domain as a
+        // suffix, while aria2's matcher treats it as an exact hostname. Use
+        // the same matcher for proxy selection and actual request routing.
+        match target {
+            ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
+            ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
+            ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+        };
+        let no_proxy = NoProxyMatcher::from_env_value(no_proxy);
+        let proxy_url = proxy_url.to_owned();
+        reqwest::Proxy::custom(move |url| {
+            let scheme_matches = match target {
+                ProxyTarget::Http => url.scheme() == "http",
+                ProxyTarget::Https => url.scheme() == "https",
+                ProxyTarget::All => matches!(url.scheme(), "http" | "https"),
+            };
+            let bypass = url
+                .host_str()
+                .is_some_and(|host| no_proxy.should_bypass_hostname(host));
+            (scheme_matches && !bypass).then(|| proxy_url.clone())
+        })
+    } else {
+        match target {
+            ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
+            ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
+            ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+        }
     };
 
     // Preserve credentials embedded in the proxy URL unless an option
@@ -507,6 +515,80 @@ pub(crate) fn add_reqwest_proxy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn proxy_request_routing_uses_exact_no_proxy_hostname_matching() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        crate::http::client_pool::ensure_rustls_provider();
+
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target_listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndirect",
+                )
+                .await
+                .unwrap();
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut stream, _) = proxy_listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "proxy request ended before its headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nproxy!",
+                )
+                .await
+                .unwrap();
+        });
+
+        let no_proxy = "example.test";
+        let proxy_url = format!("http://{proxy_address}");
+        let options = DownloadOptions {
+            all_proxy: Some(proxy_url.clone()),
+            no_proxy: Some(no_proxy.to_string()),
+            ..DownloadOptions::default()
+        };
+        let uri = format!(
+            "http://download.example.test:{}/file",
+            target_address.port()
+        );
+        assert_eq!(
+            http_proxy_origin(&uri, &options),
+            Some(("127.0.0.1".to_string(), proxy_address.port()))
+        );
+
+        let proxy =
+            build_reqwest_proxy(ProxyTarget::All, &proxy_url, None, None, Some(no_proxy)).unwrap();
+        let client = reqwest::Client::builder()
+            .proxy(proxy)
+            .resolve("download.example.test", target_address)
+            .build()
+            .unwrap();
+        let response = client.get(uri).send().await.unwrap();
+        assert_eq!(response.text().await.unwrap(), "proxy!");
+
+        proxy_task.await.unwrap();
+        target_task.abort();
+        let _ = target_task.await;
+    }
 
     #[test]
     fn download_connect_timeout_uses_the_request_option() {

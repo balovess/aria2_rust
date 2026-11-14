@@ -6,7 +6,56 @@ use crate::sftp::packet::{SSH_FX_OK, SftpFileAttrs};
 fn test_version_constants() {
     const _: () = assert!(SFTP_VERSION_MIN <= SFTP_VERSION_MAX);
     assert_eq!(SFTP_VERSION_MIN, 3);
-    assert_eq!(SFTP_VERSION_MAX, 6);
+    assert_eq!(SFTP_VERSION_MAX, 3);
+}
+
+#[test]
+fn server_version_must_match_the_v3_wire_codec() {
+    assert!(SftpSession::validate_server_version(3).is_ok());
+    assert!(matches!(
+        SftpSession::validate_server_version(2),
+        Err(SftpSessionError::UnsupportedVersion {
+            server_version: 2,
+            minimum: 3,
+        })
+    ));
+    assert!(matches!(
+        SftpSession::validate_server_version(4),
+        Err(SftpSessionError::UnsupportedVersionAboveMaximum {
+            server_version: 4,
+            maximum: 3,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn packet_read_timeout_covers_all_fragments() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    let packet = SftpPacket::Version {
+        version: 3,
+        extensions: Vec::new(),
+    }
+    .encode()
+    .unwrap();
+    let writer_task = tokio::spawn(async move {
+        for chunk in packet.chunks(2) {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            writer.write_all(chunk).await.unwrap();
+        }
+    });
+
+    let started_at = std::time::Instant::now();
+    let result = SftpSession::recv_packet_from_reader(
+        &mut reader,
+        &mut Vec::new(),
+        Duration::from_millis(140),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(SftpSessionError::Timeout(timeout)) if timeout == Duration::from_millis(140))
+    );
+    assert!(started_at.elapsed() < Duration::from_millis(240));
+    writer_task.abort();
 }
 
 #[test]

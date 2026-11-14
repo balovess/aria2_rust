@@ -512,7 +512,7 @@ fn test_registry_defaults_are_valid() {
 }
 
 #[test]
-fn test_registry_identity_defaults_match_original_aria2() {
+fn test_registry_identity_defaults_match_protocol_library() {
     let registry = OptionRegistry::new();
     assert_eq!(
         registry

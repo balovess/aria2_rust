@@ -1,13 +1,4 @@
-use super::payload::parse_content_range_total;
 use super::*;
-
-#[test]
-fn parses_payload_total_from_protocol_content_range_parser() {
-    assert_eq!(parse_content_range_total("bytes 10-19/100"), Some(100));
-    assert_eq!(parse_content_range_total("bytes */100"), Some(100));
-    assert_eq!(parse_content_range_total("bytes 10-100/100"), None);
-    assert_eq!(parse_content_range_total("not-a-range/100"), None);
-}
 
 #[cfg(test)]
 mod http_status_tests {
@@ -249,7 +240,7 @@ mod http_status_tests {
             }
         });
 
-        let output_dir = tempfile::tempdir().expect("output directory");
+        let output_dir = tempfile::tempdir_in("../target").expect("output directory");
         let xml = format!(
             r#"<?xml version="1.0"?>
 <metalink xmlns="urn:ietf:params:xml:ns:metalink">
@@ -274,6 +265,59 @@ mod http_status_tests {
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
         assert_eq!(tokio::fs::read(command.output_path()).await.unwrap(), b"x");
         server.await.expect("504 fixture should finish");
+    }
+
+    #[tokio::test]
+    async fn ftp_mirror_uses_the_ftp_protocol_adapter() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("FTP proxy fixture should bind");
+        let proxy_address = listener.local_addr().expect("FTP proxy address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("FTP mirror request");
+            let mut request = [0u8; 4096];
+            let length = stream.read(&mut request).await.expect("read proxy request");
+            let request = String::from_utf8_lossy(&request[..length]).into_owned();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload",
+                )
+                .await
+                .expect("write FTP proxy payload");
+            request
+        });
+
+        let output_dir = tempfile::tempdir_in("../target").expect("output directory");
+        let xml = br#"<?xml version="1.0"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="payload.bin"><size>7</size><url>ftp://127.0.0.1:21/payload.bin</url></file>
+</metalink>"#;
+        let options = DownloadOptions {
+            dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ftp_proxy: Some(format!("http://{proxy_address}")),
+            proxy_method: "get".to_string(),
+            max_retries: 1,
+            ..DownloadOptions::default()
+        };
+        let mut command = MetalinkDownloadCommand::new(GroupId::new(404), xml, &options, None)
+            .expect("Metalink command should construct");
+
+        command
+            .execute()
+            .await
+            .expect("FTP mirror should download through the FTP adapter");
+        assert_eq!(
+            tokio::fs::read(command.output_path()).await.unwrap(),
+            b"payload"
+        );
+        let request = server.await.expect("FTP proxy fixture should finish");
+        assert!(
+            request.starts_with("GET ftp://anonymous@127.0.0.1/payload.bin "),
+            "unexpected FTP proxy request: {request:?}"
+        );
     }
 
     #[cfg(feature = "bittorrent")]

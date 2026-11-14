@@ -130,6 +130,15 @@ impl ConfigManager {
         }
     }
 
+    /// Create a manager with built-in defaults without reading environment
+    /// variables or an implicit configuration file.
+    ///
+    /// Use this for embedded entry points whose options must come only from
+    /// their explicit API inputs.
+    pub fn new_without_config() -> Self {
+        Self::new_with_registry_without_config(OptionRegistry::new())
+    }
+
     /// Create a configuration manager with identity defaults supplied by an
     /// embedding product. Standalone core users should use [`Self::new`].
     pub fn new_with_identity(user_agent: impl Into<String>, peer_agent: impl Into<String>) -> Self {
@@ -526,6 +535,34 @@ mod tests {
             Some("aria2-rust/9.9.9")
         );
         assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_config_embedding_identity_uses_supplied_defaults() {
+        let mgr = ConfigManager::new_with_identity_without_config(
+            "binary-product/2.0",
+            "binary-peer/2.0",
+        );
+
+        assert_eq!(
+            mgr.get_global_str("user-agent").await.as_deref(),
+            Some("binary-product/2.0")
+        );
+        #[cfg(feature = "bittorrent")]
+        assert_eq!(
+            mgr.get_global_str("peer-agent").await.as_deref(),
+            Some("binary-peer/2.0")
+        );
+        assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_config_manager_keeps_registry_defaults() {
+        let mgr = ConfigManager::new_without_config();
+
+        assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
+        assert_eq!(mgr.get_global_i64("split").await, Some(16));
+        assert_eq!(mgr.get_global_str("conf-path").await, None);
     }
 
     #[tokio::test]

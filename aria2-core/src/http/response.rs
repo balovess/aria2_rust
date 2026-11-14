@@ -15,7 +15,7 @@ use crate::http::request::HttpMethod;
 /// response. It is handled as a conditional-cache result and has no
 /// `Location` header requirement.
 pub(crate) fn is_redirect_status(status_code: u16) -> bool {
-    matches!(status_code, 300..=303 | 307 | 308)
+    aria2_protocol::http::response::is_redirect_status(status_code)
 }
 
 /// HTTP response struct

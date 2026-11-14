@@ -1,7 +1,34 @@
+#[path = "no_proxy.rs"]
+mod no_proxy;
+
 use std::env;
 use tracing::{debug, info};
 
-#[derive(Debug, Clone, PartialEq)]
+use crate::socks::{ProxyProtocol, ProxyUrl};
+
+pub use no_proxy::NoProxyMatcher;
+
+/// Classification of an HTTP response status received from a proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyResponseKind {
+    /// The proxy accepted the request.
+    Connected,
+    /// The proxy requires authentication.
+    AuthenticationRequired,
+    /// The proxy returned another status code.
+    Error,
+}
+
+/// Classify a proxy response status without interpreting core policy.
+pub fn classify_proxy_response(status_code: u16) -> ProxyResponseKind {
+    match status_code {
+        200 => ProxyResponseKind::Connected,
+        407 => ProxyResponseKind::AuthenticationRequired,
+        _ => ProxyResponseKind::Error,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyType {
     Http,
     Socks5,
@@ -59,70 +86,39 @@ impl ProxyConfig {
     }
 
     pub fn from_env() -> Option<Self> {
-        if let Ok(http_proxy) = env::var("HTTP_PROXY") {
-            return Self::from_url(&http_proxy);
-        }
-        if let Ok(http_proxy) = env::var("http_proxy") {
-            return Self::from_url(&http_proxy);
-        }
-        if let Ok(https_proxy) = env::var("HTTPS_PROXY") {
-            return Self::from_url(&https_proxy);
-        }
-        if let Ok(https_proxy) = env::var("https_proxy") {
-            return Self::from_url(&https_proxy);
-        }
-        if let Ok(all_proxy) = env::var("ALL_PROXY") {
-            return Self::from_url(&all_proxy);
-        }
-        if let Ok(all_proxy) = env::var("all_proxy") {
-            return Self::from_url(&all_proxy);
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            if let Ok(value) = env::var(name) {
+                return Self::from_url(&value);
+            }
         }
         None
     }
 
     fn from_url(url: &str) -> Option<Self> {
         let url = url.trim();
-
-        let (proxy_type, rest) = if let Some(r) = url.strip_prefix("socks5://") {
-            (ProxyType::Socks5, r)
-        } else if let Some(r) = url.strip_prefix("http://") {
-            (ProxyType::Http, r)
-        } else if let Some(r) = url.strip_prefix("https://") {
-            (ProxyType::Http, r)
+        let normalized_url = if url.contains("://") {
+            url.to_string()
         } else {
-            (ProxyType::Http, url)
+            format!("http://{url}")
         };
-
-        let auth_split_pos = rest.find('@');
-        let (auth_part, addr_part) = if let Some(pos) = auth_split_pos {
-            (Some(&rest[..pos]), &rest[pos + 1..])
-        } else {
-            (None, rest)
-        };
-
-        let (username, password) = if let Some(auth) = auth_part {
-            if let Some(colon_pos) = auth.find(':') {
-                (
-                    Some(auth[..colon_pos].to_string()),
-                    Some(auth[colon_pos + 1..].to_string()),
-                )
-            } else {
-                (Some(auth.to_string()), None)
+        let parsed = ProxyUrl::parse(&normalized_url).ok()?;
+        let config = match parsed.protocol {
+            ProxyProtocol::Socks5 => Self::new_socks5(&parsed.host, parsed.port),
+            // This legacy configuration type only models HTTP and SOCKS5.
+            // Keep non-SOCKS5 schemes on its HTTP representation.
+            ProxyProtocol::Socks4 | ProxyProtocol::Http | ProxyProtocol::Https => {
+                Self::new_http(&parsed.host, parsed.port)
             }
-        } else {
-            (None, None)
         };
 
-        let colon_pos = addr_part.rfind(':')?;
-        let host = &addr_part[..colon_pos];
-        let port: u16 = addr_part[colon_pos + 1..].parse().ok()?;
-
-        let config = match proxy_type {
-            ProxyType::Http => Self::new_http(host, port),
-            ProxyType::Socks5 => Self::new_socks5(host, port),
-        };
-
-        if let (Some(user), Some(pass)) = (username, password) {
+        if let (Some(user), Some(pass)) = (parsed.username, parsed.password) {
             Some(config.with_auth(&user, &pass))
         } else {
             Some(config)
@@ -130,43 +126,12 @@ impl ProxyConfig {
     }
 
     pub fn should_bypass(&self, hostname: &str) -> bool {
-        if let Ok(no_proxy) = env::var("NO_PROXY") {
-            for pattern in no_proxy.split(',') {
-                let pattern = pattern.trim();
-                if pattern.is_empty() {
-                    continue;
-                }
-                if pattern == "*" {
-                    return true;
-                }
-                if pattern.starts_with('.') {
-                    if hostname.ends_with(pattern) || hostname == &pattern[1..] {
-                        return true;
-                    }
-                } else if hostname.eq_ignore_ascii_case(pattern) {
-                    return true;
-                }
-            }
-        }
-        if let Ok(no_proxy) = env::var("no_proxy") {
-            for pattern in no_proxy.split(',') {
-                let pattern = pattern.trim();
-                if pattern.is_empty() {
-                    continue;
-                }
-                if pattern == "*" {
-                    return true;
-                }
-                if pattern.starts_with('.') {
-                    if hostname.ends_with(pattern) || hostname == &pattern[1..] {
-                        return true;
-                    }
-                } else if hostname.eq_ignore_ascii_case(pattern) {
-                    return true;
-                }
-            }
-        }
-        false
+        let no_proxy = [env::var("NO_PROXY").ok(), env::var("no_proxy").ok()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(",");
+        NoProxyMatcher::from_env_value(&no_proxy).should_bypass_hostname(hostname)
     }
 }
 
@@ -185,11 +150,13 @@ impl ProxyManager {
         Self { config }
     }
 
+    /// Load the first available proxy from the legacy environment order.
     pub fn from_env() -> Self {
-        let config = ProxyConfig::from_env();
-        Self::new(config)
+        Self::new(ProxyConfig::from_env())
     }
 
+    /// Return the configured proxy for a URL unless its hostname is in
+    /// `NO_PROXY` or `no_proxy`.
     pub fn get_proxy_for_url(&self, url: &str) -> Option<String> {
         let config = self.config.as_ref()?;
         if let Some(hostname) = Self::extract_hostname(url)
@@ -206,12 +173,17 @@ impl ProxyManager {
     }
 
     fn extract_hostname(url: &str) -> Option<String> {
-        let url = url
-            .strip_prefix("http://")
-            .or_else(|| url.strip_prefix("https://"))
-            .or_else(|| url.strip_prefix("ftp://"))?;
-        let end_pos = url.find('/')?;
-        Some(url[..end_pos].to_string())
+        let parsed = url::Url::parse(url).ok()?;
+        if matches!(parsed.scheme(), "http" | "https" | "ftp") {
+            let hostname = parsed.host_str()?;
+            let hostname = hostname
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(hostname);
+            Some(hostname.to_owned())
+        } else {
+            None
+        }
     }
 }
 
@@ -247,11 +219,44 @@ mod tests {
 
         let socks = ProxyConfig::from_url("socks5://127.0.0.1:1080").unwrap();
         assert_eq!(socks.proxy_type, ProxyType::Socks5);
+
+        let default_port = ProxyConfig::from_url("http://proxy.example.com").unwrap();
+        assert_eq!(default_port.host, "proxy.example.com");
+        assert_eq!(default_port.port, 8080);
+
+        let https = ProxyConfig::from_url("https://secure.proxy.example/path").unwrap();
+        assert_eq!(https.proxy_type, ProxyType::Http);
+        assert_eq!(https.port, 443);
+
+        let bare = ProxyConfig::from_url("proxy.example.com:3128").unwrap();
+        assert_eq!(bare.host, "proxy.example.com");
+        assert_eq!(bare.port, 3128);
+
+        let socks_default_port = ProxyConfig::from_url("socks5://proxy.example.com").unwrap();
+        assert_eq!(socks_default_port.port, 1080);
     }
 
     #[test]
     fn test_should_bypass() {
         let config = ProxyConfig::new_http("proxy.example.com", 8080);
         assert!(!config.should_bypass("example.com"));
+    }
+
+    #[test]
+    fn proxy_manager_extracts_hosts_from_urls_with_or_without_paths() {
+        assert_eq!(
+            ProxyManager::extract_hostname("http://example.test"),
+            Some("example.test".to_string())
+        );
+        assert_eq!(
+            ProxyManager::extract_hostname("https://example.test:8443/path?q=1"),
+            Some("example.test".to_string())
+        );
+        assert_eq!(
+            ProxyManager::extract_hostname("ftp://[2001:db8::1]:21/file"),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(ProxyManager::extract_hostname("file:///tmp/file"), None);
+        assert_eq!(ProxyManager::extract_hostname("not a URL"), None);
     }
 }

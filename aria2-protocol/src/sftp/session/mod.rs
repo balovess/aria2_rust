@@ -17,7 +17,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -32,10 +32,12 @@ mod tests;
 
 pub use error::SftpSessionError;
 
-/// Minimum supported SFTP protocol version
+/// Minimum supported SFTP protocol version.
 pub const SFTP_VERSION_MIN: u32 = 3;
-/// Maximum supported SFTP protocol version
-pub const SFTP_VERSION_MAX: u32 = 6;
+/// Maximum supported SFTP protocol version.
+///
+/// The packet codec currently implements the SFTP v3 wire format.
+pub const SFTP_VERSION_MAX: u32 = 3;
 /// Represents a server-side SFTP protocol extension
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SftpExtension {
@@ -53,6 +55,32 @@ pub struct SftpExtension {
 struct SftpIo {
     stream: russh::ChannelStream<russh::client::Msg>,
     recv_buffer: Vec<u8>,
+}
+
+struct InFlightRequest {
+    session_poisoned: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl InFlightRequest {
+    fn new(session_poisoned: Arc<AtomicBool>) -> Self {
+        Self {
+            session_poisoned,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for InFlightRequest {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.session_poisoned.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl std::fmt::Display for SftpExtension {
@@ -84,6 +112,8 @@ pub struct SftpSession {
     created_at: std::time::Instant,
     /// Completed request/response exchanges (for metrics/diagnostics)
     operation_count: Arc<AtomicU32>,
+    /// An interrupted exchange leaves the response stream unsynchronized.
+    session_poisoned: Arc<AtomicBool>,
     /// Read timeout for individual operations
     read_timeout: Duration,
 }
@@ -109,6 +139,7 @@ impl Clone for SftpSession {
             extensions: self.extensions.clone(),
             created_at: self.created_at,
             operation_count: Arc::clone(&self.operation_count),
+            session_poisoned: Arc::clone(&self.session_poisoned),
             read_timeout: self.read_timeout,
         }
     }
@@ -159,12 +190,7 @@ impl SftpSession {
                 version,
                 extensions,
             } => {
-                if version < SFTP_VERSION_MIN {
-                    return Err(SftpSessionError::UnsupportedVersion {
-                        server_version: version,
-                        minimum: SFTP_VERSION_MIN,
-                    });
-                }
+                Self::validate_server_version(version)?;
                 (version, extensions)
             }
             other => {
@@ -193,8 +219,25 @@ impl SftpSession {
                 .collect(),
             created_at: std::time::Instant::now(),
             operation_count: Arc::new(AtomicU32::new(0)),
+            session_poisoned: Arc::new(AtomicBool::new(false)),
             read_timeout,
         })
+    }
+
+    fn validate_server_version(version: u32) -> Result<(), SftpSessionError> {
+        if version < SFTP_VERSION_MIN {
+            Err(SftpSessionError::UnsupportedVersion {
+                server_version: version,
+                minimum: SFTP_VERSION_MIN,
+            })
+        } else if version > SFTP_VERSION_MAX {
+            Err(SftpSessionError::UnsupportedVersionAboveMaximum {
+                server_version: version,
+                maximum: SFTP_VERSION_MAX,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     async fn write_packet(
@@ -221,14 +264,24 @@ impl SftpSession {
         io: &mut SftpIo,
         timeout: Duration,
     ) -> Result<SftpPacket, SftpSessionError> {
+        Self::recv_packet_from_reader(&mut io.stream, &mut io.recv_buffer, timeout).await
+    }
+
+    async fn recv_packet_from_reader<R>(
+        reader: &mut R,
+        recv_buffer: &mut Vec<u8>,
+        timeout: Duration,
+    ) -> Result<SftpPacket, SftpSessionError>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            // Try to decode a complete packet from the buffer first
-            if !io.recv_buffer.is_empty() {
-                match SftpPacket::decode(io.recv_buffer.as_slice()) {
-                    Ok((pkt, consumed)) => {
-                        let remaining = io.recv_buffer.split_off(consumed);
-                        io.recv_buffer = remaining;
-                        return Ok(pkt);
+            if !recv_buffer.is_empty() {
+                match SftpPacket::decode(recv_buffer.as_slice()) {
+                    Ok((packet, consumed)) => {
+                        recv_buffer.drain(..consumed);
+                        return Ok(packet);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
                     Err(error) => return Err(SftpSessionError::PacketDecode(error)),
@@ -236,14 +289,14 @@ impl SftpSession {
             }
 
             let mut chunk = [0_u8; 32 * 1024];
-            let count = tokio::time::timeout(timeout, io.stream.read(&mut chunk))
+            let count = tokio::time::timeout_at(deadline, reader.read(&mut chunk))
                 .await
                 .map_err(|_| SftpSessionError::Timeout(timeout))?
                 .map_err(SftpSessionError::ChannelRead)?;
             if count == 0 {
                 return Err(SftpSessionError::ChannelClosed);
             }
-            io.recv_buffer.extend_from_slice(&chunk[..count]);
+            recv_buffer.extend_from_slice(&chunk[..count]);
         }
     }
 
@@ -266,6 +319,10 @@ impl SftpSession {
         // synchronous operation seam rather than a speculative pending map.
         let encoded = pkt.encode().map_err(SftpSessionError::PacketEncode)?;
         let mut io = self.io.lock().await;
+        if self.session_poisoned.load(Ordering::Acquire) {
+            return Err(SftpSessionError::SessionPoisoned);
+        }
+        let request_guard = InFlightRequest::new(Arc::clone(&self.session_poisoned));
         Self::write_packet(&mut io, &encoded, "SFTP request").await?;
         let response = Self::recv_packet_from_io(&mut io, self.read_timeout).await?;
 
@@ -278,6 +335,7 @@ impl SftpSession {
         }
 
         self.operation_count.fetch_add(1, Ordering::Relaxed);
+        request_guard.complete();
         Ok(response)
     }
 

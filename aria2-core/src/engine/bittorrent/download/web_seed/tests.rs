@@ -57,6 +57,7 @@ async fn web_seed_hostname_policy_selects_a_compatible_local_source() {
         stats,
         http_client,
         timeout,
+        crate::constants::USER_AGENT,
     );
 
     assert_eq!(client.download_piece(0, 2, 0, 2).await.unwrap(), b"ok");

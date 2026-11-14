@@ -64,6 +64,10 @@ impl ProtocolCommandAdapter for MetalinkCommandAdapter {
         if let Some(limiter) = services.global_limiter.clone() {
             command.set_global_limiter(limiter);
         }
+        command.set_protocol_runtime(
+            crate::engine::protocol_adapter::ProtocolAdapterRegistry::source_protocols(),
+            services.clone(),
+        );
         #[cfg(feature = "bittorrent")]
         {
             command.set_public_tracker_catalog(Arc::clone(&self.bittorrent.public_tracker_catalog));

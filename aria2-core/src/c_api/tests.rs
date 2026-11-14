@@ -7,8 +7,12 @@ use std::sync::Mutex;
 mod bittorrent_options;
 #[path = "tests/ftp_proxy_options.rs"]
 mod ftp_proxy_options;
+#[path = "tests/ftp_reuse_options.rs"]
+mod ftp_reuse_options;
 #[path = "tests/http_adaptive_options.rs"]
 mod http_adaptive_options;
+#[path = "tests/http_auth_options.rs"]
+mod http_auth_options;
 #[path = "tests/public_tracker_sources.rs"]
 mod public_tracker_sources;
 #[path = "tests/sftp_options.rs"]

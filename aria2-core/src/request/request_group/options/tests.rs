@@ -32,6 +32,26 @@ fn split_option_keeps_large_positive_values() {
 }
 
 #[test]
+fn http_user_agent_matches_explicit_header_precedence() {
+    let options = DownloadOptions {
+        header: vec![
+            "x-extra: value".to_string(),
+            "uSeR-aGeNt: header/1.0".to_string(),
+        ],
+        user_agent: Some("option/1.0".to_string()),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(options.http_user_agent(), Some("header/1.0"));
+
+    let options = DownloadOptions {
+        user_agent: Some("option/1.0".to_string()),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(options.http_user_agent(), Some("option/1.0"));
+    assert_eq!(DownloadOptions::default().http_user_agent(), None);
+}
+
+#[test]
 fn adaptive_http_options_parse_and_normalize_external_values() {
     let values = HashMap::from([
         ("http-adaptive-enabled".to_string(), "false".to_string()),

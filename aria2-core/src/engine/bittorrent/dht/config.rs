@@ -406,11 +406,8 @@ async fn resolve_bootstrap_host(
         return Ok(vec![SocketAddr::new(address, port)]);
     }
     if async_dns {
-        dns_cache
-            .lock()
-            .await
-            .resolve_with_refresh(host, port)
-            .await
+        let dns_cache = dns_cache.lock().await.clone();
+        dns_cache.resolve_with_refresh(host, port).await
     } else {
         tokio::net::lookup_host((host, port))
             .await

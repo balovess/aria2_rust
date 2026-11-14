@@ -54,7 +54,7 @@ impl Default for FtpsConfig {
 }
 
 /// Minimum TLS protocol version for FTPS connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TlsVersion {
     /// TLS 1.2 (RFC 5246).
     #[default]

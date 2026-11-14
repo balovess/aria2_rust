@@ -140,10 +140,10 @@ fn socket_options_configure_connection_limit_and_timers() {
 }
 
 #[tokio::test]
-async fn established_idle_connection_retires_without_retransmit_timer() {
+async fn keepalive_sends_do_not_extend_established_idle_deadline() {
     let options = UtpSocketOptions::default()
-        .with_idle_timeout(Duration::from_millis(40))
-        .with_keepalive_interval(Duration::from_secs(5));
+        .with_idle_timeout(Duration::from_millis(80))
+        .with_keepalive_interval(Duration::from_millis(10));
     let mut client = UtpSocket::bind_addr_with_options(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         options,
@@ -172,7 +172,63 @@ async fn established_idle_connection_retires_without_retransmit_timer() {
         ConnectionState::Established
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client.process_timers().unwrap();
+    }
+    assert!(matches!(
+        client.connection_state(conn_id),
+        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
+    ));
+}
+
+#[tokio::test]
+async fn valid_peer_packet_refreshes_established_idle_deadline() {
+    let options = UtpSocketOptions::default()
+        .with_idle_timeout(Duration::from_millis(120))
+        .with_keepalive_interval(Duration::from_secs(5));
+    let mut client = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
+    let readiness = client.readiness_socket().unwrap();
+
+    let mut wire_buffer = [0; 2048];
+    let (syn_len, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
+    peer.send_to(
+        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    poll_recv_after_readable(&mut client, &readiness).await;
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    peer.send_to(
+        &UtpPacket::ack(syn.connection_id, syn.seq_nr, 71, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    poll_recv_after_readable(&mut client, &readiness).await;
+
+    // This is past the original deadline but before the refreshed deadline.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    client.process_timers().unwrap();
+    assert_eq!(
+        client.connection_state(conn_id).unwrap(),
+        ConnectionState::Established
+    );
+
+    tokio::time::sleep(Duration::from_millis(70)).await;
     client.process_timers().unwrap();
     assert!(matches!(
         client.connection_state(conn_id),

@@ -162,7 +162,8 @@ impl HttpProxyForward {
     /// # Arguments
     /// * method - HTTP method (GET, HEAD, etc.)
     /// * full_url - The full URL including scheme and host (e.g., http://target:80/path)
-    /// * path - The path component (used for Digest auth URI)
+    /// * path - Retained for compatibility; `full_url` determines the request
+    ///   target and the caller supplies any computed authentication header.
     /// * proxy_auth - Optional Proxy-Authorization header value
     pub fn build_forward_request(
         &self,
@@ -181,7 +182,7 @@ impl HttpProxyForward {
             ("Accept", "*/*"),
             ("Connection", "close"),
         ]);
-        let _ = path; // Path is used by the caller for Digest auth URI computation
+        let _ = path;
         String::from_utf8(aria2_protocol::http::request::serialize_http_request(
             method, full_url, &headers, None,
         ))

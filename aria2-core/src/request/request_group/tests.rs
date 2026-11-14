@@ -1023,10 +1023,42 @@ fn test_command_counter_does_not_underflow() {
 
 #[test]
 fn test_runtime_option_updates_populate_execution_fields() {
+    use std::collections::HashMap;
+
     let mut group = RequestGroup::new(
         GroupId::new(2),
         vec!["http://example.com/file".to_string()],
         DownloadOptions::default(),
+    );
+
+    let changes = group
+        .classify_runtime_options(HashMap::from([(
+            "ftp-reuse-connection".to_string(),
+            serde_json::json!(false),
+        )]))
+        .expect("FTP reuse setting should be valid for a reserved task");
+    assert_eq!(
+        changes.immediate.get("ftp-reuse-connection"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(changes.pending.get("ftp-reuse-connection"), None);
+
+    let mut active = RequestGroup::new(
+        GroupId::new(3),
+        vec!["ftp://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    active.start().expect("request group should become active");
+    let changes = active
+        .classify_runtime_options(HashMap::from([(
+            "ftp-reuse-connection".to_string(),
+            serde_json::json!(false),
+        )]))
+        .expect("FTP reuse setting should be valid for an active task");
+    assert!(changes.immediate.is_empty());
+    assert_eq!(
+        changes.pending.get("ftp-reuse-connection"),
+        Some(&serde_json::json!(false))
     );
 
     assert!(
@@ -1064,6 +1096,18 @@ fn test_runtime_option_updates_populate_execution_fields() {
             .try_update_option("ftp-pasv", serde_json::json!("false"))
             .unwrap()
     );
+    assert!(
+        group
+            .try_update_option("ftp-reuse-connection", serde_json::json!("false"))
+            .unwrap()
+    );
+    assert!(!group.options().ftp_reuse_connection);
+    assert!(
+        group
+            .try_update_option("ftp-reuse-connection", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(group.options().ftp_reuse_connection);
     assert!(
         group
             .try_update_option("ftp-user", serde_json::json!("alice"))

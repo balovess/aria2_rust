@@ -64,7 +64,7 @@ async fn mark_failed_connection(
         return;
     }
 
-    let mut dns = dns_cache.lock().await;
+    let dns = dns_cache.lock().await;
     dns.mark_bad_context(context);
     if !dns.has_good_address(&context.endpoint) {
         dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());
@@ -83,6 +83,10 @@ pub struct EngineLoopContext {
 
     /// Process-wide source-address policy for outgoing connections.
     pub outbound_network_policy: Arc<OutboundNetworkPolicy>,
+
+    /// Process-wide authenticated FTP control sessions, shared by download
+    /// commands and cleared when the engine loop shuts down.
+    pub ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
 
     /// Unified deadline-driven coordinator for session and control-file saves.
     pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveCoordinator>>>,

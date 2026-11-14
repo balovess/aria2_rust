@@ -57,13 +57,7 @@ pub fn handle_basic_challenge(
     match auth_config {
         Some(ac) => {
             let auth_header = basic_auth(ac.user(), ac.password());
-            info!(
-                "Resolved Basic auth for {}:{}{} (user={})",
-                host,
-                port,
-                path,
-                ac.user()
-            );
+            info!("Resolved Basic auth for {}:{}{}", host, port, path);
 
             if is_proxy {
                 // For proxy auth, the header name is Proxy-Authorization,

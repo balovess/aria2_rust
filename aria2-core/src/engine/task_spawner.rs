@@ -187,6 +187,9 @@ mod tests {
                 dns_cache,
                 outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
                 global_limiter: None,
+                ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(
+                    4,
+                )),
             },
             protocol_adapters: Arc::new(ProtocolAdapterRegistry::builtins(
                 #[cfg(feature = "bittorrent")]
@@ -356,7 +359,7 @@ mod tests {
             create_command_for_uri(uri, group, &options, dependencies(Arc::clone(&cache)))
                 .await
                 .expect("proxied command should resolve the first-hop proxy");
-        let mut cache = cache.lock().await;
+        let cache = cache.lock().await;
         let proxy_addresses = cache
             .resolve_no_network("localhost", 8080)
             .expect("proxy endpoint must be in the DNS cache");

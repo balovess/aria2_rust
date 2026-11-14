@@ -277,6 +277,7 @@ mod tests {
                 "dht-max-peers-per-info-hash".to_string(),
                 OptionValue::Int(37),
             ),
+            ("dht-max-items".to_string(), OptionValue::Int(512)),
         ]);
         let engine =
             DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
@@ -301,6 +302,7 @@ mod tests {
         );
         assert_eq!(dht_options.dht_max_peer_info_hashes, 1200);
         assert_eq!(dht_options.dht_max_peers_per_info_hash, 37);
+        assert_eq!(dht_options.dht_max_items, 512);
     }
 
     #[tokio::test]

@@ -1,5 +1,33 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+/// Authentication scheme token parsed from a `WWW-Authenticate` or
+/// `Proxy-Authenticate` challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeScheme {
+    Basic,
+    Digest,
+    Negotiate,
+    Ntlm,
+}
+
+impl ChallengeScheme {
+    /// Parse a challenge's leading authentication scheme token.
+    pub fn from_header(value: &str) -> Option<Self> {
+        let scheme = value.split_ascii_whitespace().next()?;
+        if scheme.eq_ignore_ascii_case("basic") {
+            Some(Self::Basic)
+        } else if scheme.eq_ignore_ascii_case("digest") {
+            Some(Self::Digest)
+        } else if scheme.eq_ignore_ascii_case("negotiate") {
+            Some(Self::Negotiate)
+        } else if scheme.eq_ignore_ascii_case("ntlm") {
+            Some(Self::Ntlm)
+        } else {
+            None
+        }
+    }
+}
+
 /// Build the HTTP Basic authentication field value for a credential pair.
 pub fn basic_authorization(username: &str, password: &str) -> String {
     let credentials = format!("{username}:{password}");
@@ -11,17 +39,73 @@ pub fn bearer_authorization(token: &str) -> String {
     format!("Bearer {token}")
 }
 
+/// Select and build a proxy authorization value from one or more challenge
+/// fields. Digest is preferred, Basic is accepted next, and unknown schemes
+/// fall back to Basic when a challenge field is present.
+pub fn proxy_authorization(
+    challenge_values: &[&str],
+    username: &str,
+    password: &str,
+    method: &str,
+    uri: &str,
+    nonce_count: u32,
+) -> Option<String> {
+    for value in challenge_values {
+        if value
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Digest"))
+            && let Ok(challenge) = crate::http::digest::DigestChallenge::parse(value)
+        {
+            return Some(
+                crate::http::digest::DigestResponse::compute(
+                    username,
+                    password,
+                    method,
+                    uri,
+                    &challenge,
+                    nonce_count,
+                )
+                .to_header_value(),
+            );
+        }
+    }
+
+    for value in challenge_values {
+        if value
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Basic"))
+        {
+            return Some(basic_authorization(username, password));
+        }
+    }
+
+    (!challenge_values.is_empty()).then(|| basic_authorization(username, password))
+}
+
 #[derive(Debug, Clone)]
 pub enum AuthScheme {
     Basic,
     Digest,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthCredentials {
     pub username: String,
     pub password: String,
     pub scheme: AuthScheme,
+}
+
+impl std::fmt::Debug for AuthCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthCredentials")
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .field("scheme", &self.scheme)
+            .finish()
+    }
 }
 
 impl AuthCredentials {
@@ -62,23 +146,21 @@ impl HttpAuth {
     }
 
     pub fn parse_www_authenticate(header_value: &str) -> Option<AuthChallenge> {
-        let header = header_value.trim();
-        let scheme = header.split_ascii_whitespace().next()?;
-        if scheme.eq_ignore_ascii_case("basic") {
-            return Some(AuthChallenge::Basic);
+        match ChallengeScheme::from_header(header_value)? {
+            ChallengeScheme::Basic => Some(AuthChallenge::Basic),
+            ChallengeScheme::Digest => {
+                let challenge = crate::http::digest::DigestChallenge::parse(header_value).ok()?;
+                Some(AuthChallenge::Digest(DigestChallenge {
+                    realm: challenge.realm,
+                    nonce: challenge.nonce,
+                    qop: challenge.qop.unwrap_or_default(),
+                    algorithm: challenge.algorithm,
+                    opaque: challenge.opaque.unwrap_or_default(),
+                    stale: challenge.stale,
+                }))
+            }
+            ChallengeScheme::Negotiate | ChallengeScheme::Ntlm => None,
         }
-        if !scheme.eq_ignore_ascii_case("digest") {
-            return None;
-        }
-        let challenge = crate::http::digest::DigestChallenge::parse(header).ok()?;
-        Some(AuthChallenge::Digest(DigestChallenge {
-            realm: challenge.realm,
-            nonce: challenge.nonce,
-            qop: challenge.qop.unwrap_or_default(),
-            algorithm: challenge.algorithm,
-            opaque: challenge.opaque.unwrap_or_default(),
-            stale: challenge.stale,
-        }))
     }
 
     pub fn build_digest_response(
@@ -141,6 +223,33 @@ mod tests {
     }
 
     #[test]
+    fn credential_debug_output_redacts_username_and_password() {
+        let credentials = AuthCredentials::new_basic("debug-user", "debug-secret");
+        let formatted = format!("{credentials:?}");
+
+        assert!(formatted.contains("<redacted>"));
+        assert!(!formatted.contains("debug-user"));
+        assert!(!formatted.contains("debug-secret"));
+    }
+
+    #[test]
+    fn proxy_authorization_prefers_digest_then_basic_and_preserves_fallback() {
+        let challenges = [
+            "Basic realm=\"proxy\"",
+            "Digest realm=\"proxy\", nonce=\"n1\", qop=\"auth\"",
+        ];
+        let digest = proxy_authorization(&challenges, "u", "p", "GET", "/file", 2).unwrap();
+        assert!(digest.starts_with("Digest "));
+        assert!(digest.contains("nc=00000002"));
+
+        let basic = proxy_authorization(&challenges[..1], "u", "p", "GET", "/file", 1).unwrap();
+        assert_eq!(basic, "Basic dTpw");
+        let fallback = proxy_authorization(&["NTLM"], "u", "p", "GET", "/file", 1).unwrap();
+        assert_eq!(fallback, "Basic dTpw");
+        assert!(proxy_authorization(&[], "u", "p", "GET", "/file", 1).is_none());
+    }
+
+    #[test]
     fn test_parse_basic_challenge() {
         let result = HttpAuth::parse_www_authenticate("Basic");
         assert!(matches!(result, Some(AuthChallenge::Basic)));
@@ -148,6 +257,28 @@ mod tests {
             HttpAuth::parse_www_authenticate("bAsIc realm=\"proxy\""),
             Some(AuthChallenge::Basic)
         ));
+    }
+
+    #[test]
+    fn parses_supported_authentication_scheme_tokens() {
+        assert_eq!(
+            ChallengeScheme::from_header("Basic realm=\"test\""),
+            Some(ChallengeScheme::Basic)
+        );
+        assert_eq!(
+            ChallengeScheme::from_header("dIgEsT nonce=abc"),
+            Some(ChallengeScheme::Digest)
+        );
+        assert_eq!(
+            ChallengeScheme::from_header("Negotiate token"),
+            Some(ChallengeScheme::Negotiate)
+        );
+        assert_eq!(
+            ChallengeScheme::from_header("NTLM token"),
+            Some(ChallengeScheme::Ntlm)
+        );
+        assert_eq!(ChallengeScheme::from_header("Unknown token"), None);
+        assert_eq!(ChallengeScheme::from_header(""), None);
     }
 
     #[test]

@@ -46,20 +46,25 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
         let uri_lower = request.first_uri.to_ascii_lowercase();
         let bt_metadata = request.group.recover().bt_metadata_data();
         if uri_lower.starts_with("bt://") || bt_metadata.is_some() {
-            let torrent_bytes = bt_metadata
-                .or_else(|| {
-                    request
+            let torrent_bytes = match bt_metadata {
+                Some(metadata) => Some(metadata),
+                None => {
+                    let metadata_path = request
                         .group
                         .recover()
                         .metadata_info()
-                        .and_then(|info| info.metadata_path().map(std::path::PathBuf::from))
-                        .and_then(|path| std::fs::read(path).ok())
-                })
-                .ok_or_else(|| {
-                    Aria2Error::Fatal(FatalError::Config(
-                        "Resolved BitTorrent payload has no metadata source".to_string(),
-                    ))
-                })?;
+                        .and_then(|info| info.metadata_path().map(std::path::PathBuf::from));
+                    match metadata_path {
+                        Some(path) => tokio::fs::read(path).await.ok(),
+                        None => None,
+                    }
+                }
+            }
+            .ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "Resolved BitTorrent payload has no metadata source".to_string(),
+                ))
+            })?;
             let mut command = crate::engine::bittorrent::download::command::BtDownloadCommand::new_with_group_and_mappings_with_policy(
                 request.group,
                 &torrent_bytes,

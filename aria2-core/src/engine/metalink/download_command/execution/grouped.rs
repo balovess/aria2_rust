@@ -25,14 +25,19 @@ impl MetalinkDownloadCommand {
         for (path, info) in &grouped_files {
             let mut command = Self {
                 group: std::sync::Arc::clone(&self.group),
-                client: self.client.clone(),
                 output_path: path.clone(),
                 started: true,
                 completed: false,
                 completed_bytes: 0,
+                progress_offset: completed_bytes,
                 file_info: Some(info.clone()),
                 grouped_file_infos: Vec::new(),
-                checkpoint: None,
+                protocol_runtime: self.protocol_runtime.as_ref().map(|runtime| {
+                    super::super::transport::ProtocolRuntime {
+                        adapters: std::sync::Arc::clone(&runtime.adapters),
+                        services: runtime.services.clone(),
+                    }
+                }),
                 global_limiter: self.global_limiter.clone(),
                 outbound_network_policy: std::sync::Arc::clone(&self.outbound_network_policy),
                 #[cfg(feature = "bittorrent")]
@@ -59,6 +64,10 @@ impl MetalinkDownloadCommand {
                     );
                 }
             }
+        }
+
+        if let Some(error) = self.lifecycle_error() {
+            return Err(error);
         }
 
         if direct_failed && self.lifecycle_error().is_none() {

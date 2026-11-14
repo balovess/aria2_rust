@@ -49,9 +49,8 @@ impl CoreTrackerSourceFetcher {
         let addresses = if let Ok(address) = host.parse::<IpAddr>() {
             vec![SocketAddr::new(address, port)]
         } else {
-            self.dns_cache
-                .lock()
-                .await
+            let dns_cache = self.dns_cache.lock().await.clone();
+            dns_cache
                 .resolve_with_refresh(&host, port)
                 .await
                 .map_err(|error| format!("Tracker source DNS lookup failed: {error}"))?

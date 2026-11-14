@@ -1,8 +1,6 @@
-use super::connector_enum::SocksConnectorEnum;
-use super::socks4::Socks4Connector;
-use super::socks5::Socks5Connector;
+use super::{Socks4Connector, Socks5Connector, SocksConnectorEnum};
 
-/// Represents a parsed proxy URL (e.g., socks5://user:pass@host:port)
+/// A parsed proxy URL (for example, `socks5://user:pass@host:port`).
 #[derive(Debug)]
 pub struct ProxyUrl {
     pub protocol: ProxyProtocol,
@@ -21,16 +19,14 @@ pub enum ProxyProtocol {
 }
 
 impl ProxyUrl {
-    /// Parse a proxy URL string into a ProxyUrl struct.
-    /// Supported formats:
-    ///   socks5://[username:password@]host[:port]
-    ///   socks4://[username@]host[:port]
-    ///   http://[username:password@]host[:port]
-    ///   https://[username:password@]host[:port]
+    /// Parse a proxy URL.
+    ///
+    /// Supported forms are `socks5://[username:password@]host[:port]`,
+    /// `socks4://[username@]host[:port]`, `http://[username:password@]host[:port]`,
+    /// and `https://[username:password@]host[:port]`. Any path, query, or
+    /// fragment is ignored because proxy routing uses only the authority.
     pub fn parse(url: &str) -> Result<Self, String> {
         let url = url.trim();
-
-        // Determine protocol
         let (protocol, rest) = if let Some(rest) = url.strip_prefix("socks5://") {
             (ProxyProtocol::Socks5, rest)
         } else if let Some(rest) = url.strip_prefix("socks4://") {
@@ -40,36 +36,31 @@ impl ProxyUrl {
         } else if let Some(rest) = url.strip_prefix("https://") {
             (ProxyProtocol::Https, rest)
         } else {
-            return Err(format!("Unsupported proxy protocol in URL: {}", url));
+            return Err(format!("Unsupported proxy protocol in URL: {url}"));
         };
 
-        // Split auth info from host:port
         let (auth_part, host_port) = match rest.find('@') {
-            Some(idx) => (&rest[..idx], &rest[idx + 1..]),
+            Some(index) => (&rest[..index], &rest[index + 1..]),
             None => ("", rest),
         };
-
-        // Parse username and password
+        let host_port = host_port.split(['/', '?', '#']).next().unwrap_or(host_port);
         let (username, password) = if !auth_part.is_empty() {
-            if let Some(colon_idx) = auth_part.find(':') {
+            if let Some(index) = auth_part.find(':') {
                 (
-                    Some(auth_part[..colon_idx].to_string()),
-                    Some(auth_part[colon_idx + 1..].to_string()),
+                    Some(auth_part[..index].to_string()),
+                    Some(auth_part[index + 1..].to_string()),
                 )
             } else {
-                // SOCKS4 only uses username, no password
                 (Some(auth_part.to_string()), None)
             }
         } else {
             (None, None)
         };
 
-        // Parse host and port. IPv6 literals must be bracketed so the colons
-        // inside the address cannot be mistaken for the port separator.
         let default_port = match protocol {
-            ProxyProtocol::Socks4 | ProxyProtocol::Socks5 => 1080u16,
-            ProxyProtocol::Http => 8080u16,
-            ProxyProtocol::Https => 443u16,
+            ProxyProtocol::Socks4 | ProxyProtocol::Socks5 => 1080,
+            ProxyProtocol::Http => 8080,
+            ProxyProtocol::Https => 443,
         };
         let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
             let close = bracketed
@@ -87,13 +78,13 @@ impl ProxyUrl {
                 return Err(format!("Invalid bracketed proxy host: {host_port}"));
             };
             (host.to_string(), port)
-        } else if let Some(colon_idx) = host_port.rfind(':') {
-            let h = &host_port[..colon_idx];
-            let p_str = &host_port[colon_idx + 1..];
-            let port: u16 = p_str
+        } else if let Some(index) = host_port.rfind(':') {
+            let host = &host_port[..index];
+            let port_text = &host_port[index + 1..];
+            let port = port_text
                 .parse()
-                .map_err(|_| format!("Invalid port number in proxy URL: {p_str}"))?;
-            (h.to_string(), port)
+                .map_err(|_| format!("Invalid port number in proxy URL: {port_text}"))?;
+            (host.to_string(), port)
         } else {
             (host_port.to_string(), default_port)
         };
@@ -111,7 +102,9 @@ impl ProxyUrl {
         })
     }
 
-    /// Create the appropriate connector for this proxy URL
+    /// Create the matching connector for SOCKS URLs.
+    ///
+    /// Panics when called for an HTTP or HTTPS proxy URL.
     pub fn create_connector(&self) -> SocksConnectorEnum {
         match self.protocol {
             ProxyProtocol::Socks4 => SocksConnectorEnum::Socks4(Socks4Connector::new(
@@ -121,7 +114,9 @@ impl ProxyUrl {
                 self.username.clone(),
                 self.password.clone(),
             )),
-            _ => panic!("HTTP/HTTPS connectors not yet implemented"),
+            ProxyProtocol::Http | ProxyProtocol::Https => {
+                panic!("HTTP/HTTPS connectors not yet implemented")
+            }
         }
     }
 }

@@ -104,14 +104,12 @@ impl WebSeedClient {
         stats: Arc<WebSeedStats>,
         client: reqwest::Client,
         timeout: Duration,
+        user_agent: &str,
     ) -> Self {
         Self {
             base_url: base_url.to_string(),
             protocol_client: aria2_protocol::bittorrent::web_seed::WebSeedHttpClient::new(
-                base_url,
-                client,
-                timeout,
-                crate::constants::USER_AGENT,
+                base_url, client, timeout, user_agent,
             ),
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,

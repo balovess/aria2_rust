@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use aria2_protocol::sftp::connection::SshError;
 use aria2_protocol::sftp::file_ops::FileOpError;
+use aria2_protocol::sftp::session::SftpSessionError;
 
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError};
@@ -175,6 +176,7 @@ fn test_build_ssh_options_without_password() {
         global_limiter: None,
         checkpoint: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        dns_cache: None,
     };
     let opts = cmd.build_ssh_options();
     assert!(opts.password.is_none());
@@ -259,15 +261,36 @@ fn test_map_network_error_to_recoverable() {
 }
 
 #[test]
-fn test_map_unclassified_server_status_to_recoverable() {
+fn test_map_unclassified_server_status_to_terminal_failure() {
     let err = FileOpError::Other {
         message: "READ failed (code=4): Generic failure".into(),
     };
     let mapped = SftpDownloadCommand::map_file_op_error(&err, "host", "/f");
+    assert!(matches!(&mapped, Aria2Error::DownloadFailed(_)));
+    assert!(!create_test_cmd().should_retry_error(0, &mapped));
+}
+
+#[test]
+fn sftp_session_protocol_errors_are_terminal_but_timeouts_are_retryable() {
+    let mut command = create_test_cmd();
+    command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(2, 0);
+
+    let protocol_error =
+        SftpDownloadCommand::map_session_error(&SftpSessionError::UnsupportedVersion {
+            server_version: 4,
+            minimum: 3,
+        });
+    assert!(matches!(&protocol_error, Aria2Error::DownloadFailed(_)));
+    assert!(!command.should_retry_error(0, &protocol_error));
+
+    let timeout_error = SftpDownloadCommand::map_session_error(&SftpSessionError::Timeout(
+        Duration::from_millis(50),
+    ));
     assert!(matches!(
-        mapped,
+        &timeout_error,
         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
     ));
+    assert!(command.should_retry_error(0, &timeout_error));
 }
 
 #[test]
@@ -386,5 +409,6 @@ fn create_test_cmd() -> SftpDownloadCommand {
         global_limiter: None,
         checkpoint: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        dns_cache: None,
     }
 }

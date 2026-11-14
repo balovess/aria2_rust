@@ -389,7 +389,7 @@ pub struct HttpFtpArgs {
     )]
     pub ftp_pasv: Option<bool>,
 
-    /// Reuse FTP data connection across downloads
+    /// Reuse FTP control connection across downloads
     #[arg(
         long = "ftp-reuse-connection",
         num_args(0..=1),

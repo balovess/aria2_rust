@@ -6,9 +6,18 @@ use super::attrs::SftpFileAttrs;
 use super::constants::*;
 use super::types::{SftpNameEntry, SftpPacket};
 use super::wire::{
-    read_raw, read_string, read_u8, read_u32, read_u64, write_string, write_string_raw, write_u32,
-    write_u64,
+    checked_u32_length, read_raw, read_string, read_u8, read_u32, read_u64, write_string,
+    write_string_raw, write_u32, write_u64,
 };
+
+pub(super) fn checked_frame_length(payload_length: usize) -> io::Result<usize> {
+    payload_length.checked_add(4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SFTP frame length overflows the platform size",
+        )
+    })
+}
 impl SftpPacket {
     /// Return the wire type code for this packet variant.
     pub fn packet_type(&self) -> u8 {
@@ -238,7 +247,10 @@ impl SftpPacket {
                 entries,
             } => {
                 write_u32(&mut payload, *request_id)?;
-                write_u32(&mut payload, entries.len() as u32)?;
+                write_u32(
+                    &mut payload,
+                    checked_u32_length(entries.len(), "NAME entry count")?,
+                )?;
                 for entry in entries {
                     write_string(&mut payload, &entry.filename)?;
                     write_string(&mut payload, &entry.longname)?;
@@ -252,8 +264,10 @@ impl SftpPacket {
         }
 
         // Wrap payload: [length:u32][payload]
-        let mut out = Vec::with_capacity(4 + payload.len());
-        write_u32(&mut out, payload.len() as u32)?;
+        let wire_payload_length = checked_u32_length(payload.len(), "packet payload length")?;
+        let frame_length = checked_frame_length(payload.len())?;
+        let mut out = Vec::with_capacity(frame_length);
+        write_u32(&mut out, wire_payload_length)?;
         out.extend_from_slice(&payload);
         Ok(out)
     }
@@ -271,13 +285,14 @@ impl SftpPacket {
             ));
         }
         let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if buf.len() < 4 + len {
+        let frame_len = checked_frame_length(len)?;
+        if buf.len() < frame_len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "incomplete packet",
             ));
         }
-        let payload = &buf[4..4 + len];
+        let payload = &buf[4..frame_len];
         let mut cursor = io::Cursor::new(payload);
 
         let pkt_type = read_u8(&mut cursor)?;
@@ -503,7 +518,14 @@ impl SftpPacket {
             }
         };
 
-        Ok((pkt, 4 + len))
+        if cursor.position() != payload.len() as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SFTP packet contains trailing payload bytes",
+            ));
+        }
+
+        Ok((pkt, frame_len))
     }
 }
 

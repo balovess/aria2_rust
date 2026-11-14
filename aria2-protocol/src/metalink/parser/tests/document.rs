@@ -363,6 +363,7 @@ fn test_v4_url_auto_detects_resource_type() {
 <url priority="1">http://example.com/test.bin</url>
 <url priority="2">https://example.com/test.bin</url>
 <url priority="3">ftp://example.com/test.bin</url>
+<url priority="4">sftp://example.com/test.bin</url>
   </file>
 </metalink>"#
         .as_bytes()
@@ -371,4 +372,6 @@ fn test_v4_url_auto_detects_resource_type() {
     assert_eq!(doc.files[0].urls[0].resource_type, ResourceType::Http);
     assert_eq!(doc.files[0].urls[1].resource_type, ResourceType::Https);
     assert_eq!(doc.files[0].urls[2].resource_type, ResourceType::Ftp);
+    assert_eq!(doc.files[0].urls[3].resource_type, ResourceType::Ftp);
+    assert_eq!(doc.files[0].urls[3].url, "sftp://example.com/test.bin");
 }

@@ -251,6 +251,9 @@ impl TrackerAnnouncer {
             return false;
         }
 
+        if let Some(client) = self.udp_client.as_mut() {
+            client.cancel_pending_requests();
+        }
         self.announce.announce_cancelled();
         self.tracker_attempt_finished(&tracker_url, false);
         self.publish_runtime_snapshot();

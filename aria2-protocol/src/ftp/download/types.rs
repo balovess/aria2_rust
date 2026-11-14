@@ -1,10 +1,13 @@
 use tokio::time::Duration;
 
 pub(super) const DEFAULT_BUFFER_SIZE: usize = 65536;
+pub(super) const MAX_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// FTP download configuration options
 #[derive(Debug, Clone)]
 pub struct FtpDownloadOptions {
+    /// Requested data buffer size. Values outside 1 byte to 1 MiB are clamped
+    /// when a transfer starts.
     pub buffer_size: usize,
     pub resume_offset: Option<u64>,
     pub max_retries: u32,
@@ -14,6 +17,12 @@ pub struct FtpDownloadOptions {
     pub data_connect_timeout: Duration,
     /// Whether to download directories recursively
     pub recursive_download: bool,
+}
+
+impl FtpDownloadOptions {
+    pub(super) fn effective_buffer_size(&self) -> usize {
+        self.buffer_size.clamp(1, MAX_BUFFER_SIZE)
+    }
 }
 
 impl Default for FtpDownloadOptions {

@@ -584,7 +584,7 @@ impl crate::config::OptionRegistry {
             name: "ftp-reuse-connection".into(),
             opt_type: OptionType::Boolean,
             default_value: OptionValue::Bool(true),
-            description: "Reuse FTP data connection across downloads".into(),
+            description: "Reuse FTP control connection across downloads".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

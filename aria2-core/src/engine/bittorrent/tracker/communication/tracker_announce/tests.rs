@@ -138,6 +138,8 @@ async fn stopped_announce_respects_total_shutdown_budget() {
     let mut announcer = TrackerAnnouncer::new(&[vec![url]], &None);
     announcer.set_timeouts(Duration::from_secs(10), Duration::from_secs(10));
     announcer.set_stopped_timeout(Duration::from_millis(100));
+    let shared = Arc::new(std::sync::RwLock::new(TrackerRuntimeSnapshot::default()));
+    announcer.set_runtime_snapshot(Arc::clone(&shared));
     announcer.announce.set_runtime_halted(true);
     announcer
         .announce
@@ -151,6 +153,11 @@ async fn stopped_announce_respects_total_shutdown_budget() {
     .await;
     assert!(result.is_ok(), "stopped announce exceeded shutdown budget");
     assert!(!announcer.stopped_sent);
+    let snapshot = shared.read().expect("tracker runtime snapshot lock");
+    assert_eq!(snapshot.in_flight, 0);
+    assert_eq!(snapshot.trackers.len(), 1);
+    assert_eq!(snapshot.trackers[0].in_flight, 0);
+    assert_ne!(snapshot.trackers[0].status, "announcing");
 
     server.await.expect("tracker test server should exit");
 }

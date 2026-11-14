@@ -18,6 +18,7 @@ use crate::engine::retry_policy::RetryPolicy;
 use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
 
 use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
+use crate::ftp::connection_pool::{ControlSessionKey, FtpConnectionPool};
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
 use crate::network::OutboundNetworkPolicy;
@@ -59,6 +60,8 @@ pub struct FtpDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for this download.
     pub(super) global_limiter: Option<RateLimiter>,
+    /// Process-wide pool for authenticated FTP control sessions.
+    pub(super) connection_pool: Option<Arc<FtpConnectionPool>>,
     /// File allocation strategy selected by the request options.
     pub(super) file_allocation: String,
     pub(super) secure_falloc: bool,
@@ -184,6 +187,7 @@ impl FtpDownloadCommand {
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             dns_cache: None,
             global_limiter: None,
+            connection_pool: None,
             file_allocation: options
                 .file_allocation
                 .clone()
@@ -347,5 +351,22 @@ impl FtpDownloadCommand {
     /// tokens from this limiter in addition to the per-download limiter.
     pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
         self.global_limiter = Some(limiter);
+    }
+
+    pub fn set_connection_pool(&mut self, pool: Arc<FtpConnectionPool>) {
+        self.connection_pool = Some(pool);
+    }
+
+    pub(super) fn control_session_key(&self, proxy: Option<&FtpProxyConfig>) -> ControlSessionKey {
+        ControlSessionKey::new(
+            &self.host,
+            self.port,
+            &self.username,
+            &self.password,
+            proxy,
+            self.ftps_config.as_ref(),
+            self.ftps_implicit,
+            self.outbound_network_policy.addresses(),
+        )
     }
 }

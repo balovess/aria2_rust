@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::http::cookie_helper::CookieHelper;
 use crate::engine::http::segment_downloader::HttpSegmentDownloader;
+use crate::http::auth::AuthConfigFactory;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
 use super::admission::{ExecutorState, RunningTask};
@@ -22,7 +23,8 @@ pub struct HttpSegmentRequestExecutor {
     pub(super) request_policy: HttpRequestPolicy,
     pub(super) cookie_helper: CookieHelper,
     pub(super) auth_options: AuthResolveOptions,
-    pub(super) netrc_path: Option<String>,
+    pub(super) auth_factory: Arc<std::sync::Mutex<AuthConfigFactory>>,
+    pub(super) origin_sensitive_headers_allowed: bool,
     pub(super) state: Arc<ExecutorState>,
     pub(super) total_limit: usize,
     pub(super) tasks: Vec<RunningTask>,
@@ -55,6 +57,17 @@ impl HttpSegmentRequestExecutor {
         )
     }
 
+    pub fn set_origin_sensitive_headers_allowed(&mut self, allowed: bool) {
+        self.origin_sensitive_headers_allowed = allowed;
+    }
+
+    pub(crate) fn set_shared_auth_factory(
+        &mut self,
+        auth_factory: Arc<std::sync::Mutex<AuthConfigFactory>>,
+    ) {
+        self.auth_factory = auth_factory;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_clients(
         client: &reqwest::Client,
@@ -81,6 +94,10 @@ impl HttpSegmentRequestExecutor {
             http1_connection_limit,
             clients.len(),
         ));
+        let auth_factory = crate::engine::http::auth::factory_from_netrc(
+            netrc_path.as_deref(),
+            auth_options.no_netrc,
+        );
 
         Self {
             result_rx,
@@ -89,7 +106,8 @@ impl HttpSegmentRequestExecutor {
             request_policy,
             cookie_helper,
             auth_options,
-            netrc_path,
+            auth_factory: Arc::new(std::sync::Mutex::new(auth_factory)),
+            origin_sensitive_headers_allowed: true,
             state,
             total_limit,
             tasks: Vec::new(),
@@ -137,7 +155,8 @@ impl HttpSegmentRequestExecutor {
         let request_policy = self.request_policy.clone();
         let cookie_helper = self.cookie_helper.clone();
         let auth_options = self.auth_options.clone();
-        let netrc_path = self.netrc_path.clone();
+        let auth_factory = Arc::clone(&self.auth_factory);
+        let origin_sensitive_headers_allowed = self.origin_sensitive_headers_allowed;
         let result_tx = self.result_tx.clone();
         let authority_key = request.authority_key.clone();
         let task_id = self.next_task_id;
@@ -148,7 +167,8 @@ impl HttpSegmentRequestExecutor {
             let make_downloader = |client: &reqwest::Client| {
                 HttpSegmentDownloader::new_with_policy(client, request_policy.clone())
                     .with_cookie_helper(cookie_helper.clone())
-                    .with_auth_options(auth_options.clone(), netrc_path.clone())
+                    .with_shared_auth_options(auth_options.clone(), Arc::clone(&auth_factory))
+                    .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed)
             };
             let mut downloader = make_downloader(&client);
             // One successful one-byte Range response establishes this

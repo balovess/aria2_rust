@@ -9,6 +9,8 @@ use reqwest::RequestBuilder;
 
 use super::browser_context::BrowserContext;
 
+pub use aria2_protocol::http::redirect::{RedirectOriginScope, is_sensitive_header, same_origin};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestPacing {
     pub min_interval: std::time::Duration,
@@ -103,17 +105,55 @@ impl HttpRequestPolicy {
     /// generated defaults.
     pub fn apply(
         &self,
+        request: RequestBuilder,
+        cookie_header: Option<&str>,
+        extra_headers: &[(String, String)],
+    ) -> RequestBuilder {
+        self.apply_for_origin(request, cookie_header, extra_headers, true)
+    }
+
+    /// Apply request headers while preventing origin-scoped secrets from
+    /// crossing a redirect to another origin. Proxy authentication configured
+    /// on the reqwest client remains independent of these request headers.
+    pub fn apply_for_origin(
+        &self,
+        request: RequestBuilder,
+        cookie_header: Option<&str>,
+        extra_headers: &[(String, String)],
+        allow_sensitive_headers: bool,
+    ) -> RequestBuilder {
+        self.apply_for_origin_with_proxy_auth(
+            request,
+            cookie_header,
+            extra_headers,
+            allow_sensitive_headers,
+            None,
+        )
+    }
+
+    /// Apply origin-scoped headers and an explicitly challenged proxy
+    /// credential. The proxy credential is kept separate from origin headers.
+    pub fn apply_for_origin_with_proxy_auth(
+        &self,
         mut request: RequestBuilder,
         cookie_header: Option<&str>,
         extra_headers: &[(String, String)],
+        allow_sensitive_headers: bool,
+        proxy_authorization: Option<&str>,
     ) -> RequestBuilder {
         let mut explicit_headers = self
             .headers
             .iter()
             .chain(extra_headers.iter())
+            .filter(|(name, _)| {
+                proxy_authorization.is_none() || !name.eq_ignore_ascii_case("Proxy-Authorization")
+            })
+            .filter(|(name, _)| allow_sensitive_headers || !is_sensitive_header(name))
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(cookie) = cookie_header.filter(|value| !value.is_empty()) {
+        if allow_sensitive_headers
+            && let Some(cookie) = cookie_header.filter(|value| !value.is_empty())
+        {
             explicit_headers.push(("Cookie".to_string(), cookie.to_string()));
         }
         let dynamic_headers = self
@@ -127,6 +167,10 @@ impl HttpRequestPolicy {
             .iter()
             .chain(extra_headers.iter())
             .chain(dynamic_headers.iter())
+            .filter(|(name, _)| {
+                proxy_authorization.is_none() || !name.eq_ignore_ascii_case("Proxy-Authorization")
+            })
+            .filter(|(name, _)| allow_sensitive_headers || !is_sensitive_header(name))
         {
             if names
                 .iter()
@@ -162,6 +206,9 @@ impl HttpRequestPolicy {
         if !self.keep_alive && !self.pipelining && !has("Connection") {
             request = request.header("Connection", "close");
         }
+        if let Some(proxy_authorization) = proxy_authorization {
+            request = request.header("Proxy-Authorization", proxy_authorization);
+        }
         request
     }
 
@@ -174,12 +221,40 @@ impl HttpRequestPolicy {
         extra_headers: &[(String, String)],
         authorization: Option<&str>,
     ) -> RequestBuilder {
-        let request = self.apply(request, cookie_header, extra_headers);
-        let explicit_authorization = self.has_header("Authorization")
-            || extra_headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
-        if !explicit_authorization && let Some(authorization) = authorization {
+        self.apply_with_basic_auth_for_origin(
+            request,
+            cookie_header,
+            extra_headers,
+            authorization,
+            true,
+        )
+    }
+
+    /// Apply request headers and generated Basic authorization for a redirect
+    /// target whose origin may differ from the initial request.
+    pub fn apply_with_basic_auth_for_origin(
+        &self,
+        request: RequestBuilder,
+        cookie_header: Option<&str>,
+        extra_headers: &[(String, String)],
+        authorization: Option<&str>,
+        allow_sensitive_headers: bool,
+    ) -> RequestBuilder {
+        let request = self.apply_for_origin(
+            request,
+            cookie_header,
+            extra_headers,
+            allow_sensitive_headers,
+        );
+        let explicit_authorization = allow_sensitive_headers
+            && (self.has_header("Authorization")
+                || extra_headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Authorization")));
+        if allow_sensitive_headers
+            && !explicit_authorization
+            && let Some(authorization) = authorization
+        {
             return request.header("Authorization", authorization);
         }
         request
@@ -188,7 +263,7 @@ impl HttpRequestPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::HttpRequestPolicy;
+    use super::{HttpRequestPolicy, RedirectOriginScope, same_origin};
 
     #[test]
     fn applies_aria2_http_headers_and_preserves_explicit_values() {
@@ -278,6 +353,117 @@ mod tests {
         assert_eq!(
             request.headers().get("authorization").unwrap(),
             "Bearer explicit"
+        );
+    }
+
+    #[test]
+    fn cross_origin_policy_removes_credential_headers_but_keeps_public_headers() {
+        crate::http::client_pool::ensure_rustls_provider();
+        let policy = HttpRequestPolicy::new(
+            vec![
+                ("Authorization".into(), "Bearer origin-secret".into()),
+                ("X-API-Key".into(), "api-secret".into()),
+                ("X-Trace-ID".into(), "trace-123".into()),
+                ("Cookie".into(), "sid=source-cookie".into()),
+                ("Proxy-Authorization".into(), "Basic proxy-secret".into()),
+            ],
+            false,
+            false,
+            false,
+            true,
+            false,
+        );
+        let request = policy
+            .apply_with_basic_auth_for_origin(
+                reqwest::Client::new().get("https://cdn.example.test/file"),
+                Some("sid=target-cookie"),
+                &[("X-Session-Token".into(), "session-secret".into())],
+                Some("Basic generated-secret"),
+                false,
+            )
+            .build()
+            .expect("request builds");
+
+        assert!(request.headers().get("authorization").is_none());
+        assert!(request.headers().get("x-api-key").is_none());
+        assert!(request.headers().get("x-session-token").is_none());
+        assert!(request.headers().get("proxy-authorization").is_none());
+        assert_eq!(request.headers().get("x-trace-id").unwrap(), "trace-123");
+        assert_eq!(
+            request.headers().get("cookie").unwrap(),
+            "sid=target-cookie",
+            "the target URL's cookie-jar value replaces a custom source-origin Cookie header"
+        );
+    }
+
+    #[test]
+    fn origin_comparison_includes_scheme_host_and_effective_port() {
+        let initial = url::Url::parse("https://example.test/file").unwrap();
+        assert!(same_origin(
+            &initial,
+            &url::Url::parse("https://example.test:443/other").unwrap()
+        ));
+        assert!(!same_origin(
+            &initial,
+            &url::Url::parse("http://example.test/file").unwrap()
+        ));
+        assert!(!same_origin(
+            &initial,
+            &url::Url::parse("https://cdn.example.test/file").unwrap()
+        ));
+        assert!(!same_origin(
+            &initial,
+            &url::Url::parse("https://example.test:8443/file").unwrap()
+        ));
+    }
+
+    #[test]
+    fn crossing_an_origin_boundary_strips_credentials_for_the_rest_of_the_chain() {
+        let initial = url::Url::parse("https://example.test/file").unwrap();
+        let other = url::Url::parse("https://cdn.example.test/file").unwrap();
+        let mut scope = RedirectOriginScope::new(initial.clone());
+
+        assert!(scope.allows_sensitive_headers(&initial));
+        scope.follow_redirect(&initial, &other);
+        assert!(!scope.allows_sensitive_headers(&other));
+        scope.follow_redirect(&other, &initial);
+        assert!(!scope.allows_sensitive_headers(&initial));
+    }
+
+    #[test]
+    fn challenged_proxy_auth_survives_cross_origin_filtering() {
+        crate::http::client_pool::ensure_rustls_provider();
+        let policy = HttpRequestPolicy::new(
+            vec![
+                ("Authorization".into(), "Bearer origin-secret".into()),
+                ("X-API-Key".into(), "api-secret".into()),
+                (
+                    "Proxy-Authorization".into(),
+                    "Basic stale-proxy-secret".into(),
+                ),
+            ],
+            false,
+            false,
+            false,
+            true,
+            false,
+        );
+        let request = policy
+            .apply_for_origin_with_proxy_auth(
+                reqwest::Client::new().get("https://cdn.example.test/file"),
+                None,
+                &[],
+                false,
+                Some("Basic challenged-proxy-credential"),
+            )
+            .build()
+            .expect("request builds");
+
+        assert!(request.headers().get("authorization").is_none());
+        assert!(request.headers().get("x-api-key").is_none());
+        assert_eq!(
+            request.headers().get("proxy-authorization").unwrap(),
+            "Basic challenged-proxy-credential"
         );
     }
 }

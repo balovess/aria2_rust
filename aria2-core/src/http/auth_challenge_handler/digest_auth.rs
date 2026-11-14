@@ -33,7 +33,7 @@ pub fn handle_digest_challenge(
         None => {
             warn!("Digest challenge received but parsing failed — missing challenge parameters");
             return AuthChallengeResult::NoCredentials {
-                status_code: 401,
+                status_code: if challenge.is_proxy { 407 } else { 401 },
                 message: "Digest challenge parsing failed".to_string(),
             };
         }
@@ -112,12 +112,8 @@ pub fn handle_digest_challenge(
 
     let auth_header = response.to_header_value();
     info!(
-        "Computed Digest auth for {}:{}{} (user={}, nc={})",
-        host,
-        port,
-        path,
-        ac.user(),
-        nc
+        "Computed Digest auth for {}:{}{} (nc={})",
+        host, port, path, nc
     );
 
     AuthChallengeResult::RetryWithAuth {

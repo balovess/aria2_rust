@@ -24,10 +24,12 @@ pub(crate) struct ProtocolCommandRequest {
 }
 
 /// Shared, protocol-neutral services available to command adapters.
+#[derive(Clone)]
 pub(crate) struct ProtocolServices {
     pub(crate) dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
     pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     pub(crate) global_limiter: Option<RateLimiter>,
+    pub(crate) ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
 }
 
 #[allow(clippy::double_must_use)]
@@ -105,6 +107,26 @@ impl ProtocolAdapterRegistry {
         adapters.insert(
             usize::from(cfg!(feature = "metalink")) + usize::from(cfg!(feature = "sftp")),
             Box::new(crate::engine::bittorrent::command_adapter::BtCommandAdapter::new(bittorrent)),
+        );
+
+        Self::new(adapters)
+    }
+
+    /// Build only adapters that can fetch a single Metalink mirror or
+    /// metadata URL. Metadata dispatch is owned by Metalink, so this registry
+    /// deliberately excludes Metalink itself and BitTorrent task commands.
+    #[cfg(feature = "metalink")]
+    pub(crate) fn source_protocols() -> Self {
+        #[allow(unused_mut)]
+        let mut adapters: Vec<Box<dyn ProtocolCommandAdapter>> = vec![
+            Box::new(crate::engine::ftp::command_adapter::FtpCommandAdapter),
+            Box::new(crate::engine::http::command_adapter::HttpCommandAdapter),
+        ];
+
+        #[cfg(feature = "sftp")]
+        adapters.insert(
+            1,
+            Box::new(crate::engine::sftp::command_adapter::SftpCommandAdapter),
         );
 
         Self::new(adapters)
@@ -193,6 +215,7 @@ mod tests {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
+            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
 
         let command = registry
@@ -237,6 +260,7 @@ mod tests {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
+            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
 
         let command = registry
@@ -272,6 +296,7 @@ mod tests {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
+            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
 
         let command = registry
@@ -280,5 +305,102 @@ mod tests {
             .expect("restored source should be parsed into command input");
 
         assert_eq!(command.gid(), GroupId::new(732));
+    }
+
+    #[cfg(feature = "metalink")]
+    #[tokio::test]
+    async fn metalink_payload_uses_injected_http_proxy_policy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("HTTP proxy fixture should bind");
+        let proxy_address = listener.local_addr().expect("HTTP proxy address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("HTTP proxy request");
+            let mut request = [0u8; 4096];
+            let length = stream.read(&mut request).await.expect("read proxy request");
+            let request = String::from_utf8_lossy(&request[..length]).into_owned();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload",
+                )
+                .await
+                .expect("write HTTP payload");
+            request
+        });
+
+        let output_dir = tempfile::tempdir_in("../target").expect("output directory");
+        let xml = format!(
+            "<metalink xmlns=\"urn:ietf:params:xml:ns:metalink\"><file name=\"payload.bin\"><size>7</size><url>http://mirror.test/payload.bin</url></file></metalink>"
+        );
+        let options = Arc::new(DownloadOptions {
+            dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            http_proxy: Some(format!("http://{proxy_address}")),
+            max_retries: 1,
+            ..DownloadOptions::default()
+        });
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(733),
+            vec!["http://mirror.test/payload.bin".to_string()],
+            (*options).clone(),
+        )));
+        group
+            .recover()
+            .set_metalink_source(xml.as_bytes().to_vec(), 0);
+        let document =
+            aria2_protocol::metalink::parser::MetalinkDocument::parse(xml.as_bytes(), None)
+                .expect("fixture should parse");
+        group
+            .recover()
+            .set_parsed_metalink_file(Arc::new(document.files.into_iter().next().unwrap()));
+
+        #[cfg(feature = "bittorrent")]
+        let adapter = crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(
+            crate::engine::bittorrent::command_adapter::BtCommandServices {
+                public_tracker_catalog: Arc::new(
+                    aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
+                ),
+                bt_registry: Arc::new(std::sync::RwLock::new(
+                    crate::engine::bittorrent::registry::BtRegistry::new(),
+                )),
+                bt_listener: Arc::new(
+                    crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+                ),
+                lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
+                open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(20),
+            },
+        );
+        #[cfg(not(feature = "bittorrent"))]
+        let adapter = crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new();
+        let adapter = ProtocolAdapterRegistry::new(vec![Box::new(adapter)]);
+        let services = ProtocolServices {
+            dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            global_limiter: None,
+            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
+        };
+        let mut command = adapter
+            .create(
+                ProtocolCommandRequest {
+                    group,
+                    first_uri: "http://mirror.test/payload.bin".to_string(),
+                    options,
+                },
+                &services,
+            )
+            .await
+            .expect("Metalink command should be created");
+
+        command.execute().await.expect("Metalink should complete");
+        assert_eq!(
+            tokio::fs::read(output_dir.path().join("payload.bin"))
+                .await
+                .unwrap(),
+            b"payload"
+        );
+        let request = server.await.expect("HTTP proxy fixture should finish");
+        assert!(request.starts_with("GET http://mirror.test/payload.bin HTTP/1.1"));
     }
 }

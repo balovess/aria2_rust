@@ -86,7 +86,7 @@ async fn resolve_cached_endpoint(
     hostname: &str,
     port: u16,
 ) -> Result<Option<Vec<std::net::SocketAddr>>> {
-    let mut dns_cache = dns_cache.lock().await;
+    let dns_cache = dns_cache.lock().await.clone();
     let has_explicit_servers = !dns_cache.dns_server_addresses().is_empty();
     match dns_cache.resolve_with_refresh(hostname, port).await {
         Ok(addresses) => Ok(Some(addresses)),

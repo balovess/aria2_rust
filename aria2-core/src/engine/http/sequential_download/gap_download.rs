@@ -407,6 +407,9 @@ impl SequentialDownloader {
                 message: format!("invalid HTTP Range URL {uri}: {error}"),
             })
         })?;
+        let mut origin_scope =
+            crate::http::request_policy::RedirectOriginScope::new(current_url.clone())
+                .with_sensitive_headers_allowed(self.origin_sensitive_headers_allowed);
         let mut redirect_count = 0;
 
         loop {
@@ -415,12 +418,28 @@ impl SequentialDownloader {
                 .cookie_helper
                 .build_cookie_header_from_url(&current_url);
             let cookie_header = (!cookie_header.is_empty()).then_some(cookie_header);
-            let request = self.request_policy.apply(
+            let allow_origin_auth = origin_scope.allows_sensitive_headers(&current_url);
+            let authorization = if allow_origin_auth {
+                self.auth_factory
+                    .as_ref()
+                    .zip(self.auth_options.as_ref())
+                    .and_then(|(factory, options)| {
+                        factory
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .resolve_basic_authorization(&current_url, options)
+                    })
+            } else {
+                None
+            };
+            let request = self.request_policy.apply_with_basic_auth_for_origin(
                 self.client
                     .get(current_url.as_str())
                     .header(reqwest::header::RANGE, range_header),
                 cookie_header.as_deref(),
                 &[],
+                authorization.as_deref(),
+                allow_origin_auth,
             );
             let response = tokio::select! {
                 result = request.send() => result.map_err(|error| {
@@ -475,6 +494,7 @@ impl SequentialDownloader {
             self.group
                 .recover_mut()
                 .add_redirect_uri(target_url.as_str());
+            origin_scope.follow_redirect(&current_url, &target_url);
             current_url = target_url;
             redirect_count += 1;
         }

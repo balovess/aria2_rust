@@ -42,6 +42,7 @@ impl TrackerAnnouncer {
             {
                 Ok(result) => result,
                 Err(_) => {
+                    self.cancel_pending_announce();
                     warn!(
                         "[BT] Stopped announce timed out after {:?}",
                         self.stopped_timeout

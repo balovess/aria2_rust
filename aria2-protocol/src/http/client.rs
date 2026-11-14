@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
-use reqwest::{Certificate, Client, ClientBuilder, redirect};
+use reqwest::{Certificate, Client, ClientBuilder};
 use tracing::{debug, info};
 
 use crate::crypto::ensure_ring_provider;
+use crate::http::redirect::{RedirectOriginScope, is_sensitive_header};
 use crate::http::request::HttpRequest;
 use crate::http::response::{HttpResponse, is_redirect_status};
 
@@ -128,7 +129,7 @@ impl HttpClient {
             .connect_timeout(options.connect_timeout)
             .timeout(options.timeout)
             .user_agent(&options.user_agent)
-            .redirect(redirect::Policy::limited(options.max_redirects));
+            .redirect(reqwest::redirect::Policy::none());
 
         builder = builder.gzip(options.accept_gzip);
 
@@ -163,8 +164,12 @@ impl HttpClient {
         Self::new(HttpClientOptions::default())
     }
 
-    fn build_request(&self, request: HttpRequest) -> Result<reqwest::RequestBuilder, String> {
-        debug!("Sending HTTP request: {} {}", request.method, request.url);
+    fn build_request(&self, request: &HttpRequest) -> Result<reqwest::RequestBuilder, String> {
+        debug!(
+            "Sending HTTP request: {} {}",
+            request.method,
+            request_log_origin(&request.url)
+        );
 
         let mut reqwest_request = match request.method.to_uppercase().as_str() {
             "GET" => self.inner.get(&request.url),
@@ -185,19 +190,96 @@ impl HttpClient {
             }
         }
 
-        if let Some(body) = request.body {
-            reqwest_request = reqwest_request.body(body);
+        if let Some(body) = &request.body {
+            reqwest_request = reqwest_request.body(body.clone());
         }
 
         Ok(reqwest_request)
     }
 
+    async fn send_with_redirects(
+        &self,
+        mut request: HttpRequest,
+    ) -> Result<reqwest::Response, String> {
+        let initial_url = match url::Url::parse(&request.url) {
+            Ok(url) => url,
+            Err(_) => {
+                return self
+                    .build_request(&request)?
+                    .send()
+                    .await
+                    .map_err(|error| format!("HTTP request failed: {error}"));
+            }
+        };
+        let mut current_url = initial_url.clone();
+        let mut origin_scope = RedirectOriginScope::new(initial_url);
+        let mut redirect_count = 0;
+
+        loop {
+            request.url = current_url.to_string();
+            let response = self
+                .build_request(&request)?
+                .send()
+                .await
+                .map_err(|error| format!("HTTP request failed: {error}"))?;
+            let status_code = response.status().as_u16();
+            if !is_redirect_status(status_code) {
+                return Ok(response);
+            }
+
+            let Some(location) = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+            else {
+                return Ok(response);
+            };
+            let Some(action) = RedirectHandler::should_follow_redirect(
+                status_code,
+                &request.method,
+                redirect_count,
+                self.options.max_redirects,
+            ) else {
+                return Err(format!(
+                    "HTTP redirect limit exceeded ({})",
+                    self.options.max_redirects
+                ));
+            };
+
+            let target_url = RedirectHandler::resolve_redirect_url(current_url.as_str(), location)?;
+            let target_url = url::Url::parse(&target_url)
+                .map_err(|error| format!("Invalid redirect URL: {error}"))?;
+            RedirectHandler::sanitize_redirect_url(target_url.as_str())?;
+            origin_scope.follow_redirect(&current_url, &target_url);
+            if !origin_scope.allows_sensitive_headers(&target_url)
+                && let Some(headers) = request.headers.as_mut()
+            {
+                headers.retain(|(name, _)| !is_sensitive_header(name));
+            }
+
+            let referer = redirect_referer(&current_url, &target_url);
+            let headers = request.headers.get_or_insert_with(Vec::new);
+            headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("Host")
+                    && !name.eq_ignore_ascii_case("Referer")
+                    && (action != RedirectAction::FollowChangeToGet || !is_entity_header(name))
+            });
+            if let Some(referer) = referer {
+                headers.push(("Referer".to_string(), referer));
+            }
+
+            if action == RedirectAction::FollowChangeToGet {
+                request.method = "GET".to_string();
+                request.body = None;
+            }
+            current_url = target_url;
+            redirect_count += 1;
+            drop(response);
+        }
+    }
+
     pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, String> {
-        let response = self
-            .build_request(request)?
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+        let response = self.send_with_redirects(request).await?;
 
         let (status_code, status_text, headers_map) = response_metadata(&response);
         debug!("Received HTTP response: status_code={}", status_code);
@@ -222,11 +304,7 @@ impl HttpClient {
     /// [`HttpResponseStream::next_chunk`] for incremental reads, or drop the
     /// stream to cancel the remaining transfer.
     pub async fn execute_stream(&self, request: HttpRequest) -> Result<HttpResponseStream, String> {
-        let response = self
-            .build_request(request)?
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+        let response = self.send_with_redirects(request).await?;
 
         let (status_code, status_text, headers) = response_metadata(&response);
         debug!(
@@ -261,6 +339,43 @@ impl HttpClient {
     pub fn options_ref(&self) -> &HttpClientOptions {
         &self.options
     }
+}
+
+fn request_log_origin(raw_url: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw_url) else {
+        return "<invalid URL>".to_string();
+    };
+
+    // Paths and query parameters can contain signed download links or other
+    // credentials. Keep only the origin in diagnostics.
+    url.set_username("").ok();
+    url.set_password(None).ok();
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn redirect_referer(current: &url::Url, target: &url::Url) -> Option<String> {
+    if current.scheme() == "https" && target.scheme() == "http" {
+        return None;
+    }
+    let mut referer = current.clone();
+    referer.set_username("").ok()?;
+    referer.set_password(None).ok()?;
+    referer.set_fragment(None);
+    Some(referer.to_string())
+}
+
+fn is_entity_header(name: &str) -> bool {
+    [
+        "Content-Encoding",
+        "Content-Length",
+        "Content-Type",
+        "Transfer-Encoding",
+    ]
+    .iter()
+    .any(|header| name.eq_ignore_ascii_case(header))
 }
 
 fn response_metadata(response: &reqwest::Response) -> (u16, String, Vec<(String, String)>) {
@@ -469,7 +584,7 @@ pub struct RedirectHandler;
 impl RedirectHandler {
     pub fn should_follow_redirect(
         status_code: u16,
-        _method: &str,
+        method: &str,
         current_redirects: usize,
         max_redirects: usize,
     ) -> Option<RedirectAction> {
@@ -483,8 +598,13 @@ impl RedirectHandler {
         }
 
         match status_code {
-            300 | 301 => Some(RedirectAction::FollowKeepMethod),
-            302 | 303 => Some(RedirectAction::FollowChangeToGet),
+            300 => Some(RedirectAction::FollowKeepMethod),
+            301 | 302 if method.eq_ignore_ascii_case("POST") => {
+                Some(RedirectAction::FollowChangeToGet)
+            }
+            301 | 302 => Some(RedirectAction::FollowKeepMethod),
+            303 if method.eq_ignore_ascii_case("HEAD") => Some(RedirectAction::FollowKeepMethod),
+            303 => Some(RedirectAction::FollowChangeToGet),
             307 | 308 => Some(RedirectAction::FollowKeepMethod),
             _ => None,
         }
@@ -496,24 +616,11 @@ impl RedirectHandler {
             return Err("Location header is empty".to_string());
         }
 
-        if location.starts_with("http://") || location.starts_with("https://") {
-            return Ok(location.to_string());
-        }
-
-        if location.starts_with("/") {
-            if let Some(base_end) = current_url[8..].find('/') {
-                Ok(format!("{}{}", &current_url[..8 + base_end], location))
-            } else {
-                Ok(format!("{}{}", current_url, location))
-            }
-        } else {
-            let last_slash = current_url.rfind('/').unwrap_or(current_url.len());
-            if last_slash < 8 {
-                Ok(format!("{}/{}", current_url, location))
-            } else {
-                Ok(format!("{}{}", &current_url[..last_slash + 1], location))
-            }
-        }
+        let base = url::Url::parse(current_url)
+            .map_err(|error| format!("Invalid current URL: {error}"))?;
+        base.join(location)
+            .map(String::from)
+            .map_err(|error| format!("Invalid redirect URL: {error}"))
     }
 
     pub fn sanitize_redirect_url(url: &str) -> Result<String, String> {
@@ -524,6 +631,7 @@ impl RedirectHandler {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectAction {
     FollowKeepMethod,
     FollowChangeToGet,

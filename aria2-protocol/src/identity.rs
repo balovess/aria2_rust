@@ -1,8 +1,9 @@
-//! Product identity values shared by public CLI, RPC, HTTP, and BitTorrent
-//! adapters.
+//! Default identity strings for standalone protocol and core-library users.
 //!
-//! The protocol shapes remain aria2-compatible, but every emitted product
-//! version identifies this independent Rust implementation.
+//! Embedding applications can inject product-specific User-Agent and peer-agent
+//! defaults through `aria2-core` configuration. The protocol shapes remain
+//! aria2-compatible, while these defaults identify this independent Rust
+//! implementation.
 
 /// Product name used in user-visible identity strings.
 pub const PRODUCT_NAME: &str = "aria2-rust";

@@ -5,55 +5,52 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
 use crate::error::{Aria2Error, Result};
-use crate::http::header_processor::{HttpHeaderProcessor, HttpResponseHead};
+use crate::http::header_processor::HttpResponseHead;
 use crate::network::OutboundNetworkPolicy;
 
 use super::config::HttpProxyConfig;
 
-/// Buffer size for reading proxy response headers.
-pub(crate) const READ_BUF_SIZE: usize = 4096;
-
 /// Maximum number of auth retry attempts (prevent infinite loops on bad creds).
 pub(crate) const MAX_AUTH_RETRIES: u32 = 2;
 
-/// Read the proxy's HTTP response head using the streaming [HttpHeaderProcessor].
+/// Read a proxy response head through the protocol parser while leaving any
+/// response body bytes unread on the stream.
 ///
-/// Applies the config's read_timeout to each read operation.
+/// Applies the config's read timeout to each transport read.
 pub(crate) async fn read_proxy_response(
     stream: &mut TcpStream,
     read_timeout: Duration,
 ) -> Result<HttpResponseHead> {
-    let mut processor = HttpHeaderProcessor::new();
-    let mut buf = [0u8; READ_BUF_SIZE];
-
-    loop {
-        let n = tokio::time::timeout(read_timeout, stream.read(&mut buf))
-            .await
-            .map_err(|_| Aria2Error::Network("Timeout reading proxy response".to_string()))?
-            .map_err(|e| Aria2Error::Network(format!("Error reading proxy response: {}", e)))?;
-
-        if n == 0 {
-            return Err(Aria2Error::Network(
-                "Connection closed by proxy before response complete".to_string(),
-            ));
-        }
-
-        let state = processor.feed(&buf[..n]);
-        if state.is_complete() {
-            return processor.get_result();
-        }
-        if state.is_error() {
-            return Err(Aria2Error::Parse(format!(
-                "Error parsing proxy response: {}",
-                state.is_error()
-            )));
-        }
-    }
+    aria2_protocol::http::header_processor::read_response_head(stream, read_timeout)
+        .await
+        .map_err(|error| match error {
+            aria2_protocol::http::header_processor::HttpResponseHeadReadError::Timeout => {
+                Aria2Error::Network("Timeout reading proxy response".to_string())
+            }
+            aria2_protocol::http::header_processor::HttpResponseHeadReadError::Io(error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                Aria2Error::Network(
+                    "Connection closed by proxy before response complete".to_string(),
+                )
+            }
+            aria2_protocol::http::header_processor::HttpResponseHeadReadError::Io(error) => {
+                Aria2Error::Network(format!("Error reading proxy response: {error}"))
+            }
+            aria2_protocol::http::header_processor::HttpResponseHeadReadError::HeaderTooLarge => {
+                Aria2Error::Parse(
+                    "Error parsing proxy response: Too large HTTP header block".into(),
+                )
+            }
+            aria2_protocol::http::header_processor::HttpResponseHeadReadError::InvalidResponse(
+                message,
+            ) => Aria2Error::HttpProtocol(message),
+        })
 }
 
 /// Write all bytes to the stream with a timeout.

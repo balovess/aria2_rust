@@ -1,5 +1,7 @@
 //! Core types for netrc parsing: `NetrcEntry` and `ParseState`.
 
+use std::fmt;
+
 // ---------------------------------------------------------------------------
 // NetrcEntry — a single .netrc entry for a specific machine
 // ---------------------------------------------------------------------------
@@ -9,7 +11,7 @@
 /// Mirrors the C++ `Authenticator` class. Each entry holds credentials
 /// scoped to a machine hostname. The `default` entry uses an empty `machine`
 /// string and matches any host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NetrcEntry {
     /// The machine hostname. Empty for the `default` entry.
     pub machine: String,
@@ -19,6 +21,18 @@ pub struct NetrcEntry {
     pub password: Option<String>,
     /// The account (rarely used).
     pub account: Option<String>,
+}
+
+impl fmt::Debug for NetrcEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetrcEntry")
+            .field("machine", &self.machine)
+            .field("login", &self.login.as_ref().map(|_| "<redacted>"))
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("account", &self.account.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl NetrcEntry {

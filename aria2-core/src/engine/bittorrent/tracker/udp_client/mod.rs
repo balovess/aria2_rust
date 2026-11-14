@@ -74,6 +74,10 @@ impl UdpTrackerClient {
         self.inner.scrape(addr, info_hashes, timeout).await
     }
 
+    pub(crate) fn cancel_pending_requests(&mut self) {
+        self.inner.cancel_pending_requests();
+    }
+
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.inner.local_addr()
     }
