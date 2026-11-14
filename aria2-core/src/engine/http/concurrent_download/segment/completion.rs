@@ -6,7 +6,7 @@ use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http::segment_downloader::{SegmentProgress, SegmentProgressTracker};
 use crate::engine::retry_policy::RetryPolicy;
-use crate::engine::work_scheduler::{WorkLease, WorkScheduler};
+use crate::engine::work_scheduler::{RetryOutcome, WorkLease, WorkScheduler};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -259,10 +259,29 @@ pub(super) async fn handle(
                         ),
                     )));
                 }
-                state
+                let retry_at = Instant::now()
+                    .checked_add(wait)
+                    .unwrap_or_else(Instant::now);
+                let max_capacity_retries = if state.adaptive.is_enabled() {
+                    0
+                } else {
+                    state.max_retries
+                };
+                let outcome = state
                     .work_queue
-                    .retry_without_consuming_attempt(completion.work_lease)
-                    .map_err(|error| work_scheduler_error("retry a rate-limited range", error))?;
+                    .retry_capacity_limited_at(
+                        completion.work_lease,
+                        retry_at,
+                        max_capacity_retries,
+                    )
+                    .map_err(|error| {
+                        work_scheduler_error("schedule a rate-limited range", error)
+                    })?;
+                if matches!(outcome, RetryOutcome::Exhausted(_)) {
+                    state.manager.fail_segment(segment_index);
+                    state.work_queue.cancel();
+                    return Ok(CompletionAction::Abort(error));
+                }
                 *state.consecutive_416_count = 0;
                 return Ok(CompletionAction::Continue);
             }

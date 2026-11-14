@@ -293,6 +293,7 @@ fn request_starts_obey_the_feedback_interval() {
     let mut controller = controller();
     controller.record_capacity_rejection(false, None);
     controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
+    controller.finish_round(false);
     controller.http1.last_request_started = Some(Instant::now());
     assert!(!controller.can_start(0, false));
 

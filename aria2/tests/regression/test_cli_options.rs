@@ -994,6 +994,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-peer-blocklist",
         "bt-snubbed-timeout",
         "bt-tracker-source",
+        "bt-tracker-source-concurrency",
         "bt-tracker-source-timeout",
         "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
@@ -1004,6 +1005,9 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "dht-bootstrap-timeout",
         "dht-cleanup-interval",
         "dht-max-concurrent-lookups",
+        "dht-max-items",
+        "dht-max-peer-info-hashes",
+        "dht-max-peers-per-info-hash",
         "dht-node-contact-interval",
         "dht-persistence-max-age",
         "dht-refresh-check-interval",
@@ -1069,11 +1073,6 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
 
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
-        registered.len(),
-        272,
-        "all-features registry inventory changed"
-    );
-    assert_eq!(
         baseline
             .difference(&registered)
             .copied()
@@ -1088,6 +1087,11 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
             .collect::<BTreeSet<_>>(),
         expected_extensions,
         "Rust-only registry names must remain explicitly enumerated"
+    );
+    assert_eq!(
+        registered.len(),
+        276,
+        "all-features registry inventory changed"
     );
 }
 

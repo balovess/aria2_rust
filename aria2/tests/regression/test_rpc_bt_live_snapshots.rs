@@ -458,7 +458,7 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         .handle_request(&make_request("aria2.evictDhtNodes", serde_json::json!([])))
         .await;
     assert_success(&evict_resp);
-    assert_eq!(evict_resp.result.unwrap(), serde_json::json!(["0", "0"]));
+    assert_eq!(evict_resp.result.unwrap(), serde_json::json!([0, 0]));
 
     dht.shutdown_async().await;
 }

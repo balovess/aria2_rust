@@ -23,6 +23,7 @@ pub(crate) struct WorkItem<T> {
     payload: T,
     /// Maximum total attempts. `0` means unlimited.
     max_attempts: u32,
+    capacity_retries: u32,
 }
 
 impl<T> WorkItem<T> {
@@ -31,6 +32,7 @@ impl<T> WorkItem<T> {
             id,
             payload,
             max_attempts,
+            capacity_retries: 0,
         }
     }
 }
@@ -305,6 +307,39 @@ impl<T> WorkScheduler<T> {
             previous_attempts: lease.attempt.saturating_sub(1),
         });
         Ok(())
+    }
+
+    /// Retry a capacity-rejected item without consuming its ordinary attempt
+    /// budget, while bounding capacity retries independently.
+    pub(crate) fn retry_capacity_limited_at(
+        &mut self,
+        mut lease: WorkLease<T>,
+        ready_at: Instant,
+        max_capacity_retries: u32,
+    ) -> Result<RetryOutcome<T>, WorkScheduleError> {
+        self.remove_active_lease(&lease)?;
+        if max_capacity_retries != 0 && lease.item.capacity_retries >= max_capacity_retries {
+            self.active_ids.remove(&lease.item.id);
+            #[cfg(test)]
+            {
+                self.states.insert(lease.item.id, WorkState::Failed);
+                self.failed_count += 1;
+            }
+            return Ok(RetryOutcome::Exhausted(lease.item.payload));
+        }
+
+        lease.item.capacity_retries = lease.item.capacity_retries.saturating_add(1);
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        #[cfg(test)]
+        self.states.insert(lease.id(), WorkState::Delayed);
+        self.delayed.push(Reverse(DelayedWork {
+            item: lease.item,
+            previous_attempts: lease.attempt.saturating_sub(1),
+            ready_at,
+            sequence,
+        }));
+        Ok(RetryOutcome::Scheduled)
     }
 
     /// Reset retry history when the adapter moves the work to a new source.

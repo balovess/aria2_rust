@@ -199,6 +199,7 @@ async fn test_multi_mirror_pause_persists_durable_inflight_blocks_and_reassigns_
     let mut options = make_options(Some(4), Some(4), &dir.path().to_string_lossy(), output_name);
     options.continue_download = true;
     options.allow_overwrite = true;
+    options.http_adaptive.start_interval_ms = 0;
     let gid = GroupId::new(478);
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         gid,
@@ -229,6 +230,7 @@ async fn test_multi_mirror_pause_persists_durable_inflight_blocks_and_reassigns_
         .send(EngineCommand::Pause { gid })
         .expect("pause multi-mirror download");
     wait_for_group_status(&group, DownloadStatus::Paused).await;
+    let paused_primary_requests = primary.take_request_log();
     let checkpoint = wait_for_in_flight_checkpoint(&control_path).await;
     assert_eq!(checkpoint.piece_length(), Some(1024 * 1024));
     assert!(checkpoint.completed_length() <= file_size as u64);
@@ -297,8 +299,7 @@ async fn test_multi_mirror_pause_persists_durable_inflight_blocks_and_reassigns_
         "checkpoint preserved only {persisted_in_flight_bytes} bytes although pause began after at least 512 KiB of live progress"
     );
 
-    let initial_primary_ranges = primary
-        .take_request_log()
+    let initial_primary_ranges = paused_primary_requests
         .into_iter()
         .filter_map(|entry| {
             entry

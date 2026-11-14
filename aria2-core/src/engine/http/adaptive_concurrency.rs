@@ -38,6 +38,7 @@ struct ProtocolTarget {
     target: usize,
     capacity_rejected: bool,
     accepting_new_work: bool,
+    drain_after_capacity_rejection: bool,
     cooldown_until: Option<Instant>,
     successful_ranges_since_adjustment: usize,
     last_target_adjustment: Instant,
@@ -55,6 +56,7 @@ impl ProtocolTarget {
             target: ceiling.max(1),
             capacity_rejected: false,
             accepting_new_work: true,
+            drain_after_capacity_rejection: false,
             cooldown_until: None,
             successful_ranges_since_adjustment: 0,
             last_target_adjustment: now,
@@ -191,7 +193,10 @@ impl HttpAdaptiveConcurrency {
         let now = Instant::now();
         let range_target = self.range_target(is_http2);
         let protocol = self.protocol_target_mut(is_http2);
-        if !protocol.accepting_new_work || active >= range_target {
+        if !protocol.accepting_new_work
+            || (protocol.drain_after_capacity_rejection && active > 0)
+            || active >= range_target
+        {
             return false;
         }
         if let Some(until) = protocol.cooldown_until {
@@ -306,6 +311,10 @@ impl HttpAdaptiveConcurrency {
             self.note_capacity_feedback(is_http2);
         }
         let protocol = self.protocol_target_mut(is_http2);
+        protocol.drain_after_capacity_rejection = true;
+        if settings.enabled {
+            protocol.accepting_new_work = false;
+        }
         protocol.successful_ranges_since_adjustment = 0;
         protocol.successful_ranges_since_rate_adjustment = 0;
         protocol.last_target_adjustment = now;
@@ -371,6 +380,10 @@ impl HttpAdaptiveConcurrency {
         self.backoff_steps
     }
 
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.settings.enabled
+    }
+
     /// Capacity rejections can be retried without consuming ordinary retry
     /// budget while another Range can still be admitted.
     pub(crate) fn preserve_retry_budget(&self, is_http2: bool) -> bool {
@@ -423,6 +436,7 @@ impl HttpAdaptiveConcurrency {
         };
         protocol.capacity_rejected = false;
         protocol.accepting_new_work = true;
+        protocol.drain_after_capacity_rejection = false;
         AdaptiveUpdate {
             range_target: changed,
             increased,

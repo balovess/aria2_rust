@@ -111,6 +111,23 @@ async fn wait_for_seed(client: &RunningAria2, gid: &str) {
     }
 }
 
+async fn wait_for_incoming_peer_route(log_path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if std::fs::read_to_string(log_path)
+            .is_ok_and(|log| log.contains("[BT] Incoming peer route registered"))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "incoming BitTorrent peer route was not registered; aria2 log tail:\n{}",
+            read_log_tail(log_path)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn next_utp_payload(socket: &mut UtpSocket, conn_id: u16) -> Vec<u8> {
     loop {
         let payloads = socket.poll_recv().expect("poll uTP peer socket");
@@ -349,6 +366,7 @@ async fn cli_rpc_seeder_accepts_inbound_utp_peer_and_uploads_verified_piece() {
     .expect("addTorrent returns a GID")
     .to_owned();
     wait_for_seed(&client, &gid).await;
+    wait_for_incoming_peer_route(&log_path).await;
 
     let peer = UdpSocket::bind("127.0.0.1:0").expect("reserve remote TCP test port");
     let peer_port = peer.local_addr().expect("read peer source port").port();

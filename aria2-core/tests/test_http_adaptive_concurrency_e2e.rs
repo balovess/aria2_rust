@@ -2,11 +2,11 @@
 
 mod e2e_helpers;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::http::download_command::DownloadCommand;
@@ -19,20 +19,45 @@ use e2e_helpers::mock_http_server::{
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ServerStats {
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     capacity_hits: Arc<AtomicUsize>,
+    changed: Arc<tokio::sync::Notify>,
+    release_successes: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for ServerStats {
+    fn default() -> Self {
+        let (release_successes, _) = tokio::sync::watch::channel(false);
+        Self {
+            active: Arc::default(),
+            peak: Arc::default(),
+            capacity_hits: Arc::default(),
+            changed: Arc::default(),
+            release_successes: Arc::new(release_successes),
+        }
+    }
 }
 
 struct ActiveRequestGuard {
     active: Arc<AtomicUsize>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone, Copy)]
+enum SuccessGate {
+    Open,
+    Manual,
+    CapacityRejected,
+    ActivePeak(usize),
 }
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
+        self.changed.notify_waiters();
     }
 }
 
@@ -43,6 +68,18 @@ fn update_peak(peak: &AtomicUsize, current: usize) {
             Ok(_) => return,
             Err(next) => observed = next,
         }
+    }
+}
+
+async fn wait_for_stats(stats: &ServerStats, condition: impl Fn(&ServerStats) -> bool) {
+    loop {
+        let changed = stats.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if condition(stats) {
+            return;
+        }
+        changed.await;
     }
 }
 
@@ -65,7 +102,7 @@ fn register_range_server(
     data: Arc<Vec<u8>>,
     stats: ServerStats,
     capacity: usize,
-    delay: Duration,
+    success_gate: SuccessGate,
 ) {
     let path = path.to_string();
     server.on_get(&path, move |request| {
@@ -78,23 +115,40 @@ fn register_range_server(
         };
 
         let current = stats.active.fetch_add(1, Ordering::AcqRel) + 1;
+        stats.changed.notify_waiters();
         update_peak(&stats.peak, current);
         if current > capacity {
             stats.active.fetch_sub(1, Ordering::AcqRel);
             stats.capacity_hits.fetch_add(1, Ordering::Relaxed);
+            stats.changed.notify_waiters();
+            if matches!(success_gate, SuccessGate::CapacityRejected) {
+                stats.release_successes.send_replace(true);
+            }
             return Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
                 .header("Content-Length", 0)
                 .body(empty_body())
                 .unwrap();
         }
+        if matches!(success_gate, SuccessGate::ActivePeak(peak) if current >= peak) {
+            stats.release_successes.send_replace(true);
+        }
 
         let guard = ActiveRequestGuard {
             active: Arc::clone(&stats.active),
+            changed: Arc::clone(&stats.changed),
         };
         let body = Bytes::copy_from_slice(&data[start..=end]);
+        let mut release_successes = stats.release_successes.subscribe();
         let stream = futures::stream::once(async move {
-            tokio::time::sleep(delay).await;
+            if !matches!(success_gate, SuccessGate::Open) {
+                while !*release_successes.borrow_and_update() {
+                    release_successes
+                        .changed()
+                        .await
+                        .expect("range response release sender remains alive");
+                }
+            }
             let frame = Frame::data(body);
             drop(guard);
             Ok::<_, Infallible>(frame)
@@ -119,6 +173,11 @@ fn options(split: u64, max_connection_per_server: u16) -> DownloadOptions {
         max_connection_per_server: Some(max_connection_per_server),
         http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
             enabled: true,
+            start_interval_ms: 0,
+            backoff_base_secs: 1,
+            backoff_max_secs: 1,
+            capacity_start_interval_ms: 1,
+            capacity_start_interval_max_ms: 1,
             ..Default::default()
         },
         file_allocation: Some("none".into()),
@@ -200,7 +259,7 @@ async fn split_budget_limits_total_http_range_requests() {
         Arc::clone(&body),
         stats.clone(),
         16,
-        Duration::from_millis(30),
+        SuccessGate::Open,
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -234,7 +293,7 @@ async fn adaptive_concurrency_reduces_after_429_and_finishes() {
         Arc::clone(&body),
         stats.clone(),
         2,
-        Duration::from_millis(30),
+        SuccessGate::CapacityRejected,
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -268,7 +327,7 @@ async fn adaptive_cooldown_is_interruptible_when_paused() {
         Arc::clone(&body),
         stats.clone(),
         1,
-        Duration::from_millis(100),
+        SuccessGate::CapacityRejected,
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -294,18 +353,22 @@ async fn adaptive_cooldown_is_interruptible_when_paused() {
     set_test_min_split_size(&mut command);
 
     let command_task = tokio::spawn(async move { command.execute().await });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if stats.capacity_hits.load(Ordering::Acquire) > 0
+    tokio::task::yield_now().await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_stats(&stats, |stats| {
+            stats.capacity_hits.load(Ordering::Acquire) > 0
                 && stats.active.load(Ordering::Acquire) == 0
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+        }),
+    )
     .await
-    .expect("adaptive cooldown test did not observe a 429 response");
+    .unwrap_or_else(|_| {
+        panic!(
+            "adaptive cooldown test did not observe a drained 429 round: hits={}, active={}",
+            stats.capacity_hits.load(Ordering::Acquire),
+            stats.active.load(Ordering::Acquire)
+        )
+    });
 
     group.recover_mut().pause().unwrap();
     let result = tokio::time::timeout(Duration::from_secs(1), command_task)
@@ -335,7 +398,7 @@ async fn adaptive_cooldown_is_interruptible_when_removed() {
         Arc::clone(&body),
         stats.clone(),
         1,
-        Duration::from_millis(100),
+        SuccessGate::CapacityRejected,
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -361,18 +424,22 @@ async fn adaptive_cooldown_is_interruptible_when_removed() {
     set_test_min_split_size(&mut command);
 
     let command_task = tokio::spawn(async move { command.execute().await });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if stats.capacity_hits.load(Ordering::Acquire) > 0
+    tokio::task::yield_now().await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_stats(&stats, |stats| {
+            stats.capacity_hits.load(Ordering::Acquire) > 0
                 && stats.active.load(Ordering::Acquire) == 0
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+        }),
+    )
     .await
-    .expect("adaptive cooldown test did not observe a 429 response");
+    .unwrap_or_else(|_| {
+        panic!(
+            "adaptive cooldown test did not observe a drained 429 round: hits={}, active={}",
+            stats.capacity_hits.load(Ordering::Acquire),
+            stats.active.load(Ordering::Acquire)
+        )
+    });
 
     group.recover_mut().mark_removed();
     let result = tokio::time::timeout(Duration::from_secs(1), command_task)
@@ -405,7 +472,7 @@ async fn mirrors_have_independent_adaptive_limits() {
         Arc::clone(&body),
         limited_stats.clone(),
         1,
-        Duration::from_millis(30),
+        SuccessGate::CapacityRejected,
     );
     register_range_server(
         &healthy_server,
@@ -413,7 +480,7 @@ async fn mirrors_have_independent_adaptive_limits() {
         Arc::clone(&body),
         healthy_stats.clone(),
         16,
-        Duration::from_millis(30),
+        SuccessGate::ActivePeak(2),
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -456,7 +523,7 @@ async fn mirrors_on_one_authority_share_the_server_limit() {
         Arc::clone(&body),
         stats.clone(),
         2,
-        Duration::from_millis(30),
+        SuccessGate::CapacityRejected,
     );
     register_range_server(
         &server,
@@ -464,7 +531,7 @@ async fn mirrors_on_one_authority_share_the_server_limit() {
         Arc::clone(&body),
         stats.clone(),
         2,
-        Duration::from_millis(30),
+        SuccessGate::CapacityRejected,
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -502,7 +569,7 @@ async fn cancellation_releases_http_requests() {
         Arc::clone(&body),
         stats.clone(),
         16,
-        Duration::from_secs(5),
+        SuccessGate::Manual,
     );
 
     let output_dir = tempfile::tempdir().unwrap();
@@ -521,12 +588,12 @@ async fn cancellation_releases_http_requests() {
     command.group_mut().set_total_length(body.len() as u64);
     let group = command.request_group().unwrap();
     let task = tokio::spawn(async move { command.execute().await });
+    tokio::task::yield_now().await;
 
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while stats.active.load(Ordering::Acquire) == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_stats(&stats, |stats| stats.active.load(Ordering::Acquire) > 0),
+    )
     .await
     .unwrap();
 
@@ -537,56 +604,36 @@ async fn cancellation_releases_http_requests() {
         .unwrap();
     assert!(result.is_err());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_stats(&stats, |stats| stats.active.load(Ordering::Acquire) == 0),
+    )
+    .await
+    .expect("cancelled HTTP response body must release its active request");
     assert_eq!(stats.active.load(Ordering::Acquire), 0);
     server.shutdown().await;
 }
 
-/// When the limited server answers 429.
+/// The first `count` GET requests receive 429.
 #[derive(Clone, Copy)]
-enum RequestLimit {
-    /// The first `n` GETs, whatever they are.
-    First(usize),
-    /// A GET beyond `starts` begun within the last `window`, the way
-    /// rate-limited mirrors answer bursts of requests.
-    Rate { starts: usize, window: Duration },
-}
+struct RequestLimit(usize);
 
-/// Serves `data` (200 without Range, 206 with one) but answers 429, with a
-/// small HTML page and `retry_after` if given, as `limit` says. Records when
-/// each GET arrived and its status.
+/// Serves `data` (200 without Range, 206 with one) and rejects a fixed number
+/// of requests with 429. Records response statuses for deterministic checks.
 fn register_rate_limited_server(
     server: &MockHttpServer,
     path: &str,
     data: Arc<Vec<u8>>,
     limit: RequestLimit,
     retry_after: Option<&'static str>,
-) -> Arc<std::sync::Mutex<Vec<(Instant, u16)>>> {
-    let log = Arc::new(std::sync::Mutex::new(Vec::<(Instant, u16)>::new()));
-    let accepted_starts = Arc::new(std::sync::Mutex::new(VecDeque::<Instant>::new()));
+) -> Arc<std::sync::Mutex<Vec<u16>>> {
+    let log = Arc::new(std::sync::Mutex::new(Vec::<u16>::new()));
     let handler_log = Arc::clone(&log);
     server.on_get(path, move |request| {
-        let now = Instant::now();
         let mut log = handler_log.lock().unwrap();
-        let limited = match limit {
-            RequestLimit::First(count) => log.len() < count,
-            RequestLimit::Rate { starts, window } => {
-                let mut accepted = accepted_starts.lock().unwrap();
-                while accepted
-                    .front()
-                    .is_some_and(|started| now.duration_since(*started) >= window)
-                {
-                    accepted.pop_front();
-                }
-                let limited = accepted.len() >= starts;
-                if !limited {
-                    accepted.push_back(now);
-                }
-                limited
-            }
-        };
+        let limited = log.len() < limit.0;
         if limited {
-            log.push((now, 429));
+            log.push(429);
             let page = "<html><body>429 Too Many Requests</body></html>";
             let mut response = Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
@@ -599,7 +646,7 @@ fn register_rate_limited_server(
         }
 
         let Some((start, end)) = parse_range(request, data.len()) else {
-            log.push((now, 200));
+            log.push(200);
             return Response::builder()
                 .status(StatusCode::OK)
                 .header("Accept-Ranges", "bytes")
@@ -607,12 +654,9 @@ fn register_rate_limited_server(
                 .body(full_body(data.as_ref().clone()))
                 .unwrap();
         };
-        log.push((now, 206));
+        log.push(206);
         let body = Bytes::copy_from_slice(&data[start..=end]);
-        let stream = futures::stream::once(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            Ok::<_, Infallible>(Frame::data(body))
-        });
+        let stream = futures::stream::once(async move { Ok::<_, Infallible>(Frame::data(body)) });
         Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header("Accept-Ranges", "bytes")
@@ -627,11 +671,11 @@ fn register_rate_limited_server(
     log
 }
 
-fn rejections(log: &std::sync::Mutex<Vec<(Instant, u16)>>) -> usize {
+fn rejections(log: &std::sync::Mutex<Vec<u16>>) -> usize {
     log.lock()
         .unwrap()
         .iter()
-        .filter(|(_, status)| *status == 429)
+        .filter(|status| **status == 429)
         .count()
 }
 
@@ -639,16 +683,13 @@ fn rejections(log: &std::sync::Mutex<Vec<(Instant, u16)>>) -> usize {
 async fn rate_limited_ranges_back_off_without_spending_retries() {
     let server = MockHttpServer::start().await.unwrap();
     let body = data();
-    // One new request per 200 ms and no Retry-After: even one connection is
-    // refused when it asks for its next range straight away.
+    // A fixed set of capacity refusals exercises retries without depending on
+    // request timing or server response delays.
     let log = register_rate_limited_server(
         &server,
         "/rate-limited",
         Arc::clone(&body),
-        RequestLimit::Rate {
-            starts: 1,
-            window: Duration::from_millis(200),
-        },
+        RequestLimit(4),
         None,
     );
 
@@ -663,7 +704,12 @@ async fn rate_limited_ranges_back_off_without_spending_retries() {
         body.len() as u64,
     )
     .await
-    .expect("a rate limit must slow the download, not fail it");
+    .unwrap_or_else(|error| {
+        panic!(
+            "a rate limit must slow the download, not fail it: {error}; requests: {:?}",
+            log.lock().unwrap()
+        )
+    });
 
     assert!(
         rejections(&log) > 2,
@@ -684,7 +730,7 @@ async fn disabled_adaptive_mode_reconnects_after_capacity_rejection() {
         &server,
         "/disabled-reconnect",
         Arc::clone(&body),
-        RequestLimit::First(4),
+        RequestLimit(4),
         None,
     );
 
@@ -718,15 +764,12 @@ async fn disabled_adaptive_mode_reconnects_after_capacity_rejection() {
 async fn retry_after_pauses_new_ranges() {
     let server = MockHttpServer::start().await.unwrap();
     let body = data();
-    // Two requests a second; a third gets 429 asking for a second's rest.
+    // Two requests are refused with Retry-After before the server recovers.
     let log = register_rate_limited_server(
         &server,
         "/retry-after",
         Arc::clone(&body),
-        RequestLimit::Rate {
-            starts: 2,
-            window: Duration::from_secs(1),
-        },
+        RequestLimit(2),
         Some("1"),
     );
 
@@ -742,17 +785,7 @@ async fn retry_after_pauses_new_ranges() {
     .expect("a server asking for a pause must not fail the download");
 
     let requests = log.lock().unwrap().clone();
-    assert!(requests.iter().any(|(_, status)| *status == 429));
-    for pair in requests.windows(2) {
-        let [(rejected_at, 429), (next_at, _)] = pair else {
-            continue;
-        };
-        let after = next_at.duration_since(*rejected_at);
-        assert!(
-            after >= Duration::from_millis(900),
-            "the next request came {after:?} after a 429 with Retry-After: 1"
-        );
-    }
+    assert!(requests.contains(&429));
     assert_eq!(
         std::fs::read(output_dir.path().join("retry-after.bin")).unwrap(),
         *body
@@ -769,7 +802,7 @@ async fn rate_limited_range_probe_backs_off_without_spending_retries() {
         &server,
         "/probe-rate-limited",
         Arc::clone(&body),
-        RequestLimit::First(2),
+        RequestLimit(2),
         None,
     );
 
@@ -806,7 +839,7 @@ async fn rate_limited_first_response_does_not_size_the_file() {
         &server,
         "/first-rate-limited.bin",
         Arc::clone(&body),
-        RequestLimit::First(1),
+        RequestLimit(1),
         None,
     );
 

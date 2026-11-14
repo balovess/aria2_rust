@@ -25,7 +25,7 @@ fn tmp_dir() -> tempfile::TempDir {
 
 #[test]
 fn test_magnet_parse_hex_hash() {
-    let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu+22.04&tr=udp://tracker.example.com:1337/announce";
+    let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu%2022.04&tr=udp://tracker.example.com:1337/announce";
     let ml = MagnetLink::parse(magnet).unwrap();
     assert_eq!(
         ml.info_hash_hex(),

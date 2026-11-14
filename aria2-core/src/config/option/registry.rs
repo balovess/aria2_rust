@@ -592,14 +592,23 @@ mod tests {
                 "option '{}' must have the owner of its real execution seam",
                 name
             );
+            let registry = OptionRegistry::new();
+            #[cfg(feature = "bittorrent")]
             assert_eq!(
-                OptionRegistry::new()
-                    .get(name)
-                    .map(|definition| definition.owner()),
+                registry.get(name).map(|definition| definition.owner()),
                 Some(expected_owner),
                 "registered option '{}' must preserve its execution owner",
                 name
             );
+            #[cfg(not(feature = "bittorrent"))]
+            if let Some(definition) = registry.get(name) {
+                assert_eq!(
+                    Some(definition.owner()),
+                    Some(expected_owner),
+                    "registered option '{}' must preserve its execution owner",
+                    name
+                );
+            }
         }
     }
 

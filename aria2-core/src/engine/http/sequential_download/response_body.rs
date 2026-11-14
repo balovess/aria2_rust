@@ -241,7 +241,23 @@ impl SequentialDownloader {
                     }
                 }
             };
-            let Some(chunk) = next_chunk else { break };
+            let Some(chunk) = next_chunk else {
+                if let Err(error) = self.check_cancelled() {
+                    finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
+                    return Err(error);
+                }
+                if completed_bytes < actual_total {
+                    finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: format!(
+                                "HTTP response ended after {completed_bytes} of {actual_total} bytes"
+                            ),
+                        },
+                    ));
+                }
+                break;
+            };
 
             // Check whether the task was removed between chunks. This is the
             // primary cancellation signal: `aria2.remove` /

@@ -192,13 +192,18 @@ async fn test_e2e_ftps_explicit_control_and_data_channels_are_tls_protected() {
 
         command.clear();
         control.read_line(&mut command).await.unwrap();
-        assert_eq!(command.trim_end(), "EPSV");
+        assert_eq!(command.trim_end(), "PASV");
         let data_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let data_port = data_listener.local_addr().unwrap().port();
         control
             .get_mut()
             .write_all(
-                format!("229 Entering Extended Passive Mode (|||{data_port}|)\r\n").as_bytes(),
+                format!(
+                    "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
+                    data_port / 256,
+                    data_port % 256
+                )
+                .as_bytes(),
             )
             .await
             .unwrap();

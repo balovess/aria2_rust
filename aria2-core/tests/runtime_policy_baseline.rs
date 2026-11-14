@@ -75,6 +75,12 @@ const RUST_DHT_POLICY_EXTENSIONS: &[&str] = &[
     "dht-persistence-max-age",
 ];
 
+const RUST_DHT_GLOBAL_POLICY_EXTENSIONS: &[&str] = &[
+    "dht-max-items",
+    "dht-max-peer-info-hashes",
+    "dht-max-peers-per-info-hash",
+];
+
 fn compatibility_policy_names(policy: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut selected = false;
@@ -151,6 +157,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         "bt-incoming-peer-handshake-timeout",
         "bt-tracker-source",
         "bt-tracker-source-timeout",
+        "bt-tracker-source-concurrency",
         "bt-tracker-update-interval",
         "bt-tracker-stopped-timeout",
         "bt-utp-connect-timeout",
@@ -159,7 +166,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         "bt-utp-max-connections",
         "enable-public-trackers",
     ];
-    global_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_DHT_GLOBAL_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
@@ -173,7 +180,6 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     );
     let mut reserved_extensions = vec!["enable-public-trackers"];
     reserved_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
-    reserved_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);

@@ -763,7 +763,7 @@ async fn rpc_change_uri_updates_file_uris_while_bt_piece_session_is_active() {
         changed.get("error").is_none(),
         "changeUri failed: {changed}"
     );
-    assert_eq!(changed["result"], json!(["1", "1"]));
+    assert_eq!(changed["result"], json!([1, 1]));
 
     let files = rpc(&client, 3, "aria2.getFiles", json!([gid]));
     let uris = files[0]["uris"].as_array().expect("file URI list");

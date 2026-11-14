@@ -280,7 +280,11 @@ impl DownloadCommand {
         // ranges still need fetching.
         let was_paused = self.group.recover().is_paused_flag();
 
-        if resume_state.is_complete && !was_paused && !self.check_integrity {
+        if resume_state.is_complete
+            && !was_paused
+            && !self.check_integrity
+            && !options.allow_overwrite
+        {
             info!(
                 "File already exists completely, skipping download: {} ({} bytes)",
                 self.output_path.display(),
@@ -414,6 +418,58 @@ impl DownloadCommand {
                 }
             }
 
+            let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+            let min_split_size = self.group.recover().effective_min_split_size();
+            let split = crate::engine::http::concurrent_download::effective_segment_count(
+                total_length,
+                requested_split,
+                min_split_size,
+            );
+
+            // File allocation can make a new output file look complete even
+            // though no response bytes have been written. Persist an empty
+            // sequential checkpoint before allocation so a pause during the
+            // first request cannot later mistake the preallocated file for a
+            // completed download.
+            if total_length > 0
+                && !resume_state.should_resume
+                && !self.should_use_concurrent(total_length, supports_range, split)
+            {
+                let control_path = crate::filesystem::control_file::ControlFile::
+                    control_path_for(&self.output_path);
+                if let Err(error) = crate::filesystem::durability::remove_file(&control_path).await
+                {
+                    warn!(
+                        path = %control_path.display(),
+                        %error,
+                        "Failed to remove stale HTTP control file before allocation"
+                    );
+                }
+                match crate::filesystem::control_file::ControlFile::open_or_create(
+                    &control_path,
+                    total_length,
+                    1,
+                )
+                .await
+                {
+                    Ok(mut control_file) => {
+                        control_file.record_completed_prefix(0);
+                        if let Err(error) = control_file.save().await {
+                            warn!(
+                                path = %control_path.display(),
+                                %error,
+                                "Failed to save initial HTTP control file before allocation"
+                            );
+                        }
+                    }
+                    Err(error) => warn!(
+                        path = %control_path.display(),
+                        %error,
+                        "Failed to create initial HTTP control file before allocation"
+                    ),
+                }
+            }
+
             if total_length > 0 {
                 // Queue the allocation through the shared FileAllocationMan
                 // (mirrors C++ FileAllocationMan + FileAllocationCommand):
@@ -435,15 +491,6 @@ impl DownloadCommand {
                     .await?;
                 }
             }
-
-            let options = self.group.recover().options_arc();
-            let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
-            let min_split_size = self.group.recover().effective_min_split_size();
-            let split = crate::engine::http::concurrent_download::effective_segment_count(
-                total_length,
-                requested_split,
-                min_split_size,
-            );
 
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();

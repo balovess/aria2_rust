@@ -361,12 +361,14 @@ async fn concurrent_tracker_failures_remain_attached_to_their_urls() {
             .await
             .expect("complete rejecting tracker handshake");
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
+        let rejection = serde_json::json!({
+            "action": "announce",
+            "info_hash": "\0".repeat(20),
+            "failure reason": "not authorized",
+        })
+        .to_string();
         websocket
-            .send(Message::Text(
-                r#"{"action":"announce","failure reason":"not authorized"}"#
-                    .to_string()
-                    .into(),
-            ))
+            .send(Message::Text(rejection.into()))
             .await
             .expect("send tracker rejection");
     });
