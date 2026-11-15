@@ -16,8 +16,8 @@ use tracing::debug;
 
 use super::bucket::Bucket;
 use super::bucket_tree::{
-    BucketTreeNode, enumerate_buckets, find_bucket_for, find_bucket_for_mut, find_closest_k_nodes,
-    find_tree_node_for_mut,
+    BucketTreeNode, enumerate_buckets, find_bucket_for, find_bucket_for_mut,
+    find_closest_good_k_nodes, find_closest_k_nodes, find_tree_node_for_mut,
 };
 use super::node::DhtNode;
 
@@ -184,6 +184,14 @@ impl RoutingTable {
     /// Uses tree-based traversal to efficiently locate the closest nodes.
     pub fn find_closest(&self, target: &[u8; 20], count: usize) -> Vec<DhtNode> {
         let mut nodes = find_closest_k_nodes(&self.root, target);
+        nodes.truncate(count);
+        nodes
+    }
+
+    /// Find the closest recently verified good nodes suitable for sharing in
+    /// responses to other DHT nodes.
+    pub fn find_closest_good(&self, target: &[u8; 20], count: usize) -> Vec<DhtNode> {
+        let mut nodes = find_closest_good_k_nodes(&self.root, target);
         nodes.truncate(count);
         nodes
     }

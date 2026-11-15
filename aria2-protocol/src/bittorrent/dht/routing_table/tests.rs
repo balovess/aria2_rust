@@ -26,6 +26,20 @@ fn test_insert_and_find() {
 }
 
 #[test]
+fn closest_good_nodes_excludes_unverified_lookup_candidates() {
+    let mut table = RoutingTable::new([0; 20]);
+    let verified_id = [0x10; 20];
+    let discovered_id = [0x11; 20];
+    table.insert(DhtNode::new(verified_id, make_addr(6881)));
+    table.insert(DhtNode::unverified(discovered_id, make_addr(6882)));
+
+    assert_eq!(table.find_closest(&[0; 20], 8).len(), 2);
+    let advertised = table.find_closest_good(&[0; 20], 8);
+    assert_eq!(advertised.len(), 1);
+    assert_eq!(advertised[0].id(), &verified_id);
+}
+
+#[test]
 fn bucket_lookup_returns_a_covering_leaf_for_any_id_range() {
     let mut table = RoutingTable::new([0u8; 20]);
     for i in 1..=super::super::bucket::K as u8 {
@@ -214,6 +228,28 @@ fn full_non_local_bucket_caches_only_verified_replacements() {
             .any(|node| node.id() == &verified_id),
         "verified candidates must enter the replacement cache"
     );
+}
+
+#[test]
+fn repeated_routing_table_insert_updates_one_cached_candidate() {
+    let mut table = RoutingTable::new([0xFF; 20]);
+    for i in 1..=super::super::bucket::K as u8 {
+        table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+    }
+
+    let candidate_id = [0x40; 20];
+    table.insert(DhtNode::new(candidate_id, make_addr(6990)));
+    table.insert(DhtNode::new(candidate_id, make_addr(6991)));
+
+    let candidates = table.get_bucket_for(&candidate_id).cached_nodes();
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.id() == &candidate_id)
+            .count(),
+        1
+    );
+    assert_eq!(candidates[0].addr().port(), 6991);
 }
 
 #[test]

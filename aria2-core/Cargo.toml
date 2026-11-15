@@ -22,7 +22,12 @@ crate-type = ["rlib", "cdylib"]
 # `tokio-uring` only builds on Linux. This is expected and documented.
 default = []
 io_uring = ["dep:tokio-uring"]
-bittorrent = ["aria2-protocol/bittorrent", "dep:rc4"]
+bittorrent = [
+    "aria2-protocol/bittorrent",
+    "dep:rc4",
+    "dep:tokio-tungstenite",
+    "dep:webpki-roots",
+]
 metalink = ["aria2-protocol/metalink"]
 sftp = ["aria2-protocol/sftp"]
 
@@ -76,6 +81,8 @@ rustls = { workspace = true, features = ["ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 # PEM certificate parser for loading custom CA files (--ca-certificate option).
 rustls-pemfile = { workspace = true }
+webpki-roots = { version = "1.0", optional = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"], optional = true }
 # Pure-Rust PKCS#12 parsing for aria2-compatible single-file client identities.
 # The transport still presents the result through rustls.
 p12_q3 = { workspace = true }
@@ -105,7 +112,6 @@ tokio-uring = { version = "0.5", optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
-tokio-tungstenite.workspace = true
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
 # for serving test HTTP responses. reqwest 0.13 already depends on hyper 1.x
 # as a transitive dep, so no additional version conflicts are introduced.

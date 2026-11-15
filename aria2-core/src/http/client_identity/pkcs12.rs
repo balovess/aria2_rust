@@ -1,6 +1,16 @@
 use crate::error::{Aria2Error, Result};
 
 pub(super) fn load_empty_password_identity(certificate: &str) -> Result<reqwest::Identity> {
+    let pem = load_empty_password_identity_pem(certificate)?;
+    reqwest::Identity::from_pem(&pem).map_err(|error| {
+        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+            "Invalid empty-password PKCS#12 client identity: {}",
+            error
+        )))
+    })
+}
+
+pub(super) fn load_empty_password_identity_pem(certificate: &str) -> Result<Vec<u8>> {
     let archive = std::fs::read(certificate).map_err(|error| {
         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
             "Failed to read client certificate '{}': {}",
@@ -93,12 +103,7 @@ pub(super) fn load_empty_password_identity(certificate: &str) -> Result<reqwest:
         identity.extend_from_slice(&pem_block("CERTIFICATE", &certificate));
     }
     identity.extend_from_slice(&pem_block("PRIVATE KEY", &key));
-    reqwest::Identity::from_pem(&identity).map_err(|error| {
-        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-            "Invalid empty-password PKCS#12 client identity: {}",
-            error
-        )))
-    })
+    Ok(identity)
 }
 
 pub(super) fn pkcs12_oid(arcs: &[u64]) -> yasna::models::ObjectIdentifier {

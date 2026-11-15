@@ -66,11 +66,25 @@ impl<'a> SftpTransfer<'a> {
 
         // Determine starting offset (resume support)
         let start_offset = if options.resume_offset > 0 {
-            options.resume_offset.min(total_size)
+            if options.resume_offset > total_size {
+                return Err(TransferError::local(
+                    "validate resume offset",
+                    local_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "resume offset {} exceeds local file size {total_size}",
+                            options.resume_offset
+                        ),
+                    ),
+                ));
+            }
+            options.resume_offset
         } else if options.resume_offset == 0 {
             // Check if remote file already exists (for auto-resume)
             match self.ops.lstat(remote_path).await {
-                Ok(attr) if attr.is_regular_file => attr.size.min(total_size),
+                Ok(attr) if attr.is_regular_file && attr.size <= total_size => attr.size,
+                Ok(attr) if attr.is_regular_file => 0,
                 Ok(_) | Err(FileOpError::NotFound { .. }) => 0,
                 Err(error) => {
                     return Err(TransferError::remote(
@@ -218,8 +232,12 @@ impl<'a> SftpTransfer<'a> {
 
         // Finalize
         // Note: SFTP v3 does not have a native fsync operation (fsync@openssh.com is an extension)
-        if let Err(e) = remote_file.close().await {
-            warn!("[SFTP] Error closing remote file: {}", e);
+        if let Err(error) = remote_file.close().await {
+            return Err(TransferError::remote(
+                "close after upload",
+                remote_path,
+                error,
+            ));
         }
         drop(local_file);
 

@@ -133,13 +133,10 @@ impl SftpDownloadCommand {
         }
 
         info!(
-            "[SFTP-CMD] Created download command: {} -> {} ({}@{}:{}/{})",
-            uri,
-            path.display(),
-            username,
+            "[SFTP-CMD] Created download command for {}:{} -> {}",
             parsed.host,
             parsed.port,
-            parsed.remote_path
+            path.display(),
         );
 
         Ok(Self {

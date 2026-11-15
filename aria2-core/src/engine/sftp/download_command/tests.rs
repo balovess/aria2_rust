@@ -120,8 +120,9 @@ fn test_build_ssh_options_with_password() {
 }
 
 #[test]
-fn sftp_timeout_options_reach_the_protocol_connection() {
+fn sftp_connection_options_reach_the_protocol_connection() {
     let options = DownloadOptions {
+        ssh_host_key_md: Some("sha-1=expected-fingerprint".to_string()),
         sftp_connect_timeout: Some(41),
         sftp_read_timeout: Some(73),
         sftp_compression: true,
@@ -142,6 +143,14 @@ fn sftp_timeout_options_reach_the_protocol_connection() {
     .expect("SFTP command should accept configured timeouts");
 
     let ssh_options = cmd.build_ssh_options();
+    assert_eq!(
+        ssh_options.host_key_fingerprint.as_deref(),
+        Some("sha-1=expected-fingerprint")
+    );
+    assert_eq!(
+        ssh_options.host_key_mode,
+        aria2_protocol::sftp::connection::HostKeyCheckingMode::Strict
+    );
     assert_eq!(ssh_options.connect_timeout, Duration::from_secs(41));
     assert_eq!(ssh_options.read_timeout, Duration::from_secs(73));
     assert!(ssh_options.compression);

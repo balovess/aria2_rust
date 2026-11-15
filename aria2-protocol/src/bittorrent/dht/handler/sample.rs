@@ -34,7 +34,7 @@ impl DhtQueryHandler {
             b"samples".to_vec(),
             BencodeValue::Bytes(info_hashes.into_iter().flatten().collect()),
         );
-        let closest = routing_table.find_closest(&target, K);
+        let closest = routing_table.find_closest_good(&target, K);
         let nodes = Self::encode_compact_nodes(&closest);
         let nodes6 = Self::encode_compact_nodes6(&closest);
         result.insert(b"nodes".to_vec(), BencodeValue::Bytes(nodes));

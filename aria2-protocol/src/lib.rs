@@ -33,7 +33,9 @@
 pub mod ftp;
 pub mod http;
 pub mod identity;
+pub mod proxy;
 pub mod socks;
+pub mod uri;
 
 mod crypto;
 

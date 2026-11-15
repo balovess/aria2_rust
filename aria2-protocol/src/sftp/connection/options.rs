@@ -26,7 +26,7 @@ impl std::fmt::Display for HostKeyCheckingMode {
 }
 
 /// Configuration options for establishing an SSH connection
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SshOptions {
     /// Remote hostname or IP address
     pub host: String,
@@ -56,6 +56,30 @@ pub struct SshOptions {
     pub keepalive_interval: Option<Duration>,
     /// Preferred ciphers (empty = server default)
     pub preferred_ciphers: Vec<String>,
+}
+
+impl std::fmt::Debug for SshOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let password = self.password.as_ref().map(|_| "[REDACTED]");
+        let username = (!self.username.is_empty()).then_some("[REDACTED]");
+        let private_key_passphrase = self.private_key_passphrase.as_ref().map(|_| "[REDACTED]");
+        f.debug_struct("SshOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &username)
+            .field("password", &password)
+            .field("private_key_path", &self.private_key_path)
+            .field("private_key_passphrase", &private_key_passphrase)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("read_timeout", &self.read_timeout)
+            .field("host_key_mode", &self.host_key_mode)
+            .field("host_key_fingerprint", &self.host_key_fingerprint)
+            .field("known_hosts_path", &self.known_hosts_path)
+            .field("compression", &self.compression)
+            .field("keepalive_interval", &self.keepalive_interval)
+            .field("preferred_ciphers", &self.preferred_ciphers)
+            .finish()
+    }
 }
 
 impl Default for SshOptions {

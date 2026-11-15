@@ -14,13 +14,15 @@ use tokio::net::TcpStream;
 use tracing::debug;
 
 use crate::engine::bittorrent::tracker::communication::AnnounceEvent;
+use crate::http::client_identity::ClientTlsConfig;
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::http::{HttpConnectProxyTunnel, HttpProxyConfig, ProxyType};
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 use aria2_protocol::bittorrent::tracker::websocket::{
-    WebSocketAnnounceError, WebSocketAnnounceRequest, announce_over_stream, parse_tracker_url,
+    WebSocketAnnounceError, WebSocketAnnounceRequest, announce_over_stream_with_connector,
+    parse_tracker_url,
 };
 
 /// Announce a magnet lookup to a WebSocket tracker.
@@ -38,6 +40,8 @@ pub(crate) struct AnnounceRequest<'a> {
     pub(crate) numwant: u32,
     pub(crate) port: u16,
     pub(crate) event: AnnounceEvent,
+    pub(crate) request_timeout: Duration,
+    pub(crate) connect_timeout: Duration,
     pub(crate) options: &'a DownloadOptions,
 }
 
@@ -88,17 +92,24 @@ pub(crate) async fn announce_with_policy(
             "WebSocket tracker URL has no port",
         )
     })?;
-    let timeout = Duration::from_secs(
-        announce
-            .options
-            .bt_tracker_timeout
-            .max(announce.options.bt_tracker_connect_timeout)
-            .max(1),
-    );
+    let connect_timeout = announce.connect_timeout.max(Duration::from_secs(1));
+    let request_timeout = announce.request_timeout.max(Duration::from_secs(1));
+    let connector = if url.scheme() == "wss" {
+        Some(
+            ClientTlsConfig::from_download_options(announce.options)
+                .websocket_connector()
+                .map_err(|error| {
+                    AnnounceError::new(TrackerFailureKind::Network, error.to_string())
+                })?,
+        )
+    } else {
+        None
+    };
 
-    let stream = connect_socket(&url, host, port, announce.options, timeout, policy).await?;
+    let stream =
+        connect_socket(&url, host, port, announce.options, connect_timeout, policy).await?;
     let event = announce.event.as_event_string();
-    let response = announce_over_stream(
+    let response = announce_over_stream_with_connector(
         stream,
         url.as_str(),
         &WebSocketAnnounceRequest {
@@ -111,7 +122,8 @@ pub(crate) async fn announce_with_policy(
             port: announce.port,
             event: Some(event),
         },
-        timeout,
+        request_timeout,
+        connector,
     )
     .await
     .map_err(classify_websocket_announce_error)?;
@@ -303,11 +315,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn announces_to_a_websocket_tracker() {
+    async fn no_proxy_routes_websocket_tracker_directly() {
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let (proxy_connected_sender, mut proxy_connected_receiver) =
+            tokio::sync::oneshot::channel();
+        let proxy_task = tokio::spawn(async move {
+            let _ = proxy_listener.accept().await;
+            let _ = proxy_connected_sender.send(());
+        });
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -353,6 +373,12 @@ mod tests {
                 .unwrap();
         });
 
+        let options = DownloadOptions {
+            http_proxy: Some(format!("http://{proxy_address}")),
+            no_proxy: Some("127.0.0.1".to_string()),
+            ca_certificate: Some("missing-ca-is-unused-for-ws.pem".to_string()),
+            ..DownloadOptions::default()
+        };
         let peers = announce_with_policy(
             &format!("ws://{address}/announce"),
             AnnounceRequest {
@@ -364,13 +390,21 @@ mod tests {
                 numwant: 50,
                 port: 0,
                 event: AnnounceEvent::Started,
-                options: &DownloadOptions::default(),
+                request_timeout: Duration::from_secs(5),
+                connect_timeout: Duration::from_secs(5),
+                options: &options,
             },
             &OutboundNetworkPolicy::direct(),
         )
         .await
         .unwrap();
         server.await.unwrap();
+        assert!(matches!(
+            proxy_connected_receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        proxy_task.abort();
+        let _ = proxy_task.await;
         assert_eq!(peers.peers, vec!["192.0.2.10:6881".parse().unwrap()]);
     }
 }

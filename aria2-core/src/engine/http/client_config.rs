@@ -12,9 +12,10 @@ use tracing::warn;
 
 use crate::constants;
 use crate::error::{Aria2Error, Result};
-use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
+use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::OutboundNetworkPolicy;
-use crate::request::request_group::DownloadOptions;
+use crate::request::request_group::{DownloadOptions, HttpProxyOptions};
+use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 
 /// Resolved endpoints used to pin direct and proxied HTTP clients to the
 /// already-selected DNS answers.
@@ -165,41 +166,71 @@ pub(super) fn build_download_clients(
 /// first outbound socket. The command factory uses this to resolve proxy DNS
 /// before the synchronous reqwest client is built.
 pub(crate) fn http_proxy_origin(uri: &str, options: &DownloadOptions) -> Option<(String, u16)> {
-    let parsed_uri = url::Url::parse(uri).ok()?;
-    let hostname = parsed_uri.host_str()?;
+    options.http_proxy_options().proxy_for_uri(uri)
+}
 
-    if let Some(no_proxy) = options.no_proxy.as_deref() {
-        let matcher = NoProxyMatcher::from_env_value(no_proxy);
-        if matcher.should_bypass_hostname(hostname) {
-            return None;
+/// Apply the task's HTTP proxy routes to a reqwest client.
+///
+/// Shared by ordinary HTTP downloads and BitTorrent WebSeeds so scheme
+/// precedence, credentials, bypass rules, and invalid-proxy handling agree.
+pub(crate) fn apply_proxy_options(
+    mut builder: reqwest::ClientBuilder,
+    options: &HttpProxyOptions,
+) -> reqwest::ClientBuilder {
+    let no_proxy = options.no_proxy.as_deref();
+    if let Some(proxy) = options
+        .http_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = add_reqwest_proxy(
+            builder,
+            ProxyTarget::Http,
+            proxy,
+            options.credentials_for_scheme("http"),
+            no_proxy,
+        );
+    }
+    if let Some(proxy) = options
+        .https_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = add_reqwest_proxy(
+            builder,
+            ProxyTarget::Https,
+            proxy,
+            options.credentials_for_scheme("https"),
+            no_proxy,
+        );
+    }
+    if let Some(proxy) = options
+        .all_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        match ProxyUrl::parse(proxy) {
+            Ok(parsed) => match parsed.protocol {
+                ProxyProtocol::Http
+                | ProxyProtocol::Https
+                | ProxyProtocol::Socks4
+                | ProxyProtocol::Socks5 => {
+                    builder = add_reqwest_proxy(
+                        builder,
+                        ProxyTarget::All,
+                        proxy,
+                        options.credentials_for_scheme("all"),
+                        no_proxy,
+                    );
+                }
+            },
+            Err(_) => warn!(
+                proxy = %proxy_log_target(proxy),
+                "Ignoring invalid all-proxy configuration"
+            ),
         }
     }
-
-    let candidate = match parsed_uri.scheme() {
-        "http" => options
-            .http_proxy
-            .as_deref()
-            .filter(|proxy| !proxy.is_empty())
-            .or_else(|| {
-                options
-                    .all_proxy
-                    .as_deref()
-                    .filter(|proxy| !proxy.is_empty())
-            }),
-        "https" => options
-            .https_proxy
-            .as_deref()
-            .filter(|proxy| !proxy.is_empty())
-            .or_else(|| {
-                options
-                    .all_proxy
-                    .as_deref()
-                    .filter(|proxy| !proxy.is_empty())
-            }),
-        _ => None,
-    }?;
-    let proxy = ProxyUrl::parse(candidate).ok()?;
-    Some((proxy.host, proxy.port))
+    builder
 }
 
 pub(super) fn uri_host(uri: &str) -> Option<String> {
@@ -338,58 +369,7 @@ pub(super) fn build_download_client(
             constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )));
 
-    let no_proxy = options.no_proxy.as_deref();
-    if let Some(proxy) = options
-        .http_proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        builder = add_reqwest_proxy(
-            builder,
-            ProxyTarget::Http,
-            proxy,
-            options.proxy_credentials_for_scheme("http"),
-            no_proxy,
-        );
-    }
-    if let Some(proxy) = options
-        .https_proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        builder = add_reqwest_proxy(
-            builder,
-            ProxyTarget::Https,
-            proxy,
-            options.proxy_credentials_for_scheme("https"),
-            no_proxy,
-        );
-    }
-    if let Some(all_proxy) = options
-        .all_proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        match ProxyUrl::parse(all_proxy) {
-            Ok(parsed) => match parsed.protocol {
-                crate::http::socks_connector::ProxyProtocol::Http
-                | crate::http::socks_connector::ProxyProtocol::Https
-                | crate::http::socks_connector::ProxyProtocol::Socks4
-                | crate::http::socks_connector::ProxyProtocol::Socks5 => {
-                    builder = add_reqwest_proxy(
-                        builder,
-                        ProxyTarget::All,
-                        all_proxy,
-                        options.proxy_credentials_for_scheme("all"),
-                        no_proxy,
-                    );
-                }
-            },
-            Err(error) => {
-                warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, error);
-            }
-        }
-    }
+    builder = apply_proxy_options(builder, &options.http_proxy_options());
 
     if let (Some((proxy_host, _)), Some(proxy_addresses)) = (
         http_proxy_origin(uri, options),
@@ -483,10 +463,6 @@ pub(crate) fn build_reqwest_proxy(
         }
     }
 
-    if let Some(no_proxy) = no_proxy {
-        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
-    }
-
     Ok(proxy)
 }
 
@@ -506,103 +482,35 @@ pub(crate) fn add_reqwest_proxy(
     ) {
         Ok(proxy) => builder.proxy(proxy),
         Err(error) => {
-            warn!(%proxy_url, ?target, %error, "Ignoring invalid HTTP proxy configuration");
+            warn!(
+                proxy = %proxy_log_target(proxy_url),
+                ?target,
+                error = %error.without_url(),
+                "Ignoring invalid HTTP proxy configuration"
+            );
             builder
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn proxy_log_target(proxy_url: &str) -> String {
+    let Ok(proxy) = ProxyUrl::parse(proxy_url) else {
+        return "<invalid proxy URL>".to_string();
+    };
+    let scheme = match proxy.protocol {
+        ProxyProtocol::Http => "http",
+        ProxyProtocol::Https => "https",
+        ProxyProtocol::Socks4 => "socks4",
+        ProxyProtocol::Socks5 => "socks5",
+    };
+    let host = if proxy.host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{}]", proxy.host)
+    } else {
+        proxy.host
+    };
 
-    #[tokio::test]
-    async fn proxy_request_routing_uses_exact_no_proxy_hostname_matching() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        crate::http::client_pool::ensure_rustls_provider();
-
-        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let target_address = target_listener.local_addr().unwrap();
-        let target_task = tokio::spawn(async move {
-            let (mut stream, _) = target_listener.accept().await.unwrap();
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request).await.unwrap();
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndirect",
-                )
-                .await
-                .unwrap();
-        });
-
-        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_address = proxy_listener.local_addr().unwrap();
-        let proxy_task = tokio::spawn(async move {
-            let (mut stream, _) = proxy_listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            loop {
-                let mut chunk = [0; 1024];
-                let read = stream.read(&mut chunk).await.unwrap();
-                assert_ne!(read, 0, "proxy request ended before its headers");
-                request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nproxy!",
-                )
-                .await
-                .unwrap();
-        });
-
-        let no_proxy = "example.test";
-        let proxy_url = format!("http://{proxy_address}");
-        let options = DownloadOptions {
-            all_proxy: Some(proxy_url.clone()),
-            no_proxy: Some(no_proxy.to_string()),
-            ..DownloadOptions::default()
-        };
-        let uri = format!(
-            "http://download.example.test:{}/file",
-            target_address.port()
-        );
-        assert_eq!(
-            http_proxy_origin(&uri, &options),
-            Some(("127.0.0.1".to_string(), proxy_address.port()))
-        );
-
-        let proxy =
-            build_reqwest_proxy(ProxyTarget::All, &proxy_url, None, None, Some(no_proxy)).unwrap();
-        let client = reqwest::Client::builder()
-            .proxy(proxy)
-            .resolve("download.example.test", target_address)
-            .build()
-            .unwrap();
-        let response = client.get(uri).send().await.unwrap();
-        assert_eq!(response.text().await.unwrap(), "proxy!");
-
-        proxy_task.await.unwrap();
-        target_task.abort();
-        let _ = target_task.await;
-    }
-
-    #[test]
-    fn download_connect_timeout_uses_the_request_option() {
-        let mut options = DownloadOptions::default();
-        options.connect_timeout = Some(47);
-        assert_eq!(http_connect_timeout(&options), Duration::from_secs(47));
-    }
-
-    #[test]
-    fn download_connect_timeout_has_a_fallback_for_direct_core_callers() {
-        let options = DownloadOptions::default();
-        assert_eq!(
-            http_connect_timeout(&options),
-            Duration::from_secs(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS)
-        );
-    }
+    format!("{scheme}://{host}:{}", proxy.port)
 }
+
+#[cfg(test)]
+mod tests;

@@ -9,7 +9,8 @@ use super::{
 };
 use crate::bittorrent::tracker::udp_tracker_protocol::{
     ConnectResponse, UdpAction, UdpEvent, build_announce_request, build_connect_request,
-    decode_response_header, parse_announce_response, parse_connect_response, parse_scrape_response,
+    decode_response_header, parse_announce_response_for_ip, parse_connect_response,
+    parse_scrape_response,
 };
 
 impl UdpTrackerClient {
@@ -319,7 +320,7 @@ impl UdpTrackerClient {
         }
 
         self.txn_map.remove(&txn_id);
-        let mut req = self.inflight.remove(idx).unwrap_or_else(|| {
+        let mut req = self.remove_inflight(idx).unwrap_or_else(|| {
             UdpTrackerRequest::new(*from, [0u8; 20], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0)
         });
 
@@ -350,7 +351,7 @@ impl UdpTrackerClient {
                 self.fail_connection_requests(*from, UdpError::MalformedResponse);
             }
             Some(UdpAction::Announce) => {
-                match parse_announce_response(data) {
+                match parse_announce_response_for_ip(data, from.ip()) {
                     Ok(resp) => {
                         info!(
                             "ANNOUNCE response from {}: {} peers, interval={}s",
@@ -439,7 +440,7 @@ impl UdpTrackerClient {
 
         for idx in expired.into_iter().rev() {
             if idx < self.inflight.len() {
-                let mut req = self.inflight.remove(idx).unwrap_or_else(|| {
+                let mut req = self.remove_inflight(idx).unwrap_or_else(|| {
                     UdpTrackerRequest::new(
                         std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
                             std::net::Ipv4Addr::UNSPECIFIED,
@@ -497,6 +498,16 @@ impl UdpTrackerClient {
         self.inflight
             .iter()
             .any(|r| r.is_connect && &r.remote_addr == addr)
+    }
+
+    fn remove_inflight(&mut self, index: usize) -> Option<UdpTrackerRequest> {
+        let request = self.inflight.remove(index)?;
+        for mapped_index in self.txn_map.values_mut() {
+            if *mapped_index > index {
+                *mapped_index -= 1;
+            }
+        }
+        Some(request)
     }
 
     fn move_connection_waiters_to_pending(&mut self, addr: &SocketAddr) {

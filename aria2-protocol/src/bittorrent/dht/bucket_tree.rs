@@ -234,8 +234,17 @@ pub(super) fn find_bucket_for_mut<'a>(
 /// then collects nodes from the parent's subtree and walks upward
 /// until K nodes are found.
 pub(super) fn find_closest_k_nodes(root: &BucketTreeNode, key: &[u8; 20]) -> Vec<DhtNode> {
+    find_closest_nodes(root, key, false)
+}
+
+/// Find up to K closest recently verified good nodes for a DHT response.
+pub(super) fn find_closest_good_k_nodes(root: &BucketTreeNode, key: &[u8; 20]) -> Vec<DhtNode> {
+    find_closest_nodes(root, key, true)
+}
+
+fn find_closest_nodes(root: &BucketTreeNode, key: &[u8; 20], good_only: bool) -> Vec<DhtNode> {
     let mut nodes = BinaryHeap::with_capacity(K);
-    collect_closest_from_tree(root, key, &mut nodes);
+    collect_closest_from_tree(root, key, &mut nodes, good_only);
     let mut result: Vec<DhtNode> = nodes.into_iter().map(|candidate| candidate.node).collect();
     result.sort_by(|a, b| {
         a.distance_to(key)
@@ -286,11 +295,12 @@ fn collect_closest_from_tree(
     root: &BucketTreeNode,
     key: &[u8; 20],
     nodes: &mut BinaryHeap<ClosestCandidate>,
+    good_only: bool,
 ) {
     match root {
         BucketTreeNode::Leaf { bucket } => {
             for node in bucket.nodes() {
-                if node.is_bad() {
+                if node.is_bad() || (good_only && !node.is_good()) {
                     continue;
                 }
                 let candidate = ClosestCandidate {
@@ -306,8 +316,8 @@ fn collect_closest_from_tree(
             }
         }
         BucketTreeNode::Internal { left, right, .. } => {
-            collect_closest_from_tree(left, key, nodes);
-            collect_closest_from_tree(right, key, nodes);
+            collect_closest_from_tree(left, key, nodes, good_only);
+            collect_closest_from_tree(right, key, nodes, good_only);
         }
     }
 }

@@ -254,6 +254,8 @@ impl MagnetDownloadCommand {
                         numwant: 50,
                         port: announce_port,
                         event: crate::engine::bittorrent::tracker::communication::AnnounceEvent::Started,
+                        request_timeout: max_tracker_timeout,
+                        connect_timeout,
                         options,
                     },
                     &self.outbound_network_policy,

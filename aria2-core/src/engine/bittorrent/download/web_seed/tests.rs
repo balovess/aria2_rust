@@ -48,8 +48,13 @@ async fn web_seed_hostname_policy_selects_a_compatible_local_source() {
         peer
     });
     let timeout = std::time::Duration::from_secs(60);
-    let http_client = super::client::build_client(&tls, Some(local_address), timeout)
-        .expect("web-seed HTTP client should build");
+    let http_client = super::client::build_client(
+        &tls,
+        Some(local_address),
+        timeout,
+        &crate::request::request_group::HttpProxyOptions::default(),
+    )
+    .expect("web-seed HTTP client should build");
     // The policy already resolved localhost; use the fixture's IP literal
     // to avoid a second lookup selecting a different address family.
     let client = WebSeedClient::with_shared_http_client(
@@ -58,6 +63,7 @@ async fn web_seed_hostname_policy_selects_a_compatible_local_source() {
         http_client,
         timeout,
         crate::constants::USER_AGENT,
+        Vec::new(),
     );
 
     assert_eq!(client.download_piece(0, 2, 0, 2).await.unwrap(), b"ok");

@@ -22,9 +22,16 @@ async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
                     break;
                 }
             }
-            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let raw_request = String::from_utf8_lossy(&request);
+            assert!(raw_request.lines().any(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("authorization: basic ")
+                    && line.ends_with("dXNlcjpwYXNz")
+            }));
+            let request = raw_request.to_ascii_lowercase();
             assert!(request.contains("range: bytes=0-3"));
             assert!(request.contains("user-agent: header-web-seed-client/1.0"));
+            assert!(request.contains("x-trace-id: web-seed"));
             stream
                 .write_all(
                     format!(
@@ -55,7 +62,12 @@ async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
             Vec::new(),
             crate::request::request_group::DownloadOptions {
                 user_agent: Some("test-web-seed-client/1.0".to_string()),
-                header: vec!["User-Agent: header-web-seed-client/1.0".to_string()],
+                http_user: Some("user".to_string()),
+                http_passwd: Some("pass".to_string()),
+                header: vec![
+                    "User-Agent: header-web-seed-client/1.0".to_string(),
+                    "X-Trace-ID: web-seed".to_string(),
+                ],
                 ..Default::default()
             },
         ),
@@ -93,6 +105,169 @@ async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
     second_server
         .await
         .expect("second file source should finish");
+}
+
+#[tokio::test]
+async fn live_web_seed_uses_task_proxy_and_proxy_credentials() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WebSeed proxy fixture");
+    let proxy_address = proxy_listener.local_addr().expect("proxy fixture address");
+    let proxy_server = tokio::spawn(async move {
+        let (mut stream, _) = proxy_listener
+            .accept()
+            .await
+            .expect("accept proxied WebSeed request");
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 512];
+        loop {
+            let count = stream.read(&mut buffer).await.expect("read proxy request");
+            assert_ne!(count, 0, "proxy request ended before headers completed");
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let lower_request = request.to_ascii_lowercase();
+        assert!(lower_request.starts_with("get http://seed.invalid/file http/1.1\r\n"));
+        assert!(lower_request.contains("range: bytes=0-3\r\n"));
+        assert!(
+            request.lines().any(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("proxy-authorization: basic ")
+                    && line.ends_with("dXNlcjpwYXNz")
+            }),
+            "request should carry proxy credentials: {request}"
+        );
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDATA",
+            )
+            .await
+            .expect("write proxy response");
+    });
+
+    let entry = crate::download::file_entry::FileEntry::new(
+        "file.bin".into(),
+        4,
+        0,
+        vec!["http://seed.invalid/file".to_string()],
+    );
+    let mut context = crate::download::DownloadContext::new_default();
+    context.set_piece_length(4);
+    context.set_file_entries(vec![entry]);
+    let group = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            crate::request::request_group::GroupId::new(7191),
+            Vec::new(),
+            crate::request::request_group::DownloadOptions {
+                all_proxy: Some(format!("http://{proxy_address}")),
+                all_proxy_user: Some("user".to_string()),
+                all_proxy_passwd: Some("pass".to_string()),
+                ..Default::default()
+            },
+        ),
+    ));
+    group
+        .recover()
+        .set_download_context(std::sync::Arc::new(context));
+    let manager = WebSeedManager::for_request_group(
+        group,
+        4,
+        4,
+        crate::http::client_identity::ClientTlsConfig::default(),
+        crate::network::OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap()).into(),
+    );
+
+    let data = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        manager.request_piece_with_length_and_activity(0, 4, None),
+    )
+    .await
+    .expect("proxied WebSeed request should not hang")
+    .expect("WebSeed should use the task proxy");
+    assert_eq!(data, b"DATA");
+    proxy_server.await.expect("proxy fixture should finish");
+}
+
+#[tokio::test]
+async fn live_web_seed_honors_task_no_proxy_for_direct_origin() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WebSeed origin fixture");
+    let origin_address = origin.local_addr().expect("origin fixture address");
+    let origin_server = tokio::spawn(async move {
+        let (mut stream, _) = origin
+            .accept()
+            .await
+            .expect("accept direct WebSeed request");
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 512];
+        loop {
+            let count = stream.read(&mut buffer).await.expect("read origin request");
+            assert_ne!(count, 0, "origin request ended before headers completed");
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        assert!(request.starts_with("get /file http/1.1\r\n"));
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDATA",
+            )
+            .await
+            .expect("write origin response");
+    });
+
+    let entry = crate::download::file_entry::FileEntry::new(
+        "file.bin".into(),
+        4,
+        0,
+        vec![format!("http://{origin_address}/file")],
+    );
+    let mut context = crate::download::DownloadContext::new_default();
+    context.set_piece_length(4);
+    context.set_file_entries(vec![entry]);
+    let group = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            crate::request::request_group::GroupId::new(7192),
+            Vec::new(),
+            crate::request::request_group::DownloadOptions {
+                all_proxy: Some("http://127.0.0.1:9".to_string()),
+                no_proxy: Some("127.0.0.1".to_string()),
+                ..Default::default()
+            },
+        ),
+    ));
+    group
+        .recover()
+        .set_download_context(std::sync::Arc::new(context));
+    let manager = WebSeedManager::for_request_group(
+        group,
+        4,
+        4,
+        crate::http::client_identity::ClientTlsConfig::default(),
+        crate::network::OutboundNetworkPolicy::direct().into(),
+    );
+
+    let data = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        manager.request_piece_with_length_and_activity(0, 4, None),
+    )
+    .await
+    .expect("direct WebSeed request should not hang")
+    .expect("no-proxy should bypass the unavailable proxy");
+    assert_eq!(data, b"DATA");
+    origin_server.await.expect("origin fixture should finish");
 }
 
 #[tokio::test]

@@ -92,6 +92,34 @@ fn ftp_proxy_rpc_options_reach_the_core_proxy_configuration() {
     assert_eq!(method, crate::ftp::connection::ProxyMethod::Get);
 }
 
+#[test]
+fn ftp_no_proxy_uses_exact_host_matching_for_proxy_selection() {
+    let options = DownloadOptions {
+        ftp_proxy: Some("http://proxy.example:3128".to_string()),
+        no_proxy: Some("example.test".to_string()),
+        ..DownloadOptions::default()
+    };
+    let exact_host = FtpDownloadCommand::new(
+        GroupId::new(103),
+        "ftp://example.test/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(exact_host.ftp_proxy_config().unwrap().is_none());
+
+    let subdomain = FtpDownloadCommand::new(
+        GroupId::new(104),
+        "ftp://download.example.test/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(subdomain.ftp_proxy_config().unwrap().is_some());
+}
+
 #[tokio::test]
 async fn ftp_proxy_records_each_payload_chunk_for_timeout() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -175,6 +203,8 @@ async fn ftp_reuses_authenticated_control_session_across_downloads() {
 
     let control_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_address = control_listener.local_addr().unwrap();
+    let _proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_address = _proxy_listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = control_listener.accept().await.unwrap();
         let mut control = BufReader::new(stream);
@@ -286,6 +316,8 @@ async fn ftp_reuses_authenticated_control_session_across_downloads() {
         let uri = format!("ftp://reuse-user:reuse-pass@{control_address}/{filename}");
         let options = DownloadOptions {
             allow_overwrite: true,
+            ftp_proxy: Some(format!("http://{proxy_address}")),
+            no_proxy: Some("127.0.0.1".to_string()),
             ..DownloadOptions::default()
         };
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(

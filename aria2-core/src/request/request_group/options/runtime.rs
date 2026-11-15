@@ -143,57 +143,11 @@ impl DownloadOptions {
         &self,
         scheme: &str,
     ) -> (Option<String>, Option<String>) {
-        let (user, passwd, proxy_url) = match scheme {
-            "https" => (
-                &self.https_proxy_user,
-                &self.https_proxy_passwd,
-                self.https_proxy
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
-            ),
-            "http" => (
-                &self.http_proxy_user,
-                &self.http_proxy_passwd,
-                self.http_proxy
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
-            ),
-            "ftp" => (
-                &self.ftp_proxy_user,
-                &self.ftp_proxy_passwd,
-                self.ftp_proxy
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
-            ),
-            _ => (
-                &self.all_proxy_user,
-                &self.all_proxy_passwd,
-                self.all_proxy.as_deref().filter(|value| !value.is_empty()),
-            ),
-        };
+        self.http_proxy_options().credentials_for_scheme(scheme)
+    }
 
-        let embedded = proxy_url
-            .and_then(|value| Url::parse(value).ok())
-            .map(|url| {
-                (
-                    (!url.username().is_empty()).then(|| url.username().to_string()),
-                    url.password().map(str::to_string),
-                )
-            })
-            .unwrap_or((None, None));
-
-        (
-            user.clone()
-                .or_else(|| self.all_proxy_user.clone())
-                .or(embedded.0),
-            passwd
-                .clone()
-                .or_else(|| self.all_proxy_passwd.clone())
-                .or(embedded.1),
-        )
+    pub(crate) fn http_proxy_options(&self) -> super::HttpProxyOptions {
+        super::HttpProxyOptions::from_download_options(self)
     }
 }
 

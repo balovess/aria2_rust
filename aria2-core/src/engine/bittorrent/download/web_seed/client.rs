@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::request::request_group::AtomicProgress;
+use crate::request::request_group::{AtomicProgress, HttpProxyOptions};
 
 pub(super) const DEFAULT_WEB_SEED_TIMEOUT_SECS: u64 = 60;
 
@@ -55,7 +55,7 @@ impl WebSeedClient {
 
         // Build client with sensible defaults for large file downloads
         let timeout = Duration::from_secs(DEFAULT_WEB_SEED_TIMEOUT_SECS);
-        let client = build_client(tls, None, timeout)?;
+        let client = build_client(tls, None, timeout, &HttpProxyOptions::default())?;
 
         Ok(Self {
             base_url: base_url.to_string(),
@@ -84,7 +84,7 @@ impl WebSeedClient {
         debug!(url = base_url, "Creating WebSeedClient with shared stats");
         crate::http::client_pool::ensure_rustls_provider();
         let timeout = Duration::from_secs(DEFAULT_WEB_SEED_TIMEOUT_SECS);
-        let client = build_client(tls, None, timeout)?;
+        let client = build_client(tls, None, timeout, &HttpProxyOptions::default())?;
 
         Ok(Self {
             base_url: base_url.to_string(),
@@ -105,12 +105,14 @@ impl WebSeedClient {
         client: reqwest::Client,
         timeout: Duration,
         user_agent: &str,
+        headers: Vec<(String, String)>,
     ) -> Self {
         Self {
             base_url: base_url.to_string(),
             protocol_client: aria2_protocol::bittorrent::web_seed::WebSeedHttpClient::new(
                 base_url, client, timeout, user_agent,
-            ),
+            )
+            .with_headers(headers),
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
         }
@@ -382,15 +384,18 @@ pub(crate) fn build_client(
     tls: &ClientTlsConfig,
     local_address: Option<std::net::IpAddr>,
     connect_timeout: Duration,
+    proxy_options: &HttpProxyOptions,
 ) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
     let mut builder = reqwest::Client::builder()
         .connect_timeout(connect_timeout)
         .pool_max_idle_per_host(4)
-        .gzip(false);
+        .gzip(false)
+        .redirect(reqwest::redirect::Policy::none());
     if let Some(address) = local_address {
         builder = builder.local_address(address);
     }
+    builder = crate::engine::http::client_config::apply_proxy_options(builder, proxy_options);
     let builder =
         crate::http::client_identity::apply(builder, tls).map_err(|error| error.to_string())?;
     crate::http::client_pool::configure_http2_download_client(builder)

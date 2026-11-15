@@ -75,6 +75,21 @@ fn test_proxy_config_from_proxy_url_http() {
 }
 
 #[test]
+fn test_proxy_config_from_proxy_url_decodes_encoded_credentials() {
+    let config = HttpProxyConfig::from_proxy_url(
+        "http://user%40name:p%3A%40%25@[2001:db8::1]:3128",
+        "target.com".into(),
+        443,
+    )
+    .unwrap();
+
+    assert_eq!(config.proxy_host, "2001:db8::1");
+    assert_eq!(config.proxy_port, 3128);
+    assert_eq!(config.proxy_username.as_deref(), Some("user@name"));
+    assert_eq!(config.proxy_password.as_deref(), Some("p:@%"));
+}
+
+#[test]
 fn test_proxy_config_from_proxy_url_https() {
     let config =
         HttpProxyConfig::from_proxy_url("https://secure.proxy.com", "target.com".into(), 443)

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::IpAddr;
 
 pub const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 pub const DEFAULT_ANNOUNCE_INTERVAL: u32 = 300;
@@ -158,6 +159,24 @@ impl fmt::Debug for AnnounceResponse {
 }
 
 pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
+    parse_announce_response_with_family(data, false)
+}
+
+/// Parse an ANNOUNCE response using the address family of the tracker's UDP
+/// response source, as required by BEP 15.
+///
+/// The legacy [`parse_announce_response`] entry point remains IPv4-oriented.
+pub fn parse_announce_response_for_ip(
+    data: &[u8],
+    tracker_ip: IpAddr,
+) -> Result<AnnounceResponse, String> {
+    parse_announce_response_with_family(data, tracker_ip.is_ipv6())
+}
+
+fn parse_announce_response_with_family(
+    data: &[u8],
+    is_ipv6: bool,
+) -> Result<AnnounceResponse, String> {
     if data.len() < 8 {
         return Err(format!(
             "ANNOUNCE response too short: {} bytes (min 8)",
@@ -183,17 +202,24 @@ pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> 
             data.len()
         ));
     }
-    if !(data.len() - 20).is_multiple_of(6) {
+    let peer_stride = if is_ipv6 { 18 } else { 6 };
+    if !(data.len() - 20).is_multiple_of(peer_stride) {
         return Err(format!(
-            "ANNOUNCE compact peer list length {} is not a multiple of 6",
-            data.len() - 20
+            "ANNOUNCE compact peer list length {} is not a multiple of {}",
+            data.len() - 20,
+            peer_stride
         ));
     }
     let interval = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let leechers = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
     let seeders = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
     let peers = if data.len() > 20 {
-        crate::bittorrent::peer::address::decode_compact_v4_peers(&data[20..])
+        let decoded = if is_ipv6 {
+            crate::bittorrent::peer::address::decode_compact_v6_peers(&data[20..])
+        } else {
+            crate::bittorrent::peer::address::decode_compact_v4_peers(&data[20..])
+        };
+        decoded
             .expect("compact peer list length was validated")
             .into_iter()
             .map(|peer| (peer.ip().to_string(), peer.port()))

@@ -3,6 +3,7 @@ mod default;
 mod follow_mode;
 mod from_strings;
 mod http_adaptive;
+mod proxy;
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -10,6 +11,7 @@ mod tests;
 pub use conversion::option_value_to_string;
 pub use follow_mode::FollowMode;
 pub use http_adaptive::HttpAdaptiveOptions;
+pub(crate) use proxy::HttpProxyOptions;
 
 pub const DEFAULT_DISK_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 

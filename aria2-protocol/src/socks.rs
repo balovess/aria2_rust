@@ -5,8 +5,8 @@ mod proxy_url;
 mod socks4;
 mod socks5;
 
+pub use crate::proxy::{ProxyProtocol, ProxyUrl};
 pub use connector_enum::SocksConnectorEnum;
-pub use proxy_url::{ProxyProtocol, ProxyUrl};
 pub use socks4::Socks4Connector;
 pub use socks5::Socks5Connector;
 
@@ -240,6 +240,16 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn legacy_socks_proxy_url_path_uses_shared_proxy_parser() {
+        let proxy = ProxyUrl::parse("socks5://user%40name:secret@proxy.example:1080").unwrap();
+
+        assert_eq!(proxy.protocol, ProxyProtocol::Socks5);
+        assert_eq!(proxy.host, "proxy.example");
+        assert_eq!(proxy.username.as_deref(), Some("user@name"));
+        assert_eq!(proxy.password.as_deref(), Some("secret"));
     }
 
     #[test]

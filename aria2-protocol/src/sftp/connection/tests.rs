@@ -123,6 +123,20 @@ fn test_ssh_options_with_private_key() {
 }
 
 #[test]
+fn ssh_options_debug_redacts_password_and_private_key_passphrase() {
+    let options = SshOptions::new("example.com", "deploy")
+        .with_password("password-secret")
+        .with_private_key("/keys/id_ed25519")
+        .with_passphrase("passphrase-secret");
+
+    let debug = format!("{options:?}");
+    assert!(!debug.contains("deploy"));
+    assert!(!debug.contains("password-secret"));
+    assert!(!debug.contains("passphrase-secret"));
+    assert_eq!(debug.matches("[REDACTED]").count(), 3);
+}
+
+#[test]
 fn test_host_key_modes() {
     let strict = HostKeyCheckingMode::Strict;
     let accept_new = HostKeyCheckingMode::AcceptNew;

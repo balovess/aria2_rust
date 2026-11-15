@@ -1,4 +1,3 @@
-use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
@@ -8,9 +7,11 @@ use tracing::warn;
 const MAX_MEMORY_DOWNLOAD_PREALLOCATION: usize = 1024 * 1024;
 
 use super::connection::{FtpActiveDataListener, FtpConnection, FtpResponseClass};
-use super::listing::parse_ftp_list_response;
 
+mod directory;
 mod types;
+#[cfg(test)]
+use directory::local_child_path;
 pub use types::{DownloadProgress, DownloadResult, FtpDownloadOptions};
 
 #[cfg(test)]
@@ -63,14 +64,6 @@ fn is_transient_io_error(error: &std::io::Error) -> bool {
             | ErrorKind::BrokenPipe
             | ErrorKind::TimedOut
     ) || error.to_string().to_lowercase().contains("temporary")
-}
-
-fn local_child_path(base: &Path, name: &str) -> Result<PathBuf, String> {
-    let mut components = Path::new(name).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(_)), None) => Ok(base.join(name)),
-        _ => Err(format!("Unsafe FTP listing entry name: {name:?}")),
-    }
 }
 
 fn memory_download_capacity(expected_size: Option<u64>) -> usize {
@@ -262,120 +255,6 @@ impl<'a> FtpDownload<'a> {
             .await?;
 
         Ok(data)
-    }
-
-    /// Download a directory recursively (if recursive_download is enabled)
-    ///
-    /// Returns results for each file downloaded
-    pub async fn download_directory(
-        &mut self,
-        remote_dir: &str,
-        local_base_dir: &str,
-        progress_callback: Option<fn(DownloadProgress)>,
-    ) -> Result<Vec<DownloadResult>, String> {
-        self.download_directory_controlled(remote_dir, local_base_dir, progress_callback, None)
-            .await
-    }
-
-    /// Download a directory recursively while observing a cancellation token.
-    pub async fn download_directory_with_cancellation(
-        &mut self,
-        remote_dir: &str,
-        local_base_dir: &str,
-        progress_callback: Option<fn(DownloadProgress)>,
-        cancellation: &CancellationToken,
-    ) -> Result<Vec<DownloadResult>, String> {
-        self.download_directory_controlled(
-            remote_dir,
-            local_base_dir,
-            progress_callback,
-            Some(cancellation),
-        )
-        .await
-    }
-
-    async fn download_directory_controlled(
-        &mut self,
-        remote_dir: &str,
-        local_base_dir: &str,
-        progress_callback: Option<fn(DownloadProgress)>,
-        cancellation: Option<&CancellationToken>,
-    ) -> Result<Vec<DownloadResult>, String> {
-        if cancellation.is_some_and(CancellationToken::is_cancelled) {
-            return Err("FTP download cancelled".to_string());
-        }
-
-        if !self.options.recursive_download {
-            return Err("Recursive download not enabled in options".to_string());
-        }
-
-        // Change to remote directory
-        self.conn.cwd(remote_dir).await?;
-
-        // Negotiate the data channel before sending LIST. The server opens the
-        // negotiated channel only after it receives the transfer command.
-        let data_connection = self.establish_data_connection().await?;
-
-        let list_resp = self.conn.list(None).await?;
-        if !list_resp.is_positive_preliminary() {
-            return Err(format!(
-                "LIST failed: {} {}",
-                list_resp.code, list_resp.message
-            ));
-        }
-
-        // Read directory listing from data connection
-        let listing_data = self
-            .receive_data_to_memory(data_connection, None, cancellation)
-            .await?;
-
-        // Parse listing
-        let listing_str = String::from_utf8_lossy(&listing_data);
-        let entries = parse_ftp_list_response(&listing_str);
-
-        // Create local directory
-        std::fs::create_dir_all(local_base_dir)
-            .map_err(|e| format!("Failed to create local directory: {}", e))?;
-
-        let mut results = Vec::new();
-        for entry in entries {
-            if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                return Err("FTP download cancelled".to_string());
-            }
-
-            if entry.is_directory {
-                // Recursively download subdirectory
-                let sub_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
-                let sub_local = local_child_path(Path::new(local_base_dir), &entry.name)?;
-                let sub_local = sub_local.to_string_lossy().into_owned();
-
-                let sub_results = Box::pin(self.download_directory_controlled(
-                    &sub_remote,
-                    &sub_local,
-                    progress_callback,
-                    cancellation,
-                ))
-                .await?;
-                results.extend(sub_results);
-            } else {
-                // Download individual file
-                let remote_file = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
-                let local_file = local_child_path(Path::new(local_base_dir), &entry.name)?;
-                let local_file = local_file.to_string_lossy().into_owned();
-
-                let result = self
-                    .download_file_controlled(
-                        &remote_file,
-                        &local_file,
-                        progress_callback,
-                        cancellation,
-                    )
-                    .await?;
-                results.push(result);
-            }
-        }
-
-        Ok(results)
     }
 
     /// Establish data connection using configured mode (passive/active)

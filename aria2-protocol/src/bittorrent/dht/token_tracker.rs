@@ -2,11 +2,17 @@ use sha1::{Digest, Sha1};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-const SECRET_SIZE: usize = 4;
+const SECRET_SIZE: usize = 32;
 const ROTATION_INTERVAL_SECS: u64 = 900;
 
+#[derive(Clone, Copy)]
+struct Secret {
+    bytes: [u8; SECRET_SIZE],
+    len: usize,
+}
+
 pub struct TokenTracker {
-    secrets: [[u8; SECRET_SIZE]; 2],
+    secrets: [Secret; 2],
     last_rotation: Instant,
 }
 
@@ -25,9 +31,31 @@ impl TokenTracker {
         }
     }
 
-    pub fn with_secret(initial: [u8; SECRET_SIZE]) -> Self {
+    /// Creates a tracker with a deterministic four-byte secret.
+    ///
+    /// This constructor is intended for tests and deterministic callers. Use
+    /// [`TokenTracker::new`] for production so the secret has full entropy.
+    pub fn with_secret(initial: [u8; 4]) -> Self {
+        let mut bytes = [0; SECRET_SIZE];
+        bytes[..initial.len()].copy_from_slice(&initial);
+        let secret = Secret {
+            bytes,
+            len: initial.len(),
+        };
         Self {
-            secrets: [initial; 2],
+            secrets: [secret; 2],
+            last_rotation: Instant::now(),
+        }
+    }
+
+    /// Creates a tracker with a caller-provided 256-bit secret.
+    pub fn with_secret_bytes(initial: [u8; SECRET_SIZE]) -> Self {
+        let secret = Secret {
+            bytes: initial,
+            len: SECRET_SIZE,
+        };
+        Self {
+            secrets: [secret; 2],
             last_rotation: Instant::now(),
         }
     }
@@ -86,39 +114,27 @@ impl TokenTracker {
         &self,
         info_hash: &[u8; 20],
         addr: &SocketAddr,
-        secret: &[u8; SECRET_SIZE],
+        secret: &Secret,
     ) -> String {
-        let compact = Self::addr_to_compact(addr);
         let mut hasher = Sha1::new();
         hasher.update(info_hash);
-        hasher.update(&compact);
-        hasher.update(secret);
+        match addr {
+            SocketAddr::V4(v4) => hasher.update(v4.ip().octets()),
+            SocketAddr::V6(v6) => hasher.update(v6.ip().octets()),
+        }
+        hasher.update(&secret.bytes[..secret.len]);
         let result = hasher.finalize();
         hex::encode(result)
     }
 
-    fn addr_to_compact(addr: &SocketAddr) -> Vec<u8> {
-        match addr {
-            SocketAddr::V4(v4) => {
-                let mut buf = vec![0u8; 6];
-                buf[..4].copy_from_slice(&v4.ip().octets());
-                buf[4..6].copy_from_slice(&v4.port().to_be_bytes());
-                buf
-            }
-            SocketAddr::V6(v6) => {
-                let mut buf = vec![0u8; 18];
-                buf[..16].copy_from_slice(&v6.ip().octets());
-                buf[16..18].copy_from_slice(&v6.port().to_be_bytes());
-                buf
-            }
-        }
-    }
-
-    fn random_secret() -> [u8; SECRET_SIZE] {
+    fn random_secret() -> Secret {
         use rand::Rng;
-        let mut s = [0u8; SECRET_SIZE];
-        rand::rng().fill_bytes(&mut s);
-        s
+        let mut bytes = [0u8; SECRET_SIZE];
+        rand::rng().fill_bytes(&mut bytes);
+        Secret {
+            bytes,
+            len: SECRET_SIZE,
+        }
     }
 }
 
@@ -159,6 +175,33 @@ mod tests {
         assert!(
             !tt.validate_token(&token, &hash, &wrong_addr),
             "wrong addr should reject"
+        );
+    }
+
+    #[test]
+    fn token_is_bound_to_ip_not_transient_udp_port() {
+        let tt = TokenTracker::with_secret([1, 2, 3, 4]);
+        let hash = [0xABu8; 20];
+        let source: SocketAddr = "10.0.0.1:6881".parse().unwrap();
+        let changed_port: SocketAddr = "10.0.0.1:49152".parse().unwrap();
+        let changed_ip: SocketAddr = "10.0.0.2:6881".parse().unwrap();
+        let token = tt.generate_token(&hash, &source);
+
+        assert!(tt.validate_token(&token, &hash, &changed_port));
+        assert!(!tt.validate_token(&token, &hash, &changed_ip));
+    }
+
+    #[test]
+    fn caller_can_provide_full_width_secret() {
+        let tracker = TokenTracker::with_secret_bytes([7; SECRET_SIZE]);
+        let hash = [0x42; 20];
+        let addr: SocketAddr = "192.0.2.1:6881".parse().unwrap();
+        let token = tracker.generate_token(&hash, &addr);
+
+        assert!(tracker.validate_token(&token, &hash, &addr));
+        assert_ne!(
+            token,
+            TokenTracker::with_secret([7; 4]).generate_token(&hash, &addr)
         );
     }
 

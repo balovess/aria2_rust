@@ -167,15 +167,20 @@ impl WebSeedManager {
             .network_policy
             .as_ref()
             .ok_or_else(|| "WebSeed network policy is unavailable".to_string())?;
+        let proxy_endpoint = self.proxy_options.proxy_for_uri(uri);
+        let (network_host, network_port) = proxy_endpoint
+            .as_ref()
+            .map(|(host, port)| (host.as_str(), *port))
+            .unwrap_or((host, port));
         let local_address = if policy.is_direct() {
             None
         } else {
             policy
-                .source_for_host(host, port)
+                .source_for_host(network_host, network_port)
                 .await
-                .map_err(|error| format!("WebSeed source selection failed: {error}"))?
+                .map_err(|error| format!("WebSeed first-hop source selection failed: {error}"))?
         };
-        let origin = format!("{scheme}://{host}:{port}/{local_address:?}");
+        let origin = format!("{scheme}://{host}:{port}/{proxy_endpoint:?}/{local_address:?}");
         let client = {
             let mut clients = self.http_clients.lock().await;
             if let Some(client) = clients.get(&origin) {
@@ -185,17 +190,33 @@ impl WebSeedManager {
                     &self.tls,
                     local_address,
                     self.connect_timeout,
+                    &self.proxy_options,
                 )?;
                 clients.insert(origin, client.clone());
                 client
             }
         };
+        let mut request_headers = self.request_headers.clone();
+        if !request_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+        {
+            let authorization = self
+                .auth_factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .resolve_basic_authorization(&parsed, &self.auth_options);
+            if let Some(authorization) = authorization {
+                request_headers.push(("Authorization".to_string(), authorization));
+            }
+        }
         Ok(WebSeedClient::with_shared_http_client(
             uri,
             Arc::clone(&self.stats),
             client,
             self.request_timeout,
             &self.user_agent,
+            request_headers,
         ))
     }
 }

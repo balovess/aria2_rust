@@ -2,6 +2,7 @@ mod constructor;
 mod execute;
 mod finalize;
 mod in_memory;
+mod integrity;
 mod lifecycle;
 mod metadata_request;
 mod range_probe_work;

@@ -4,7 +4,8 @@ mod no_proxy;
 use std::env;
 use tracing::{debug, info};
 
-use crate::socks::{ProxyProtocol, ProxyUrl};
+use crate::proxy::{ProxyProtocol, ProxyUrl};
+use crate::uri::percent_encode;
 
 pub use no_proxy::NoProxyMatcher;
 
@@ -70,19 +71,30 @@ impl ProxyConfig {
         self
     }
 
+    /// Serialize the proxy URL, escaping credentials and bracketing IPv6 hosts.
     pub fn to_url(&self) -> String {
-        match (&self.username, &self.password) {
-            (Some(user), Some(pass)) => match self.proxy_type {
-                ProxyType::Http => format!("http://{}:{}@{}:{}", user, pass, self.host, self.port),
-                ProxyType::Socks5 => {
-                    format!("socks5://{}:{}@{}:{}", user, pass, self.host, self.port)
-                }
-            },
-            _ => match self.proxy_type {
-                ProxyType::Http => format!("http://{}:{}", self.host, self.port),
-                ProxyType::Socks5 => format!("socks5://{}:{}", self.host, self.port),
-            },
-        }
+        let scheme = match self.proxy_type {
+            ProxyType::Http => "http",
+            ProxyType::Socks5 => "socks5",
+        };
+        let host_value = self
+            .host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(&self.host);
+        let host = if host_value.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{host_value}]")
+        } else {
+            self.host.clone()
+        };
+        let auth = match (&self.username, &self.password) {
+            (Some(user), Some(pass)) => {
+                format!("{}:{}@", percent_encode(user), percent_encode(pass))
+            }
+            _ => String::new(),
+        };
+
+        format!("{scheme}://{auth}{host}:{}", self.port)
     }
 
     pub fn from_env() -> Option<Self> {
@@ -204,6 +216,25 @@ mod tests {
             with_auth.to_url(),
             "http://user:pass@proxy.example.com:8080"
         );
+    }
+
+    #[test]
+    fn proxy_url_round_trip_encodes_credentials_and_ipv6_authority() {
+        let config =
+            ProxyConfig::from_url("socks5://user%40name:p%3A%40%25@[2001:db8::1]:9050").unwrap();
+
+        assert_eq!(config.username.as_deref(), Some("user@name"));
+        assert_eq!(config.password.as_deref(), Some("p:@%"));
+        let rendered = config.to_url();
+        assert_eq!(
+            rendered,
+            "socks5://user%40name:p%3A%40%25@[2001:db8::1]:9050"
+        );
+
+        let parsed = ProxyUrl::parse(&rendered).unwrap();
+        assert_eq!(parsed.host, "2001:db8::1");
+        assert_eq!(parsed.username.as_deref(), Some("user@name"));
+        assert_eq!(parsed.password.as_deref(), Some("p:@%"));
     }
 
     #[test]

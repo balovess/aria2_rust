@@ -184,13 +184,15 @@ async fn dual_stack_policy_uses_ipv6_source_for_ipv6_udp_tracker() {
         assert_eq!(&request[0..8], &connection_id.to_be_bytes());
         assert_eq!(&request[8..12], &1i32.to_be_bytes());
         let transaction = u32::from_be_bytes(request[12..16].try_into().unwrap());
-        let mut announce_response = Vec::with_capacity(26);
+        let mut announce_response = Vec::with_capacity(38);
         announce_response.extend_from_slice(&1i32.to_be_bytes());
         announce_response.extend_from_slice(&transaction.to_be_bytes());
         announce_response.extend_from_slice(&60u32.to_be_bytes());
         announce_response.extend_from_slice(&3u32.to_be_bytes());
         announce_response.extend_from_slice(&7u32.to_be_bytes());
-        announce_response.extend_from_slice(&[192, 0, 2, 11, 0x1A, 0xE1]);
+        announce_response.extend_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0x1A, 0xE1,
+        ]);
         socket
             .send_to(&announce_response, peer)
             .await
@@ -214,6 +216,6 @@ async fn dual_stack_policy_uses_ipv6_source_for_ipv6_udp_tracker() {
             )
         });
 
-    assert_eq!(result.peers, vec![("192.0.2.11".to_string(), 6881)]);
+    assert_eq!(result.peers, vec![("2001:db8::b".to_string(), 6881)]);
     server.await.expect("IPv6 UDP tracker fixture should exit");
 }

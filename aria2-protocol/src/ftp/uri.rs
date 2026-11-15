@@ -1,5 +1,8 @@
 //! FTP and FTPS URI syntax parsing.
 
+pub use crate::uri::percent_decode;
+use crate::uri::percent_encode;
+
 /// Parsed FTP URI fields before engine defaults are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtpUri {
@@ -11,43 +14,9 @@ pub struct FtpUri {
     pub secure: bool,
 }
 
-/// Decode valid percent escapes while preserving malformed escapes verbatim.
-pub fn percent_decode(value: &str) -> String {
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(character) = chars.next() {
-        if character == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2
-                && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && let Ok(byte) = u8::from_str_radix(&hex, 16)
-            {
-                bytes.push(byte);
-            } else {
-                bytes.push(b'%');
-                bytes.extend_from_slice(hex.as_bytes());
-            }
-        } else {
-            let mut encoded = [0; 4];
-            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
 /// Percent-encode a URI user-info component using the RFC 3986 unreserved set.
 pub fn percent_encode_userinfo(value: &str) -> String {
-    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if UNRESERVED.contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write as _;
-            write!(&mut encoded, "%{byte:02X}").expect("writing to String cannot fail");
-        }
-    }
-    encoded
+    percent_encode(value)
 }
 
 /// Parse the FTP URI forms accepted by the download engine.

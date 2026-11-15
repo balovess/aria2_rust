@@ -49,6 +49,7 @@ pub use group::RequestGroup;
 pub use group_id::GroupId;
 pub use halt_reason::{DownloadControlFlags, HaltReason};
 pub use metadata_info::MetadataInfo;
+pub(crate) use options::HttpProxyOptions;
 pub use options::{
     DEFAULT_DISK_CACHE_BYTES, DownloadOptions, FollowMode, HttpAdaptiveOptions,
     option_value_to_string,

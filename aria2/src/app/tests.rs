@@ -369,9 +369,10 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
 }
 
 #[tokio::test]
-async fn test_cli_sftp_timeouts_reach_download_options() {
+async fn test_cli_sftp_connection_options_reach_download_options() {
     let cli = CliArgs::try_parse_from([
         "aria2",
+        "--ssh-host-key-md=sha-1=cli-fingerprint",
         "--sftp-connect-timeout=41",
         "--sftp-read-timeout=73",
         "--sftp-compression=true",
@@ -386,6 +387,10 @@ async fn test_cli_sftp_timeouts_reach_download_options() {
         .expect("CLI options should load into ConfigManager");
     let (options, _) = app.download_options_with_snapshot().await;
 
+    assert_eq!(
+        options.ssh_host_key_md.as_deref(),
+        Some("sha-1=cli-fingerprint")
+    );
     assert_eq!(options.sftp_connect_timeout, Some(41));
     assert_eq!(options.sftp_read_timeout, Some(73));
     assert!(options.sftp_compression);

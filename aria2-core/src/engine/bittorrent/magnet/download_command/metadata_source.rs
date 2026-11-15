@@ -6,9 +6,9 @@ use crate::engine::bittorrent::magnet::metadata_swarm::MetadataPeerSwarm;
 use crate::engine::http::client_config::{ProxyTarget, add_reqwest_proxy};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::client_identity::ClientTlsConfig;
-use crate::http::socks_connector::ProxyUrl;
 use crate::request::request_group::DownloadOptions;
 use crate::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -175,8 +175,7 @@ impl MagnetDownloadCommand {
             .filter(|proxy| !proxy.is_empty())
             && matches!(
                 ProxyUrl::parse(proxy).map(|parsed| parsed.protocol),
-                Ok(crate::http::socks_connector::ProxyProtocol::Http)
-                    | Ok(crate::http::socks_connector::ProxyProtocol::Https)
+                Ok(ProxyProtocol::Http) | Ok(ProxyProtocol::Https)
             )
         {
             builder = add_reqwest_proxy(

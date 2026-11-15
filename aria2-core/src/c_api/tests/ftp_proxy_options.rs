@@ -2,7 +2,7 @@ use super::*;
 use std::ptr;
 
 #[test]
-fn c_api_ftp_proxy_global_options_reach_new_downloads() {
+fn c_api_proxy_global_options_reach_new_downloads() {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -16,6 +16,7 @@ fn c_api_ftp_proxy_global_options_reach_new_downloads() {
         kv("ftp-proxy-user", "proxy-user"),
         kv("ftp-proxy-passwd", "proxy-password"),
         kv("proxy-method", "tunnel"),
+        kv("no-proxy", "first.example,second.example"),
         kv("user-agent", "task-agent/1.0"),
         kv("ftp-user", "download-user"),
     ];
@@ -53,6 +54,10 @@ fn c_api_ftp_proxy_global_options_reach_new_downloads() {
     assert_eq!(options.ftp_proxy_user.as_deref(), Some("proxy-user"));
     assert_eq!(options.ftp_proxy_passwd.as_deref(), Some("proxy-password"));
     assert_eq!(options.proxy_method, "tunnel");
+    assert_eq!(
+        options.no_proxy.as_deref(),
+        Some("first.example,second.example")
+    );
     assert_eq!(options.user_agent.as_deref(), Some("task-agent/1.0"));
     assert_eq!(options.ftp_user.as_deref(), Some("download-user"));
     drop(group);

@@ -2,8 +2,8 @@ use std::net::{IpAddr, SocketAddr};
 
 /// Matches hostnames and IP addresses against a `NO_PROXY` value.
 ///
-/// Entries are comma-separated exact hostnames, domain suffixes (`.example.com`),
-/// IP addresses, CIDR networks, or `*` to bypass every proxy.
+/// Entries are comma- or newline-separated exact hostnames, domain suffixes
+/// (`.example.com`), IP addresses, CIDR networks, or `*` to bypass every proxy.
 pub struct NoProxyMatcher {
     entries: Vec<NoProxyEntry>,
     match_all: bool,
@@ -16,13 +16,13 @@ enum NoProxyEntry {
 }
 
 impl NoProxyMatcher {
-    /// Parse a comma-separated `NO_PROXY` value.
+    /// Parse a comma- or newline-separated `NO_PROXY` value.
     pub fn from_env_value(value: &str) -> Self {
         let mut entries = Vec::new();
         let mut match_all = false;
 
         for pattern in value
-            .split(',')
+            .split([',', '\n'])
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
@@ -133,6 +133,14 @@ mod tests {
         assert!(matcher.should_bypass_hostname("host.local"));
         assert!(!matcher.should_bypass_hostname("notexample.com"));
         assert!(!matcher.should_bypass_hostname("external.test"));
+    }
+
+    #[test]
+    fn parses_newline_separated_option_values() {
+        let matcher = NoProxyMatcher::from_env_value("first.example\nsecond.example");
+
+        assert!(matcher.should_bypass_hostname("first.example"));
+        assert!(matcher.should_bypass_hostname("second.example"));
     }
 
     #[test]

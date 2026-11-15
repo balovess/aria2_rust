@@ -3,7 +3,7 @@ use std::ffi::CString;
 use std::ptr;
 
 #[test]
-fn c_api_sftp_timeout_global_options_reach_new_downloads() {
+fn c_api_sftp_options_global_and_task_values_reach_new_downloads() {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -12,6 +12,7 @@ fn c_api_sftp_timeout_global_options_reach_new_downloads() {
     assert!(!session.is_null());
 
     let options = [
+        kv("ssh-host-key-md", "sha-1=global-fingerprint"),
         kv("sftp-connect-timeout", "41"),
         kv("sftp-read-timeout", "73"),
         kv("sftp-compression", "true"),
@@ -44,6 +45,10 @@ fn c_api_sftp_timeout_global_options_reach_new_downloads() {
         .expect("C API should create the SFTP request group");
     let group = group.read().unwrap();
     let options = group.options();
+    assert_eq!(
+        options.ssh_host_key_md.as_deref(),
+        Some("sha-1=global-fingerprint")
+    );
     assert_eq!(options.sftp_connect_timeout, Some(41));
     assert_eq!(options.sftp_read_timeout, Some(73));
     assert!(options.sftp_compression);
@@ -60,6 +65,7 @@ fn c_api_sftp_timeout_global_options_reach_new_downloads() {
     drop(group);
 
     let task_options = [
+        kv("ssh-host-key-md", "md5=task-fingerprint"),
         kv("sftp-connect-timeout", "19"),
         kv("sftp-compression", "false"),
     ];
@@ -90,6 +96,10 @@ fn c_api_sftp_timeout_global_options_reach_new_downloads() {
         .expect("C API should apply the per-task SFTP options");
     let task_group = task_group.read().unwrap();
     let task_options = task_group.options();
+    assert_eq!(
+        task_options.ssh_host_key_md.as_deref(),
+        Some("md5=task-fingerprint")
+    );
     assert_eq!(task_options.sftp_connect_timeout, Some(19));
     assert_eq!(task_options.sftp_read_timeout, Some(73));
     assert!(!task_options.sftp_compression);

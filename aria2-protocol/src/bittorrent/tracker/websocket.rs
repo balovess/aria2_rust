@@ -7,7 +7,10 @@ use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+use tokio_tungstenite::{
+    Connector,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 use url::Url;
 
 use crate::crypto::ensure_ring_provider;
@@ -135,6 +138,22 @@ pub async fn announce_over_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    announce_over_stream_with_connector(stream, tracker_url, request, timeout, None).await
+}
+
+/// Perform an announce using a caller-supplied TLS connector when the URL is
+/// secure. This lets the engine apply its task TLS identity and trust policy
+/// while this module retains ownership of WebSocket framing and validation.
+pub async fn announce_over_stream_with_connector<S>(
+    stream: S,
+    tracker_url: &str,
+    request: &WebSocketAnnounceRequest<'_>,
+    timeout: Duration,
+    connector: Option<Connector>,
+) -> Result<WebSocketAnnounceResponse, WebSocketAnnounceError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     ensure_ring_provider();
     let tracker_url = parse_tracker_url(tracker_url)?;
     let ws_request = tracker_url
@@ -143,7 +162,7 @@ where
         .map_err(|error| WebSocketAnnounceError::InvalidRequest(error.to_string()))?;
     let (mut websocket, _) = tokio::time::timeout(
         timeout,
-        tokio_tungstenite::client_async_tls_with_config(ws_request, stream, None, None),
+        tokio_tungstenite::client_async_tls_with_config(ws_request, stream, None, connector),
     )
     .await
     .map_err(|_| WebSocketAnnounceError::Timeout("handshake"))?

@@ -175,6 +175,18 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol response-decoding tests cover valid, malformed,
   rejected, and mismatched responses; the core local WebSocket tracker fixture
   echoes the request identity for both started and stopped announces.
+- **TLS configuration:** `wss://` announces use the task's configured CA,
+  client identity, certificate-check setting, and minimum TLS version. Core
+  builds the TLS connector from `DownloadOptions`; the protocol crate accepts
+  that connector and retains WebSocket handshake and message handling. Plain
+  `ws://` announces do not load TLS files. Connection establishment uses
+  `bt-tracker-connect-timeout`; the WebSocket handshake and announce exchange
+  use `bt-tracker-timeout`. Rustls only negotiates TLS 1.2 or newer, so a
+  configured TLS 1.1 minimum is enforced as TLS 1.2.
+- **Verification:** a local WSS tracker test verifies task-specific CA
+  propagation. Public tracker interoperability, mutual-TLS identity selection,
+  and TLS-version negotiation have not been externally exercised. A local
+  plain-WebSocket fixture verifies that unused TLS file paths are not loaded.
 
 ## BitTorrent IPv6 tracker peer list compatibility
 
@@ -322,7 +334,7 @@ behavior. An unlisted behavior has not been audited here.
 
 ## HTTP redirect credential scope
 
-- **Selected behavior:** after any redirect changes scheme, host, or effective
+- **User-confirmed behavior:** after any redirect changes scheme, host, or effective
   port, core removes origin `Authorization`, cookies supplied as custom
   headers, and conventional sensitive custom headers (auth, token, key,
   password, secret, session, signature, and CSRF names) for the rest of that
@@ -379,14 +391,17 @@ behavior. An unlisted behavior has not been audited here.
 - Core Basic/Digest and `.netrc` resolution diagnostics no longer print
   usernames. Malformed Digest challenges preserve their source status: proxy
   challenges report 407, while origin challenges report 401.
+- HTTP proxy configuration warnings now log only the parsed proxy scheme,
+  host, and port; malformed URLs use a fixed label. Reqwest errors have their
+  URL removed before logging, so embedded proxy credentials are not emitted.
 - Raw HTTP header log filtering now identifies confidential fields by parsed
   header name rather than fixed byte offsets. This handles optional whitespace
   after the colon and non-ASCII neighboring lines without panicking. It
   continues to redact Authorization, Proxy-Authorization, Cookie, and
   Set-Cookie values.
 - These changes affect diagnostics only; request headers and authentication
-  wire behavior is unchanged. Focused core and protocol tests cover redaction
-  and challenge status classification.
+  wire behavior is unchanged. Focused core and protocol tests cover proxy
+  label redaction and challenge status classification.
 - CLI parsing, RPC global/task option merging, and C API global/task option
   merging each have focused coverage showing that HTTP credentials, challenge
   mode, `no-netrc`, and custom Authorization headers reach the created task's
@@ -410,9 +425,11 @@ behavior. An unlisted behavior has not been audited here.
   schemes; active download requests continue to use core's scheme-specific
   proxy selection.
 - **Verification:** protocol tests cover case-insensitive domain matching,
-  IP/CIDR matching, and invalid CIDR prefix rejection. Core tests exercise the
-  historical `NoProxyMatcher` path for domains, IPs, and wildcard matching.
-  These helper tests do not exercise external proxy servers.
+  IP/CIDR matching, invalid CIDR prefix rejection, and newline-separated
+  entries. Newline support preserves typed list values through RPC's list
+  serialization. Core tests exercise the historical `NoProxyMatcher` path for
+  domains, IPs, and wildcard matching. These helper tests do not exercise
+  external proxy servers.
 - **Compatibility intent:** HTTP and HTTPS proxy transports and credential
   handling remain unchanged. Unprefixed `no-proxy` host entries now follow
   upstream exact-host matching instead of reqwest's broader suffix behavior;
@@ -431,7 +448,12 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** a core loopback test uses separate target and proxy
   listeners to verify that an unprefixed `example.test` exclusion does not
   bypass the proxy for `download.example.test`, matching the first-hop
-  selector. These checks do not exercise external proxy servers.
+  selector. FTP coverage verifies exact-host selection and performs a real
+  local direct transfer while an HTTP proxy is configured. A WebSocket tracker
+  loopback test confirms a matching `no-proxy` rule uses the direct socket.
+  CLI list parsing, RPC global and per-task list propagation, and C API global
+  option propagation are covered. These checks do not exercise external proxy
+  servers.
 - **Verification:** protocol tests cover SOCKS4 success framing and SOCKS5
   username/password plus IPv4 CONNECT framing; core adapter tests cover their
   error paths. SOCKS5 also rejects a server-selected authentication method
@@ -442,6 +464,14 @@ behavior. An unlisted behavior has not been audited here.
   interoperability remains unverified. CLI global, RPC global/per-task, and
   C API global option tests verify that SOCKS `all-proxy` values reach the
   resulting `DownloadOptions`.
+- **Proxy URL userinfo:** `ProxyUrl` percent-decodes username/password
+  components, and `ProxyConfig::to_url` percent-encodes them and brackets IPv6
+  proxy hosts. For valid UTF-8 userinfo, this matches the local original aria2
+  URI parser and constructor; protocol and core proxy-config tests cover
+  encoded delimiters and an IPv6 authority. The public credential fields are
+  `String`, so percent-encoded invalid UTF-8 octets decode lossily and are not
+  byte-for-byte compatible. No external proxy requiring escaped credentials
+  was contacted.
 
 ## HTTP live connection status
 
@@ -574,12 +604,17 @@ behavior. An unlisted behavior has not been audited here.
 
 - **Protocol interface:** `aria2_protocol::bittorrent::tracker::udp_client::UdpTrackerClient`
   owns BEP 15 CONNECT, ANNOUNCE, and SCRAPE transaction state, including
-  connection-ID reuse, transaction IDs, source/action validation, and retries.
+  connection-ID reuse, transaction IDs, source/action validation, retries, and
+  stable association of out-of-order responses with concurrent requests.
   It receives a caller-bound `tokio::net::UdpSocket`.
 - **Response association:** a structurally valid SCRAPE payload is accepted
   only when it contains exactly one result for each requested info hash;
   truncated or excess result sets are reported as malformed responses instead
   of returning values that cannot be associated with the request hashes.
+- **ANNOUNCE peer family:** compact peers are decoded using the IP family of
+  the tracker's UDP response source (6-byte IPv4 entries or 18-byte IPv6
+  entries), as specified by BEP 15. The legacy protocol parser helper remains
+  IPv4-oriented for callers that use it directly.
 - **Engine policy:** core retains tracker URL resolution through
   `OutboundNetworkPolicy`, binds the socket to the selected address family and
   local source, and maps protocol errors into tracker lifecycle outcomes. UDP
@@ -591,9 +626,12 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol UDP client loopback tests cover transaction
   matching, unexpected-source rejection, malformed/action-mismatched packets,
   retry deadlines, connection-ID expiry, ANNOUNCE, SCRAPE, and rejection of
-  SCRAPE result counts that differ from the requested hash count. Core tests
-  cover source-address/address-family binding and URL-to-policy resolution.
-  External tracker interoperability remains unverified.
+  SCRAPE result counts that differ from the requested hash count. Concurrent
+  response and timeout removal coverage verifies that remaining transaction
+  indices are updated. Parser tests cover IPv4 and IPv6 compact peer strides,
+  including an IPv6 tracker-source response. Core tests cover
+  source-address/address-family binding and URL-to-policy resolution. External
+  tracker interoperability remains unverified.
 
 ## BitTorrent tracker announce cancellation
 
@@ -658,17 +696,20 @@ behavior. An unlisted behavior has not been audited here.
   persistence-age value into the protocol config, process-level peer and
   BEP 44 item-storage
   options through the CLI/C API/config-to-engine path, RPC global-option
-  projection, and the runtime allowlist contract. Protocol tests cover routing
-  snapshot startup and async item-store file restoration. DHT network
-  interoperability under simultaneous tasks with conflicting DHT overrides
-  has not been run.
+  projection, and the runtime allowlist contract. Current focused runs passed
+  59 core DHT tests, 12 protocol peer-storage tests, and 6 CLI/RPC propagation
+  tests. Protocol tests cover routing snapshot startup and async item-store
+  file restoration. DHT network interoperability under simultaneous tasks
+  with conflicting DHT overrides has not been run.
 
 ## BitTorrent DHT BEP 44 item storage
 
 - **Behavior:** inbound `put` requires a valid write token; mutable values also
-  require a valid signature and monotonic sequence. The store rejects bencoded
-  values over 1,000 bytes and mutable salts over 64 bytes. Restored `.items`
-  data enforces those same per-item bounds before accepting entries. Each DHT
+  require a valid signature and monotonic sequence. CAS is checked against an
+  existing value and ignored if no value exists, as BEP 44 specifies. The store
+  rejects bencoded values over 1,000 bytes and mutable salts over 64 bytes.
+  Restored `.items` data enforces those same per-item bounds before accepting
+  entries. Each DHT
   engine retains at most 4,096 targets by default. A valid write at capacity is
   accepted and evicts the oldest-written target; lowering `dht-max-items`
   applies the same eviction immediately. This Rust resource policy may make a
@@ -684,7 +725,31 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol tests cover remote put validation, capacity
   eviction, runtime limit reduction on a running engine, persisted item order,
   round trips, and rejection of restored entries with oversized values or
-  salts. Large-scale network behavior with a saturated store has not been run.
+  salts. Handler regression tests cover malformed `cas`/`seq` types and `nodes`
+  plus `nodes6` output; mutable update coverage checks CAS when no value exists.
+  Large-scale network behavior with a saturated store has not been run.
+
+## BitTorrent DHT routing response node quality
+
+- **Behavior:** local iterative lookups may use unverified restored/discovered
+  nodes as candidates to probe. `find_node`, `get_peers`, BEP 44 `get`, and
+  BEP 51 `sample_infohashes` responses now advertise only recently verified
+  good nodes, as required for routing-table responses by BEP 5. A bucket's
+  replacement cache stores a node ID at most once and will not cache a node
+  that is already active in that bucket. Bucket refresh targets preserve only
+  fixed prefix bits; remaining bits, including the unaligned boundary byte,
+  are randomized. An unverified duplicate cannot replace a verified endpoint,
+  and rejected candidates do not reset the bucket refresh age.
+- **Compatibility impact:** peers no longer receive contacts that this node
+  has not recently verified. Local lookup seeding and persistence restoration
+  continue to retain unverified candidates until they answer a valid query.
+- **Verification:** routing-table tests distinguish lookup candidates from
+  advertisable good nodes and exercise repeated candidate insertion; bucket
+  tests cover non-byte-aligned refresh prefixes and verified-endpoint
+  preservation; handler and loopback tests cover node response construction.
+  External DHT interoperability has not been exercised.
+- **Compatibility reference:** [BEP 5](https://www.bittorrent.org/beps/bep_0005.html)
+  defines routing-table responses in terms of the closest good nodes.
 
 ## BitTorrent peer input error classification
 
@@ -730,6 +795,23 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol token-tracker coverage checks configured intervals
   on both sides of the deadline; engine configuration already maps the option
   into `DhtEngineConfig::token_rotation_interval`.
+
+## BitTorrent DHT announce token binding and secret strength
+
+- **Behavior:** announce tokens are bound to the requesting IP address, info
+  hash, and a process-local random 256-bit secret. A change in the requester's
+  UDP source port does not invalidate a token; a different source IP does.
+  `TokenTracker::with_secret([u8; 4])` remains available for deterministic
+  callers, and `with_secret_bytes([u8; 32])` supports explicit full-width
+  secrets.
+- **Compatibility impact:** this follows BEP 5's IP-based token check and
+  permits NAT/source-port changes between `get_peers` and `announce_peer`.
+  The token remains opaque on the wire, with its existing 40-character
+  representation. Tokens generated before a process restart are invalidated
+  when the process-local secret is regenerated.
+- **Verification:** focused protocol tests cover port changes, IP changes,
+  deterministic secrets, and full-width secrets. Interoperability against an
+  external DHT implementation has not been exercised.
 
 ## BitTorrent DHT bootstrap concurrency
 
@@ -812,12 +894,27 @@ behavior. An unlisted behavior has not been audited here.
   CLI/RPC/C API or wire contract change is intended. The task's configured
   `user-agent` now reaches live WebSeed range requests, with an explicit
   `User-Agent` entry in `header` retaining precedence; standalone WebSeed
-  clients retain the library default.
+  clients retain the library default. Task `header` values and resolved
+  preemptive HTTP Basic credentials now reach live WebSeed requests. Redirects
+  are handled per hop; origin Authorization, Cookie headers supplied through
+  `header`, and conventional sensitive custom headers are stripped permanently
+  after an origin change.
+  Proxy authentication remains attached to the configured proxy route.
+  HTTP/HTTPS/all proxy selection, credentials, and `no-proxy` reach live
+  WebSeed clients through the task's `DownloadOptions`. Cookie-jar integration
+  and HTTP challenge retries are not yet wired into WebSeed requests.
 - **Verification:** protocol loopback tests cover range/header construction,
-  partial and full-content responses, status reporting, and oversized bodies.
-  Existing core WebSeed tests cover source-address selection, URI fallback,
-  timeout/cancellation, statistics, and task integration. Remote WebSeed
-  interoperability remains unverified.
+  partial and full-content responses, status reporting, oversized bodies, and
+  cross-origin removal of Authorization, Cookie, and sensitive custom headers
+  while preserving public tracing headers.
+  A core loopback proxy fixture verifies `all-proxy`, Basic proxy credentials,
+  and outbound source binding with an unresolvable origin hostname. Existing
+  core WebSeed tests cover source-address selection, URI fallback,
+  timeout/cancellation, statistics, and task integration. The local
+  `aria2_original` checkout is unavailable; the upstream aria2 1.37.0 manual
+  defines `all-proxy` as applying to all protocols and `http-proxy` to all HTTP
+  downloads. No original-binary differential or remote WebSeed interoperability
+  run has been performed.
 
 ## SFTP connection and transport options
 
@@ -851,8 +948,9 @@ behavior. An unlisted behavior has not been audited here.
   comma-separated cipher preference (empty means library defaults). These
   settings are per download and do not change the meanings of aria2's generic
   HTTP/FTP `connect-timeout` and `timeout` options.
-- **Propagation:** CLI/configuration values, RPC `addUri` options, and session
-  persistence feed the SFTP protocol connection builder through the shared
+- **Propagation:** CLI/configuration values, RPC `addUri` options, C API
+  global and per-task values, and session persistence feed the SFTP protocol
+  connection builder through the shared
   `DownloadOptions::from_option_strings` parser. Session restoration no longer
   reparses selected SFTP fields with different validation. `changeOption`
   stores changes for reserved downloads and defers them on active downloads
@@ -876,13 +974,17 @@ behavior. An unlisted behavior has not been audited here.
   time out. A separate protocol loopback test confirms the server has entered
   password authentication before stalling, then verifies
   `connect_with_stream` returns `ConnectTimeout` within the configured
-  connection deadline. Standalone SFTP transfer tests pass 17/17, including
-  early-EOF regressions for a truncated remote download and a local upload
-  source that shrinks after its initial size is read; both paths return errors
-  and close the remote handle. The suite also includes a loopback upload that
+  connection deadline. The current focused protocol loopback run passes 12/12,
+  including early-EOF regressions for a truncated remote download and a local
+  upload source that shrinks after its initial size was read; both paths return
+  errors and close the remote handle. The suite also includes a loopback upload that
   reports a pre-existing remote prefix and verifies the
   resumed OPEN omits `TRUNC` and the first WRITE starts at the remote file
-  size. Cancellation coverage also verifies explicit remote CLOSE. Buffer
+  size, an oversized-remote case that restarts with `TRUNC` at offset zero, and
+  rejection of a resume offset beyond the local source. Upload CLOSE failure
+  returns an error; a separate download case verifies that CLOSE failure after
+  the full payload is received remains a cleanup warning and preserves the
+  completed file. Cancellation coverage also verifies explicit remote CLOSE. Buffer
   bounds are checked at use time even when callers directly assign the public
   `TransferOptions::buffer_size` field. SFTP INIT advertises v3, and the
   implementation now accepts only the negotiated v3 wire format. Each packet
@@ -920,12 +1022,21 @@ behavior. An unlisted behavior has not been audited here.
   configuration errors; transport connect failures remain retryable. This
   strengthens the prior implementation, which accepted every key without
   checking or recording it.
-- **Verification:** protocol tests cover unknown-key rejection, first-use
+- **Credential diagnostics:** SFTP command-creation logs omit the input URI,
+  which can contain a password. `SshOptions` debug output redacts the username,
+  password, and private-key passphrase; `SshConnection` debug output omits the
+  username. This changes diagnostics only.
+- **Verification:** CLI, RPC global/task, and C API global/task tests confirm
+  `ssh-host-key-md` reaches each created download's `DownloadOptions`;
+  protocol tests cover unknown-key rejection, first-use
   recording, known-key acceptance, and changed-key rejection. End-to-end
   loopback tests use the local mock SFTP server; focused tests verify host-key
-  rejection is terminal even when retries are unlimited. The latest full SFTP
-  download run passed 21/21 tests, including authentication, fingerprint
-  checks, cancellation, resume, and transfer lifecycle. No public remote SFTP
+  rejection is terminal even when retries are unlimited. The latest focused
+  SFTP run passed 33/33 core tests and 23/23 standalone protocol transfer
+  tests; protocol SSH option tests cover secret redaction. These include
+  authentication, fingerprint checks, cancellation, resume,
+  and transfer lifecycle. The full `aria2-protocol` all-features library suite
+  passed 1320 tests with 2 ignored. No public remote SFTP
   server interoperability run has been performed. SSH trust behavior is not
   claimed compatible with original aria2 beyond explicit fingerprint checks.
 - **Malformed packet handling:** length-prefixed fields are collected from
@@ -1108,7 +1219,13 @@ behavior. An unlisted behavior has not been audited here.
   adapter does not parse the same XML again for every resource group. Restored
   groups reconstruct the parsed file from persisted source XML and file index.
   Commands retain parsed execution data; request groups retain source bytes for
-  session reconstruction.
+  session reconstruction. `aria2-protocol::metalink::checksum_verifier` remains
+  a standalone synchronous file-checksum API; engine execution instead uses
+  core's shared asynchronous checksum service and Metalink piece verifier.
+- **Policy:** Core's `engine::metalink` applies task-level file and resource
+  selection, source ordering, retry, mirror failover, and staged-file
+  publication. Protocol code supplies parsing, metadata, and ordering
+  primitives; it does not decide the engine's retry or task lifecycle policy.
 - **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
   BitTorrent metaurls use the same parser output as before. Parsing errors are
   still surfaced by command construction, before task execution.

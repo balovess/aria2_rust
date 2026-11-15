@@ -11,9 +11,10 @@ use tracing::{debug, warn};
 use super::client::WebSeedClient;
 use super::stats::WebSeedStats;
 use super::uri_state::{UriProbeAdmission, WebSeedUriState};
+use crate::engine::http::auth;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
-use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::request::request_group::{AtomicProgress, HttpProxyOptions, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Manages multiple web-seed endpoints with automatic fallback.
@@ -33,7 +34,11 @@ pub struct WebSeedManager {
     /// become visible without rebuilding the piece session.
     live_group: Option<Arc<std::sync::RwLock<RequestGroup>>>,
     tls: ClientTlsConfig,
+    proxy_options: HttpProxyOptions,
     user_agent: String,
+    request_headers: Vec<(String, String)>,
+    auth_factory: Arc<std::sync::Mutex<crate::http::AuthConfigFactory>>,
+    auth_options: crate::http::AuthResolveOptions,
     request_timeout: Duration,
     connect_timeout: Duration,
     network_policy: Option<Arc<OutboundNetworkPolicy>>,
@@ -103,7 +108,11 @@ impl WebSeedManager {
             total_length,
             live_group: None,
             tls: tls.clone(),
+            proxy_options: HttpProxyOptions::default(),
             user_agent: crate::constants::USER_AGENT.to_string(),
+            request_headers: Vec::new(),
+            auth_factory: Arc::new(std::sync::Mutex::new(crate::http::AuthConfigFactory::new())),
+            auth_options: crate::http::AuthResolveOptions::default(),
             request_timeout,
             connect_timeout,
             network_policy: None,
@@ -122,7 +131,15 @@ impl WebSeedManager {
         tls: ClientTlsConfig,
         policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
-        let (request_timeout, connect_timeout, user_agent) = {
+        let (
+            request_timeout,
+            connect_timeout,
+            user_agent,
+            request_headers,
+            proxy_options,
+            auth_options,
+            auth_factory,
+        ) = {
             let group = group.recover();
             let options = group.options();
             (
@@ -140,6 +157,10 @@ impl WebSeedManager {
                     .http_user_agent()
                     .unwrap_or(crate::constants::USER_AGENT)
                     .to_string(),
+                options.parsed_headers(),
+                options.http_proxy_options(),
+                auth::auth_options_from_download_options(options, "http"),
+                Arc::new(std::sync::Mutex::new(auth::factory_from_options(options))),
             )
         };
         Self {
@@ -149,7 +170,11 @@ impl WebSeedManager {
             total_length,
             live_group: Some(group),
             tls,
+            proxy_options,
             user_agent,
+            request_headers,
+            auth_factory,
+            auth_options,
             request_timeout,
             connect_timeout,
             network_policy: Some(policy),

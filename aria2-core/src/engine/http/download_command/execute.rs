@@ -340,98 +340,11 @@ impl DownloadCommand {
         self.update_tail_reclaim_progress();
 
         let download_result: Result<()> = async {
-            // --check-integrity: when the download context carries piece
-            // hashes (e.g. Metalink), verify the existing file chunk-by-chunk
-            // before allocating/downloading (mirrors C++ CheckIntegrityMan +
-            // CheckIntegrityCommand). No-op when there is nothing to validate.
-            if self.check_integrity && total_length > 0 {
-                use crate::checksum::check_integrity::{
-                    man as ci_man, IntegrityTrailingGarbageAction,
-                };
-                IntegrityTrailingGarbageAction::single_file(
-                    self.output_path.clone(),
-                    total_length,
-                )
-                .apply()
-                .await?;
-                use crate::checksum::message_digest::HashType;
-                // Extract owned data first so the RwLock guard is dropped
-                // before any await (guard is not Send).
-                let piece_info = self
-                    .group
-                    .recover()
-                    .get_download_context()
-                    .map(|ctx| {
-                        (
-                            ctx.get_piece_hashes()
-                                .iter()
-                                .map(|hash| hash.to_string())
-                                .collect(),
-                            ctx.get_piece_length() as u64,
-                            ctx.get_piece_hash_type().to_string(),
-                        )
-                    });
-                if let Some((hashes, piece_len, hash_type)) = piece_info {
-                    let algo = if hash_type.is_empty() {
-                        // Empty piece-hash metadata is the legacy SHA-1
-                        // default used by BitTorrent-style contexts.
-                        HashType::Sha1
-                    } else {
-                        HashType::from_str(&hash_type).ok_or_else(|| {
-                            Aria2Error::Parse(format!(
-                                "unknown piece hash algorithm: {hash_type}"
-                            ))
-                        })?
-                    };
-                    if let Some(task) = ci_man::file_task(
-                        &self.output_path,
-                        piece_len.max(1),
-                        total_length,
-                        hashes,
-                        algo,
-                    )? {
-                        let gid = self.group.recover().gid().value();
-                        info!(gid, "Checking integrity of existing data against piece hashes");
-                        let outcome = ci_man::enqueue_with_outcome_for_group(
-                            &ci_man::shared(),
-                            Arc::clone(&self.group),
-                            task,
-                        )
-                        .await?;
-                        let ok = outcome.verified;
-                        if !ok {
-                            warn!(
-                                gid,
-                                "Integrity check failed; discarding resume state and re-downloading"
-                            );
-                            // C++ StreamCheckIntegrityEntry::onDownloadIncomplete()
-                            // sends the request back through allocation/download rather
-                            // than terminating the request. Do not reuse offsets derived
-                            // from data that failed validation.
-                            resume_state.should_resume = false;
-                            resume_state.start_offset = 0;
-                            resume_state.is_complete = false;
-                        } else {
-                            info!(gid, "Integrity check passed");
-                            // A successful pre-download integrity check proves
-                            // the complete existing file is already usable. Do
-                            // not issue a range request at EOF or reallocate it.
-                            if resume_state.existing_length >= total_length {
-                                self.completed_bytes = total_length;
-                                resume_state.start_offset = total_length;
-                                resume_state.is_complete = true;
-                                {
-                                    let mut group = self.group.recover_mut();
-                                    group.set_completed_length(total_length);
-                                    group.complete()?;
-                                }
-                                self.completed = true;
-                                self.release_output_path().await;
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
+            if self
+                .verify_existing_integrity(total_length, &mut resume_state)
+                .await?
+            {
+                return Ok(());
             }
 
             let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);

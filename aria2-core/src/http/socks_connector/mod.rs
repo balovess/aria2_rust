@@ -2,6 +2,7 @@
 mod tests;
 
 pub use aria2_protocol::http::proxy::NoProxyMatcher;
+pub use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 pub use aria2_protocol::socks::{
-    ProxyProtocol, ProxyUrl, Socks4Connector, Socks5Connector, SocksConnector, SocksConnectorEnum,
+    Socks4Connector, Socks5Connector, SocksConnector, SocksConnectorEnum,
 };

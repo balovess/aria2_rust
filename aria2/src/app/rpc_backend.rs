@@ -358,13 +358,29 @@ mod tests {
             )
             .await
             .expect("global all-proxy option should be accepted");
+        config
+            .write()
+            .await
+            .set_global_option(
+                "no-proxy",
+                aria2_core::config::OptionValue::List(vec![
+                    "first.example".into(),
+                    "second.example".into(),
+                ]),
+            )
+            .await
+            .expect("global no-proxy option should be accepted");
         let (global_options, _) = backend
             .merged_task_options(HashMap::new())
             .await
-            .expect("global all-proxy should reach DownloadOptions");
+            .expect("global proxy options should reach DownloadOptions");
         assert_eq!(
             global_options.all_proxy.as_deref(),
             Some("socks5://global-proxy.invalid:1080")
+        );
+        assert_eq!(
+            global_options.no_proxy.as_deref(),
+            Some("first.example\nsecond.example")
         );
 
         let (task_options, _) = backend
@@ -377,6 +393,18 @@ mod tests {
         assert_eq!(
             task_options.all_proxy.as_deref(),
             Some("socks4://task-proxy.invalid:1080")
+        );
+
+        let (task_options, _) = backend
+            .merged_task_options(HashMap::from([(
+                "no-proxy".to_string(),
+                serde_json::Value::String("task-first.example\ntask-second.example".to_string()),
+            )]))
+            .await
+            .expect("per-task no-proxy list should reach DownloadOptions");
+        assert_eq!(
+            task_options.no_proxy.as_deref(),
+            Some("task-first.example\ntask-second.example")
         );
     }
 
@@ -416,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sftp_transport_options_flow_from_global_and_task_rpc_options() {
+    async fn sftp_connection_options_flow_from_global_and_task_rpc_options() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
         let (sender, _receiver) = aria2_core::engine::engine_command::channel();
         let backend = CoreRpcBackend::new(
@@ -429,6 +457,10 @@ mod tests {
 
         backend
             .change_global_option(HashMap::from([
+                (
+                    "ssh-host-key-md".to_string(),
+                    serde_json::json!("sha-1=global-fingerprint"),
+                ),
                 ("sftp-connect-timeout".to_string(), serde_json::json!(41)),
                 ("sftp-read-timeout".to_string(), serde_json::json!(73)),
                 ("sftp-compression".to_string(), serde_json::json!(true)),
@@ -445,6 +477,10 @@ mod tests {
             .await
             .expect("global SFTP options should reach download options");
         assert_eq!(global.sftp_connect_timeout, Some(41));
+        assert_eq!(
+            global.ssh_host_key_md.as_deref(),
+            Some("sha-1=global-fingerprint")
+        );
         assert_eq!(global.sftp_read_timeout, Some(73));
         assert!(global.sftp_compression);
         assert_eq!(global.sftp_keepalive_interval, Some(0));
@@ -458,6 +494,10 @@ mod tests {
 
         let (task, _) = backend
             .merged_task_options(HashMap::from([
+                (
+                    "ssh-host-key-md".to_string(),
+                    serde_json::json!("md5=task-fingerprint"),
+                ),
                 ("sftp-connect-timeout".to_string(), serde_json::json!(19)),
                 ("sftp-compression".to_string(), serde_json::json!(false)),
                 (
@@ -468,6 +508,10 @@ mod tests {
             .await
             .expect("per-task SFTP options should override global values");
         assert_eq!(task.sftp_connect_timeout, Some(19));
+        assert_eq!(
+            task.ssh_host_key_md.as_deref(),
+            Some("md5=task-fingerprint")
+        );
         assert_eq!(task.sftp_read_timeout, Some(73));
         assert!(!task.sftp_compression);
         assert_eq!(task.sftp_keepalive_interval, Some(0));

@@ -143,6 +143,23 @@ fn test_parse_announce_with_peers() {
 }
 
 #[test]
+fn announce_parser_decodes_ipv6_peers_for_ipv6_tracker_source() {
+    let mut data = vec![0u8; 20];
+    data[0..4].copy_from_slice(&(UdpAction::Announce as i32).to_be_bytes());
+    data[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
+    data.extend_from_slice(&[
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1a, 0xe1,
+    ]);
+
+    let response = parse_announce_response_for_ip(&data, "2001:db8::1".parse().unwrap()).unwrap();
+    assert_eq!(response.peers, vec![("2001:db8::1".into(), 6881)]);
+    assert!(
+        parse_announce_response_for_ip(&data[..data.len() - 1], "2001:db8::1".parse().unwrap())
+            .is_err()
+    );
+}
+
+#[test]
 fn test_parse_announce_empty_peers() {
     let mut data = vec![0u8; 20];
     data[0..4].copy_from_slice(&1i32.to_be_bytes());

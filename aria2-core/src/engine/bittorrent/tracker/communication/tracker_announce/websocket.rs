@@ -27,6 +27,8 @@ impl TrackerAnnouncer {
                 numwant: self.announce.numwant(),
                 port: self.announce.tcp_port(),
                 event,
+                request_timeout: Duration::from_secs(self.tracker_timeout_secs),
+                connect_timeout: Duration::from_secs(self.tracker_connect_timeout_secs),
                 options: &self.websocket_options,
             },
             &self.outbound_network_policy,
