@@ -9,6 +9,14 @@ pub enum HttpBodyCoding {
     Bzip2,
 }
 
+/// Whether a Transfer-Encoding value is the supported `chunked` coding.
+///
+/// The current body decoder supports one coding only. Keep classification here
+/// so response orchestration and decoder selection apply the same token rules.
+pub fn is_supported_chunked_transfer_encoding(transfer_encoding: Option<&str>) -> bool {
+    transfer_encoding.is_some_and(|value| value.trim().eq_ignore_ascii_case("chunked"))
+}
+
 /// Selects body decoders in wire order: transfer coding first, then content
 /// codings in the order declared by the response.
 pub fn select_http_body_codings(
@@ -18,7 +26,7 @@ pub fn select_http_body_codings(
     let mut codings = Vec::new();
 
     if let Some(transfer_encoding) = transfer_encoding {
-        if !transfer_encoding.trim().eq_ignore_ascii_case("chunked") {
+        if !is_supported_chunked_transfer_encoding(Some(transfer_encoding)) {
             return Err(HttpStreamFilterError::Protocol(format!(
                 "Transfer-Encoding not supported: {transfer_encoding}"
             )));
@@ -77,6 +85,19 @@ mod tests {
                 HttpBodyCoding::Deflate,
             ]
         );
+    }
+
+    #[test]
+    fn chunked_classification_matches_supported_transfer_coding() {
+        assert!(is_supported_chunked_transfer_encoding(Some("chunked")));
+        assert!(is_supported_chunked_transfer_encoding(Some(" Chunked\t")));
+        for value in ["xchunked", "chunked-extra", "gzip, chunked", "gzip"] {
+            assert!(
+                !is_supported_chunked_transfer_encoding(Some(value)),
+                "unsupported transfer coding must not be classified as chunked: {value}"
+            );
+        }
+        assert!(!is_supported_chunked_transfer_encoding(None));
     }
 
     #[test]

@@ -132,6 +132,11 @@ The following catalog covers all canonical names registered by the current `Opti
 
 Options currently marked as unsupported compatibility entries are: `enable-async-dns6`, `event-poll`, `optimize-concurrent-downloads`, `optimize-concurrent-downloads-coeffA`, `optimize-concurrent-downloads-coeffB`, `rlimit-nofile`, `select-least-used-host`, `socket-recv-buffer-size`, `dscp`, and `max-http-pipelining`. These names may appear in compatible configuration files, but users should not rely on them to provide the corresponding feature.
 
+The SSH/SFTP options (`ssh-host-key-md` and the five `sftp-*` options below)
+are registered in every build, but are usable only when the `sftp` build
+feature is enabled. In builds without it, config-file entries are warned about
+and ignored; explicit CLI or per-task values are rejected.
+
 ### General: basic, session, UI, and logging
 
 | Options | Description |
@@ -179,7 +184,12 @@ Options currently marked as unsupported compatibility entries are: `enable-async
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS verification, CA, client certificate/key, and minimum TLS version |
 | `allow-overwrite`, `auto-file-renaming`, `continue`, `remote-time` | Overwrite, automatic renaming, resume, and remote timestamps |
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP connection, pipelining, compression, authentication, and response behavior |
-| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type`, `ssh-host-key-md` | FTP passive mode, connection reuse, transfer type, and SSH host-key digest |
+| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type` | FTP passive mode, connection reuse, and transfer type |
+| `ssh-host-key-md` | Expected SSH host-key fingerprint for SFTP |
+| `sftp-connect-timeout`, `sftp-read-timeout` | SFTP connection setup and protocol I/O timeouts in seconds (1..600; defaults 15 and 30) |
+| `sftp-compression` | Enable SSH compression for SFTP (default `false`) |
+| `sftp-keepalive-interval` | SSH keepalive interval in seconds (0..600; default 60; 0 disables keepalives) |
+| `sftp-preferred-ciphers` | Ordered comma-separated SSH cipher preference; empty uses library defaults |
 
 For HTTP downloads, `split` is the task-wide segment budget and has no fixed
 registry maximum. Its effective value is bounded by the payload,

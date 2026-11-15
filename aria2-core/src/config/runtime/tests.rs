@@ -164,6 +164,7 @@ fn task_policy_matches_runtime_changeability_axes() {
         is_option_changeable("min-http-range-size", false),
         ChangeableKind::Immediate
     );
+    #[cfg(feature = "sftp")]
     for option in [
         "sftp-connect-timeout",
         "sftp-read-timeout",
@@ -180,6 +181,25 @@ fn task_policy_matches_runtime_changeability_axes() {
             is_option_changeable(option, false),
             ChangeableKind::Immediate,
             "{option} should apply immediately to a reserved download"
+        );
+    }
+    #[cfg(not(feature = "sftp"))]
+    for option in [
+        "ssh-host-key-md",
+        "sftp-connect-timeout",
+        "sftp-read-timeout",
+        "sftp-compression",
+        "sftp-keepalive-interval",
+        "sftp-preferred-ciphers",
+    ] {
+        assert!(
+            !is_option_available(option),
+            "{option} requires SFTP support"
+        );
+        assert_eq!(
+            is_option_changeable(option, true),
+            ChangeableKind::NotChangeable,
+            "{option} must not be mutable when SFTP is unavailable"
         );
     }
     #[cfg(feature = "bittorrent")]

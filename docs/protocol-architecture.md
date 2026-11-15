@@ -317,6 +317,26 @@ Moving this loop into `SftpTransfer` would make protocol code own core output
 and checkpoint policy; adding another protocol wrapper around the existing
 file-operation interface would only forward calls.
 
+**Keep** SFTP option definitions and source-precedence policy in core, where
+CLI/config, RPC, C API, and session restoration converge. **Narrow** their
+registration into `config::option_definitions::sftp`; the definitions keep
+their existing public option names and `http/ftp` help category, while defaults
+come from protocol-owned constants. `SftpDownloadCommand::build_ssh_options`
+is the single conversion from normalized `DownloadOptions` into protocol
+`SshOptions`. The definitions remain registered in every build for consistent
+diagnostics, but their supported flag and runtime-option availability follow
+the core `sftp` feature. A build without SFTP rejects explicit CLI/config and
+task-option values; global runtime-change adapters ignore them under the
+existing non-changeable-option contract and do not store or dispatch them.
+
+**Keep** BitTorrent option definitions in core because they configure engine
+policy and are consumed by CLI/config, RPC, C API, and session boundaries.
+**Narrow** the registry implementation: `register_bt_options` remains the
+single feature-gated entry point and delegates tracker, DHT, and peer-network
+definitions to private child modules. These are registry organization seams;
+the external option names, values, categories, and registration availability
+remain unchanged.
+
 `aria2-protocol::sftp::transfer::SftpTransfer` remains a public standalone
 transfer interface. It adds local-file I/O, configurable buffering, resume,
 progress callbacks, and optional source permission and timestamp preservation
@@ -521,9 +541,12 @@ family-specific bind address before creating the protocol engine. Under a
 constrained policy, it skips a family with no compatible source and rejects a
 conflicting explicit DHT listen address; only direct routing may use a wildcard
 bind. The protocol engine owns the bound UDP socket and all subsequent DHT
-traffic. DHT engine settings are startup configuration; they are not accepted
-by `changeGlobalOption` or task `changeOption`, matching the original aria2
-runtime option contract.
+traffic. Listener, bootstrap, persistence, and timing settings configure the
+shared engine at startup and are excluded from both runtime option allowlists.
+The Rust resource limits `dht-max-peer-info-hashes`,
+`dht-max-peers-per-info-hash`, and `dht-max-items` are process-owned extensions:
+`changeGlobalOption` updates running storage and future engine configuration;
+task `changeOption` cannot override them.
 
 `DhtEngineContext` stores one `DhtTaskContext` for the effective local node ID,
 routing table, UDP socket, transaction tracker, and query timeout used at
@@ -887,7 +910,10 @@ Do not add pass-through engine clients around these public interfaces.
   GZip, Deflate, and BZip2 decoding into
   `aria2-protocol::http::stream_filter`. Core keeps its public decoder types,
   selector, and `StreamFilter` interface as compatibility adapters; response
-  lifecycle, filter-chain execution, and the null sink remain in core.
+  lifecycle, filter-chain execution, and the null sink remain in core. The
+  protocol selector also owns the supported `Transfer-Encoding: chunked`
+  classifier used by both the core response processor and Linux splice path,
+  preventing wire-token checks from diverging across download paths.
 - **Narrow** rustls `ring` provider initialization inside `aria2-protocol` to
   one private helper shared by its HTTP client, FTPS connector, WebSocket
   tracker, and tracker-list test transport. Core keeps a separate initializer
@@ -1092,13 +1118,16 @@ Do not add pass-through engine clients around these public interfaces.
   `PeerState`, `PeerSessionResource`, and torrent-geometry/capability message
   validation. Core owns actor lifecycle, peer identity and statistics, peer
   selection/admission, upload policy, piece scheduling, and bad-peer feedback.
-- **Keep** `PeerWireSession` as the shared protocol owner of peer handshakes
-  and length-prefixed message framing over an injected ordered byte transport.
-  It preserves bytes received beyond the handshake, checks outgoing info-hash
+- **Keep** `PeerWireSession` as the protocol-owned handshake and framing
+  session for injected ordered byte transports; the core uTP peer adapter uses
+  it to carry BitTorrent handshake state over actor-managed connections. It
+  preserves bytes received beyond the handshake, checks outgoing info-hash
   matches, and enforces the maximum message size before waiting for a body.
-  Core TCP/uTP adapters supply transport lifecycle and network policy; session
-  tests cover handshake buffering, hybrid response hashes, and oversized
-  frames.
+  TCP `PeerConnection` retains its plain/MSE handshake and TCP-specific state,
+  while sharing `PeerFrameDecoder` and the message parser with
+  `PeerWireSession`. This keeps TCP encryption and socket behavior together
+  without duplicating frame decoding. Session tests cover handshake buffering,
+  hybrid response hashes, and oversized frames.
 - **Keep** `peer::incoming::IncomingHandshake` as the TCP plain/MSE handshake
   seam before torrent routing. MSE exposes the info-hash only after matching
   the obfuscated hash against registered routes; the selected route supplies
@@ -1334,6 +1363,10 @@ Do not add pass-through engine clients around these public interfaces.
   aliases to canonical names before runtime availability/changeability checks
   and before projecting engine commands, so aliases cannot be silently
   filtered or bypass feature gating.
+- **Narrow** `OptionRegistry` ownership metadata into the private
+  `config::option::owner` module. Keep the public `OptionRegistry::owner_for_name`
+  API and registration-time exhaustive-owner invariant unchanged; the map
+  remains independent of option categories and feature-dependent registration.
 - **Narrow** session option serialization by option domain (basic,
   integrity/Metalink, BitTorrent, network, and lifecycle). Keep the public
   `download_options_to_map` boundary as the single coordinator and retain the
@@ -1373,6 +1406,13 @@ Do not add pass-through engine clients around these public interfaces.
   a request-group atomic signal to existing peer connections; core applies
   that live task policy at PEX receive, admission, and send boundaries, while
   the immutable private-torrent rule remains a separate gate.
+- **Keep** `request::request_group::DownloadResult` as the owned terminal
+  snapshot shared by stopped-result storage, RPC, the C API, and session
+  persistence. `RequestGroup::create_download_result` coordinates the
+  snapshot; `DownloadResult::fill_from_group` projects output paths, file/URI
+  state, transfer counters, and optional BitTorrent metadata. Live status stays
+  on the active-group path. Keep the external result shape and move its tests
+  to an adjacent module so the production projection remains focused.
 - **Keep** `aria2-core::dns::DnsCache` resolver fallback policy: an explicit
   `async-dns-server` list replaces system DNS servers, and lookup failure is
   reported and negative-cached without consulting the OS resolver. Hickory to

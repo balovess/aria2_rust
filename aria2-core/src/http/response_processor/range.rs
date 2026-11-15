@@ -5,7 +5,7 @@
 //! and chunked transfer-encoding detection.
 
 use crate::http::header_processor::HttpResponseHead;
-use aria2_protocol::http::ContentRange;
+use aria2_protocol::http::{ContentRange, stream_filter::is_supported_chunked_transfer_encoding};
 
 /// Validate that the server's Content-Range satisfies the requested range.
 ///
@@ -91,10 +91,7 @@ pub(crate) fn compute_entity_length(response_head: &HttpResponseHead) -> u64 {
 
 /// Check if Transfer-Encoding is chunked.
 pub(crate) fn is_chunked_transfer_encoding(response_head: &HttpResponseHead) -> bool {
-    match response_head.header("transfer-encoding") {
-        Some(te) => te.to_lowercase().contains("chunked"),
-        None => false,
-    }
+    is_supported_chunked_transfer_encoding(response_head.header("transfer-encoding"))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +178,14 @@ mod tests {
     fn test_chunked_transfer_encoding() {
         let head = parse_head(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
         assert!(is_chunked_transfer_encoding(&head));
+
+        for value in ["xchunked", "chunked-extra", "gzip, chunked"] {
+            let header = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: {value}\r\n\r\n");
+            assert!(
+                !is_chunked_transfer_encoding(&parse_head(header.as_bytes())),
+                "unsupported transfer coding must not be classified as chunked: {value}"
+            );
+        }
 
         let head = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
         assert!(!is_chunked_transfer_encoding(&head));

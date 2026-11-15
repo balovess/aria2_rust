@@ -43,10 +43,11 @@ pub(crate) fn parse_status_code(header_str: &str) -> io::Result<u16> {
 /// Case-insensitive header name and value matching.
 #[cfg(target_os = "linux")]
 pub(crate) fn is_chunked(header_str: &str) -> bool {
-    parse_header(header_str)
-        .ok()
-        .and_then(|head| head.header("transfer-encoding").map(str::to_owned))
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("chunked"))
+    parse_header(header_str).ok().is_some_and(|head| {
+        aria2_protocol::http::stream_filter::is_supported_chunked_transfer_encoding(
+            head.header("transfer-encoding"),
+        )
+    })
 }
 
 /// Parse the `Content-Length` header value.

@@ -10,7 +10,7 @@ Each platform provides four binary packages:
 
 | Suffix | Contents | Recommended for |
 | --- | --- | --- |
-| `-minimal` | Base build without TUI | Servers, scripts, and low-dependency deployments |
+| `-minimal` | HTTP/FTP + RPC, without BitTorrent or TUI | Servers, scripts, and low-dependency deployments |
 | `-standard` | HTTP/FTP + BitTorrent + RPC, without TUI | General downloads and remote control |
 | `-tui` | Local TUI, RPC TUI, and localized resources | Interactive terminal users |
 | `-full` | standard + Metalink + SFTP + TUI | Users needing all protocol features |

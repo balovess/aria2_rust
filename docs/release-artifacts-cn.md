@@ -10,7 +10,7 @@ English: [`release-artifacts-en.md`](release-artifacts-en.md)
 
 | 后缀 | 内容 | 适合用户 |
 | --- | --- | --- |
-| `-minimal` | 不含 TUI 的基础构建 | 服务器、脚本、低依赖部署 |
+| `-minimal` | HTTP/FTP + RPC，不含 BitTorrent 和 TUI | 服务器、脚本、低依赖部署 |
 | `-standard` | HTTP/FTP + BitTorrent + RPC，不含 TUI | 常规下载和远程控制 |
 | `-tui` | 包含本地 TUI、RPC TUI 和多语言资源 | 交互式终端用户 |
 | `-full` | standard + Metalink + SFTP + TUI | 需要完整协议支持的用户 |

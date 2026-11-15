@@ -37,6 +37,39 @@ async fn dht_process_options_are_ignored_by_global_runtime_changes() {
     assert!(receiver.try_recv().is_err());
 }
 
+#[cfg(not(feature = "sftp"))]
+#[tokio::test]
+async fn sftp_options_are_ignored_by_global_runtime_changes_without_feature() {
+    let config = Arc::new(RwLock::new(ConfigManager::new()));
+    let (sender, mut receiver) = channel();
+    let backend = CoreRpcBackend::new(
+        Arc::new(RequestGroupMan::new()),
+        sender,
+        Arc::clone(&config),
+        None,
+        "test",
+    );
+
+    backend
+        .change_global_option(HashMap::from([(
+            "sftp-connect-timeout".to_string(),
+            serde_json::json!(41),
+        )]))
+        .await
+        .expect("unsupported global runtime changes should be ignored");
+
+    assert_eq!(
+        config
+            .read()
+            .await
+            .get_global_i64("sftp-connect-timeout")
+            .await,
+        None,
+        "SFTP options must not be stored without an SFTP consumer"
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
 #[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn global_dht_storage_limits_update_config_and_engine() {

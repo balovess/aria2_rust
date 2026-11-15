@@ -798,11 +798,13 @@ behavior. An unlisted behavior has not been audited here.
   persistence-age value into the protocol config, process-level peer and
   BEP 44 item-storage
   options through the CLI/C API/config-to-engine path, RPC global-option
-  projection, and the runtime allowlist contract. Current focused runs passed
-  59 core DHT tests, 12 protocol peer-storage tests, and 6 CLI/RPC propagation
-  tests. Protocol tests cover routing snapshot startup and async item-store
-  file restoration. DHT network interoperability under simultaneous tasks
-  with conflicting DHT overrides has not been run.
+  projection, and the runtime allowlist contract. In the latest focused pass,
+  55 core tests matching the `dht_` filter, 12 protocol peer-storage tests,
+  and 6 CLI/RPC DHT tests passed. The magnet handoff persistence regression
+  uses a workspace-local temporary directory so its file assertion works in
+  restricted Windows test environments. Protocol tests cover routing snapshot
+  startup and async item-store file restoration. DHT network interoperability
+  under simultaneous tasks with conflicting DHT overrides has not been run.
 
 ## BitTorrent DHT BEP 44 item storage
 
@@ -829,7 +831,10 @@ behavior. An unlisted behavior has not been audited here.
   round trips, and rejection of restored entries with oversized values or
   salts. Handler regression tests cover malformed `cas`/`seq` types and `nodes`
   plus `nodes6` output; mutable update coverage checks CAS when no value exists.
-  Large-scale network behavior with a saturated store has not been run.
+  A deterministic store-pressure test fills the default 4,096-target capacity,
+  refreshes an existing item, then inserts a new target and verifies bounded
+  size and oldest-target eviction. Large-scale network behavior with a
+  saturated store has not been run.
 
 ## BitTorrent DHT routing response node quality
 
@@ -1073,6 +1078,13 @@ behavior. An unlisted behavior has not been audited here.
   `OptionValue`s to the newline-separated string form accepted by the shared
   registry before merging them with per-task RPC options. This keeps global
   list settings such as `sftp-preferred-ciphers` valid through task creation.
+- **Feature availability:** the six SSH/SFTP-specific options remain in the
+  core registry for stable diagnostics, but are marked unsupported when the
+  `sftp` feature is absent. CLI/config parsing and task-option classification
+  use the same feature gate. As with other non-changeable global options, RPC
+  and C API global runtime changes ignore these names without storing values or
+  dispatching engine commands. This corrects the former behavior where those
+  settings were accepted by SFTP-disabled builds.
 - **Verification:** focused CLI, RPC option validation, C API global and
   task-option propagation, protocol option construction, and session restore
   tests cover the path, including global/task RPC overrides for all SFTP
@@ -1585,15 +1597,23 @@ behavior. An unlisted behavior has not been audited here.
   formats, streaming state, and decoder error categories are preserved.
   Response filter-chain execution and null-sink behavior remain in core.
   `bzip2-rs` is now a protocol dependency rather than a core dependency.
+- The protocol crate owns the supported `Transfer-Encoding: chunked`
+  classifier, shared by the core response processor and Linux splice path.
+  This removes a core substring check that treated values such as `xchunked`
+  as chunked. Unsupported transfer codings still fail in body-decoder
+  selection; the classifier now reports only the exact supported coding.
 - **Legacy buffered interface:** `aria2_protocol::http::encoding::{HttpEncoding,
   ChunkedDecoder}` remains available. It has no in-repository production
   callers and retains its independent whole-buffer acceptance and error
   behavior; this compatibility surface is not routed through the incremental
   decoders.
-- **Verification:** all 31 focused core stream-filter tests passed, including
+- **Verification:** the current focused core stream-filter run passed 40/40,
+  including
   chunk extensions, split input, strict chunk terminators, tolerated bare LF,
-  early EOF, and HTTP response decoding. All 29 protocol stream-filter tests
-  passed, covering each decoder, header selection, and magic-byte detection.
+  early EOF, and HTTP response decoding. All 30 protocol stream-filter tests
+  passed, covering each decoder, shared chunked classification, header
+  selection, and magic-byte detection. Core Content-Range and chunked response
+  classification tests passed 10/10.
   Protocol and core clippy with BitTorrent enabled and core clippy with
   BitTorrent, Metalink, and SFTP enabled passed with warnings denied.
 

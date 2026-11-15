@@ -202,6 +202,11 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
 /// without BitTorrent must not expose those names as usable runtime options.
 pub fn is_option_available(option_name: &str) -> bool {
     let option_name = crate::config::OptionRegistry::canonical_name(option_name);
+    #[cfg(not(feature = "sftp"))]
+    if is_sftp_option(option_name) {
+        return false;
+    }
+
     #[cfg(feature = "bittorrent")]
     {
         let _ = option_name;
@@ -212,6 +217,11 @@ pub fn is_option_available(option_name: &str) -> bool {
     {
         !is_bittorrent_option(option_name)
     }
+}
+
+#[cfg(not(feature = "sftp"))]
+fn is_sftp_option(option_name: &str) -> bool {
+    option_name == "ssh-host-key-md" || option_name.starts_with("sftp-")
 }
 
 #[cfg(not(feature = "bittorrent"))]

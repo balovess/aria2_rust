@@ -541,6 +541,7 @@ mod tests {
         assert!(task.ftp_reuse_connection);
     }
 
+    #[cfg(feature = "sftp")]
     #[tokio::test]
     async fn sftp_connection_options_flow_from_global_and_task_rpc_options() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));

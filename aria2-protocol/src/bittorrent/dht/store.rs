@@ -410,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn default_capacity_accepts_new_items_and_evicts_oldest_after_refresh() {
+        let store = DhtItemStore::default();
+        let capacity = DEFAULT_MAX_ITEMS;
+        let mut targets = Vec::with_capacity(capacity + 1);
+        for value in 0..capacity {
+            targets.push(
+                store
+                    .put_immutable(BencodeValue::Int(value as i64))
+                    .expect("valid immutable items should be accepted at capacity"),
+            );
+        }
+
+        assert_eq!(store.len(), capacity);
+        let refreshed = store
+            .put_immutable(BencodeValue::Int(0))
+            .expect("updating an existing target should succeed at capacity");
+        assert_eq!(refreshed, targets[0]);
+
+        let newest = store
+            .put_immutable(BencodeValue::Int(capacity as i64))
+            .expect("a new target should replace the oldest retained target");
+
+        assert_eq!(store.len(), capacity);
+        assert!(store.get(&targets[0]).is_some());
+        assert!(store.get(&targets[1]).is_none());
+        assert!(store.get(&newest).is_some());
+    }
+
+    #[test]
     fn store_roundtrips_immutable_and_mutable_items() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
         let store = DhtItemStore::default();

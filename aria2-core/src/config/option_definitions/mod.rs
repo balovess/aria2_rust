@@ -33,43 +33,4 @@ mod bittorrent;
 mod general;
 mod http_ftp;
 mod rpc;
-
-/// Extension trait that adds categorized registration methods to
-/// [`OptionRegistry`](super::OptionRegistry).
-///
-/// This trait is implemented for [`super::OptionRegistry`] and provides one
-/// method per option category, making it easy to register options in logical
-/// groups or to selectively enable/disable categories.
-#[allow(dead_code)] // Trait methods are called dynamically via impl blocks
-pub(super) trait RegisterOptions {
-    /// Register all General category options (directory, logging, UI, session).
-    fn register_general_options(&mut self);
-
-    /// Register all HTTP/FTP category options (proxies, headers, timeouts, connections).
-    fn register_http_ftp_options(&mut self);
-
-    /// Register all BitTorrent category options (seeding, DHT, PEX, peers).
-    #[cfg(feature = "bittorrent")]
-    fn register_bt_options(&mut self);
-
-    /// Register all RPC category options (JSON-RPC/XML-RPC server settings).
-    fn register_rpc_options(&mut self);
-
-    /// Register all Advanced category options (bandwidth limits, disk cache, allocation).
-    fn register_advanced_options(&mut self);
-
-    /// Convenience method that registers all categories at once.
-    fn register_all_options(&mut self) {
-        self.register_general_options();
-        self.register_http_ftp_options();
-        #[cfg(feature = "bittorrent")]
-        self.register_bt_options();
-        self.register_rpc_options();
-        self.register_advanced_options();
-    }
-}
-
-// Note: The impl RegisterOptions for OptionRegistry block is in option.rs
-// since OptionRegistry is defined there. The individual register_*_options
-// methods are defined in the category sub-modules (general.rs, http_ftp.rs,
-// etc.) as separate impl blocks.
+mod sftp;

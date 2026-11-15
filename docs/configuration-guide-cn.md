@@ -132,6 +132,8 @@ aria2c --conf-path=aria2.conf --reset-config
 
 当前明确未接线的兼容选项：`enable-async-dns6`、`event-poll`、`optimize-concurrent-downloads`、`optimize-concurrent-downloads-coeffA`、`optimize-concurrent-downloads-coeffB`、`rlimit-nofile`、`select-least-used-host`、`socket-recv-buffer-size`、`dscp`、`max-http-pipelining`。这些名称可以出现在兼容配置中，但不要依赖它们提供对应功能。
 
+SSH/SFTP 选项（`ssh-host-key-md` 和下表中的 5 个 `sftp-*` 选项）在所有构建中保留注册，但只有启用 `sftp` 构建 feature 时才可用。未启用时，配置文件中的设置会警告后忽略；CLI 或任务级显式设置会被拒绝。
+
 ### General：基础、会话、界面和日志
 
 | 选项 | 说明 |
@@ -179,7 +181,12 @@ aria2c --conf-path=aria2.conf --reset-config
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS 校验、CA、客户端证书/私钥、最低 TLS 版本 |
 | `allow-overwrite`, `auto-file-renaming`, `continue`, `remote-time` | 覆盖、自动改名、续传、远端时间 |
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP 连接、流水线、压缩、认证和响应行为 |
-| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type`, `ssh-host-key-md` | FTP 被动模式、连接复用、传输类型、SSH 主机密钥摘要 |
+| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type` | FTP 被动模式、连接复用、传输类型 |
+| `ssh-host-key-md` | SFTP SSH 主机密钥指纹 |
+| `sftp-connect-timeout`, `sftp-read-timeout` | SFTP 连接建立和协议 I/O 超时（秒，1..600；默认 15 和 30） |
+| `sftp-compression` | 启用 SFTP 的 SSH 压缩（默认 `false`） |
+| `sftp-keepalive-interval` | SSH keepalive 间隔（秒，0..600；默认 60；0 禁用） |
+| `sftp-preferred-ciphers` | 逗号分隔的 SSH cipher 有序偏好列表；留空使用库默认值 |
 
 HTTP 下载中，`split` 是任务级分段预算，不再有固定的配置上限；实际生效值
 受文件大小、`min-split-size`（默认 `20M`）和运行时资源约束。`piece-length`

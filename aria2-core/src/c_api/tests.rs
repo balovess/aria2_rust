@@ -15,6 +15,7 @@ mod http_adaptive_options;
 mod http_auth_options;
 #[path = "tests/public_tracker_sources.rs"]
 mod public_tracker_sources;
+#[cfg(feature = "sftp")]
 #[path = "tests/sftp_options.rs"]
 mod sftp_options;
 
@@ -135,6 +136,29 @@ fn c_api_ignores_dht_settings_in_global_runtime_changes() {
             .block_on(session.config.get_global_i64("dht-message-timeout")),
         Some(10),
         "DHT message timeout remains the configured process value"
+    );
+
+    session.finalize();
+}
+
+#[cfg(not(feature = "sftp"))]
+#[test]
+fn c_api_ignores_sftp_settings_in_global_runtime_changes_without_feature() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    let result =
+        session.change_global_options(vec![("sftp-connect-timeout".to_string(), "41".to_string())]);
+
+    assert_eq!(result, 0, "unsupported global changes are ignored");
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("sftp-connect-timeout")),
+        None,
+        "SFTP options must not be stored without an SFTP consumer"
     );
 
     session.finalize();

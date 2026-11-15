@@ -368,6 +368,7 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     }
 }
 
+#[cfg(feature = "sftp")]
 #[tokio::test]
 async fn test_cli_sftp_connection_options_reach_download_options() {
     let cli = CliArgs::try_parse_from([
@@ -1240,7 +1241,6 @@ async fn test_original_cli_options_reach_config_registry() {
         "--certificate=client.pem",
         "--private-key=client.key",
         "--min-tls-version=TLSv1.2",
-        "--ssh-host-key-md=sha-1=deadbeef",
         "--metalink-enable-unique-protocol=false",
         "--pause-metadata",
         "--show-console-readout=false",
@@ -1257,10 +1257,6 @@ async fn test_original_cli_options_reach_config_registry() {
     assert_eq!(
         app.get_opt_str("certificate").await.as_deref(),
         Some("client.pem")
-    );
-    assert_eq!(
-        app.get_opt_str("ssh-host-key-md").await.as_deref(),
-        Some("sha-1=deadbeef")
     );
     assert_eq!(
         app.get_opt_bool("metalink-enable-unique-protocol").await,

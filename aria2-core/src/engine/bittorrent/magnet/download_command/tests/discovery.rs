@@ -257,7 +257,8 @@ async fn public_magnet_prefers_an_existing_global_dht_engine_at_handoff() {
 
 #[tokio::test]
 async fn handed_off_bt_success_shuts_down_and_persists_owned_dht_engine() {
-    let temp_dir = tempfile::tempdir().expect("temporary magnet output directory");
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+        .expect("temporary magnet output directory should be created in the workspace");
     let dht_path = temp_dir.path().join("dht.dat");
     let engine = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
         aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
