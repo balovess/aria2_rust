@@ -4,7 +4,7 @@ pub use crate::uri::percent_decode;
 use crate::uri::percent_encode;
 
 /// Parsed FTP URI fields before engine defaults are applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FtpUri {
     pub host: String,
     pub port: u16,
@@ -12,6 +12,20 @@ pub struct FtpUri {
     pub password: Option<String>,
     pub remote_path: String,
     pub secure: bool,
+}
+
+impl std::fmt::Debug for FtpUri {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FtpUri")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("remote_path", &self.remote_path)
+            .field("secure", &self.secure)
+            .finish()
+    }
 }
 
 /// Percent-encode a URI user-info component using the RFC 3986 unreserved set.
@@ -119,5 +133,15 @@ mod tests {
             percent_encode_userinfo("user@name /é"),
             "user%40name%20%2F%C3%A9"
         );
+    }
+
+    #[test]
+    fn ftp_uri_debug_redacts_credentials() {
+        let uri = parse_uri("ftp://private-user:private-password@example.test/file").unwrap();
+
+        let debug = format!("{uri:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
     }
 }

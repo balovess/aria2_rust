@@ -13,10 +13,20 @@ pub struct ProxyGetRequestOptions<'a> {
 }
 
 /// Serialized HTTP request carrying an FTP URL as its absolute request target.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProxyGetRequest {
     pub request_bytes: Vec<u8>,
     pub request_url: String,
+}
+
+impl std::fmt::Debug for ProxyGetRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyGetRequest")
+            .field("request_bytes_len", &self.request_bytes.len())
+            .field("request_url", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Build the GET request used by an HTTP forward proxy for an FTP resource.
@@ -144,6 +154,28 @@ mod tests {
         assert!(text.contains("Pragma: no-cache\r\n"));
         assert!(text.contains("Cache-Control: no-cache\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn request_debug_does_not_expose_ftp_or_proxy_credentials() {
+        let request = build(
+            "ftp://ftp-user:ftp-password@ftp.example/file",
+            ProxyGetRequestOptions {
+                ftp_username: "ftp-user",
+                proxy_username: "proxy-user",
+                proxy_password: "proxy-password",
+                user_agent: "test-client",
+                range_start: 0,
+                no_cache: false,
+            },
+        );
+
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("ftp-user"));
+        assert!(!debug.contains("ftp-password"));
+        assert!(!debug.contains("proxy-user"));
+        assert!(!debug.contains("proxy-password"));
+        assert!(debug.contains("request_bytes_len"));
     }
 
     #[test]

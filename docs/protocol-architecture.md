@@ -728,8 +728,15 @@ Do not add pass-through engine clients around these public interfaces.
   core `.netrc` store models now live in a focused submodule while retaining
   the existing `aria2_core::http::auth` public paths. Debug formatting for
   credential-bearing core and protocol values redacts usernames/passwords;
-  explicit credential accessors and the legacy `AuthConfig` Display behavior
+  proxy URL/configuration, FTP/SFTP URI, FTP options, and serialized
+  FTP-proxy request and HTTP Digest response debug output follow the same
+  redaction rule.
+  Explicit credential accessors and the legacy `AuthConfig` Display behavior
   remain available to callers.
+- **Narrow** HTTP metadata authentication retry inputs into the named
+  `GetAuthRetryContext`. URL, cookie policy, auth factory/options, and
+  cross-origin retry state travel together at the retry boundary; request
+  construction and retry decisions remain in core.
 - **Keep** the public core `HttpResponse` shape while delegating complete
   response-head parsing to the protocol HTTP parser; core converts the parsed
   header model and preserves the body as opaque bytes.
@@ -884,6 +891,15 @@ Do not add pass-through engine clients around these public interfaces.
   data-socket policy, and task lifecycle. FTPS TLS and RFC 4217 negotiation
   live in the protocol crate. The standalone client remains a distinct
   public client rather than a forwarding stage in the engine route.
+- **Narrow** FTP receive-transfer inputs into `FtpReceiveTransfer`, a named
+  context for the accepted data connection, checkpoint, completion state,
+  and transfer accounting. The attempt path still owns network selection and
+  retry policy; the transfer routine owns receiving and completing that
+  already-selected data channel.
+- **Narrow** pooled FTP control-session key construction through the named
+  `ControlSessionIdentity`. Its fields make the reuse identity explicit at
+  the call site while the pool retains key normalization, secret-safe debug
+  output, and session lifecycle.
 - **Narrow** FTPS TLS assembly through `aria2_protocol::ftp::tls::FtpsClient`:
   the engine builds one client per attempt and reuses its connector for
   explicit/implicit control TLS and protected data-channel handshakes. Protocol
@@ -935,8 +951,10 @@ Do not add pass-through engine clients around these public interfaces.
   after a packet's defined fields, impossible directory entry counts, and
   length-prefixed fields not present in the received payload; frame arithmetic
   and encoded `u32` lengths are checked instead of overflowing or truncating.
-  Keep an explicit decision open on a maximum outer frame size because it can
-  reject otherwise valid large responses.
+  Cap encoded frames at 16 MiB including the length prefix. The decoder rejects
+  an oversized declaration as soon as its prefix is available, bounding
+  receive-buffer growth; this intentionally rejects larger otherwise valid
+  responses. The encoder enforces the same cap.
 - **Narrow** Metalink expansion to one parse and selection pass that produces
   direct-resource groups and, when enabled, torrent metadata graphs from the
   same normalized entries and GID sequence. Remove the unused mirror types and

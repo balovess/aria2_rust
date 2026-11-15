@@ -18,7 +18,7 @@ use crate::engine::retry_policy::RetryPolicy;
 use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
 
 use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
-use crate::ftp::connection_pool::{ControlSessionKey, FtpConnectionPool};
+use crate::ftp::connection_pool::{ControlSessionIdentity, ControlSessionKey, FtpConnectionPool};
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
 use crate::network::OutboundNetworkPolicy;
@@ -358,15 +358,15 @@ impl FtpDownloadCommand {
     }
 
     pub(super) fn control_session_key(&self, proxy: Option<&FtpProxyConfig>) -> ControlSessionKey {
-        ControlSessionKey::new(
-            &self.host,
-            self.port,
-            &self.username,
-            &self.password,
+        ControlSessionKey::new(ControlSessionIdentity {
+            host: &self.host,
+            port: self.port,
+            username: &self.username,
+            password: &self.password,
             proxy,
-            self.ftps_config.as_ref(),
-            self.ftps_implicit,
-            self.outbound_network_policy.addresses(),
-        )
+            tls: self.ftps_config.as_ref(),
+            implicit_tls: self.ftps_implicit,
+            outbound_sources: self.outbound_network_policy.addresses(),
+        })
     }
 }

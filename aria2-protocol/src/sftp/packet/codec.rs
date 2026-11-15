@@ -11,12 +11,21 @@ use super::wire::{
 };
 
 pub(super) fn checked_frame_length(payload_length: usize) -> io::Result<usize> {
-    payload_length.checked_add(4).ok_or_else(|| {
+    let frame_length = payload_length.checked_add(4).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "SFTP frame length overflows the platform size",
         )
-    })
+    })?;
+    if frame_length > MAX_SFTP_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SFTP frame length {frame_length} exceeds the maximum of {MAX_SFTP_FRAME_SIZE} bytes"
+            ),
+        ));
+    }
+    Ok(frame_length)
 }
 impl SftpPacket {
     /// Return the wire type code for this packet variant.

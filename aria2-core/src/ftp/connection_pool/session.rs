@@ -43,6 +43,17 @@ pub(crate) struct ControlSessionKey {
     outbound_sources: Vec<IpAddr>,
 }
 
+pub(crate) struct ControlSessionIdentity<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) port: u16,
+    pub(crate) username: &'a str,
+    pub(crate) password: &'a str,
+    pub(crate) proxy: Option<&'a FtpProxyConfig>,
+    pub(crate) tls: Option<&'a FtpsConfig>,
+    pub(crate) implicit_tls: bool,
+    pub(crate) outbound_sources: Vec<IpAddr>,
+}
+
 impl std::fmt::Debug for ControlSessionKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -62,35 +73,26 @@ impl std::fmt::Debug for ControlSessionKey {
 }
 
 impl ControlSessionKey {
-    pub(crate) fn new(
-        host: &str,
-        port: u16,
-        username: &str,
-        password: &str,
-        proxy: Option<&FtpProxyConfig>,
-        tls: Option<&FtpsConfig>,
-        implicit_tls: bool,
-        outbound_sources: Vec<IpAddr>,
-    ) -> Self {
+    pub(crate) fn new(identity: ControlSessionIdentity<'_>) -> Self {
         Self {
-            host: host.to_owned(),
-            port,
-            username: username.to_owned(),
-            password: password.to_owned(),
-            proxy: proxy.map(|proxy| ProxySessionKey {
+            host: identity.host.to_owned(),
+            port: identity.port,
+            username: identity.username.to_owned(),
+            password: identity.password.to_owned(),
+            proxy: identity.proxy.map(|proxy| ProxySessionKey {
                 host: proxy.proxy_host.clone(),
                 port: proxy.proxy_port,
                 username: proxy.proxy_username.clone(),
                 password: proxy.proxy_password.clone(),
             }),
-            tls: tls.map(|tls| TlsSessionKey {
+            tls: identity.tls.map(|tls| TlsSessionKey {
                 enabled: tls.enabled,
                 check_certificate: tls.check_certificate,
                 ca_certificate: tls.ca_certificate.clone(),
                 min_tls_version: tls.min_tls_version,
-                implicit: implicit_tls,
+                implicit: identity.implicit_tls,
             }),
-            outbound_sources,
+            outbound_sources: identity.outbound_sources,
         }
     }
 }
@@ -177,26 +179,26 @@ mod tests {
 
     #[test]
     fn control_session_identity_separates_credentials_and_redacts_them() {
-        let first = ControlSessionKey::new(
-            "ftp.example.test",
-            21,
-            "download-user",
-            "origin-secret",
-            None,
-            None,
-            false,
-            Vec::new(),
-        );
-        let different_password = ControlSessionKey::new(
-            "ftp.example.test",
-            21,
-            "download-user",
-            "different-secret",
-            None,
-            None,
-            false,
-            Vec::new(),
-        );
+        let first = ControlSessionKey::new(ControlSessionIdentity {
+            host: "ftp.example.test",
+            port: 21,
+            username: "download-user",
+            password: "origin-secret",
+            proxy: None,
+            tls: None,
+            implicit_tls: false,
+            outbound_sources: Vec::new(),
+        });
+        let different_password = ControlSessionKey::new(ControlSessionIdentity {
+            host: "ftp.example.test",
+            port: 21,
+            username: "download-user",
+            password: "different-secret",
+            proxy: None,
+            tls: None,
+            implicit_tls: false,
+            outbound_sources: Vec::new(),
+        });
         assert_ne!(first, different_password);
         assert!(!format!("{first:?}").contains("origin-secret"));
         assert!(!format!("{different_password:?}").contains("different-secret"));

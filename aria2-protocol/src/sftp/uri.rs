@@ -3,13 +3,26 @@
 pub use crate::uri::percent_decode;
 
 /// Parsed SFTP URI fields before engine credential resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SftpUri {
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: String,
+}
+
+impl std::fmt::Debug for SftpUri {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SftpUri")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("remote_path", &self.remote_path)
+            .finish()
+    }
 }
 
 /// URI syntax errors independent of the download engine's error model.
@@ -136,5 +149,15 @@ mod tests {
     fn percent_decode_preserves_plus_and_invalid_sequences() {
         assert_eq!(percent_decode("a+b%20c%ZZ%3"), "a+b c%ZZ%3");
         assert_eq!(percent_decode("%E6%96%87%E4%BB%B6"), "文件");
+    }
+
+    #[test]
+    fn sftp_uri_debug_redacts_credentials() {
+        let uri = parse_uri("sftp://private-user:private-password@example.test/file").unwrap();
+
+        let debug = format!("{uri:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
     }
 }

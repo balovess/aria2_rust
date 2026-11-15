@@ -90,7 +90,7 @@ pub fn parse_challenge_parameters(
 
 /// Computed HTTP Digest response, ready for serialization as an
 /// `Authorization` header value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DigestResponse {
     pub username: String,
     pub realm: String,
@@ -102,6 +102,24 @@ pub struct DigestResponse {
     pub response: String,
     pub algorithm: String,
     pub opaque: Option<String>,
+}
+
+impl std::fmt::Debug for DigestResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DigestResponse")
+            .field("username", &"[REDACTED]")
+            .field("realm", &self.realm)
+            .field("nonce", &"[REDACTED]")
+            .field("uri", &"[REDACTED]")
+            .field("qop", &self.qop)
+            .field("nc", &self.nc)
+            .field("cnonce", &"[REDACTED]")
+            .field("response", &"[REDACTED]")
+            .field("algorithm", &self.algorithm)
+            .field("opaque", &self.opaque.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Request data needed to calculate a Digest response.
@@ -528,5 +546,34 @@ mod tests {
         );
         assert!(DigestChallenge::parse("Digest nonce=abc, qop=auth-int-only").is_err());
         assert!(DigestChallenge::parse("Digest nonce=abc, algorithm=SHA-1").is_err());
+    }
+
+    #[test]
+    fn digest_response_debug_redacts_authentication_material() {
+        let response = DigestResponse {
+            username: "private-user".to_owned(),
+            realm: "example".to_owned(),
+            nonce: "private-nonce".to_owned(),
+            uri: "/private/path".to_owned(),
+            qop: Some("auth".to_owned()),
+            nc: 1,
+            cnonce: "private-cnonce".to_owned(),
+            response: "private-response".to_owned(),
+            algorithm: "SHA-256".to_owned(),
+            opaque: Some("private-opaque".to_owned()),
+        };
+
+        let debug = format!("{response:?}");
+        for secret in [
+            "private-user",
+            "private-nonce",
+            "/private/path",
+            "private-cnonce",
+            "private-response",
+            "private-opaque",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("[REDACTED]"));
     }
 }

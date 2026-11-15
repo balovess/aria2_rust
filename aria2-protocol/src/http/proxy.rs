@@ -35,13 +35,26 @@ pub enum ProxyType {
     Socks5,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProxyConfig {
     pub proxy_type: ProxyType,
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyConfig")
+            .field("proxy_type", &self.proxy_type)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl ProxyConfig {
@@ -235,6 +248,17 @@ mod tests {
         assert_eq!(parsed.host, "2001:db8::1");
         assert_eq!(parsed.username.as_deref(), Some("user@name"));
         assert_eq!(parsed.password.as_deref(), Some("p:@%"));
+    }
+
+    #[test]
+    fn proxy_config_debug_redacts_credentials() {
+        let config = ProxyConfig::new_http("proxy.example", 8080)
+            .with_auth("private-user", "private-password");
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
     }
 
     #[test]

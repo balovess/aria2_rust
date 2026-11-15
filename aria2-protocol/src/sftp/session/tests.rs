@@ -58,6 +58,26 @@ async fn packet_read_timeout_covers_all_fragments() {
     writer_task.abort();
 }
 
+#[tokio::test]
+async fn oversized_frame_prefix_is_rejected_before_receiving_its_body() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    let payload_length = u32::try_from(crate::sftp::packet::MAX_SFTP_FRAME_SIZE - 3).unwrap();
+    writer
+        .write_all(&payload_length.to_be_bytes())
+        .await
+        .unwrap();
+
+    let result =
+        SftpSession::recv_packet_from_reader(&mut reader, &mut Vec::new(), Duration::from_secs(1))
+            .await;
+
+    assert!(matches!(
+        result,
+        Err(SftpSessionError::PacketDecode(error))
+            if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
 #[test]
 fn test_sftp_extension_creation_and_display() {
     let ext = SftpExtension {

@@ -1,5 +1,8 @@
 //! SFTP protocol message and attribute constants.
 
+/// Maximum encoded SFTP frame size, including its four-byte length prefix.
+pub const MAX_SFTP_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
 // Protocol Type Codes (SSH_FXP_*)
 // =============================================================================
 

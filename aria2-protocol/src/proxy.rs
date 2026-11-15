@@ -1,13 +1,25 @@
 use crate::uri::percent_decode;
 
 /// A parsed proxy URL (for example, `socks5://user:pass@host:port`).
-#[derive(Debug)]
 pub struct ProxyUrl {
     pub protocol: ProxyProtocol,
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyUrl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyUrl")
+            .field("protocol", &self.protocol)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// The protocol selected by a proxy URL scheme.
@@ -101,5 +113,26 @@ impl ProxyUrl {
             username,
             password,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProxyProtocol, ProxyUrl};
+
+    #[test]
+    fn proxy_url_debug_redacts_credentials() {
+        let proxy = ProxyUrl {
+            protocol: ProxyProtocol::Http,
+            host: "proxy.example".to_string(),
+            port: 8080,
+            username: Some("private-user".to_string()),
+            password: Some("private-password".to_string()),
+        };
+
+        let debug = format!("{proxy:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
     }
 }

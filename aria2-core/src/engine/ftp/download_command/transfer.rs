@@ -19,17 +19,30 @@ use super::execution::FtpAttemptError;
 use super::types::FtpDownloadCommand;
 use crate::ftp::connection_pool::ControlSessionKey;
 
+pub(super) struct FtpReceiveTransfer {
+    pub(super) ctrl: RawFtpControl,
+    pub(super) data_stream: FtpDataStream,
+    pub(super) file_size: Option<u64>,
+    pub(super) in_memory_download: bool,
+    pub(super) remote_modified_time: Option<SystemTime>,
+    pub(super) write_offset: u64,
+    pub(super) reuse_key: Option<ControlSessionKey>,
+}
+
 impl FtpDownloadCommand {
     pub(super) async fn receive_data_transfer(
         &mut self,
-        mut ctrl: RawFtpControl,
-        mut data_stream: FtpDataStream,
-        file_size: Option<u64>,
-        in_memory_download: bool,
-        remote_modified_time: Option<SystemTime>,
-        write_offset: u64,
-        reuse_key: Option<ControlSessionKey>,
+        transfer: FtpReceiveTransfer,
     ) -> std::result::Result<(), FtpAttemptError> {
+        let FtpReceiveTransfer {
+            mut ctrl,
+            mut data_stream,
+            file_size,
+            in_memory_download,
+            remote_modified_time,
+            write_offset,
+            reuse_key,
+        } = transfer;
         // Step 11: Select a disk or memory writer, then apply optional rate
         // limiting. The memory writer is the FTP/SFTP equivalent of aria2's
         // MemoryPreDownloadHandler and never opens output_path.

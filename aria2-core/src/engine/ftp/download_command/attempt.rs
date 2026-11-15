@@ -13,6 +13,7 @@ use aria2_protocol::ftp::tls::FtpsClient;
 
 use super::control::RawFtpControl;
 use super::execution::FtpAttemptError;
+use super::transfer::FtpReceiveTransfer;
 use super::types::FtpDownloadCommand;
 
 impl FtpDownloadCommand {
@@ -420,7 +421,7 @@ impl FtpDownloadCommand {
         let data_stream = ctrl.secure_data_stream(data_stream).await?;
         let _ = data_stream.set_nodelay(true); // Ignore error if not supported
 
-        self.receive_data_transfer(
+        self.receive_data_transfer(FtpReceiveTransfer {
             ctrl,
             data_stream,
             file_size,
@@ -428,7 +429,7 @@ impl FtpDownloadCommand {
             remote_modified_time,
             write_offset,
             reuse_key,
-        )
+        })
         .await
     }
 }

@@ -1036,9 +1036,15 @@ behavior. An unlisted behavior has not been audited here.
   tests; protocol SSH option tests cover secret redaction. These include
   authentication, fingerprint checks, cancellation, resume,
   and transfer lifecycle. The full `aria2-protocol` all-features library suite
-  passed 1320 tests with 2 ignored. No public remote SFTP
+  passed 1324 tests with 2 ignored. No public remote SFTP
   server interoperability run has been performed. SSH trust behavior is not
   claimed compatible with original aria2 beyond explicit fingerprint checks.
+- **Frame size policy:** SFTP frames are capped at 16 MiB including the
+  four-byte length prefix. The decoder rejects a declared oversized frame as
+  soon as the prefix is available, before waiting for or buffering its body;
+  the encoder rejects frames above the same limit. This can reject unusually
+  large but otherwise valid server packets and is an intentional compatibility
+  deviation chosen to bound per-frame memory use.
 - **Malformed packet handling:** length-prefixed fields are collected from
   bytes actually present before their contents are allocated, and a directory
   entry count is checked against the minimum possible encoded payload before
@@ -1046,10 +1052,9 @@ behavior. An unlisted behavior has not been audited here.
   unexplained trailing bytes are rejected. Encoding rejects field and packet
   lengths that do not fit the u32 wire fields, rather than silently truncating
   them; decoding checks the outer frame addition for platform-size overflow.
-  These checks reject malformed or unrepresentable packets without limiting
-  valid packet sizes. The outer SFTP frame length still has no configured
-  maximum; deciding whether to impose one requires a compatibility policy for
-  unusually large but valid server responses.
+  **Verification:** packet tests reject an over-limit length prefix without a
+  body and reject oversized encoded packets. Remote-server interoperability
+  for frames near the cap has not been exercised.
 - **Version negotiation:** the client sends `SSH_FXP_INIT` with version 3 and
   accepts the negotiated v3 version only, as required by the SFTP negotiation
   rule that the server selects the lower of its version and the client's.

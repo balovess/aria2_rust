@@ -369,4 +369,4 @@ pub fn create_custom_pool(config: PoolConfig) -> Arc<FtpConnectionPool> {
 // Re-export sibling module items so the public API is unchanged.
 pub use stats::PoolStats;
 
-pub(crate) use session::{ControlSessionKey, PooledControlSession};
+pub(crate) use session::{ControlSessionIdentity, ControlSessionKey, PooledControlSession};

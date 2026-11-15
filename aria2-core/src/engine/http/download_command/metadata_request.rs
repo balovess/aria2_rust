@@ -10,6 +10,15 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
 
+struct GetAuthRetryContext<'a> {
+    current_url: &'a reqwest::Url,
+    cookie_helper: &'a CookieHelper,
+    auth_factory: &'a mut AuthConfigFactory,
+    auth_options: &'a AuthResolveOptions,
+    authentication_used: bool,
+    allow_origin_auth: bool,
+}
+
 fn prepared_response(
     response: reqwest::Response,
     effective_uri: String,
@@ -28,13 +37,16 @@ impl DownloadCommand {
     async fn retry_get_after_auth_challenge(
         &self,
         response: reqwest::Response,
-        current_url: &reqwest::Url,
-        cookie_helper: &CookieHelper,
-        auth_factory: &mut AuthConfigFactory,
-        auth_options: &AuthResolveOptions,
-        authentication_used: bool,
-        allow_origin_auth: bool,
+        context: GetAuthRetryContext<'_>,
     ) -> reqwest::Response {
+        let GetAuthRetryContext {
+            current_url,
+            cookie_helper,
+            auth_factory,
+            auth_options,
+            authentication_used,
+            allow_origin_auth,
+        } = context;
         let status_code = response.status().as_u16();
         if status_code != 401 && status_code != 407 {
             return response;
@@ -210,12 +222,14 @@ impl DownloadCommand {
             response = self
                 .retry_get_after_auth_challenge(
                     response,
-                    &current_url,
-                    &cookie_helper,
-                    &mut auth_factory,
-                    &auth_options,
-                    authorization.is_some(),
-                    allow_origin_auth,
+                    GetAuthRetryContext {
+                        current_url: &current_url,
+                        cookie_helper: &cookie_helper,
+                        auth_factory: &mut auth_factory,
+                        auth_options: &auth_options,
+                        authentication_used: authorization.is_some(),
+                        allow_origin_auth,
+                    },
                 )
                 .await;
 

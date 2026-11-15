@@ -175,6 +175,35 @@ fn frame_length_addition_rejects_platform_size_overflow() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
+#[test]
+fn maximum_sftp_frame_size_is_inclusive_of_the_length_prefix() {
+    assert_eq!(
+        super::codec::checked_frame_length(MAX_SFTP_FRAME_SIZE - 4).unwrap(),
+        MAX_SFTP_FRAME_SIZE
+    );
+}
+
+#[test]
+fn decoder_rejects_oversized_frame_from_length_prefix_alone() {
+    let payload_length = u32::try_from(MAX_SFTP_FRAME_SIZE - 3).unwrap();
+    let error = SftpPacket::decode(&payload_length.to_be_bytes()).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exceeds the maximum"));
+}
+
+#[test]
+fn encoder_rejects_frame_larger_than_the_protocol_cap() {
+    let packet = SftpPacket::Data {
+        request_id: 1,
+        data: vec![0; MAX_SFTP_FRAME_SIZE],
+    };
+
+    let error = packet.encode().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exceeds the maximum"));
+}
+
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn wire_lengths_reject_values_larger_than_u32() {
