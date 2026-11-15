@@ -42,12 +42,12 @@ pub(super) enum ChunkState {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use aria2_core::http::stream_filter::{ChunkedDecoder, StreamFilter};
+/// ```
+/// use aria2_protocol::http::stream_filter::{ChunkedDecoder, HttpStreamFilter};
 ///
 /// let mut decoder = ChunkedDecoder::new();
 /// let chunked_data = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-/// let decoded = decoder.filter(chunked_data)?;
+/// let decoded = decoder.filter(chunked_data).unwrap();
 /// assert_eq!(decoded, b"hello world");
 /// ```
 #[derive(Debug)]

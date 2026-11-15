@@ -15,7 +15,7 @@ Each platform provides four binary packages:
 | `-tui` | Local TUI, RPC TUI, and localized resources | Interactive terminal users |
 | `-full` | standard + Metalink + SFTP + TUI | Users needing all protocol features |
 
-The `-minimal` build enables only HTTP/FTP and excludes BitTorrent, TUI, and TUI dependencies. `-standard` is the default feature tier; `-tui` adds TUI to standard; `-full` additionally enables Metalink and SFTP.
+The `-minimal` build enables HTTP/FTP, keeps the JSON-RPC/XML-RPC/WebSocket server available, and excludes BitTorrent, TUI, and TUI dependencies. RPC is also available in `-standard`; the `rpc` Cargo feature is a tier marker, not a source-code gate. `-standard` adds BitTorrent; `-tui` adds the local TUI and its dependencies; `-full` additionally enables Metalink and SFTP.
 
 ## Current platforms
 

@@ -73,6 +73,8 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 
 [features]
 default = []
+# HTTP is part of the unconditional protocol API. This marker lets the CLI
+# forward its named build tier without making HTTP support optional here.
 http = []
 bittorrent = ["dep:num-bigint-dig", "dep:num-traits", "dep:base32", "dep:tokio-tungstenite"]
 metalink = ["dep:quick-xml"]

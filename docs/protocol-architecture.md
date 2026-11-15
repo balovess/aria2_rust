@@ -72,6 +72,15 @@ BitTorrent. The built-in registry orders metadata and scheme-specific adapters
 before the HTTP fallback. The HTTP adapter delegates construction to
 `engine::http::command_factory`, which resolves target and proxy addresses.
 
+Cargo feature propagation follows the same ownership boundary. BitTorrent,
+Metalink, and SFTP are real optional features: the CLI forwards each to core and
+protocol crates, and the protocol crate gates their module and optional
+dependencies. HTTP and RPC remain compiled in every CLI tier; the CLI's `http`
+and `rpc` features are tier markers, and `aria2-protocol/http` is a retained
+marker because the protocol crate's HTTP API is unconditional. Therefore the
+minimal artifact includes the RPC server just like standard; standard adds
+BitTorrent, while TUI and full add their documented optional capabilities.
+
 **Keep** `aria2_core::validation::protocol_detector::detect` in core as an
 input-boundary classifier: it reads and sniffs local torrent/Metalink files
 and returns the application-facing `InputType` used by CLI setup and metadata

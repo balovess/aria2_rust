@@ -3,6 +3,24 @@
 This file records compatibility evidence for externally observable download
 behavior. An unlisted behavior has not been audited here.
 
+## CLI build-tier feature behavior
+
+- **External behavior:** the minimal artifact (`--no-default-features
+  --features http`) supports HTTP/FTP and the JSON-RPC, XML-RPC, and WebSocket
+  server. Standard adds BitTorrent; TUI adds the local TUI and its dependencies;
+  full additionally adds Metalink and SFTP.
+- **Feature ownership:** HTTP is unconditional in the CLI, core, and protocol
+  APIs. RPC is unconditional in the CLI and `aria2-rpc`; core remains independent
+  of the RPC crate. The CLI `http`/`rpc` features and `aria2-protocol/http` are
+  retained tier markers, not source-code gates. BitTorrent, Metalink, and SFTP
+  are actual optional features propagated to the crates that own their code.
+- **Verification:** source cfg inspection found no `http` or `rpc` feature
+  gates in the CLI/RPC implementation. Cargo feature-tree inspection confirms
+  the minimal and standard artifacts both include `aria2-rpc`; the `rpc`
+  feature itself changes only the feature label, while standard additionally
+  enables BitTorrent's RPC projections. Release binaries were not rebuilt or
+  compared in this documentation audit.
+
 ## Continue default
 
 - **User-directed difference:** `continue` defaults to `true`, so an existing
