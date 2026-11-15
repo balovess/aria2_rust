@@ -306,6 +306,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_options_apply_utp_connection_limit_before_transport_creation() {
+        let options = HashMap::from([
+            ("bt-utp-max-connections".to_string(), OptionValue::Int(1)),
+            ("bt-utp-connect-timeout".to_string(), OptionValue::Int(14)),
+            ("bt-utp-idle-timeout".to_string(), OptionValue::Int(46)),
+            (
+                "bt-utp-keepalive-interval".to_string(),
+                OptionValue::Int(19),
+            ),
+        ]);
+        let engine =
+            DownloadEngine::from_process_options(&options, Arc::new(RequestGroupMan::new())).await;
+        let reservation = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("reserve a local endpoint");
+        let address = reservation.local_addr().unwrap();
+        drop(reservation);
+
+        let transport = engine
+            .bt_listener
+            .register_utp_transport(address)
+            .await
+            .expect("transport created after process options should use configured limits");
+        let remote = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local remote endpoint");
+        let endpoint = remote.local_addr().unwrap();
+
+        let _first = transport
+            .connect(endpoint)
+            .await
+            .expect("the configured single connection should be admitted");
+        assert!(transport.connect(endpoint).await.is_err());
+
+        engine.bt_listener.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn process_options_apply_incoming_handshake_timeout_to_live_listener() {
         use crate::engine::bittorrent::peer::listener::BtPeerRouteConfig;
         use crate::engine::bittorrent::peer::storage::DefaultPeerStorage;

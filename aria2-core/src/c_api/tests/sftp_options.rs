@@ -67,7 +67,10 @@ fn c_api_sftp_options_global_and_task_values_reach_new_downloads() {
     let task_options = [
         kv("ssh-host-key-md", "md5=task-fingerprint"),
         kv("sftp-connect-timeout", "19"),
+        kv("sftp-read-timeout", "27"),
         kv("sftp-compression", "false"),
+        kv("sftp-keepalive-interval", "15"),
+        kv("sftp-preferred-ciphers", "aes128-ctr"),
     ];
     let task_entries = task_options
         .iter()
@@ -101,9 +104,13 @@ fn c_api_sftp_options_global_and_task_values_reach_new_downloads() {
         Some("md5=task-fingerprint")
     );
     assert_eq!(task_options.sftp_connect_timeout, Some(19));
-    assert_eq!(task_options.sftp_read_timeout, Some(73));
+    assert_eq!(task_options.sftp_read_timeout, Some(27));
     assert!(!task_options.sftp_compression);
-    assert_eq!(task_options.sftp_keepalive_interval, Some(0));
+    assert_eq!(task_options.sftp_keepalive_interval, Some(15));
+    assert_eq!(
+        task_options.sftp_preferred_ciphers.as_deref(),
+        Some(&["aes128-ctr".to_string()][..])
+    );
     drop(task_group);
 
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);

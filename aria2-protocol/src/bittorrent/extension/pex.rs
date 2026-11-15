@@ -1,7 +1,7 @@
 //! High-level BEP 11 peer-list operations.
 //!
 //! Wire encoding, decoding, and compact-address representation are owned by
-//! [`UtPexMessage`](crate::bittorrent::message::extension::UtPexMessage).
+//! [`UtPexMessage`].
 
 use crate::bittorrent::bencode::codec::BencodeValue;
 use crate::bittorrent::extension::mse_crypto::MseCryptoState;

@@ -49,6 +49,14 @@ pub struct MagnetDownloadCommand {
 }
 
 impl MagnetDownloadCommand {
+    async fn execute_handed_off_bt_command(
+        command: &mut crate::engine::bittorrent::download::command::BtDownloadCommand,
+    ) -> Result<()> {
+        let result = command.execute().await;
+        command.shutdown().await;
+        result
+    }
+
     pub fn new(
         gid: GroupId,
         magnet_uri: &str,
@@ -423,11 +431,7 @@ impl Command for MagnetDownloadCommand {
 
         self.handoff_dht_engine_to_bt(&mut bt_cmd).await;
 
-        let download_result = bt_cmd.execute().await;
-        if download_result.is_err() {
-            bt_cmd.shutdown().await;
-        }
-        download_result?;
+        Self::execute_handed_off_bt_command(&mut bt_cmd).await?;
 
         self.shutdown_dht_engine().await;
 

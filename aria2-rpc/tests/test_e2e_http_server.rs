@@ -416,6 +416,37 @@ async fn e2e_xmlrpc_get_version() {
 }
 
 #[tokio::test]
+async fn e2e_xmlrpc_change_option_decodes_struct_and_updates_task() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let created = rpc_call(
+        &client,
+        &base,
+        "aria2.addUri",
+        json!([["http://127.0.0.1:1/xml-change-option"]]),
+    )
+    .await;
+    let gid = created["result"].as_str().expect("addUri returns a GID");
+    let body = format!(
+        r#"<?xml version="1.0"?><methodCall><methodName>aria2.changeOption</methodName><params><param><value><string>{gid}</string></value></param><param><value><struct><member><name>max-download-limit</name><value><string>64K</string></value></member></struct></value></param></params></methodCall>"#
+    );
+
+    let response = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(body)
+        .send()
+        .await
+        .expect("POST /rpc should succeed");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let response_body = response.text().await.expect("XML response is text");
+    assert!(response_body.contains("<string>OK</string>"));
+
+    let options = rpc_call(&client, &base, "aria2.getOption", json!([gid])).await;
+    assert_eq!(options["result"]["max-download-limit"], "64K");
+}
+
+#[tokio::test]
 async fn e2e_xmlrpc_execution_errors_use_aria2_fault_code_one() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();

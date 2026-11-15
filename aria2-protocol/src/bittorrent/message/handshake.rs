@@ -74,7 +74,7 @@ impl Handshake {
         }
     }
 
-    /// Builder-pattern version of [`set_dht_enabled`].
+    /// Builder-pattern version of [`Self::set_dht_enabled`].
     pub fn with_dht(mut self, enabled: bool) -> Self {
         self.set_dht_enabled(enabled);
         self
@@ -89,7 +89,7 @@ impl Handshake {
         }
     }
 
-    /// Builder-pattern version of [`set_bep52_enabled`].
+    /// Builder-pattern version of [`Self::set_bep52_enabled`].
     pub fn with_bep52(mut self, enabled: bool) -> Self {
         self.set_bep52_enabled(enabled);
         self

@@ -107,7 +107,7 @@ impl PeerListener {
     /// through the channel. Returns when the shutdown signal is received
     /// or the receiver half of the channel is dropped.
     ///
-    /// Each accept cycle processes up to [`MAX_ACCEPT_PER_CYCLE`] connections,
+    /// Each accept cycle processes up to three connections,
     /// matching the C++ behavior of `PeerListenCommand::execute()`.
     /// After the first connection arrives (via `select!`), additional
     /// pending connections are drained in a tight loop with a micro-timeout,

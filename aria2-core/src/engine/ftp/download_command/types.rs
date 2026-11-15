@@ -150,12 +150,10 @@ impl FtpDownloadCommand {
         };
 
         info!(
-            "FtpDownloadCommand created (shared group): {} -> {} ({}:{}/{}) [resume_offset={}]",
-            uri,
+            "FtpDownloadCommand created (shared group): {} -> {}:{} [resume_offset={}]",
             path.display(),
             target.host,
             target.port,
-            target.remote_path,
             resume_offset
         );
 

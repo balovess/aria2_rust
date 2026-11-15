@@ -192,6 +192,26 @@ impl BtRegistry {
         std::mem::take(&mut self.global_dht_engines).into_vec()
     }
 
+    /// Take every DHT engine retained by the registry for final engine shutdown.
+    ///
+    /// Per-download entries can remain when a download task is aborted before
+    /// its async cleanup runs. Deduplicate shared engines so callers shut each
+    /// engine down exactly once.
+    pub fn take_all_dht_engines(
+        &mut self,
+    ) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        let mut engines = std::mem::take(&mut self.global_dht_engines).into_vec();
+        for engine in std::mem::take(&mut self.dht_engines)
+            .into_values()
+            .flat_map(DhtEngineSet::into_vec)
+        {
+            if !engines.iter().any(|current| Arc::ptr_eq(current, &engine)) {
+                engines.push(engine);
+            }
+        }
+        engines
+    }
+
     /// Register the DHT engine owned by one active download.
     pub fn set_dht_engine_for_gid(
         &mut self,

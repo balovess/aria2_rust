@@ -107,7 +107,7 @@ impl DownloadEngine {
             .bt_registry
             .write()
             .ok()
-            .map(|mut registry| registry.take_global_dht_engines())
+            .map(|mut registry| registry.take_all_dht_engines())
             .unwrap_or_default();
         #[cfg(feature = "bittorrent")]
         for engine in engines {

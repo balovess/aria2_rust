@@ -18,6 +18,24 @@ async fn test_add_scrape_request() {
 }
 
 #[tokio::test]
+async fn scrape_retry_keeps_hashes_after_a_send_failure() {
+    let mut client = new_direct_client(0).await.unwrap();
+    let addr: SocketAddr = "[::1]:6969".parse().unwrap();
+    let hashes = [[0xA5u8; 20], [0x5Au8; 20]];
+    client.add_scrape(&addr, &hashes);
+
+    let mut request = client.pending.pop_front().unwrap();
+    assert!(client.send_scrape(&mut request, 0x1234).await);
+
+    let retry = client
+        .pending
+        .front()
+        .expect("a family-mismatched send should leave the request queued for retry");
+    assert_eq!(retry.scrape_info_hashes, hashes);
+    assert_eq!(retry.fail_count, 1);
+}
+
+#[tokio::test]
 async fn test_handle_scrape_response_single_hash() {
     let mut client = new_direct_client(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();
@@ -140,4 +158,68 @@ async fn test_scrape_error_action_returns_error() {
         scrape_results.is_none(),
         "Error response should not produce scrape results"
     );
+}
+
+#[tokio::test]
+async fn scrape_splits_large_inputs_into_bep15_sized_requests() {
+    let tracker = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback UDP tracker");
+    let tracker_addr = tracker.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut packet = [0u8; 2048];
+        let mut scrape_sizes = Vec::new();
+        let mut result_index = 0u32;
+
+        for _ in 0..3 {
+            let (length, client_addr) =
+                tokio::time::timeout(Duration::from_secs(2), tracker.recv_from(&mut packet))
+                    .await
+                    .expect("client should send the next UDP tracker request")
+                    .expect("receive UDP tracker request");
+            let request = &packet[..length];
+            let action = i32::from_be_bytes(request[8..12].try_into().unwrap());
+            let transaction_id = request[12..16].to_vec();
+            let response = if action == UdpAction::Connect as i32 {
+                let mut response = Vec::with_capacity(16);
+                response.extend_from_slice(&(UdpAction::Connect as i32).to_be_bytes());
+                response.extend_from_slice(&transaction_id);
+                response.extend_from_slice(&0x1234_5678_9abc_def0u64.to_be_bytes());
+                response
+            } else {
+                assert_eq!(action, UdpAction::Scrape as i32);
+                assert!(length >= 16);
+                let hash_count = (length - 16) / 20;
+                assert_eq!((length - 16) % 20, 0);
+                assert!(length <= 1500, "scrape datagram should remain bounded");
+                scrape_sizes.push(hash_count);
+
+                let mut response = Vec::with_capacity(8 + hash_count * 12);
+                response.extend_from_slice(&(UdpAction::Scrape as i32).to_be_bytes());
+                response.extend_from_slice(&transaction_id);
+                for _ in 0..hash_count {
+                    result_index += 1;
+                    response.extend_from_slice(&result_index.to_be_bytes());
+                    response.extend_from_slice(&0u32.to_be_bytes());
+                    response.extend_from_slice(&0u32.to_be_bytes());
+                }
+                response
+            };
+            tracker.send_to(&response, client_addr).await.unwrap();
+        }
+
+        scrape_sizes
+    });
+
+    let hashes = vec![[0x5au8; 20]; 75];
+    let mut client = new_direct_client(0).await.unwrap();
+    let results = client
+        .scrape(tracker_addr, &hashes, Duration::from_secs(1))
+        .await
+        .expect("large scrape should complete as bounded requests");
+
+    assert_eq!(server.await.unwrap(), vec![74, 1]);
+    assert_eq!(results.len(), hashes.len());
+    assert_eq!(results.first().unwrap().seeders, 1);
+    assert_eq!(results.last().unwrap().seeders, 75);
 }

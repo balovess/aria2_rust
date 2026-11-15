@@ -159,17 +159,6 @@ impl CoreRpcBackend {
     }
 }
 
-pub(super) fn normalize_options(
-    options: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, serde_json::Value> {
-    options
-        .iter()
-        .filter_map(|(key, value)| {
-            rpc_value_to_string(value).map(|value| (key.clone(), serde_json::Value::String(value)))
-        })
-        .collect()
-}
-
 fn rpc_value_to_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(value) => Some(value.clone()),

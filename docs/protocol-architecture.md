@@ -352,6 +352,15 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    with the existing `RequestGroup`, the resolved torrent bytes, and the
    outbound-network policy. Any DHT engines acquired for metadata discovery
    are handed to that command so the payload stage can reuse them.
+   The magnet coordinator awaits the nested `BtDownloadCommand::shutdown` on
+   both success and failure. The outer task spawner only owns the magnet
+   command, so it cannot clean up the nested command; this await persists a
+   locally owned DHT engine and releases task-scoped resources while the
+   command's shared-engine check keeps process DHT alive.
+   At final engine shutdown, the registry drains both global and per-GID DHT
+   handles and deduplicates shared `Arc`s before asynchronous shutdown. This
+   also persists engines retained by a task that exceeded the graceful-shutdown
+   deadline and was aborted before its per-GID cleanup ran.
    For payload downloads, the validated, normalized metainfo is also retained
    on that same group before handoff. Session snapshots encode it in the
    existing `aria2-rust-bt-metadata-data` field, allowing a restored magnet task
@@ -621,6 +630,18 @@ Do not add pass-through engine clients around these public interfaces.
 - **Keep** shared engine modules at `engine` level when they own cross-protocol
   lifecycle or a reusable coordination interface, including `task_spawner`,
   `protocol_adapter`, `concurrent_segment_manager`, and `mirror_coordinator`.
+- **Keep** `engine::work_scheduler::WorkScheduler` as the transport-neutral
+  owner of queued work, bounded lease admission, retry deadlines, attempt
+  budgets, and cancellation. HTTP and BitTorrent callers retain source and
+  protocol eligibility policy. Its transition tests live in the child
+  `work_scheduler/tests.rs` module so production and test code remain separate.
+- **Keep** `engine::engine_command` as the core-owned typed boundary between
+  CLI/RPC/library producers and the engine loop. Its separate bounded control
+  and normal queues, lifecycle coalescing, and queue metrics stay below the
+  adapters. **Improve** its control classification so both runtime DHT storage
+  limits are dispatched with other process-wide updates instead of waiting
+  behind normal download submissions. Tests live in the child
+  `engine_command/tests.rs` module.
 - **Narrow** the former flat collection of `bt_*`, `http_*`, FTP, SFTP, and
   Metalink engine modules into the protocol directories above. This is a source
   organization and module-path change; it does not alter download semantics,
@@ -891,6 +912,9 @@ Do not add pass-through engine clients around these public interfaces.
   data-socket policy, and task lifecycle. FTPS TLS and RFC 4217 negotiation
   live in the protocol crate. The standalone client remains a distinct
   public client rather than a forwarding stage in the engine route.
+- **Narrow** FTP command-creation diagnostics: omit the raw URI and remote
+  path, retaining the output path and resolved host/port. URI userinfo must
+  not enter logs because it may contain download credentials.
 - **Narrow** FTP receive-transfer inputs into `FtpReceiveTransfer`, a named
   context for the accepted data connection, checkpoint, completion state,
   and transfer accounting. The attempt path still owns network selection and
@@ -967,6 +991,10 @@ Do not add pass-through engine clients around these public interfaces.
   groups rebuild that parsed value from the persisted XML source and selected
   file index. Grouped commands keep one parsed projection per file, while the
   request group retains raw source bytes for session reconstruction.
+- **Keep** Metalink payloads in mirror-specific staging files until size and
+  integrity validation succeeds. Pause and force-halt preserve the stage and
+  its sibling control file for same-GID resume; explicit removal discards both
+  because the incomplete payload has not been published to the destination.
 - **Narrow** the BitTorrent peer-connection seam: protocol owns plain/MSE
   handshakes, encryption, and one TCP message connection; core supplies the
   selected stream and assembles `BtPeerConn`. Incoming route selection also
@@ -1036,11 +1064,15 @@ Do not add pass-through engine clients around these public interfaces.
   announced tiers, and selects policy-controlled transports. The core
   communication module re-exports the protocol types under the existing
   `AnnounceEvent`, `AnnounceList`, and `AnnounceTier` names. The UDP client
-  receives only the currently selected URL. Protocol also owns BEP 15 packet
-  encoding/decoding and UDP URL syntax/default port; core owns policy-based DNS
-  and binding, one-shot announce/scrape exchanges, transaction state, and
-  timeout/retry handling. Resolve the selected URL once and reuse its address;
-  DNS failures stay inside the outbound-policy boundary.
+  receives only the currently selected URL. Protocol owns BEP 15 packet
+  encoding/decoding, UDP URL syntax/default port, and the stateful
+  `UdpTrackerClient`, including connection-ID caching, transaction matching,
+  one-shot announce/scrape exchanges, and retry deadlines. Core's
+  `tracker::udp_client` is the network-policy adapter: it resolves the selected
+  URL under `OutboundNetworkPolicy`, binds the matching source-address family,
+  and constructs the protocol client over that socket. `TrackerAnnouncer` maps
+  protocol errors into task lifecycle outcomes. The existing public core client
+  constructors remain policy adapters for library compatibility.
 - **Keep** `aria2_protocol::bittorrent::tracker::response::TrackerResponse`
   as the bencoded HTTP tracker response parser. It owns response keys,
   compact and dictionary peer decoding, IPv6 peers, tracker IDs, and optional
@@ -1232,7 +1264,14 @@ Do not add pass-through engine clients around these public interfaces.
   RPC normalizes wire values in `aria2`, while the C API converts its string
   pairs at its own boundary; both converge on the public core option-update
   contract. Core owns immediate versus pending application and active-task
-  restart semantics, which depend on request-group state.
+  restart semantics, which depend on request-group state. **Narrow** HTTP
+  connection, adaptive, HTTP/2, Range-size, and version mapping into the
+  private `options_ops::runtime_update::http` child module. Batch application
+  prevalidates every value before mutating the group, so a rejected batch
+  cannot leave earlier entries applied. Preserve the public low-level
+  `RequestGroupMan::update_group_options` interface for library callers and
+  document that adapter-facing runtime semantics belong to
+  `change_group_options`.
   The immediate BitTorrent `enable-peer-exchange` option is published through
   a request-group atomic signal to existing peer connections; core applies
   that live task policy at PEX receive, admission, and send boundaries, while

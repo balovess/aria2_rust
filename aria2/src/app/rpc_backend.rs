@@ -499,7 +499,9 @@ mod tests {
                     serde_json::json!("md5=task-fingerprint"),
                 ),
                 ("sftp-connect-timeout".to_string(), serde_json::json!(19)),
+                ("sftp-read-timeout".to_string(), serde_json::json!(27)),
                 ("sftp-compression".to_string(), serde_json::json!(false)),
+                ("sftp-keepalive-interval".to_string(), serde_json::json!(15)),
                 (
                     "sftp-preferred-ciphers".to_string(),
                     serde_json::json!("aes128-ctr"),
@@ -512,9 +514,9 @@ mod tests {
             task.ssh_host_key_md.as_deref(),
             Some("md5=task-fingerprint")
         );
-        assert_eq!(task.sftp_read_timeout, Some(73));
+        assert_eq!(task.sftp_read_timeout, Some(27));
         assert!(!task.sftp_compression);
-        assert_eq!(task.sftp_keepalive_interval, Some(0));
+        assert_eq!(task.sftp_keepalive_interval, Some(15));
         assert_eq!(
             task.sftp_preferred_ciphers.unwrap(),
             vec!["aes128-ctr".to_string()]
@@ -540,6 +542,14 @@ mod tests {
                     serde_json::Value::Bool(true),
                 ),
                 (
+                    "http-adaptive-reduction-percent".to_string(),
+                    serde_json::json!(33),
+                ),
+                (
+                    "http-adaptive-recovery-interval".to_string(),
+                    serde_json::json!(17),
+                ),
+                (
                     "http-adaptive-recovery-successes-min".to_string(),
                     serde_json::json!(40),
                 ),
@@ -547,13 +557,55 @@ mod tests {
                     "http-adaptive-recovery-successes-max".to_string(),
                     serde_json::json!(20),
                 ),
+                (
+                    "http-adaptive-start-interval-ms".to_string(),
+                    serde_json::json!(250),
+                ),
+                (
+                    "http-adaptive-backoff-base".to_string(),
+                    serde_json::json!(30),
+                ),
+                (
+                    "http-adaptive-backoff-max".to_string(),
+                    serde_json::json!(10),
+                ),
+                (
+                    "http-adaptive-capacity-start-interval-ms".to_string(),
+                    serde_json::json!(2500),
+                ),
+                (
+                    "http-adaptive-capacity-start-interval-max-ms".to_string(),
+                    serde_json::json!(1500),
+                ),
+                (
+                    "http-adaptive-rate-recovery-successes".to_string(),
+                    serde_json::json!(128),
+                ),
+                (
+                    "http-adaptive-rate-min-interval-ms".to_string(),
+                    serde_json::json!(25),
+                ),
+                (
+                    "http-adaptive-backoff-reset-after".to_string(),
+                    serde_json::json!(70),
+                ),
             ]))
             .await
             .expect("RPC task options should accept per-download adaptive settings");
 
         assert!(options.http_adaptive.enabled);
+        assert_eq!(options.http_adaptive.reduction_percent, 33);
+        assert_eq!(options.http_adaptive.recovery_interval_secs, 17);
         assert_eq!(options.http_adaptive.recovery_successes_min, 40);
         assert_eq!(options.http_adaptive.recovery_successes_max, 40);
+        assert_eq!(options.http_adaptive.start_interval_ms, 250);
+        assert_eq!(options.http_adaptive.backoff_base_secs, 30);
+        assert_eq!(options.http_adaptive.backoff_max_secs, 30);
+        assert_eq!(options.http_adaptive.capacity_start_interval_ms, 2500);
+        assert_eq!(options.http_adaptive.capacity_start_interval_max_ms, 2500);
+        assert_eq!(options.http_adaptive.rate_recovery_successes, 128);
+        assert_eq!(options.http_adaptive.rate_min_interval_ms, 25);
+        assert_eq!(options.http_adaptive.backoff_reset_after_secs, 70);
     }
 
     #[test]

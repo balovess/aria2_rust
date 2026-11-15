@@ -7,7 +7,10 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_rpc::{BackendError, BackendEvent, BackendResponse, BackendResult, PositionMode};
 
 use super::CoreRpcBackend;
-use super::values::normalize_options;
+use aria2_rpc::rpc_helpers::normalize_change_option_options;
+
+#[cfg(test)]
+mod tests;
 
 impl CoreRpcBackend {
     pub(super) async fn remove_download_files(
@@ -159,7 +162,7 @@ impl CoreRpcBackend {
     ) -> Result<BackendResult, BackendError> {
         let gid = self.parse_gid(&gid)?.to_hex_string();
         self.group_man
-            .change_group_options(&gid, normalize_options(&options))
+            .change_group_options(&gid, normalize_change_option_options(&options))
             .map_err(Self::execution)?;
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
     }

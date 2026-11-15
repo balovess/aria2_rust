@@ -3,9 +3,9 @@
 //! This module groups the per-protocol extension message types negotiated and
 //! exchanged over the BEP 10 extension mechanism:
 //!
-//! - [`handshake`] — BEP 10 extension handshake (negotiate `ut_metadata`, `ut_pex`)
-//! - [`ut_metadata`] — BEP 9 metadata piece exchange
-//! - [`ut_pex`] — BEP 11 peer exchange (compact IPv4/IPv6 peers)
+//! - `handshake` — BEP 10 extension handshake (negotiate `ut_metadata`, `ut_pex`)
+//! - `ut_metadata` — BEP 9 metadata piece exchange
+//! - `ut_pex` — BEP 11 peer exchange (compact IPv4/IPv6 peers)
 //!
 //! Each submodule operates on the *payload* portion of a `BtMessage::Extended`,
 //! i.e. the bytes **after** the 1-byte `ext_id` field.

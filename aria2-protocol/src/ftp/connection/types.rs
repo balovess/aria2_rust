@@ -140,25 +140,6 @@ impl FtpResponse {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::FtpOptions;
-
-    #[test]
-    fn ftp_options_debug_redacts_credentials() {
-        let options = FtpOptions {
-            username: "private-user".to_string(),
-            password: "private-password".to_string(),
-            ..FtpOptions::default()
-        };
-
-        let debug = format!("{options:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("private-user"));
-        assert!(!debug.contains("private-password"));
-    }
-}
-
 /// FTP control connection state.
 pub struct FtpConnection {
     pub stream: BufReader<TcpStream>,
@@ -210,5 +191,24 @@ impl FtpActiveDataListener {
     /// that apply their own network policy or diagnostics.
     pub async fn accept_with_peer(self) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
         self.listener.accept().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FtpOptions;
+
+    #[test]
+    fn ftp_options_debug_redacts_credentials() {
+        let options = FtpOptions {
+            username: "private-user".to_string(),
+            password: "private-password".to_string(),
+            ..FtpOptions::default()
+        };
+
+        let debug = format!("{options:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
     }
 }

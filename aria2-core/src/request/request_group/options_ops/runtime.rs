@@ -91,6 +91,14 @@ impl super::super::RequestGroup {
         &mut self,
         changes: HashMap<String, serde_json::Value>,
     ) -> Result<(), String> {
+        // Preflight the whole batch before applying side effects. Adapters
+        // normally classify first, but this method is also reached through
+        // direct core paths and must not leave a partially updated group.
+        for (key, value) in &changes {
+            if !Self::validate_option_update(key, value)? {
+                return Err(format!("Option '{}' cannot be changed at runtime", key));
+            }
+        }
         for (key, value) in changes {
             if !self.try_update_option(&key, value)? {
                 return Err(format!("Option '{}' cannot be changed at runtime", key));

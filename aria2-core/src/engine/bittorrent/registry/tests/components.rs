@@ -414,6 +414,25 @@ async fn global_dht_engine_install_returns_the_existing_canonical_engine() {
     ipv6.shutdown_async().await;
 }
 
+#[tokio::test]
+async fn final_dht_shutdown_takes_download_engines_and_deduplicates_shared_handles() {
+    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+
+    let engine = DhtEngine::start(DhtEngineConfig::local())
+        .await
+        .expect("local DHT engine should start");
+    let mut registry = BtRegistry::new();
+    registry.set_global_dht_engine(Arc::clone(&engine));
+    registry.set_dht_engine_for_gid(7, Arc::clone(&engine));
+
+    let engines = registry.take_all_dht_engines();
+
+    assert_eq!(engines.len(), 1);
+    assert!(Arc::ptr_eq(&engines[0], &engine));
+    assert!(registry.get_dht_engines().is_empty());
+    engine.shutdown_async().await;
+}
+
 #[test]
 fn test_dht_engines_are_taken_for_final_shutdown() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};

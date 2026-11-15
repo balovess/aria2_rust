@@ -7,6 +7,9 @@ use crate::bittorrent::tracker::udp_tracker_protocol::{
     ScrapeResult, UdpEvent, build_scrape_request,
 };
 
+// BEP 15 estimates that about 74 hashes fit in one UDP scrape request.
+const MAX_SCRAPE_INFO_HASHES_PER_REQUEST: usize = 74;
+
 impl UdpTrackerClient {
     /// Query tracker statistics for one or more info hashes.
     pub async fn scrape(
@@ -19,6 +22,19 @@ impl UdpTrackerClient {
             return Ok(Vec::new());
         }
 
+        let mut results = Vec::with_capacity(info_hashes.len());
+        for hashes in info_hashes.chunks(MAX_SCRAPE_INFO_HASHES_PER_REQUEST) {
+            results.extend(self.scrape_batch(addr, hashes, timeout).await?);
+        }
+        Ok(results)
+    }
+
+    async fn scrape_batch(
+        &mut self,
+        addr: SocketAddr,
+        info_hashes: &[[u8; 20]],
+        timeout: Duration,
+    ) -> Result<Vec<ScrapeResult>, UdpError> {
         self.add_scrape(&addr, info_hashes);
         loop {
             if let Some(index) = self.pending.iter().position(|request| {
@@ -82,8 +98,7 @@ impl UdpTrackerClient {
         match self.socket.send_to(&payload, req.remote_addr).await {
             Ok(len) => {
                 self.txn_map.insert(txn_id, self.inflight.len());
-                // Preserve scrape_info_hashes when replacing the request
-                let mut replacement = UdpTrackerRequest::new(
+                let replacement = UdpTrackerRequest::new(
                     req.remote_addr,
                     req.info_hash,
                     req.peer_id,
@@ -94,7 +109,6 @@ impl UdpTrackerClient {
                     req.num_want,
                     req.port,
                 );
-                replacement.scrape_info_hashes = std::mem::take(&mut req.scrape_info_hashes);
                 self.inflight.push_back(std::mem::replace(req, replacement));
                 tracing::debug!(
                     "Sent SCRAPE {} bytes to {} (txn={}, {} hashes)",
@@ -110,7 +124,7 @@ impl UdpTrackerClient {
                 req.fail_count += 1;
                 let retry = req.fail_count < super::MAX_RETRIES;
                 req.error = (!retry).then_some(UdpError::Network);
-                let mut replacement = UdpTrackerRequest::new(
+                let replacement = UdpTrackerRequest::new(
                     req.remote_addr,
                     req.info_hash,
                     req.peer_id,
@@ -121,7 +135,6 @@ impl UdpTrackerClient {
                     req.num_want,
                     req.port,
                 );
-                replacement.scrape_info_hashes = std::mem::take(&mut req.scrape_info_hashes);
                 let completed_or_retry = std::mem::replace(req, replacement);
                 if retry {
                     self.pending.push_front(completed_or_retry);

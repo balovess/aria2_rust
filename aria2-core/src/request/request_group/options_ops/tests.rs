@@ -1,5 +1,22 @@
 use super::runtime_update::apply_runtime_option_value;
-use crate::request::request_group::DownloadOptions;
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+
+#[test]
+fn runtime_option_batch_validates_all_entries_before_mutating() {
+    let mut group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    let changes = std::collections::HashMap::from([
+        ("dir".to_string(), serde_json::json!("new-directory")),
+        ("split".to_string(), serde_json::json!("0")),
+    ]);
+
+    assert!(group.apply_runtime_options(changes).is_err());
+    assert_eq!(group.options().dir, None);
+    assert!(group.runtime_options().is_empty());
+}
 
 #[test]
 fn runtime_split_update_keeps_values_above_u16() {
@@ -82,6 +99,68 @@ fn connection_timeouts_are_valid_rpc_task_options() {
     assert_eq!(options.sftp_connect_timeout, Some(41));
     assert_eq!(options.sftp_read_timeout, Some(73));
     assert_eq!(options.connect_timeout, Some(47));
+}
+
+#[test]
+fn ftp_and_sftp_connection_options_follow_reserved_and_pending_change_policy() {
+    for name in [
+        "ftp-reuse-connection",
+        "ssh-host-key-md",
+        "sftp-connect-timeout",
+        "sftp-read-timeout",
+        "sftp-compression",
+        "sftp-keepalive-interval",
+        "sftp-preferred-ciphers",
+    ] {
+        assert_eq!(
+            crate::config::is_option_changeable(name, false),
+            crate::config::ChangeableKind::Immediate,
+            "reserved tasks should accept {name} immediately"
+        );
+        assert_eq!(
+            crate::config::is_option_changeable(name, true),
+            crate::config::ChangeableKind::Pending,
+            "active tasks should defer {name} until restart"
+        );
+    }
+
+    let mut options = DownloadOptions::default();
+    for (name, value) in [
+        ("ftp-reuse-connection", serde_json::json!(false)),
+        (
+            "ssh-host-key-md",
+            serde_json::json!("sha-256=task-fingerprint"),
+        ),
+        ("sftp-connect-timeout", serde_json::json!(19)),
+        ("sftp-read-timeout", serde_json::json!(27)),
+        ("sftp-compression", serde_json::json!(false)),
+        ("sftp-keepalive-interval", serde_json::json!(15)),
+        (
+            "sftp-preferred-ciphers",
+            serde_json::json!("aes128-ctr,chacha20-poly1305@openssh.com"),
+        ),
+    ] {
+        assert!(apply_runtime_option_value(&mut options, name, &value).unwrap());
+    }
+
+    assert!(!options.ftp_reuse_connection);
+    assert_eq!(
+        options.ssh_host_key_md.as_deref(),
+        Some("sha-256=task-fingerprint")
+    );
+    assert_eq!(options.sftp_connect_timeout, Some(19));
+    assert_eq!(options.sftp_read_timeout, Some(27));
+    assert!(!options.sftp_compression);
+    assert_eq!(options.sftp_keepalive_interval, Some(15));
+    assert_eq!(
+        options.sftp_preferred_ciphers.as_deref(),
+        Some(
+            &[
+                "aes128-ctr".to_string(),
+                "chacha20-poly1305@openssh.com".to_string()
+            ][..]
+        )
+    );
 }
 
 #[test]

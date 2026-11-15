@@ -2,26 +2,32 @@
 //!
 //! Protocol implementations for the aria2-rust download utility.
 //!
-//! Provides reusable protocol implementations for HTTP/HTTPS, FTP, SFTP,
-//! BitTorrent, and Metalink. HTTP, FTP, SOCKS, and identity modules are always
+//! Provides reusable protocol implementations and protocol-level utilities
+//! for HTTP/HTTPS, FTP, SFTP, BitTorrent, and Metalink. HTTP, FTP, SOCKS,
+//! proxy URL parsing, URI component encoding, and identity defaults are always
 //! available; BitTorrent, Metalink, and SFTP are enabled by their respective
-//! crate features.
+//! crate features. The download engine owns task policy, network routing, and
+//! process-wide lifecycle; these modules expose protocol operations without
+//! depending on the engine.
 //!
 //! ## Modules
 //!
-//! - **[`http`]** — HTTP/HTTPS client built on reqwest/hyper, plus reusable request,
-//!   response, authentication, proxy-configuration, CONNECT, cookie, content
-//!   decoding, and header-parsing helpers. The standalone `HttpClient` does not
-//!   configure proxies; the download engine composes proxy and network policy
-//!   around its task-facing client.
+//! - **[`http`]** — Standalone HTTP/HTTPS client built on reqwest, plus reusable
+//!   request serialization, response parsing, authentication, CONNECT, cookie,
+//!   content-decoding, redirect, and header-parsing operations. The standalone
+//!   `HttpClient` does not configure proxies; the download engine composes proxy
+//!   and network policy around its task-facing clients.
 //!
 //! - **[`ftp`]** — FTP client: control connection (USER/PASS/CWD/SIZE/PASV/EPSV),
 //!   passive mode data transfer, anonymous and authenticated login, REST-based resume.
 //!
 //! - **[`bittorrent`]** *(feature: `bittorrent`)* — Full BitTorrent protocol stack:
 //!   bencode codec, .torrent parsing, info_hash computation, BT message protocol (10 types),
-//!   handshake, Tracker communication (HTTP announce/scrape), DHT network (K-buckets/KRPC),
-//!   PEX peer exchange, MSE encryption framework, and PeerConnection.
+//!   handshake, incoming TCP listener and handshake primitives, Tracker
+//!   communication (HTTP announce/scrape), DHT network (K-buckets/KRPC), PEX
+//!   peer exchange, MSE encryption framework, and `PeerConnection`. The engine
+//!   composes the raw listener with torrent routing, admission, and lifecycle
+//!   management.
 //!
 //! - **[`metalink`]** *(feature: `metalink`)* — Metalink V3/V4 XML parser:
 //!   multi-mirror URL priority, hash verification (MD5/SHA1/SHA256/SHA512),
@@ -29,6 +35,18 @@
 //!
 //! - **[`sftp`]** *(feature: `sftp`)* — SFTP over SSH2 client: key/password auth,
 //!   file operations (stat/read/write/mkdir/rmdir/readdir/symlink), streaming transfer.
+//!
+//! - **[`socks`]** — SOCKS4/SOCKS5 CONNECT handshakes over caller-provided
+//!   streams. Socket creation and target-address policy belong to the caller.
+//!
+//! - **[`proxy`]** — Proxy URL parsing, including percent-decoded credentials;
+//!   it does not resolve hosts or select routes.
+//!
+//! - **[`uri`]** — URI component percent-encoding and decoding helpers.
+//!
+//! - **[`identity`]** — Default product and peer identity strings for standalone
+//!   library users. Applications can supply their own identity through the
+//!   higher-level configuration boundary.
 
 pub mod ftp;
 pub mod http;

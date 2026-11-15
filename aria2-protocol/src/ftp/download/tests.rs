@@ -206,19 +206,20 @@ async fn failed_data_connect_aborts_transfer_and_keeps_control_session_synchroni
         host: "127.0.0.1".to_string(),
         port: control_address.port(),
     };
-    let mut download = FtpDownload::new(
-        &mut connection,
-        Some(FtpDownloadOptions {
-            data_connect_timeout: Duration::from_millis(200),
-            ..FtpDownloadOptions::default()
-        }),
-    );
-    let error = timeout(Duration::from_secs(2), download.download_to_memory("file"))
-        .await
-        .expect("failed data connection should not hang")
-        .expect_err("closed passive port should fail the transfer");
-    assert!(error.contains("FTP data connection"), "{error}");
-    drop(download);
+    {
+        let mut download = FtpDownload::new(
+            &mut connection,
+            Some(FtpDownloadOptions {
+                data_connect_timeout: Duration::from_millis(200),
+                ..FtpDownloadOptions::default()
+            }),
+        );
+        let error = timeout(Duration::from_secs(2), download.download_to_memory("file"))
+            .await
+            .expect("failed data connection should not hang")
+            .expect_err("closed passive port should fail the transfer");
+        assert!(error.contains("FTP data connection"), "{error}");
+    }
 
     timeout(Duration::from_secs(1), connection.noop())
         .await
@@ -317,31 +318,32 @@ async fn local_file_setup_failure_aborts_transfer_and_preserves_control_session(
         host: "127.0.0.1".to_string(),
         port: control_address.port(),
     };
-    let mut download = FtpDownload::new(
-        &mut connection,
-        Some(FtpDownloadOptions {
-            data_connect_timeout: Duration::from_secs(1),
-            ..FtpDownloadOptions::default()
-        }),
-    );
-    let error = timeout(
-        Duration::from_secs(2),
-        download.receive_data_to_file(
-            FtpDataConnection::Passive {
-                host: "127.0.0.1".to_string(),
-                port: data_address.port(),
-            },
-            output_directory.to_str().expect("UTF-8 test path"),
-            Some(1),
-            None,
-            None,
-        ),
-    )
-    .await
-    .expect("local setup failure should not hang")
-    .expect_err("opening a directory as a file should fail");
-    assert!(error.contains("Failed to create local file"), "{error}");
-    drop(download);
+    {
+        let mut download = FtpDownload::new(
+            &mut connection,
+            Some(FtpDownloadOptions {
+                data_connect_timeout: Duration::from_secs(1),
+                ..FtpDownloadOptions::default()
+            }),
+        );
+        let error = timeout(
+            Duration::from_secs(2),
+            download.receive_data_to_file(
+                FtpDataConnection::Passive {
+                    host: "127.0.0.1".to_string(),
+                    port: data_address.port(),
+                },
+                output_directory.to_str().expect("UTF-8 test path"),
+                Some(1),
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("local setup failure should not hang")
+        .expect_err("opening a directory as a file should fail");
+        assert!(error.contains("Failed to create local file"), "{error}");
+    }
 
     timeout(Duration::from_secs(1), connection.noop())
         .await
@@ -384,15 +386,15 @@ async fn preliminary_reply_is_not_accepted_as_transfer_completion() {
         host: "127.0.0.1".to_string(),
         port: address.port(),
     };
-    let mut download = FtpDownload::new(&mut connection, None);
+    {
+        let mut download = FtpDownload::new(&mut connection, None);
 
-    let error = download
-        .read_transfer_complete()
-        .await
-        .expect_err("a preliminary 1xx response does not complete a transfer");
-    assert!(error.contains("150"), "{error}");
-
-    drop(download);
+        let error = download
+            .read_transfer_complete()
+            .await
+            .expect_err("a preliminary 1xx response does not complete a transfer");
+        assert!(error.contains("150"), "{error}");
+    }
     server.await.expect("FTP test server should finish");
 }
 
@@ -487,22 +489,23 @@ async fn successful_226_does_not_hide_a_short_memory_download() {
         host: "127.0.0.1".to_string(),
         port: control_address.port(),
     };
-    let mut download = FtpDownload::new(
-        &mut connection,
-        Some(FtpDownloadOptions {
-            data_connect_timeout: Duration::from_secs(1),
-            ..FtpDownloadOptions::default()
-        }),
-    );
-    let error = timeout(Duration::from_secs(2), download.download_to_memory("file"))
-        .await
-        .expect("short download should not hang")
-        .expect_err("known remote SIZE should reject a truncated payload");
-    assert!(
-        error.contains("expected 2 bytes, received 1 bytes"),
-        "{error}"
-    );
-    drop(download);
+    {
+        let mut download = FtpDownload::new(
+            &mut connection,
+            Some(FtpDownloadOptions {
+                data_connect_timeout: Duration::from_secs(1),
+                ..FtpDownloadOptions::default()
+            }),
+        );
+        let error = timeout(Duration::from_secs(2), download.download_to_memory("file"))
+            .await
+            .expect("short download should not hang")
+            .expect_err("known remote SIZE should reject a truncated payload");
+        assert!(
+            error.contains("expected 2 bytes, received 1 bytes"),
+            "{error}"
+        );
+    }
 
     timeout(Duration::from_secs(1), connection.noop())
         .await

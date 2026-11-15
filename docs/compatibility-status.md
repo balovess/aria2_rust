@@ -91,7 +91,9 @@ behavior. An unlisted behavior has not been audited here.
   proxy-jitter soak completed once, and its extended eight-iteration soak
   completed twice after the retry scheduling and output-reset fixes. Those
   loopback runs verify exact output bytes and that recovered servers receive
-  no additional self-induced capacity rejections.
+  no additional self-induced capacity rejections. CLI, RPC `addUri`, and C API
+  `add_uri` task-option tests now each cover all 13 adaptive controls and
+  verify normalization of paired recovery, backoff, and pacing limits.
 
 ## HTTP mirror circuit-breaker recovery
 
@@ -534,11 +536,12 @@ behavior. An unlisted behavior has not been audited here.
   deadline, refreshed by valid packets from the peer. This closes unresponsive
   peers even when no packet retransmission timer is active, so the configured
   idle timeout also bounds keepalive-only connections.
-- **Verification:** a core test confirms the configured connection cap is
-  enforced by the shared transport socket; CLI parsing and RPC option-to-engine
-  command propagation have focused tests. A C API FFI regression verifies that
-  runtime handshake-timeout and uTP-cap changes produce the corresponding
-  engine commands. Protocol unit tests cover ID-space wraparound, the sole
+- **Verification:** a process-options test creates a shared transport after
+  startup and confirms that its configured connection cap is enforced; CLI
+  parsing and RPC option-to-engine command propagation have focused tests. A
+  C API FFI regression verifies that runtime handshake-timeout changes and all
+  four uTP socket settings produce the corresponding engine commands. Protocol
+  unit tests cover ID-space wraparound, the sole
   free-ID case, complete exhaustion, idle retirement without pending
   retransmissions, idle-deadline refresh on valid peer traffic, the fact that
   local keepalive sends do not refresh that deadline, and preservation of a
@@ -615,6 +618,11 @@ behavior. An unlisted behavior has not been audited here.
   the tracker's UDP response source (6-byte IPv4 entries or 18-byte IPv6
   entries), as specified by BEP 15. The legacy protocol parser helper remains
   IPv4-oriented for callers that use it directly.
+- **SCRAPE request sizing:** the client sends at most 74 info hashes per UDP
+  SCRAPE request and splits larger library requests into ordered batches. The
+  returned results retain the input order. This follows BEP 15's approximate
+  packet-size guidance and prevents large public API inputs from producing
+  unusually large, fragmentation-prone UDP datagrams.
 - **Engine policy:** core retains tracker URL resolution through
   `OutboundNetworkPolicy`, binds the socket to the selected address family and
   local source, and maps protocol errors into tracker lifecycle outcomes. UDP
@@ -626,12 +634,14 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol UDP client loopback tests cover transaction
   matching, unexpected-source rejection, malformed/action-mismatched packets,
   retry deadlines, connection-ID expiry, ANNOUNCE, SCRAPE, and rejection of
-  SCRAPE result counts that differ from the requested hash count. Concurrent
-  response and timeout removal coverage verifies that remaining transaction
-  indices are updated. Parser tests cover IPv4 and IPv6 compact peer strides,
-  including an IPv6 tracker-source response. Core tests cover
-  source-address/address-family binding and URL-to-policy resolution. External
-  tracker interoperability remains unverified.
+  SCRAPE result counts that differ from the requested hash count. A loopback
+  test sends 75 hashes and verifies ordered results across 74-hash and 1-hash
+  requests, and a send-failure test verifies retries retain their hash
+  association. Concurrent response and timeout removal coverage verifies that
+  remaining transaction indices are updated. Parser tests cover IPv4 and IPv6
+  compact peer strides, including an IPv6 tracker-source response. Core tests
+  cover source-address/address-family binding and URL-to-policy resolution.
+  External tracker interoperability remains unverified.
 
 ## BitTorrent tracker announce cancellation
 
@@ -674,6 +684,8 @@ behavior. An unlisted behavior has not been audited here.
   through global-option RPC reads and `changeGlobalOption`. Global changes
   immediately update running engines, trim excess entries by least-recently
   updated swarm/peer, and update the process snapshot used by later engines.
+  Both DHT storage-limit updates use the engine's bounded control queue, so
+  they are not delayed behind queued download submissions.
   `dht-max-items` independently caps BEP 44 targets at 4,096 per DHT engine;
   when full, the oldest write is evicted. It is exposed through CLI/config,
   C API session options, and global RPC options. Runtime changes trim the
@@ -691,6 +703,15 @@ behavior. An unlisted behavior has not been audited here.
   through Tokio file I/O and performs bencode decoding and signature checks on
   the blocking pool. The synchronous `DhtItemStore` file API remains available
   to direct library callers.
+- **Nested command shutdown:** after handing DHT engines to the payload
+  `BtDownloadCommand`, magnet execution awaits that command's shutdown on both
+  success and failure. Locally owned engines finish asynchronous persistence;
+  process-shared engines remain running. A successful zero-length payload
+  regression verifies the handed-off local engine reaches shutdown and writes
+  its DHT state file. At final engine shutdown, the registry also drains
+  per-GID DHT handles left by commands that exceeded the graceful-shutdown
+  deadline; shared handles are deduplicated before asynchronous shutdown. A
+  registry regression covers draining a shared engine retained in both maps.
 - **Verification:** focused core tests cover process-option precedence over a
   task override, projection of every configurable DHT timeout/concurrency and
   persistence-age value into the protocol config, process-level peer and
@@ -975,6 +996,11 @@ behavior. An unlisted behavior has not been audited here.
   password authentication before stalling, then verifies
   `connect_with_stream` returns `ConnectTimeout` within the configured
   connection deadline. The current focused protocol loopback run passes 12/12,
+  and the CLI/RPC SFTP option tests pass 2/2. The core SFTP-filtered library
+  run passes 34/34, including C API global/task propagation, shared option
+  parsing, session restoration, and protocol-option construction. Its session
+  persistence case requires a writable temporary directory; on the sandboxed
+  Windows host, `TEMP` and `TMP` were pointed inside the workspace for this run.
   including early-EOF regressions for a truncated remote download and a local
   upload source that shrinks after its initial size was read; both paths return
   errors and close the remote handle. The suite also includes a loopback upload that
@@ -984,9 +1010,9 @@ behavior. An unlisted behavior has not been audited here.
   rejection of a resume offset beyond the local source. Upload CLOSE failure
   returns an error; a separate download case verifies that CLOSE failure after
   the full payload is received remains a cleanup warning and preserves the
-  completed file. Cancellation coverage also verifies explicit remote CLOSE. Buffer
-  bounds are checked at use time even when callers directly assign the public
-  `TransferOptions::buffer_size` field. SFTP INIT advertises v3, and the
+  completed file. Cancellation coverage also verifies explicit remote CLOSE.
+  Buffer bounds are checked at use time even when callers directly assign the
+  public `TransferOptions::buffer_size` field. SFTP INIT advertises v3, and the
   implementation now accepts only the negotiated v3 wire format. Each packet
   read uses a single `sftp-read-timeout` deadline across all fragments; a
   slow-drip regression test verifies that periodic bytes do not reset it.
@@ -1036,7 +1062,7 @@ behavior. An unlisted behavior has not been audited here.
   tests; protocol SSH option tests cover secret redaction. These include
   authentication, fingerprint checks, cancellation, resume,
   and transfer lifecycle. The full `aria2-protocol` all-features library suite
-  passed 1324 tests with 2 ignored. No public remote SFTP
+  passed 1333 tests with 2 ignored. No public remote SFTP
   server interoperability run has been performed. SSH trust behavior is not
   claimed compatible with original aria2 beyond explicit fingerprint checks.
 - **Frame size policy:** SFTP frames are capped at 16 MiB including the
@@ -1155,7 +1181,9 @@ behavior. An unlisted behavior has not been audited here.
   core's injected control session. Recursive standalone downloads reject LIST
   entry names that are not one normal local path component, preventing
   absolute and parent-directory traversal from server-controlled names.
-  Authentication logs omit username and password values.
+  Authentication logs omit username and password values. FTP command-creation
+  diagnostics omit the raw URI and remote path, which could expose URI
+  credentials; they retain the resolved host and port.
 - **Current focused verification:** `cargo test -p aria2-protocol --lib ftp::`
   passes 81 tests, and
   `cargo test -p aria2-core --lib engine::ftp::download_command::tests` passes
@@ -1174,8 +1202,9 @@ behavior. An unlisted behavior has not been audited here.
   testing. Focused tests cover bounded line reads and oversized responses in
   both public FTP client paths, CR/LF rejection at the shared command writer,
   rejection of unsafe recursive listing paths, and credential redaction in
-  command-log formatting. Earlier core FTP, FTP download end-to-end, proxy, and
-  legacy integration checks are recorded in their respective audit entries.
+  FTP command-log formatting. Earlier core FTP, FTP download end-to-end,
+  proxy, and legacy integration checks are recorded in their respective audit
+  entries.
 
 - **FTPS TLS layering:** `aria2-protocol::ftp::tls::FtpsClient` builds a TLS
   connector once per download attempt and reuses it for the control and data
@@ -1242,8 +1271,12 @@ behavior. An unlisted behavior has not been audited here.
   verifies expected size, whole-file hashes, and piece hashes before a durable
   atomic replacement publishes the destination. Metalink controls retries by
   limiting each child protocol command to one attempt and relays pause, halt,
-  removal, and progress to that command. HTTP source commands preserve the
-  Metalink path's 30-second default connect timeout when the option is unset;
+  removal, and progress to that command. Pause and force-halt retain the
+  mirror-specific staging file and its sibling control file so the same GID can
+  resume that source. Explicit removal discards the unpublished staging file
+  and control file; the incomplete payload is not published at the destination.
+  HTTP source commands preserve the Metalink path's 30-second default connect
+  timeout when the option is unset;
   an explicit task value is passed through unchanged. They also retain the
   former one-sequential-request-per-mirror pattern.
 - **Verification:** focused Metalink constructor and execution tests cover
@@ -1257,7 +1290,9 @@ behavior. An unlisted behavior has not been audited here.
   source-command path. Parser tests cover SFTP URI retention and FTP-family
   classification. No public remote-server or original-binary comparison was
   run; Metalink-over-SFTP wire interoperability and custom-DNS end-to-end
-  behavior remain unverified.
+  behavior remain unverified. The lifecycle integration target passes 17/17,
+  including pause/resume from the staging checkpoint, force-halt checkpoint
+  retention, and removal cleanup.
 
 ## Pause and unpause lifecycle status
 
@@ -1500,6 +1535,17 @@ behavior. An unlisted behavior has not been audited here.
   while XML `<base64>` values are decoded. XML multicall error entries expose
   `faultCode` and `faultString`. `changeUri` returns its two counts as JSON
   numbers, matching the original examples.
+- **Input extension and difference:** `changeGlobalOption` accepts native
+  JSON number and boolean scalars and converts them through the shared option
+  registry. Its registry also stringifies numeric and boolean members in
+  cumulative arrays, rejects null/object array members, and rejects arrays
+  for non-cumulative options. Original aria2 accepts string scalars, skips
+  non-string members in cumulative arrays, and ignores arrays for
+  non-cumulative options. The native scalar extension is covered by registry
+  and core-backed adapter tests; the remaining input-shape difference is a
+  known compatibility gap without live original-binary differential coverage.
+  Task `changeOption` follows the original string-only scalar and
+  string-members-only array behavior.
 - **Extensions:** Rust-only methods such as `aria2.getPeerStats`,
   `aria2.getPeerDetails`, `aria2.getTrackers`, `aria2.getDhtStatus`,
   `aria2.saveDhtState`, `aria2.evictDhtNodes`, `aria2.removeDownloadFiles`,
@@ -1511,6 +1557,17 @@ behavior. An unlisted behavior has not been audited here.
   HTTP/TLS/WebSocket transports, authentication, multicall, lifecycle methods,
   notifications, and concurrent stress coverage. The core-backed regression
   suite verifies the application adapter for the original method surface.
+  Task `changeOption` accepts string scalars and string array members, skipping
+  non-string scalar values and non-string array members as the original RPC
+  contract does. Its dedicated input normalizer is separate from response
+  option normalization, which converts numbers and booleans to strings.
+  Normalized input then delegates validation and immediate/pending lifecycle
+  semantics to core; focused tests cover these conversions, successful updates,
+  ignored unknown keys, and atomic rejection of an invalid known value. An
+  XML-RPC `/rpc` end-to-end test decodes a `changeOption` struct, applies it,
+  and reads the task option back. A core-backed `changeGlobalOption` regression
+  verifies that adapter validation rejects the whole batch before changing a
+  valid sibling option or emitting runtime commands.
   Upstream source and manual examples were used as the reference. A live
   cross-binary differential run against an original `aria2c` executable remains
   a verification gap because no original binary is available in this workspace.

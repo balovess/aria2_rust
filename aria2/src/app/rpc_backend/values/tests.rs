@@ -175,7 +175,7 @@ async fn global_handshake_timeout_updates_config_and_engine() {
 }
 
 #[tokio::test]
-async fn invalid_global_handshake_timeout_is_rejected_before_update() {
+async fn invalid_global_handshake_timeout_rejects_entire_change_batch() {
     let config = Arc::new(RwLock::new(ConfigManager::new()));
     let (sender, mut receiver) = channel();
     let backend = CoreRpcBackend::new(
@@ -185,13 +185,21 @@ async fn invalid_global_handshake_timeout_is_rejected_before_update() {
         None,
         "test",
     );
+    let original_max_concurrent = config
+        .read()
+        .await
+        .get_global_i64("max-concurrent-downloads")
+        .await;
 
     assert!(
         backend
-            .change_global_option(HashMap::from([(
-                "bt-incoming-peer-handshake-timeout".to_string(),
-                serde_json::json!(0),
-            )]))
+            .change_global_option(HashMap::from([
+                ("max-concurrent-downloads".to_string(), serde_json::json!(9),),
+                (
+                    "bt-incoming-peer-handshake-timeout".to_string(),
+                    serde_json::json!(0),
+                ),
+            ]))
             .await
             .is_err()
     );
@@ -202,6 +210,15 @@ async fn invalid_global_handshake_timeout_is_rejected_before_update() {
             .get_global_i64("bt-incoming-peer-handshake-timeout")
             .await,
         Some(30)
+    );
+    assert_eq!(
+        config
+            .read()
+            .await
+            .get_global_i64("max-concurrent-downloads")
+            .await,
+        original_max_concurrent,
+        "a rejected batch must not apply its valid sibling option"
     );
     assert!(receiver.try_recv().is_err());
 }
