@@ -15,6 +15,52 @@ fn options<'a>(user_agent: &'a str) -> HttpConnectOptions<'a> {
     }
 }
 
+#[test]
+fn proxy_auth_body_framing_requires_unambiguous_http_boundaries() {
+    assert_eq!(
+        proxy_response_body_framing(&[(
+            "Transfer-Encoding".to_string(),
+            "gzip, chunked".to_string(),
+        )])
+        .unwrap(),
+        ProxyResponseBodyFraming::Chunked
+    );
+    assert!(matches!(
+        proxy_response_body_framing(&[(
+            "Transfer-Encoding".to_string(),
+            "chunked, gzip".to_string(),
+        )]),
+        Err(HttpConnectError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        proxy_response_body_framing(&[(
+            "Transfer-Encoding".to_string(),
+            "chunked, chunked".to_string(),
+        )]),
+        Err(HttpConnectError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        proxy_response_body_framing(&[
+            ("Content-Length".to_string(), "1".to_string()),
+            ("content-length".to_string(), "2".to_string()),
+        ]),
+        Err(HttpConnectError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        proxy_response_body_framing(&[("Content-Length".to_string(), "not-a-length".to_string(),)]),
+        Err(HttpConnectError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        proxy_response_body_framing(&[]),
+        Err(HttpConnectError::InvalidResponse(_))
+    ));
+    assert_eq!(
+        proxy_response_body_framing(&[("Content-Length".to_string(), "1, 1".to_string(),)])
+            .unwrap(),
+        ProxyResponseBodyFraming::ContentLength(1)
+    );
+}
+
 #[tokio::test]
 async fn skips_informational_responses_and_preserves_tunnel_bytes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -39,6 +85,30 @@ async fn skips_informational_responses_and_preserves_tunnel_bytes() {
     let mut tunneled = [0; 3];
     stream.read_exact(&mut tunneled).await.unwrap();
     assert_eq!(&tunneled, b"TLS");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_user_agent_is_rejected_before_connect_request_is_written() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 256];
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), stream.read(&mut request)).await;
+        assert!(result.is_err(), "invalid request must not be written");
+    });
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let options = HttpConnectOptions {
+        user_agent: "agent\r\nX-Injected: yes",
+        ..options("unused")
+    };
+    assert!(matches!(
+        establish_connect_tunnel(&mut stream, &options).await,
+        Err(HttpConnectError::InvalidRequestField("User-Agent"))
+    ));
     server.await.unwrap();
 }
 
@@ -82,6 +152,46 @@ async fn challenge_authentication_is_sent_only_after_407() {
     establish_connect_tunnel(&mut stream, &options)
         .await
         .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn unframed_407_stops_before_authenticated_retry() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 2048];
+        let length = stream.read(&mut request).await.unwrap();
+        assert!(request[..length].starts_with(b"CONNECT example.com:443 HTTP/1.1\r\n"));
+        stream
+            .write_all(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"test\"\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let mut retry = [0; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.read(&mut retry))
+                .await
+                .is_err(),
+            "an unframed 407 must not trigger an authenticated retry"
+        );
+    });
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let options = HttpConnectOptions {
+        username: Some("user"),
+        password: Some("pass"),
+        ..options("test-agent")
+    };
+    let result = establish_connect_tunnel(&mut stream, &options).await;
+    assert!(matches!(
+        result,
+        Err(HttpConnectError::InvalidResponse(message))
+            if message.contains("no body framing")
+    ));
     server.await.unwrap();
 }
 

@@ -95,6 +95,9 @@ fn map_connect_error(
 
     match error {
         HttpConnectError::Timeout => Aria2Error::Network("Timeout during proxy CONNECT".into()),
+        HttpConnectError::InvalidRequestField(field) => {
+            Aria2Error::InvalidArgument(format!("invalid HTTP CONNECT request field: {field}"))
+        }
         HttpConnectError::Io(error) => {
             Aria2Error::Network(format!("Error communicating with proxy: {error}"))
         }

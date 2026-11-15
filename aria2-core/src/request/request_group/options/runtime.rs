@@ -134,11 +134,11 @@ impl DownloadOptions {
         .with_browser_context(crate::http::global_browser_context())
     }
 
-    /// Resolve proxy credentials using aria2's protocol-specific precedence.
+    /// Resolve credentials from the proxy selected for this protocol.
     ///
-    /// A protocol-specific credential overrides the corresponding
-    /// `all-proxy-*` value. The `all` selector is used when constructing the
-    /// fallback proxy matcher itself.
+    /// Credentials stay scoped to their proxy URL: protocol-specific options
+    /// apply only when that protocol's proxy URL is selected; otherwise the
+    /// `all-proxy-*` options apply to the selected fallback proxy.
     pub(crate) fn proxy_credentials_for_scheme(
         &self,
         scheme: &str,

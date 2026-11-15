@@ -6,6 +6,16 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
+/// Return whether a value can be serialized as an HTTP field value.
+///
+/// Horizontal tab, visible ASCII, and obs-text octets are permitted. Other
+/// control bytes, including CR and LF, are rejected to prevent field injection.
+pub fn is_valid_http_field_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte == b'\t' || (byte >= 0x20 && byte != 0x7f))
+}
+
 impl HttpRequest {
     pub fn new<U: Into<String>>(method: &str, url: U) -> Self {
         Self {
@@ -130,7 +140,16 @@ pub fn serialize_http_request(
 
 #[cfg(test)]
 mod tests {
-    use super::HttpRequest;
+    use super::{HttpRequest, is_valid_http_field_value};
+
+    #[test]
+    fn validates_http_field_value_control_bytes() {
+        assert!(is_valid_http_field_value("agent/1.0\t(comment)"));
+        assert!(is_valid_http_field_value("agent-\u{80}"));
+        for invalid in ["agent\r\nX-Injected: yes", "agent\0", "agent\u{7f}"] {
+            assert!(!is_valid_http_field_value(invalid), "accepted {invalid:?}");
+        }
+    }
 
     #[test]
     fn serializes_origin_form_and_absolute_form_requests() {

@@ -165,8 +165,9 @@ impl BtPeerListenerManager {
         }
     }
 
-    /// Set the process-wide timeout applied to each read during an incoming
-    /// BitTorrent TCP handshake. New connections observe the updated value.
+    /// Set the process-wide timeout applied while receiving incoming
+    /// BitTorrent TCP and uTP handshakes. New connections observe the updated
+    /// value.
     pub fn set_incoming_handshake_timeout(&self, timeout: std::time::Duration) {
         let timeout_nanos = if timeout.is_zero() {
             1_000_000_000
@@ -241,10 +242,13 @@ impl BtPeerListenerManager {
 
         if let Some(receiver) = self.utp_incoming_rx.lock().await.take() {
             let incoming_handshake_slots = Arc::clone(&self.incoming_handshake_slots);
+            let incoming_handshake_timeout_nanos =
+                Arc::clone(&self.incoming_handshake_timeout_nanos);
             let task = tokio::spawn(incoming::run_shared_utp_listener(
                 receiver,
                 Arc::clone(&self.routes),
                 incoming_handshake_slots,
+                incoming_handshake_timeout_nanos,
                 self.shutdown.clone(),
             ));
             self.state.lock().await.listener_tasks.push(task);

@@ -517,7 +517,7 @@ fn e7_test_proxy_url_default_port() {
     assert_eq!(socks5_parsed.port, 1080, "SOCKS default port is 1080");
 
     let http_parsed = ProxyUrl::parse("http://webproxy.local").expect("should parse");
-    assert_eq!(http_parsed.port, 8080, "HTTP default port is 8080");
+    assert_eq!(http_parsed.port, 80, "HTTP default port is 80");
 
     let https_parsed = ProxyUrl::parse("https://secure.local").expect("should parse");
     assert_eq!(https_parsed.port, 443, "HTTPS default port is 443");

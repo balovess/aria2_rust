@@ -698,9 +698,7 @@ impl crate::config::OptionRegistry {
             ),
             min: Some(1),
             max: Some(600),
-            description:
-                "Maximum wait per read during an incoming BitTorrent peer handshake, in seconds"
-                    .into(),
+            description: "Maximum wait per TCP read or uTP receive during an incoming BitTorrent peer handshake, in seconds".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

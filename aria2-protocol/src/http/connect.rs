@@ -12,7 +12,7 @@ use tracing::debug;
 use super::auth::basic_authorization;
 use super::digest::{DigestChallenge, DigestResponse};
 use super::header_processor::{HttpResponseHeadReadError, read_response_head};
-use super::request::serialize_http_request;
+use super::request::{is_valid_http_field_value, serialize_http_request};
 
 /// Settings for one HTTP CONNECT handshake.
 pub struct HttpConnectOptions<'a> {
@@ -88,12 +88,21 @@ pub enum HttpConnectError {
         /// Reason phrase returned by the proxy.
         reason_phrase: String,
     },
+    /// A caller-provided field cannot be serialized safely.
+    #[error("invalid HTTP CONNECT request field: {0}")]
+    InvalidRequestField(&'static str),
 }
 
 struct ProxyResponse {
     status_code: u16,
     reason_phrase: String,
     headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyResponseBodyFraming {
+    Chunked,
+    ContentLength(usize),
 }
 
 /// Complete an HTTP CONNECT handshake without opening or replacing the stream.
@@ -119,6 +128,9 @@ pub async fn establish_connect_tunnel_with_retry_policy(
     options: &HttpConnectOptions<'_>,
     retry_policy: &HttpConnectRetryPolicy,
 ) -> Result<(), HttpConnectError> {
+    if !is_valid_http_field_value(options.user_agent) {
+        return Err(HttpConnectError::InvalidRequestField("User-Agent"));
+    }
     let preemptive_auth = if options.preemptive_basic_auth {
         options
             .username
@@ -303,66 +315,95 @@ async fn consume_response_body(
     read_timeout: Duration,
 ) -> Result<(), HttpConnectError> {
     const MAX_AUTH_RESPONSE_BODY_BYTES: usize = 64 * 1024;
-    if let Some((_, transfer_encoding)) = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
-    {
-        if transfer_encoding
-            .split(',')
-            .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
-        {
+    match proxy_response_body_framing(headers)? {
+        ProxyResponseBodyFraming::Chunked => {
             timeout(read_timeout, consume_chunked_body(stream))
                 .await
                 .map_err(|_| HttpConnectError::Timeout)??;
             return Ok(());
         }
-        return Err(HttpConnectError::InvalidResponse(
-            "unsupported proxy authentication response transfer coding".to_string(),
-        ));
+        ProxyResponseBodyFraming::ContentLength(0) => return Ok(()),
+        ProxyResponseBodyFraming::ContentLength(length)
+            if length <= MAX_AUTH_RESPONSE_BODY_BYTES =>
+        {
+            let mut remaining = length;
+            let mut buffer = [0; 4096];
+            let result = timeout(read_timeout, async {
+                while remaining > 0 {
+                    let chunk_length = remaining.min(buffer.len());
+                    stream.read_exact(&mut buffer[..chunk_length]).await?;
+                    remaining -= chunk_length;
+                }
+                Ok::<(), io::Error>(())
+            })
+            .await;
+            result
+                .map_err(|_| HttpConnectError::Timeout)?
+                .map_err(HttpConnectError::Io)?;
+            debug!(length, "Consumed proxy authentication response body");
+            return Ok(());
+        }
+        ProxyResponseBodyFraming::ContentLength(_) => {
+            return Err(HttpConnectError::InvalidResponse(
+                "proxy authentication response body exceeds the discard limit".to_string(),
+            ));
+        }
     }
+}
 
-    let content_length = headers
+fn proxy_response_body_framing(
+    headers: &[(String, String)],
+) -> Result<ProxyResponseBodyFraming, HttpConnectError> {
+    let transfer_encodings = headers
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok());
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .collect::<Vec<_>>();
 
-    if content_length == Some(0) {
-        return Ok(());
+    if !transfer_encodings.is_empty() {
+        let chunked_count = transfer_encodings
+            .iter()
+            .filter(|coding| coding.eq_ignore_ascii_case("chunked"))
+            .count();
+        if transfer_encodings.iter().any(|coding| coding.is_empty())
+            || chunked_count != 1
+            || !transfer_encodings
+                .last()
+                .is_some_and(|coding| coding.eq_ignore_ascii_case("chunked"))
+        {
+            return Err(HttpConnectError::InvalidResponse(
+                "unsupported proxy authentication response transfer coding".to_string(),
+            ));
+        }
+        return Ok(ProxyResponseBodyFraming::Chunked);
     }
-    if let Some(length) = content_length.filter(|length| *length <= MAX_AUTH_RESPONSE_BODY_BYTES) {
-        let mut remaining = length;
-        let mut buffer = [0; 4096];
-        let result = timeout(read_timeout, async {
-            while remaining > 0 {
-                let chunk_length = remaining.min(buffer.len());
-                stream.read_exact(&mut buffer[..chunk_length]).await?;
-                remaining -= chunk_length;
-            }
-            Ok::<(), io::Error>(())
+
+    let content_lengths = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                HttpConnectError::InvalidResponse(
+                    "invalid proxy authentication response Content-Length".to_string(),
+                )
+            })
         })
-        .await;
-        result
-            .map_err(|_| HttpConnectError::Timeout)?
-            .map_err(HttpConnectError::Io)?;
-        debug!(length, "Consumed proxy authentication response body");
-        return Ok(());
-    }
+        .collect::<Result<Vec<_>, _>>()?;
 
-    if content_length.is_some() {
+    let Some(&length) = content_lengths.first() else {
         return Err(HttpConnectError::InvalidResponse(
-            "proxy authentication response body exceeds the discard limit".to_string(),
+            "proxy authentication response has no body framing".to_string(),
+        ));
+    };
+    if content_lengths.iter().any(|candidate| *candidate != length) {
+        return Err(HttpConnectError::InvalidResponse(
+            "conflicting proxy authentication response Content-Length values".to_string(),
         ));
     }
-
-    // Responses without a usable Content-Length may still carry a small body.
-    // Preserve the bounded legacy drain for these uncommon proxy responses.
-    let mut buffer = [0; 4096];
-    match timeout(read_timeout, stream.read(&mut buffer)).await {
-        Ok(Ok(length)) => debug!(length, "Consumed proxy authentication response body"),
-        Ok(Err(error)) => debug!(%error, "Could not consume proxy authentication response body"),
-        Err(_) => debug!("Timed out while consuming proxy authentication response body"),
-    }
-    Ok(())
+    Ok(ProxyResponseBodyFraming::ContentLength(length))
 }
 
 async fn consume_chunked_body(stream: &mut TcpStream) -> Result<(), HttpConnectError> {

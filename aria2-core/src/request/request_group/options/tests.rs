@@ -131,6 +131,9 @@ fn memory_follow_mode_matches_metadata_content_types() {
 #[test]
 fn proxy_credentials_prefer_protocol_specific_values() {
     let options = DownloadOptions {
+        http_proxy: Some("http://url-user:url-pass@http-proxy.example:8080".to_string()),
+        https_proxy: Some("http://url-user:url-pass@https-proxy.example:8080".to_string()),
+        all_proxy: Some("http://url-user:url-pass@all-proxy.example:8080".to_string()),
         http_proxy_user: Some("http-user".to_string()),
         http_proxy_passwd: Some("http-pass".to_string()),
         https_proxy_user: Some("https-user".to_string()),
@@ -145,11 +148,32 @@ fn proxy_credentials_prefer_protocol_specific_values() {
     );
     assert_eq!(
         options.proxy_credentials_for_scheme("https"),
-        (Some("https-user".to_string()), Some("all-pass".to_string()))
+        (Some("https-user".to_string()), Some("url-pass".to_string()))
     );
     assert_eq!(
         options.proxy_credentials_for_scheme("all"),
         (Some("all-user".to_string()), Some("all-pass".to_string()))
+    );
+}
+
+#[test]
+fn protocol_credentials_do_not_cross_to_all_proxy_or_vice_versa() {
+    let options = DownloadOptions {
+        all_proxy: Some("http://all-url-user:all-url-pass@all-proxy.example:8080".into()),
+        all_proxy_user: Some("all-user".into()),
+        all_proxy_passwd: Some("all-pass".into()),
+        http_proxy_user: Some("http-user".into()),
+        http_proxy_passwd: Some("http-pass".into()),
+        ..DownloadOptions::default()
+    };
+
+    assert_eq!(
+        options.proxy_credentials_for_scheme("http"),
+        (Some("all-user".into()), Some("all-pass".into()))
+    );
+    assert_eq!(
+        options.proxy_credentials_for_scheme("all"),
+        (Some("all-user".into()), Some("all-pass".into()))
     );
 }
 

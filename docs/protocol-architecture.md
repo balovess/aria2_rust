@@ -72,6 +72,17 @@ BitTorrent. The built-in registry orders metadata and scheme-specific adapters
 before the HTTP fallback. The HTTP adapter delegates construction to
 `engine::http::command_factory`, which resolves target and proxy addresses.
 
+**Keep** `aria2_core::validation::protocol_detector::detect` in core as an
+input-boundary classifier: it reads and sniffs local torrent/Metalink files
+and returns the application-facing `InputType` used by CLI setup and metadata
+expansion. It does not parse protocol wire data or construct network clients;
+URI command selection remains with `ProtocolAdapterRegistry`. The separate
+public `validation::uri::validate` helper is a shallow scheme/input check, not
+the dispatch parser or the BitTorrent magnet parser. Both input checks accept
+the `magnet:?` prefix case-insensitively and reject `magnet?`, matching the
+protocol parser's URI boundary. Keeping these contracts separate avoids making
+a local-file classifier depend on transport internals.
+
 The process-level `OpenFileBudget` is a core filesystem service. The BitTorrent
 adapter injects it into payload and magnet commands; Metalink injects the same
 service into payload writers and torrent fallback. Multi-file BitTorrent block
@@ -681,6 +692,8 @@ Do not add pass-through engine clients around these public interfaces.
 - **Narrow** raw HTTP request framing in proxy and splice paths to
   `aria2-protocol::http::request`. Core keeps proxy routing, auth retries,
   Range policy, outbound networking and zero-copy transfer decisions.
+  The core request builder treats standard header names case-insensitively
+  when preserving caller-supplied overrides, matching HTTP field-name rules.
 - **Narrow** SOCKS4/5 wire handshakes into reusable primitives in
   `aria2-protocol::socks`. The async HTTP download path uses reqwest's SOCKS
   connector with the existing HTTP client and pool. SOCKS connector types live
@@ -690,21 +703,36 @@ Do not add pass-through engine clients around these public interfaces.
   parser from its owning protocol module. The reusable `NoProxyMatcher` also
   lives in `aria2-protocol::http::proxy`; core owns proxy
   precedence, task-option application, DNS pinning, and outbound socket policy.
+  SOCKS4 reply-version and SOCKS5 successful-reply reserved-byte validation
+  stay in the protocol handshake parser. The same boundary rejects embedded
+  NUL in SOCKS4 user IDs and SOCKS5 credentials that cannot be represented by
+  RFC 1929's nonempty 1-to-255-byte fields.
   HTTP proxy credential precedence and reqwest auth construction both consume
   decoded userinfo from this shared parser; they do not reinterpret proxy
-  credentials through `url::Url`.
+  credentials through `url::Url`. Core selects a valid protocol-specific proxy
+  URL before its `all-proxy` fallback and resolves credentials from that same
+  selection, so `all-proxy-*` values are not sent to a protocol-specific proxy.
   The public `aria2-core::http::socks_connector` module re-exports both protocol
   APIs to preserve their historical library paths.
 - **Narrow** URI component percent encoding and byte-oriented percent decoding
   into `aria2-protocol::uri`; FTP, SFTP, and the historical core URI module
   keep their public helpers as re-exports. `MagnetLink::url_decode` and CLI
   magnet-URI rendering use the same primitives instead of maintaining copies.
+  **Keep** the remaining public `aria2_core::util::uri` compatibility API
+  (`UriStruct`, parse/construct, path normalization, and URI joining) in core:
+  the download `Request` uses its `url::Url` state for redirect resolution and
+  live component access, while the legacy helper API has no engine callers
+  beyond its own URI-joining composition. Moving or merging those models would
+  add a compatibility facade without consolidating a live engine path.
   `ProxyUrl` matches schemes case-insensitively and decodes percent-escaped
   userinfo, and
   `ProxyConfig::to_url` re-encodes credentials and brackets IPv6 authorities,
   matching the original URI parser's parse/construct contract. HTTP and FTP
   proxy configuration both use this parser for credential decoding; FTP no
-  longer reparses proxy userinfo through `url::Url`.
+  longer reparses proxy userinfo through `url::Url`. Authority parsing uses
+  the final `@` delimiter, validates bracketed IPv6, rejects unbracketed IPv6
+  and empty userinfo, and defaults HTTP proxies to port 80 (SOCKS to 1080,
+  HTTPS to 443), matching the original URI parser's relevant behavior.
 - **Narrow** the core Metalink/HTTP module to compatibility exports. Link and
   Digest header parsing and its values live in
   `aria2-protocol::http::metalink_http`; task integration remains in the core
@@ -735,8 +763,10 @@ Do not add pass-through engine clients around these public interfaces.
   it while composing its reqwest clients. Both `ProxyConfig` and core's
   compatibility-facing `HttpProxyConfig` use the protocol-owned `ProxyUrl`
   parser, while `ProxyManager` extracts target hosts with the URL parser for
-  `no-proxy` matching. The manager retains its public behavior of applying one
-  selected environment or explicit proxy configuration across URL schemes;
+  `no-proxy` matching. The environment parser and URL serializer preserve a
+  nonempty username-only userinfo field. The manager retains its public
+  behavior of applying one selected environment or explicit proxy
+  configuration across URL schemes;
   active download proxy selection remains scheme-specific in core. Proxy
   response classification is a separate protocol helper used by core's public
   HTTP proxy adapter.
@@ -809,7 +839,11 @@ Do not add pass-through engine clients around these public interfaces.
   option-driven request construction, then uses the protocol serializer. The
   FTP-specific HTTP-proxy GET request syntax lives in
   `aria2-protocol::ftp::proxy`; core retains proxy selection and network/task
-  policy. Public core request types keep their existing APIs.
+  policy. Its fallible `try_build_get_request` validates caller-supplied
+  `User-Agent` bytes; the existing infallible protocol helper remains a raw
+  compatibility serializer. Configured `User-Agent` values are checked before
+  FTP proxy GET or CONNECT serialization. Public core request types keep their
+  existing APIs.
 - **Narrow** HTTP and FTP CONNECT handshakes into
   `aria2-protocol::http::connect`, operating on a caller-established TCP
   stream. Core retains socket and outbound-network policy and maps typed
@@ -1018,6 +1052,9 @@ Do not add pass-through engine clients around these public interfaces.
   while the core owns task expansion and lifecycle. The CLI obtains every
   generated group ID from the shared atomic manager allocator as needed, so
   concurrent task creation cannot overlap an estimated local GID range.
+- **Keep** `MetalinkDocument::total_size` in the public protocol model. It sums
+  known file sizes and returns `None` if that sum overflows `u64`; the core
+  currently has no caller, but standalone library users retain the helper.
 - **Narrow** Metalink command execution to parsed file data. The initial
   expansion passes each normalized `MetalinkFile` through its in-memory
   request group to the execution adapter, avoiding a second XML parse per
@@ -1053,9 +1090,20 @@ Do not add pass-through engine clients around these public interfaces.
 - **Keep** `peer::incoming::IncomingHandshake` as the TCP plain/MSE handshake
   seam before torrent routing. MSE exposes the info-hash only after matching
   the obfuscated hash against registered routes; the selected route supplies
-  encryption policy and response capabilities. The incoming handshake timeout
-  remains a maximum wait per required read, while core owns route lookup and
+  encryption policy and response capabilities. Core injects the process-wide
+  per-read incoming handshake timeout into TCP and uTP receive paths. The TCP
+  protocol helper bounds each required read; the uTP peer session bounds each
+  transport receive. Core owns the process-wide setting, route lookup, and
   admission.
+- **Keep** `BtPeerListenerManager` in core. It is process/engine state, not a
+  standalone BitTorrent wire primitive: it shares TCP listeners and uTP actors
+  across torrent routes, owns route registration and cancellation, looks up
+  info-hashes, applies per-torrent encryption/DHT capabilities, and admits
+  completed peers into core `PeerStorage` before delivering them to a task.
+  Protocol `PeerTcpListener` owns only bind/accept for an injected socket;
+  standalone `PeerListener` is a one-socket public helper and is not used by
+  the engine. The core manager delegates handshake parsing/completion to
+  protocol peer APIs and contains no alternate peer-wire parser.
 - **Narrow** the BitTorrent WebSeed client: protocol owns HTTP Range request
   construction, bounded redirect handling, cross-origin sensitive-header
   stripping, accepted status handling, body-size enforcement, and read

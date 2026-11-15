@@ -156,8 +156,11 @@ behavior. An unlisted behavior has not been audited here.
   whitespace and matches the scheme, parameter names, and `btih`/`btmh` URN
   prefixes without case sensitivity. The local original parser requires the
   exact `magnet:?` prefix and preserves parameter-name case; its v1 parser
-  recognizes the exact lowercase `urn:btih:` prefix. These broader Rust
-  acceptance rules are retained pending a separate compatibility decision.
+  recognizes the exact lowercase `urn:btih:` prefix. Rust CLI detection and
+  core URI validation require the `magnet:?` delimiter (case-insensitively)
+  and reject the malformed `magnet?` form, consistent with the protocol parser.
+  The parser's broader whitespace, scheme-case, parameter-case, and URN-case
+  acceptance remains documented pending a separate compatibility decision.
 - **Verification:** behavior was compared with the local original aria2
   `magnet.cc` and `util.cc` implementations. Protocol magnet tests passed
   (11/11); core magnet-command tests passed (25/25), including `xs=file://`
@@ -437,7 +440,9 @@ behavior. An unlisted behavior has not been audited here.
   upstream exact-host matching instead of reqwest's broader suffix behavior;
   this restores consistency with core's first-hop selection. SOCKS URLs remain
   an additive extension to the upstream manual's documented HTTP proxy URL
-  format for `--all-proxy`.
+  format for `--all-proxy`. Valid SOCKS exchanges remain unchanged; malformed
+  response fields and username/password inputs that cannot be represented by
+  the wire format now fail before a tunnel is returned or credentials sent.
 - **`no-proxy` comparison:** upstream `inNoProxy` uses exact matching for an
   unprefixed hostname and suffix matching for a leading-dot entry; its CIDR
   comparison applies to numeric URI hosts without DNS resolution. The shared
@@ -458,20 +463,35 @@ behavior. An unlisted behavior has not been audited here.
   servers.
 - **Verification:** protocol tests cover SOCKS4 success framing and SOCKS5
   username/password plus IPv4 CONNECT framing; core adapter tests cover their
-  error paths. SOCKS5 also rejects a server-selected authentication method
-  that the client did not offer, rather than sending empty fallback
+  error paths. SOCKS4 rejects replies whose response version is not zero, and
+  SOCKS5 rejects a successful CONNECT reply whose reserved byte is nonzero,
+  as required by their wire formats. SOCKS4 rejects embedded NUL in user IDs;
+  SOCKS5 rejects partial, empty, and overlong username/password inputs before
+  writing the handshake. It also rejects a server-selected authentication
+  method that the client did not offer, rather than sending empty fallback
   credentials. A live local SOCKS5 fixture verifies `all-proxy` routing,
-  resolved proxy address pinning, username/password authentication, and an
-  HTTP response carried through the SOCKS tunnel. External SOCKS proxy
+  resolved proxy address pinning, username/password authentication, and an HTTP
+  response carried through the SOCKS tunnel. External SOCKS proxy
   interoperability remains unverified. CLI global, RPC global/per-task, and
   C API global option tests verify that SOCKS `all-proxy` values reach the
   resulting `DownloadOptions`.
+- **Protocol references:** [RFC 1928, Section 6](https://www.rfc-editor.org/rfc/rfc1928.html#section-6)
+  requires the SOCKS5 reply's reserved field to be zero; [RFC 1929](https://www.rfc-editor.org/rfc/rfc1929.html)
+  requires username and password lengths of 1 through 255 bytes. The SOCKS4
+  reply version is zero in the [SOCKS4 specification](https://datatracker.ietf.org/doc/draft-vance-socks-v4/05/).
 - **Proxy URL userinfo:** `ProxyUrl` percent-decodes username/password
   components and matches schemes case-insensitively; `ProxyConfig::to_url`
-  percent-encodes credentials and brackets IPv6 proxy hosts. For valid UTF-8
-  userinfo, this matches the local original aria2 URI parser and constructor;
-  protocol and core proxy-config tests cover encoded delimiters, an IPv6
-  authority, and `@` characters in ignored path/query/fragment components.
+  percent-encodes credentials, preserves a nonempty username without a
+  password, and brackets IPv6 proxy hosts. For valid UTF-8 userinfo, this
+  matches the local original aria2 URI parser and constructor; protocol and
+  core proxy-config tests cover encoded delimiters, username-only userinfo, an
+  IPv6 authority, and `@` characters in ignored path/query/fragment components.
+  Parsing uses the final authority `@` delimiter so literal `@` in a username
+  remains compatible with the original parser. It rejects empty userinfo,
+  malformed bracketed hosts, and unbracketed IPv6. An HTTP proxy URL without
+  an explicit port defaults to 80, matching `aria2_original`'s HTTP default;
+  SOCKS defaults to 1080 and HTTPS to 443. Protocol and core tests cover these
+  authority boundaries and defaults.
   HTTP and FTP core configuration share the decoded parser result;
   a local HTTP proxy regression verifies the actual Basic authorization header
   for escaped username/password delimiters, and an FTP configuration test
@@ -482,6 +502,28 @@ behavior. An unlisted behavior has not been audited here.
   was contacted. Invalid proxy URL errors omit raw userinfo; core HTTP and FTP
   error-path tests verify that configured credentials do not appear in
   returned diagnostics.
+
+## Proxy selection and credential scope
+
+- **Behavior:** Core selects a nonempty, parseable protocol-specific proxy URL
+  first and falls back to `all-proxy` if that URL is absent or invalid. It
+  resolves credentials from the same selected URL: matching protocol-specific
+  user/password options override corresponding URL userinfo fields, while
+  `all-proxy-user/passwd` apply only when `all-proxy` is selected. This avoids
+  sending credentials intended for the global proxy to a different
+  protocol-specific proxy.
+- **Compatibility reference:** `aria2_original/src/AbstractCommand.cc`
+  constructs the protocol-specific proxy URI first and uses `all-proxy` only
+  when that URI is empty. `makeProxyUri` applies the selected option pair to
+  the selected URI; it does not merge credentials from the other proxy scope.
+- **Verification:** core option tests cover per-protocol credentials, embedded
+  URL fallback, invalid-specific-URL fallback, and isolation between specific
+  and global credentials. HTTP, FTP, tracker, WebSeed, and metadata-source
+  assembly call the same core credential resolver. CLI and C API tests cover
+  FTP proxy credential propagation; RPC tests cover global and task-level proxy
+  URL and credential field propagation. Mixed credential-scope resolution is
+  verified in core option tests, but no single test spans an entry point through
+  a live proxy authentication exchange.
 
 ## HTTP live connection status
 
@@ -496,22 +538,27 @@ behavior. An unlisted behavior has not been audited here.
 ## Incoming BitTorrent peer handshake timeout
 
 - **Extension:** `bt-incoming-peer-handshake-timeout` is a process-wide setting
-  for the maximum wait on each read while receiving an incoming TCP peer
-  handshake. It defaults to 30 seconds and accepts 1 through 600 seconds.
+  for the maximum wait on each required TCP read or uTP transport receive while
+  receiving an incoming peer handshake. It defaults to 30 seconds and accepts
+  1 through 600 seconds. This matches the existing TCP protocol helper's
+  per-read timeout semantics; the total wall-clock time can exceed the setting
+  when a handshake requires multiple reads.
   The process-wide scope matches the shared listener, which serves multiple
   torrents before the info-hash route is known. Existing task-scoped
   `peer-connection-timeout` retains its outbound connection meaning.
 - **Runtime behavior:** CLI/configuration values are applied when the engine
-  starts. `changeGlobalOption` updates the timeout for newly accepted peers;
-  handshakes already in progress retain the value captured when accepted.
+  starts. `changeGlobalOption` updates the timeout for newly accepted TCP and
+  uTP peers; handshakes already in progress retain the value captured when
+  accepted.
 - **Verification:** protocol-level timeout behavior and core shared-listener
   application are covered by focused tests. CLI parsing, RPC updates and invalid
   values, and C API global-option propagation also have focused coverage. The
   startup `process_options` path and runtime `EngineCommand` path each have a
-  loopback behavior test through an accepted TCP connection. CLI, RPC, and C API
-  projection tests remain separate; no single test spans those entry points
-  through to a live peer. Original aria2 has no corresponding process-wide
-  option, so this is a Rust extension.
+  loopback behavior test through an accepted TCP connection; a core test also
+  verifies the configured timeout closes an incomplete incoming uTP handshake.
+  CLI, RPC, and C API projection tests remain separate; no single test spans
+  those entry points through to a live peer. Original aria2 has no corresponding
+  process-wide option, so this is a Rust extension.
 
 ## BitTorrent peer connection state
 
@@ -786,12 +833,18 @@ behavior. An unlisted behavior has not been audited here.
   messages outside the active torrent geometry are classified as recoverable
   peer/network failures. The peer actor disconnects that connection; malformed
   remote data is not a local configuration error. TCP and uTP use the same
-  classification, and upload-side validation follows it as well.
+  classification, and upload-side validation follows it as well. Disconnects
+  do not by themselves add an address to the temporary bad-peer list. That
+  list is reserved for a completed piece whose hash fails and whose contributing
+  peer is unambiguous, matching the upstream call site; ordinary transport
+  closure and malformed frames therefore remain eligible for later retry.
 - **Compatibility reference:** `aria2_original/src/PeerConnection.cc` aborts
   the peer read on invalid framing, while `aria2_original/src/AbstractCommand.cc`
   handles `DlAbortEx` as an abort of the affected command. The Rust code had
   classified validly framed but semantically invalid remote messages as
-  `FatalError::Config`; it now follows the peer-failure path.
+  `FatalError::Config`; it now follows the peer-failure path. Upstream adds a
+  bad peer only from `aria2_original/src/BtPieceMessage.cc` after a completed
+  piece fails hash verification.
 - **Verification:** a core regression test verifies that an out-of-range
   remote upload request is recoverable, and focused mapping tests cover invalid
   uTP frames and torrent-geometry validation. Full peer interoperability with
@@ -940,10 +993,10 @@ behavior. An unlisted behavior has not been audited here.
   and outbound source binding with an unresolvable origin hostname. Existing
   core WebSeed tests cover source-address selection, URI fallback,
   timeout/cancellation, statistics, and task integration. The local
-  `aria2_original` checkout is unavailable; the upstream aria2 1.37.0 manual
-  defines `all-proxy` as applying to all protocols and `http-proxy` to all HTTP
-  downloads. No original-binary differential or remote WebSeed interoperability
-  run has been performed.
+  `aria2_original` source defines `all-proxy` as applying to all protocols and
+  `http-proxy` to all HTTP downloads, consistent with the aria2 1.37.0 manual.
+  No original-binary differential or remote WebSeed interoperability run has
+  been performed.
 
 ## SFTP connection and transport options
 
@@ -962,7 +1015,14 @@ behavior. An unlisted behavior has not been audited here.
   bytes literal. Verification covers CLI fields through `DownloadOptions`,
   RPC values through the core proxy configuration, C API global options through
   newly created request groups, and the protocol serializer plus core public
-  builder output.
+  builder output. The engine uses the new fallible protocol builder; the
+  existing infallible `build_get_request` remains available for compatibility
+  and serializes its supplied fields unchanged. FTP proxy GET and CONNECT
+  requests reject `User-Agent` values containing CR, LF, DEL, or other
+  forbidden control bytes before writing the request, preventing configured
+  values from injecting additional fields. HTAB remains allowed by HTTP
+  field-value syntax. This is an intentional compatibility hardening for
+  malformed header values.
 
 - **Extension:** `sftp-connect-timeout` and `sftp-read-timeout` configure the
   SFTP connection-establishment and SFTP I/O read timeouts independently, in
@@ -1276,6 +1336,11 @@ behavior. An unlisted behavior has not been audited here.
 - **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
   BitTorrent metaurls use the same parser output as before. Parsing errors are
   still surfaced by command construction, before task execution.
+- **Public model helper:** `MetalinkDocument::total_size` continues to sum
+  known file sizes and preserve its empty-document result of `Some(0)`. It now
+  returns `None` if known sizes overflow `u64`, instead of panicking in debug
+  builds or wrapping in optimized builds. Core has no current caller; this
+  affects only standalone protocol-library callers of the helper.
 - **Transport and commit:** each mirror and torrent metadata URL uses the
   ordinary source-protocol adapters, with the task's DNS cache, proxy rules,
   outbound-address policy, and global limiter. HTTP, FTP, and feature-enabled
@@ -1303,8 +1368,10 @@ behavior. An unlisted behavior has not been audited here.
   confirms engine-injected proxy policy reaches Metalink payload traffic. The
   504 retry, pause, and torrent-metadata retry tests also pass through the new
   source-command path. Parser tests cover SFTP URI retention and FTP-family
-  classification. No public remote-server or original-binary comparison was
-  run; Metalink-over-SFTP wire interoperability and custom-DNS end-to-end
+  classification. Public-model regressions cover checked total-size overflow,
+  known-size summation, and the empty-document result. No public remote-server
+  or original-binary comparison was run; Metalink-over-SFTP wire
+  interoperability and custom-DNS end-to-end
   behavior remain unverified. The lifecycle integration target passes 17/17,
   including pause/resume from the staging checkpoint, force-halt checkpoint
   retention, and removal cleanup.
@@ -1530,11 +1597,19 @@ behavior. An unlisted behavior has not been audited here.
   authentication body use the caller's configured `read_timeout`. This avoids
   an internal fixed two-second deadline that could contradict the timeout
   already applied to the response head. Body discard limits remain bounded.
+  The protocol rejects conflicting or malformed `Content-Length` values and
+  accepts chunked framing only when `chunked` occurs once as the final transfer
+  coding. It rejects an unframed 407 and stops the auth retry because the body
+  boundary cannot be determined safely while reusing the proxy stream. This
+  intentionally rejects nonconforming or close-delimited 407 responses that
+  cannot support an in-place retry.
 - **Scope:** HTTP CONNECT callers in core pass the same configured timeout to
   the protocol session. This does not change proxy selection, auth retry count,
   authentication scheme policy, or the ordinary tunnel success path.
-- **Verification:** protocol tests cover configured timeout enforcement and
-  preservation of bytes following Content-Length and chunked 407 bodies.
+- **Verification:** protocol tests cover configured timeout enforcement,
+  preservation of bytes following Content-Length and chunked 407 bodies, and
+  rejection of unframed bodies, conflicting lengths, and non-final or repeated
+  `chunked` coding.
 
 ## RPC interface
 

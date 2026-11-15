@@ -116,7 +116,7 @@ fn proxy_config_ignores_at_signs_outside_proxy_authority() {
     .expect("proxy path, query, and fragment should not affect its authority");
 
     assert_eq!(config.proxy_host, "proxy.local");
-    assert_eq!(config.proxy_port, 8080);
+    assert_eq!(config.proxy_port, 80);
     assert!(config.proxy_username.is_none());
     assert!(config.proxy_password.is_none());
 }
@@ -395,7 +395,7 @@ fn test_proxy_digest_auth_produces_header() {
 #[test]
 fn test_proxy_url_http_default_port() {
     let parsed = ProxyUrl::parse("http://proxy.local").unwrap();
-    assert_eq!(parsed.port, 8080);
+    assert_eq!(parsed.port, 80);
 }
 
 #[test]

@@ -200,6 +200,7 @@ mod tests {
     #[test]
     fn test_parse_invalid_not_magnet() {
         assert!(MagnetLink::parse("http://example.com").is_err());
+        assert!(MagnetLink::parse("magnet?xt=urn:btih:abc123").is_err());
     }
 
     #[test]

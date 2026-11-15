@@ -127,15 +127,24 @@ impl<T: PeerTransport> PeerWireSession<T> {
         let mut session = Self::new(transport);
         tokio::time::timeout(timeout, async {
             session.read_bytes(68).await?;
-            let handshake_bytes = session
-                .frame_decoder
-                .take_prefix(68)
-                .ok_or_else(|| "BitTorrent handshake buffer is incomplete".to_string())?;
-            session.remote_handshake = Some(Handshake::parse(&handshake_bytes)?);
+            session.parse_incoming_handshake()?;
             Ok::<(), String>(())
         })
         .await
         .map_err(|_| "BitTorrent peer handshake timed out".to_string())??;
+        Ok(session)
+    }
+
+    /// Receive an incoming handshake with a separate timeout for each
+    /// transport read. This is useful when the caller's setting follows
+    /// socket read-timeout semantics rather than a total handshake deadline.
+    pub async fn receive_incoming_with_read_timeout(
+        transport: T,
+        read_timeout: Duration,
+    ) -> Result<Self, String> {
+        let mut session = Self::new(transport);
+        session.read_bytes_with_timeout(68, read_timeout).await?;
+        session.parse_incoming_handshake()?;
         Ok(session)
     }
 
@@ -247,6 +256,32 @@ impl<T: PeerTransport> PeerWireSession<T> {
         }
         Ok(())
     }
+
+    async fn read_bytes_with_timeout(
+        &mut self,
+        length: usize,
+        read_timeout: Duration,
+    ) -> Result<(), String> {
+        while self.frame_decoder.buffered_len() < length {
+            let bytes = tokio::time::timeout(read_timeout, self.transport.receive())
+                .await
+                .map_err(|_| "BitTorrent peer handshake read timed out".to_string())??;
+            let Some(bytes) = bytes else {
+                return Err("Transport closed during BitTorrent handshake".to_string());
+            };
+            self.frame_decoder.append(&bytes);
+        }
+        Ok(())
+    }
+
+    fn parse_incoming_handshake(&mut self) -> Result<(), String> {
+        let handshake_bytes = self
+            .frame_decoder
+            .take_prefix(68)
+            .ok_or_else(|| "BitTorrent handshake buffer is incomplete".to_string())?;
+        self.remote_handshake = Some(Handshake::parse(&handshake_bytes)?);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +390,30 @@ mod tests {
         let response = Handshake::parse(&remote.receive().await.unwrap().unwrap()).unwrap();
         assert_eq!(response.info_hash, info_hash_v2[..20]);
         assert!(session.is_connected());
+    }
+
+    #[tokio::test]
+    async fn incoming_read_timeout_restarts_between_transport_chunks() {
+        let info_hash = [0x42; 20];
+        let peer_id = [0x22; 20];
+        let handshake = Handshake::new(&info_hash, &peer_id).to_bytes();
+        let (transport, mut remote) = transport_pair();
+        let remote_task = tokio::spawn(async move {
+            remote.send(&handshake[..20]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            remote.send(&handshake[20..44]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            remote.send(&handshake[44..]).await.unwrap();
+        });
+
+        let session = PeerWireSession::receive_incoming_with_read_timeout(
+            transport,
+            Duration::from_millis(500),
+        )
+        .await
+        .expect("each transport read should fit within its timeout");
+        assert_eq!(session.remote_handshake().unwrap().peer_id, peer_id);
+        remote_task.await.unwrap();
     }
 
     #[tokio::test]

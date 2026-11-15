@@ -52,7 +52,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
 
     let lower = trimmed.to_lowercase();
 
-    if lower.starts_with("magnet:?") || lower.starts_with("magnet?") {
+    if lower.starts_with("magnet:?") {
         return Ok(DetectedInput {
             input_type: InputType::MagnetLink,
             raw: trimmed.to_string(),
@@ -119,10 +119,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
         });
     }
 
-    if filename.ends_with(".metalink")
-        || filename.ends_with(".meta4")
-        || filename.ends_with(".meta4")
-    {
+    if filename.ends_with(".metalink") || filename.ends_with(".meta4") {
         let data = std::fs::read(path).map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!(
                 "Cannot read metalink file: {}",
@@ -217,6 +214,11 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_rejects_malformed_magnet_prefix() {
+        assert!(detect("magnet?xt=urn:btih:abc123").is_err());
+    }
+
+    #[test]
     fn test_detect_empty_input() {
         assert!(detect("").is_err());
         assert!(detect("   ").is_err());
@@ -237,6 +239,20 @@ mod tests {
             detected.is_err(),
             "Existing local non-torrent/non-metalink file must be rejected, but detect() succeeded"
         );
+    }
+
+    #[test]
+    fn test_detect_metalink_extensions() {
+        let dir = tempfile::tempdir().expect("create temp directory");
+        for filename in ["download.metalink", "download.META4"] {
+            let path = dir.path().join(filename);
+            std::fs::write(&path, b"<metalink>").expect("write Metalink fixture");
+
+            let detected = detect(path.to_str().expect("temporary path is valid UTF-8"))
+                .expect("supported Metalink extension should be detected");
+            assert_eq!(detected.input_type, InputType::MetalinkFile);
+            assert!(detected.file_data.is_some());
+        }
     }
 
     #[test]

@@ -349,7 +349,7 @@ impl HttpRequestBuilder {
         let mut final_headers = self.headers;
 
         // Host header (mirrors C++ getHostText() — omit default ports)
-        if !final_headers.contains_key("Host") {
+        if !has_header(&final_headers, "Host") {
             let host = self.url.host_str().unwrap_or("");
             let port = self.url.port_or_known_default();
             let should_omit_port = match port {
@@ -368,7 +368,7 @@ impl HttpRequestBuilder {
         }
 
         // User-Agent header
-        if !final_headers.contains_key("User-Agent") {
+        if !has_header(&final_headers, "User-Agent") {
             final_headers.insert(
                 "User-Agent".to_string(),
                 crate::constants::USER_AGENT.to_string(),
@@ -376,28 +376,28 @@ impl HttpRequestBuilder {
         }
 
         // Accept header
-        if !final_headers.contains_key("Accept") {
+        if !has_header(&final_headers, "Accept") {
             final_headers.insert("Accept".to_string(), "*/*".to_string());
         }
 
         // Accept-Encoding header (mirrors C++ contentEncodingEnabled_ + acceptGzip_)
-        if self.accept_gzip && !final_headers.contains_key("Accept-Encoding") {
+        if self.accept_gzip && !has_header(&final_headers, "Accept-Encoding") {
             final_headers.insert("Accept-Encoding".to_string(), "deflate, gzip".to_string());
         }
 
         // Pragma and Cache-Control headers (mirrors C++ noCache_)
         if self.no_cache {
-            if !final_headers.contains_key("Pragma") {
+            if !has_header(&final_headers, "Pragma") {
                 final_headers.insert("Pragma".to_string(), "no-cache".to_string());
             }
-            if !final_headers.contains_key("Cache-Control") {
+            if !has_header(&final_headers, "Cache-Control") {
                 final_headers.insert("Cache-Control".to_string(), "no-cache".to_string());
             }
         }
 
         // Connection header (mirrors C++ !isKeepAliveEnabled() && !isPipeliningEnabled())
         // HTTP/1.1 default is keep-alive, so we only emit Connection when explicitly needed
-        if !final_headers.contains_key("Connection") {
+        if !has_header(&final_headers, "Connection") {
             if self.connection_close {
                 final_headers.insert("Connection".to_string(), "close".to_string());
             } else if self.proxy_keep_alive {
@@ -410,7 +410,7 @@ impl HttpRequestBuilder {
 
         // Range header (mirrors C++ segment-based Range logic in createRequest())
         if let Some(start) = self.range_start
-            && !final_headers.contains_key("Range")
+            && !has_header(&final_headers, "Range")
         {
             let range_value = match self.range_end {
                 Some(end) => format!("bytes={}-{}", start, end),
@@ -421,7 +421,7 @@ impl HttpRequestBuilder {
 
         // Want-Digest header (mirrors C++ !noWantDigest_)
         // C++ format: "SHA-512;q=1, SHA-256;q=1, SHA;q=0.1"
-        if self.want_digest && !final_headers.contains_key("Want-Digest") {
+        if self.want_digest && !has_header(&final_headers, "Want-Digest") {
             final_headers.insert(
                 "Want-Digest".to_string(),
                 "SHA-512;q=1, SHA-256;q=1, SHA;q=0.1".to_string(),
@@ -430,49 +430,49 @@ impl HttpRequestBuilder {
 
         // If-Modified-Since header (mirrors C++ ifModSinceHeader_)
         if let Some(ref val) = self.if_modified_since
-            && !final_headers.contains_key("If-Modified-Since")
+            && !has_header(&final_headers, "If-Modified-Since")
         {
             final_headers.insert("If-Modified-Since".to_string(), val.clone());
         }
 
         // If-None-Match header (ETag-based conditional GET)
         if let Some(ref val) = self.if_none_match
-            && !final_headers.contains_key("If-None-Match")
+            && !has_header(&final_headers, "If-None-Match")
         {
             final_headers.insert("If-None-Match".to_string(), val.clone());
         }
 
         // Referer header (mirrors C++ request_->getReferer())
         if let Some(ref val) = self.referer
-            && !final_headers.contains_key("Referer")
+            && !has_header(&final_headers, "Referer")
         {
             final_headers.insert("Referer".to_string(), val.clone());
         }
 
         // Cookie header (mirrors C++ cookieStorage_->criteriaFind())
         if let Some(ref val) = self.cookie
-            && !final_headers.contains_key("Cookie")
+            && !has_header(&final_headers, "Cookie")
         {
             final_headers.insert("Cookie".to_string(), val.clone());
         }
 
         // Authorization header (mirrors C++ authConfig_->getAuthText())
         if let Some(ref val) = self.authorization
-            && !final_headers.contains_key("Authorization")
+            && !has_header(&final_headers, "Authorization")
         {
             final_headers.insert("Authorization".to_string(), val.clone());
         }
 
         // Proxy-Authorization header (mirrors C++ getProxyAuthString())
         if let Some(ref val) = self.proxy_authorization
-            && !final_headers.contains_key("Proxy-Authorization")
+            && !has_header(&final_headers, "Proxy-Authorization")
         {
             final_headers.insert("Proxy-Authorization".to_string(), val.clone());
         }
 
         // Content-Length header (if body is present)
         if let Some(body) = &self.body
-            && !final_headers.contains_key("Content-Length")
+            && !has_header(&final_headers, "Content-Length")
         {
             let len = body.len();
             final_headers.insert("Content-Length".to_string(), len.to_string());
@@ -485,6 +485,12 @@ impl HttpRequestBuilder {
             body: self.body,
         })
     }
+}
+
+fn has_header(headers: &HashMap<String, String>, name: &str) -> bool {
+    headers
+        .keys()
+        .any(|header_name| header_name.eq_ignore_ascii_case(name))
 }
 
 /// Generate Basic Auth header value

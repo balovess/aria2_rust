@@ -1,6 +1,12 @@
 use crate::http::socks_connector::NoProxyMatcher;
 use aria2_protocol::proxy::ProxyUrl;
 
+struct SelectedProxy<'a> {
+    parsed: ProxyUrl,
+    username: Option<&'a str>,
+    password: Option<&'a str>,
+}
+
 /// Per-task HTTP proxy selection and authentication settings.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HttpProxyOptions {
@@ -46,68 +52,61 @@ impl HttpProxyOptions {
         }) {
             return None;
         }
-        let proxy = match parsed_uri.scheme() {
-            "http" => self
-                .http_proxy
-                .as_deref()
-                .filter(|proxy| !proxy.is_empty())
-                .or_else(|| self.all_proxy.as_deref().filter(|proxy| !proxy.is_empty())),
-            "https" => self
-                .https_proxy
-                .as_deref()
-                .filter(|proxy| !proxy.is_empty())
-                .or_else(|| self.all_proxy.as_deref().filter(|proxy| !proxy.is_empty())),
-            _ => None,
-        }?;
-        let proxy = ProxyUrl::parse(proxy).ok()?;
-        Some((proxy.host, proxy.port))
+        let proxy = self.selected_proxy(parsed_uri.scheme())?;
+        Some((proxy.parsed.host, proxy.parsed.port))
     }
 
     pub(crate) fn credentials_for_scheme(&self, scheme: &str) -> (Option<String>, Option<String>) {
-        let (user, passwd, proxy_url) = match scheme {
-            "https" => (
-                &self.https_proxy_user,
-                &self.https_proxy_passwd,
-                self.https_proxy
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
-            ),
-            "http" => (
-                &self.http_proxy_user,
-                &self.http_proxy_passwd,
-                self.http_proxy
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
-            ),
-            "ftp" => (
-                &self.ftp_proxy_user,
-                &self.ftp_proxy_passwd,
-                self.ftp_proxy
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
-            ),
-            _ => (
-                &self.all_proxy_user,
-                &self.all_proxy_passwd,
-                self.all_proxy.as_deref().filter(|value| !value.is_empty()),
-            ),
+        let Some(proxy) = self.selected_proxy(scheme) else {
+            return (None, None);
         };
-        let embedded = proxy_url
-            .and_then(|value| ProxyUrl::parse(value).ok())
-            .map(|proxy| (proxy.username, proxy.password))
-            .unwrap_or((None, None));
         (
-            user.clone()
-                .or_else(|| self.all_proxy_user.clone())
-                .or(embedded.0),
-            passwd
-                .clone()
-                .or_else(|| self.all_proxy_passwd.clone())
-                .or(embedded.1),
+            proxy.username.map(str::to_owned).or(proxy.parsed.username),
+            proxy.password.map(str::to_owned).or(proxy.parsed.password),
         )
+    }
+
+    fn selected_proxy(&self, scheme: &str) -> Option<SelectedProxy<'_>> {
+        let specific = match scheme {
+            "http" => Some((
+                self.http_proxy.as_deref(),
+                self.http_proxy_user.as_deref(),
+                self.http_proxy_passwd.as_deref(),
+            )),
+            "https" => Some((
+                self.https_proxy.as_deref(),
+                self.https_proxy_user.as_deref(),
+                self.https_proxy_passwd.as_deref(),
+            )),
+            "ftp" => Some((
+                self.ftp_proxy.as_deref(),
+                self.ftp_proxy_user.as_deref(),
+                self.ftp_proxy_passwd.as_deref(),
+            )),
+            _ => None,
+        };
+
+        if let Some((Some(proxy_url), username, password)) = specific
+            && !proxy_url.is_empty()
+            && let Ok(parsed) = ProxyUrl::parse(proxy_url)
+        {
+            return Some(SelectedProxy {
+                parsed,
+                username,
+                password,
+            });
+        }
+
+        let proxy_url = self
+            .all_proxy
+            .as_deref()
+            .filter(|value| !value.is_empty())?;
+        let parsed = ProxyUrl::parse(proxy_url).ok()?;
+        Some(SelectedProxy {
+            parsed,
+            username: self.all_proxy_user.as_deref(),
+            password: self.all_proxy_passwd.as_deref(),
+        })
     }
 }
 
@@ -116,16 +115,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn credentials_for_scheme_decodes_embedded_proxy_userinfo() {
+    fn credentials_for_scheme_uses_the_selected_proxy_scope() {
         let options = super::super::DownloadOptions {
-            http_proxy: Some("http://user%40name:p%3A%40%25@proxy.example:8080".to_string()),
+            http_proxy: Some("http://url-user:url-pass@specific-proxy.example:8080".to_string()),
+            all_proxy: Some("http://all-url-user:all-url-pass@fallback-proxy.example:8080".into()),
+            http_proxy_user: Some("http-user".into()),
+            all_proxy_user: Some("all-user".into()),
+            all_proxy_passwd: Some("all-pass".into()),
             ..Default::default()
         };
         let proxy_options = HttpProxyOptions::from_download_options(&options);
 
         assert_eq!(
             proxy_options.credentials_for_scheme("http"),
-            (Some("user@name".to_string()), Some("p:@%".to_string()))
+            (Some("http-user".to_string()), Some("url-pass".to_string()))
+        );
+        assert_eq!(
+            proxy_options.credentials_for_scheme("https"),
+            (Some("all-user".to_string()), Some("all-pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn invalid_specific_proxy_falls_back_with_all_proxy_credentials() {
+        let options = super::super::DownloadOptions {
+            http_proxy: Some("http://proxy.invalid:bad".into()),
+            all_proxy: Some("http://all-user:all-pass@fallback-proxy.example:8080".into()),
+            http_proxy_user: Some("must-not-leak".into()),
+            ..Default::default()
+        };
+        let proxy_options = HttpProxyOptions::from_download_options(&options);
+
+        assert_eq!(
+            proxy_options.proxy_for_uri("http://target.example/file"),
+            Some(("fallback-proxy.example".into(), 8080))
+        );
+        assert_eq!(
+            proxy_options.credentials_for_scheme("http"),
+            (Some("all-user".into()), Some("all-pass".into()))
         );
     }
 }

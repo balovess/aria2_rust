@@ -57,6 +57,48 @@ async fn configured_incoming_handshake_timeout_is_applied_by_shared_listener() {
 }
 
 #[tokio::test]
+async fn runtime_handshake_timeout_update_is_applied_to_utp_listener() {
+    let manager = BtPeerListenerManager::new();
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(5));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let _route = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [94; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 94,
+            max_peers: 1,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+    let _transport = manager
+        .register_utp_transport("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_millis(150));
+
+    let endpoint = "127.0.0.1:6882".parse().unwrap();
+    let (incoming, close_requested, _receive_tx) =
+        super::super::utp_transport::incoming_connection_for_test(endpoint);
+    manager.utp_incoming_tx.send(incoming).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(800), async {
+        while !close_requested.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("configured timeout should close an incomplete incoming uTP handshake");
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn shared_listener_rejects_tcp_handshakes_when_global_slots_are_full() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -142,7 +184,7 @@ async fn tcp_and_utp_listeners_share_the_handshake_slot_limit() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let endpoint = "127.0.0.1:6881".parse().unwrap();
-    let (incoming, close_requested) =
+    let (incoming, close_requested, _receive_tx) =
         super::super::utp_transport::incoming_connection_for_test(endpoint);
     manager.utp_incoming_tx.send(incoming).await.unwrap();
 

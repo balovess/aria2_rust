@@ -24,6 +24,9 @@ pub fn connect_socks4<S: Read + Write>(
     target: &SocketAddr,
     user_id: &str,
 ) -> Result<S, String> {
+    if user_id.as_bytes().contains(&0) {
+        return Err("SOCKS4 user ID must not contain a NUL byte".to_string());
+    }
     let ip = match target.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => return Err("SOCKS4 does not support IPv6 addresses".to_string()),
@@ -42,6 +45,12 @@ pub fn connect_socks4<S: Read + Write>(
     stream
         .read_exact(&mut response)
         .map_err(|error| format!("SOCKS4 failed to read response: {error}"))?;
+    if response[0] != 0x00 {
+        return Err(format!(
+            "SOCKS4 invalid response version: 0x{:02X}",
+            response[0]
+        ));
+    }
     if response[1] == 0x5A {
         return Ok(stream);
     }
@@ -61,7 +70,22 @@ pub fn connect_socks5<S: Read + Write>(
     username: Option<&str>,
     password: Option<&str>,
 ) -> Result<S, String> {
-    let has_credentials = username.is_some() && password.is_some();
+    let credentials = match (username, password) {
+        (None, None) => None,
+        (Some(username), Some(password)) => {
+            if username.is_empty() || password.is_empty() {
+                return Err("SOCKS5 username and password must not be empty".to_string());
+            }
+            if username.len() > 255 || password.len() > 255 {
+                return Err(
+                    "SOCKS5 username or password exceeds maximum length of 255 bytes".to_string(),
+                );
+            }
+            Some((username, password))
+        }
+        _ => return Err("SOCKS5 username and password must be provided together".to_string()),
+    };
+    let has_credentials = credentials.is_some();
     let mut greeting = vec![0x05, if has_credentials { 2 } else { 1 }, 0x00];
     if has_credentials {
         greeting.push(0x02);
@@ -81,11 +105,9 @@ pub fn connect_socks5<S: Read + Write>(
     }
     match reply[1] {
         0x00 => {}
-        0x02 if has_credentials => authenticate(
-            &mut stream,
-            username.expect("credentials are present"),
-            password.expect("credentials are present"),
-        )?,
+        0x02 if let Some((username, password)) = credentials => {
+            authenticate(&mut stream, username, password)?
+        }
         0x02 => {
             return Err(
                 "SOCKS5 server selected username/password authentication that was not offered"
@@ -107,9 +129,6 @@ fn authenticate<S: Read + Write>(
     username: &str,
     password: &str,
 ) -> Result<(), String> {
-    if username.len() > 255 || password.len() > 255 {
-        return Err("SOCKS5 username or password exceeds maximum length of 255 bytes".to_string());
-    }
     let mut request = Vec::with_capacity(3 + username.len() + password.len());
     request.extend_from_slice(&[0x01, username.len() as u8]);
     request.extend_from_slice(username.as_bytes());
@@ -171,8 +190,13 @@ fn send_connect_request<S: Read + Write>(
         };
         return Err(message.to_string());
     }
-    let _reserved =
+    let reserved =
         read_u8(stream).map_err(|error| format!("SOCKS5 failed to read reserved byte: {error}"))?;
+    if reserved != 0x00 {
+        return Err(format!(
+            "SOCKS5 invalid reserved byte in reply: 0x{reserved:02X}"
+        ));
+    }
     let address_type =
         read_u8(stream).map_err(|error| format!("SOCKS5 failed to read address type: {error}"))?;
     match address_type {
@@ -261,6 +285,28 @@ mod tests {
     }
 
     #[test]
+    fn socks4_rejects_invalid_response_version() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let stream = MockStream::new(&[4, 0x5a, 0, 0, 0, 0, 0, 0]);
+
+        assert!(matches!(
+            connect_socks4(stream, &target, "u"),
+            Err(error) if error.contains("invalid response version")
+        ));
+    }
+
+    #[test]
+    fn socks4_rejects_nul_in_user_id() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let stream = MockStream::new(&[]);
+
+        assert!(matches!(
+            connect_socks4(stream, &target, "user\0suffix"),
+            Err(error) if error.contains("NUL byte")
+        ));
+    }
+
+    #[test]
     fn socks5_authenticates_and_encodes_ipv4_connect_request() {
         let target = SocketAddrV4::new(Ipv4Addr::new(10, 20, 30, 40), 8080).into();
         let stream = MockStream::new(&[
@@ -289,5 +335,57 @@ mod tests {
         let result = connect_socks5(stream, &target, None, None);
 
         assert!(matches!(result, Err(error) if error.contains("was not offered")));
+    }
+
+    #[test]
+    fn socks5_rejects_nonzero_reserved_reply_byte() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let stream = MockStream::new(&[5, 0, 5, 0, 1, 1, 0, 0, 0, 0, 0, 0]);
+
+        assert!(matches!(
+            connect_socks5(stream, &target, None, None),
+            Err(error) if error.contains("invalid reserved byte")
+        ));
+    }
+
+    #[test]
+    fn socks5_rejects_incomplete_credentials_before_writing() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let stream = MockStream::new(&[]);
+
+        assert!(matches!(
+            connect_socks5(stream, &target, Some("user"), None),
+            Err(error) if error.contains("provided together")
+        ));
+    }
+
+    #[test]
+    fn socks5_rejects_empty_credentials_before_writing() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let stream = MockStream::new(&[]);
+
+        assert!(matches!(
+            connect_socks5(stream, &target, Some("user"), Some("")),
+            Err(error) if error.contains("must not be empty")
+        ));
+    }
+
+    #[test]
+    fn socks5_rejects_overlong_credentials_before_writing() {
+        let target = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080).into();
+        let username = "u".repeat(256);
+        let stream = MockStream::new(&[]);
+
+        assert!(matches!(
+            connect_socks5(stream, &target, Some(&username), Some("p")),
+            Err(error) if error.contains("maximum length of 255 bytes")
+        ));
+
+        let password = "p".repeat(256);
+        let stream = MockStream::new(&[]);
+        assert!(matches!(
+            connect_socks5(stream, &target, Some("u"), Some(&password)),
+            Err(error) if error.contains("maximum length of 255 bytes")
+        ));
     }
 }

@@ -358,6 +358,46 @@ mod tests {
             )
             .await
             .expect("global all-proxy option should be accepted");
+        {
+            let mut config = config.write().await;
+            config
+                .set_global_option(
+                    "all-proxy-user",
+                    aria2_core::config::OptionValue::Str("global-proxy-user".into()),
+                )
+                .await
+                .expect("global proxy username should be accepted");
+            config
+                .set_global_option(
+                    "all-proxy-passwd",
+                    aria2_core::config::OptionValue::Str("global-proxy-pass".into()),
+                )
+                .await
+                .expect("global proxy password should be accepted");
+            config
+                .set_global_option(
+                    "http-proxy",
+                    aria2_core::config::OptionValue::Str(
+                        "http://global-http-proxy.invalid:3128".into(),
+                    ),
+                )
+                .await
+                .expect("global HTTP proxy should be accepted");
+            config
+                .set_global_option(
+                    "http-proxy-user",
+                    aria2_core::config::OptionValue::Str("global-http-user".into()),
+                )
+                .await
+                .expect("global HTTP proxy username should be accepted");
+            config
+                .set_global_option(
+                    "http-proxy-passwd",
+                    aria2_core::config::OptionValue::Str("global-http-pass".into()),
+                )
+                .await
+                .expect("global HTTP proxy password should be accepted");
+        }
         config
             .write()
             .await
@@ -379,6 +419,26 @@ mod tests {
             Some("socks5://global-proxy.invalid:1080")
         );
         assert_eq!(
+            global_options.all_proxy_user.as_deref(),
+            Some("global-proxy-user")
+        );
+        assert_eq!(
+            global_options.all_proxy_passwd.as_deref(),
+            Some("global-proxy-pass")
+        );
+        assert_eq!(
+            global_options.http_proxy.as_deref(),
+            Some("http://global-http-proxy.invalid:3128")
+        );
+        assert_eq!(
+            global_options.http_proxy_user.as_deref(),
+            Some("global-http-user")
+        );
+        assert_eq!(
+            global_options.http_proxy_passwd.as_deref(),
+            Some("global-http-pass")
+        );
+        assert_eq!(
             global_options.no_proxy.as_deref(),
             Some("first.example\nsecond.example")
         );
@@ -393,6 +453,44 @@ mod tests {
         assert_eq!(
             task_options.all_proxy.as_deref(),
             Some("socks4://task-proxy.invalid:1080")
+        );
+
+        let (task_options, _) = backend
+            .merged_task_options(HashMap::from([
+                (
+                    "http-proxy".to_string(),
+                    serde_json::Value::String("http://task-http-proxy.invalid:8080".into()),
+                ),
+                (
+                    "http-proxy-user".to_string(),
+                    serde_json::Value::String("task-http-user".into()),
+                ),
+                (
+                    "http-proxy-passwd".to_string(),
+                    serde_json::Value::String("task-http-pass".into()),
+                ),
+            ]))
+            .await
+            .expect("task proxy URL and credentials should override global values");
+        assert_eq!(
+            task_options.http_proxy.as_deref(),
+            Some("http://task-http-proxy.invalid:8080")
+        );
+        assert_eq!(
+            task_options.http_proxy_user.as_deref(),
+            Some("task-http-user")
+        );
+        assert_eq!(
+            task_options.http_proxy_passwd.as_deref(),
+            Some("task-http-pass")
+        );
+        assert_eq!(
+            task_options.all_proxy_user.as_deref(),
+            Some("global-proxy-user")
+        );
+        assert_eq!(
+            task_options.all_proxy_passwd.as_deref(),
+            Some("global-proxy-pass")
         );
 
         let (task_options, _) = backend

@@ -57,10 +57,14 @@ impl ProxyUrl {
         };
 
         let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-        let (auth_part, host_port) = match authority.find('@') {
+        let (auth_part, host_port) = match authority.rfind('@') {
+            Some(0) => return Err("Username is empty in proxy URL".to_string()),
             Some(index) => (&authority[..index], &authority[index + 1..]),
             None => ("", authority),
         };
+        if auth_part.starts_with('@') {
+            return Err("Username is empty in proxy URL".to_string());
+        }
         let (username, password) = if !auth_part.is_empty() {
             if let Some(index) = auth_part.find(':') {
                 (
@@ -76,7 +80,7 @@ impl ProxyUrl {
 
         let default_port = match protocol {
             ProxyProtocol::Socks4 | ProxyProtocol::Socks5 => 1080,
-            ProxyProtocol::Http => 8080,
+            ProxyProtocol::Http => 80,
             ProxyProtocol::Https => 443,
         };
         let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
@@ -84,6 +88,8 @@ impl ProxyUrl {
                 .find(']')
                 .ok_or_else(|| "Missing closing bracket in proxy IPv6 host".to_string())?;
             let host = &bracketed[..close];
+            host.parse::<std::net::Ipv6Addr>()
+                .map_err(|_| "Invalid IPv6 host in proxy URL".to_string())?;
             let suffix = &bracketed[close + 1..];
             let port = if suffix.is_empty() {
                 default_port
@@ -98,6 +104,9 @@ impl ProxyUrl {
         } else if let Some(index) = host_port.rfind(':') {
             let host = &host_port[..index];
             let port_text = &host_port[index + 1..];
+            if host.contains(':') {
+                return Err("IPv6 proxy hosts must be enclosed in brackets".to_string());
+            }
             let port = port_text
                 .parse()
                 .map_err(|_| "Invalid port number in proxy URL".to_string())?;
@@ -108,6 +117,13 @@ impl ProxyUrl {
 
         if host.is_empty() {
             return Err("Host is empty in proxy URL".to_string());
+        }
+        if host.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, '@' | '[' | ']')
+        }) {
+            return Err("Invalid host in proxy URL".to_string());
         }
 
         Ok(Self {
@@ -129,7 +145,7 @@ mod tests {
         let proxy = ProxyUrl {
             protocol: ProxyProtocol::Http,
             host: "proxy.example".to_string(),
-            port: 8080,
+            port: 80,
             username: Some("private-user".to_string()),
             password: Some("private-password".to_string()),
         };
@@ -146,7 +162,7 @@ mod tests {
 
         assert_eq!(proxy.protocol, ProxyProtocol::Http);
         assert_eq!(proxy.host, "proxy.example");
-        assert_eq!(proxy.port, 8080);
+        assert_eq!(proxy.port, 80);
         assert_eq!(proxy.username.as_deref(), Some("user@name"));
         assert_eq!(proxy.password.as_deref(), Some("p:@%"));
     }
@@ -157,7 +173,7 @@ mod tests {
             .expect("path, query, and fragment are ignored");
 
         assert_eq!(proxy.host, "proxy.example");
-        assert_eq!(proxy.port, 8080);
+        assert_eq!(proxy.port, 80);
         assert_eq!(proxy.username, None);
         assert_eq!(proxy.password, None);
 
@@ -175,5 +191,28 @@ mod tests {
 
         assert!(!error.contains("private-user"));
         assert!(!error.contains("private-password"));
+    }
+
+    #[test]
+    fn proxy_url_uses_last_at_sign_for_userinfo() {
+        let proxy = ProxyUrl::parse("http://user@domain:pass@proxy.example").unwrap();
+
+        assert_eq!(proxy.username.as_deref(), Some("user@domain"));
+        assert_eq!(proxy.password.as_deref(), Some("pass"));
+        assert_eq!(proxy.host, "proxy.example");
+    }
+
+    #[test]
+    fn proxy_url_rejects_malformed_authorities() {
+        for url in [
+            "http://@proxy.example",
+            "http://@user@proxy.example",
+            "http://proxy.example@",
+            "http://2001:db8::1:8080",
+            "http://[not-ipv6]:8080",
+            "http://proxy[.example]:8080",
+        ] {
+            assert!(ProxyUrl::parse(url).is_err(), "accepted {url}");
+        }
     }
 }

@@ -399,9 +399,9 @@ impl FtpProxyGetRequestBuilder {
     /// - FTP auth embedded in URI if needed
     ///
     /// The `Result` return type is retained for compatibility with the public
-    /// core API; request serialization currently has no fallible step.
+    /// core API; it also reports invalid configured HTTP field values.
     pub fn build(self) -> Result<FtpProxyGetRequest> {
-        let request = aria2_protocol::ftp::proxy::build_get_request(
+        let request = aria2_protocol::ftp::proxy::try_build_get_request(
             &self.ftp_url,
             &aria2_protocol::ftp::proxy::ProxyGetRequestOptions {
                 ftp_username: &self.proxy_config.ftp_username,
@@ -411,7 +411,14 @@ impl FtpProxyGetRequestBuilder {
                 range_start: self.range_start,
                 no_cache: self.no_cache,
             },
-        );
+        )
+        .map_err(|error| match error {
+            aria2_protocol::ftp::proxy::ProxyGetRequestError::InvalidUserAgent => {
+                Aria2Error::InvalidArgument(
+                    "user-agent contains invalid HTTP field characters".to_string(),
+                )
+            }
+        })?;
         Ok(FtpProxyGetRequest {
             request_bytes: request.request_bytes,
             request_url: request.request_url,

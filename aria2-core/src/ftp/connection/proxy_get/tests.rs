@@ -52,6 +52,22 @@ fn build_request_string(ftp_url: Url, proxy_config: FtpProxyConfig) -> String {
 }
 
 #[test]
+fn proxy_get_rejects_user_agent_that_injects_a_header() {
+    let ftp_url = Url::parse("ftp://ftp.example.com/file.bin").unwrap();
+    let proxy_config = FtpProxyConfig {
+        user_agent: "agent\r\nX-Injected: yes".to_string(),
+        ..FtpProxyConfig::default()
+    };
+
+    let result = FtpProxyGetRequestBuilder::new(ftp_url, proxy_config).build();
+    assert!(matches!(
+        result,
+        Err(crate::error::Aria2Error::InvalidArgument(message))
+            if message.contains("user-agent")
+    ));
+}
+
+#[test]
 fn test_proxy_method_default() {
     assert_eq!(ProxyMethod::default(), ProxyMethod::Get);
 }

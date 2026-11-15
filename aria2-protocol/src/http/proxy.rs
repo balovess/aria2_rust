@@ -101,9 +101,10 @@ impl ProxyConfig {
             self.host.clone()
         };
         let auth = match (&self.username, &self.password) {
-            (Some(user), Some(pass)) => {
+            (Some(user), Some(pass)) if !user.is_empty() => {
                 format!("{}:{}@", percent_encode(user), percent_encode(pass))
             }
+            (Some(user), None) if !user.is_empty() => format!("{}@", percent_encode(user)),
             _ => String::new(),
         };
 
@@ -143,11 +144,11 @@ impl ProxyConfig {
             }
         };
 
-        if let (Some(user), Some(pass)) = (parsed.username, parsed.password) {
-            Some(config.with_auth(&user, &pass))
-        } else {
-            Some(config)
-        }
+        Some(ProxyConfig {
+            username: parsed.username,
+            password: parsed.password,
+            ..config
+        })
     }
 
     pub fn should_bypass(&self, hostname: &str) -> bool {
@@ -272,12 +273,20 @@ mod tests {
         assert_eq!(with_auth.username.as_deref(), Some("user"));
         assert_eq!(with_auth.password.as_deref(), Some("pass"));
 
+        let username_only = ProxyConfig::from_url("http://user@proxy.example.com").unwrap();
+        assert_eq!(username_only.username.as_deref(), Some("user"));
+        assert_eq!(username_only.password, None);
+        assert_eq!(username_only.to_url(), "http://user@proxy.example.com:80");
+        let reparsed = ProxyUrl::parse(&username_only.to_url()).unwrap();
+        assert_eq!(reparsed.username.as_deref(), Some("user"));
+        assert_eq!(reparsed.password, None);
+
         let socks = ProxyConfig::from_url("socks5://127.0.0.1:1080").unwrap();
         assert_eq!(socks.proxy_type, ProxyType::Socks5);
 
         let default_port = ProxyConfig::from_url("http://proxy.example.com").unwrap();
         assert_eq!(default_port.host, "proxy.example.com");
-        assert_eq!(default_port.port, 8080);
+        assert_eq!(default_port.port, 80);
 
         let https = ProxyConfig::from_url("https://secure.proxy.example/path").unwrap();
         assert_eq!(https.proxy_type, ProxyType::Http);

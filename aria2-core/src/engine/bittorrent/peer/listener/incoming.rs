@@ -175,6 +175,7 @@ pub(super) async fn run_shared_utp_listener(
     mut incoming: mpsc::Receiver<super::super::utp_transport::IncomingUtpConnection>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
     incoming_handshake_slots: Arc<Semaphore>,
+    incoming_handshake_timeout_nanos: Arc<std::sync::atomic::AtomicU64>,
     shutdown: CancellationToken,
 ) {
     enum Event {
@@ -205,10 +206,13 @@ pub(super) async fn run_shared_utp_listener(
                 };
                 let routes = Arc::clone(&routes);
                 let connection_shutdown = connection_shutdown.clone();
+                let timeout = std::time::Duration::from_nanos(
+                    incoming_handshake_timeout_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 connections.spawn(async move {
                     tokio::select! {
                         _ = connection_shutdown.cancelled() => {},
-                        _ = route_incoming_utp_peer(incoming, routes) => {},
+                        _ = route_incoming_utp_peer(incoming, routes, timeout) => {},
                     }
                     permit
                 });
@@ -258,13 +262,14 @@ fn normalize_peer_endpoint(endpoint: SocketAddr) -> SocketAddr {
 async fn route_incoming_utp_peer(
     incoming: super::super::utp_transport::IncomingUtpConnection,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    timeout: std::time::Duration,
 ) {
     let endpoint = normalize_peer_endpoint(incoming.endpoint);
     let mut connection =
         match super::super::connection::UtpPeerConnection::receive_incoming_handshake(
             incoming.connection,
             endpoint,
-            std::time::Duration::from_secs(30),
+            timeout,
         )
         .await
         {

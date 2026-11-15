@@ -29,7 +29,29 @@ impl std::fmt::Debug for ProxyGetRequest {
     }
 }
 
+/// Failure to build an FTP-over-HTTP-proxy request from invalid HTTP fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ProxyGetRequestError {
+    /// The configured User-Agent cannot be represented as an HTTP field value.
+    #[error("invalid HTTP User-Agent field value")]
+    InvalidUserAgent,
+}
+
+/// Build an FTP-over-HTTP-proxy GET request after validating caller fields.
+pub fn try_build_get_request(
+    ftp_url: &Url,
+    options: &ProxyGetRequestOptions<'_>,
+) -> Result<ProxyGetRequest, ProxyGetRequestError> {
+    if !crate::http::request::is_valid_http_field_value(options.user_agent) {
+        return Err(ProxyGetRequestError::InvalidUserAgent);
+    }
+    Ok(build_get_request(ftp_url, options))
+}
+
 /// Build the GET request used by an HTTP forward proxy for an FTP resource.
+///
+/// This compatibility entry point serializes the supplied fields as-is. Use
+/// [`try_build_get_request`] when any field value may come from configuration.
 pub fn build_get_request(ftp_url: &Url, options: &ProxyGetRequestOptions<'_>) -> ProxyGetRequest {
     let request_url = build_request_url(ftp_url, options.ftp_username);
     let host_header = build_host_header(ftp_url);
@@ -154,6 +176,24 @@ mod tests {
         assert!(text.contains("Pragma: no-cache\r\n"));
         assert!(text.contains("Cache-Control: no-cache\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn validated_builder_rejects_user_agent_field_injection() {
+        let url = Url::parse("ftp://ftp.example.com/file").unwrap();
+        let options = ProxyGetRequestOptions {
+            ftp_username: "",
+            proxy_username: "",
+            proxy_password: "",
+            user_agent: "agent\r\nX-Injected: yes",
+            range_start: 0,
+            no_cache: false,
+        };
+
+        assert_eq!(
+            try_build_get_request(&url, &options).unwrap_err(),
+            ProxyGetRequestError::InvalidUserAgent
+        );
     }
 
     #[test]

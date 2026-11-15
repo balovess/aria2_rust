@@ -47,7 +47,8 @@ impl UtpPeerConnection {
         endpoint: std::net::SocketAddr,
         timeout: std::time::Duration,
     ) -> std::result::Result<Self, String> {
-        let session = PeerWireSession::receive_incoming(connection, timeout).await?;
+        let session =
+            PeerWireSession::receive_incoming_with_read_timeout(connection, timeout).await?;
         Ok(Self {
             session,
             remote_endpoint: endpoint,

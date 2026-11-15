@@ -47,9 +47,13 @@ pub(crate) struct UtpConnectionHandle {
 #[cfg(test)]
 pub(crate) fn incoming_connection_for_test(
     endpoint: SocketAddr,
-) -> (IncomingUtpConnection, Arc<AtomicBool>) {
+) -> (
+    IncomingUtpConnection,
+    Arc<AtomicBool>,
+    mpsc::Sender<Vec<u8>>,
+) {
     let (command_tx, _command_rx) = mpsc::channel(1);
-    let (_receive_tx, receive_rx) = mpsc::channel(1);
+    let (receive_tx, receive_rx) = mpsc::channel(1);
     let (_state_tx, state_rx) = watch::channel(ConnectionState::Established);
     let close_requested = Arc::new(AtomicBool::new(false));
     let connection = UtpConnectionHandle {
@@ -67,6 +71,7 @@ pub(crate) fn incoming_connection_for_test(
             endpoint,
         },
         close_requested,
+        receive_tx,
     )
 }
 

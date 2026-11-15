@@ -147,6 +147,51 @@ fn test_single_file_accessor() {
 }
 
 #[test]
+fn document_total_size_returns_none_when_known_sizes_overflow() {
+    let document = MetalinkDocument {
+        version: MetalinkVersion::V4,
+        files: vec![
+            MetalinkFile {
+                size: Some(u64::MAX),
+                ..MetalinkFile::new("large.bin")
+            },
+            MetalinkFile {
+                size: Some(1),
+                ..MetalinkFile::new("overflow.bin")
+            },
+        ],
+        generator: None,
+        origin: None,
+        published: None,
+        base_uri: None,
+    };
+
+    assert_eq!(document.total_size(), None);
+}
+
+#[test]
+fn document_total_size_sums_known_sizes_and_keeps_empty_behavior() {
+    let mut document = MetalinkDocument {
+        version: MetalinkVersion::V4,
+        files: vec![
+            MetalinkFile {
+                size: Some(5),
+                ..MetalinkFile::new("known.bin")
+            },
+            MetalinkFile::new("unknown.bin"),
+        ],
+        generator: None,
+        origin: None,
+        published: None,
+        base_uri: None,
+    };
+
+    assert_eq!(document.total_size(), Some(5));
+    document.files.clear();
+    assert_eq!(document.total_size(), Some(0));
+}
+
+#[test]
 fn test_pieces_info() {
     let data = make_v4_metalink();
     let doc = MetalinkDocument::parse(&data, None).unwrap();

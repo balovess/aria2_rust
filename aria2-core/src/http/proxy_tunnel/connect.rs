@@ -105,6 +105,9 @@ fn map_connect_error(
     match error {
         HttpConnectError::Timeout => Aria2Error::Recoverable(RecoverableError::Timeout),
         HttpConnectError::InvalidResponse(message) => Aria2Error::Parse(message),
+        HttpConnectError::InvalidRequestField(field) => {
+            Aria2Error::InvalidArgument(format!("invalid HTTP CONNECT request field: {field}"))
+        }
         HttpConnectError::Io(error) => {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("HTTP CONNECT I/O failed: {error}"),
