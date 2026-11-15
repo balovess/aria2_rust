@@ -35,6 +35,9 @@ pub enum ProxyGetRequestError {
     /// The configured User-Agent cannot be represented as an HTTP field value.
     #[error("invalid HTTP User-Agent field value")]
     InvalidUserAgent,
+    /// Another HTTP request-line or field component is invalid.
+    #[error("invalid FTP proxy HTTP request: {0}")]
+    InvalidRequest(#[from] crate::http::request::HttpRequestSerializationError),
 }
 
 /// Build an FTP-over-HTTP-proxy GET request after validating caller fields.
@@ -45,7 +48,12 @@ pub fn try_build_get_request(
     if !crate::http::request::is_valid_http_field_value(options.user_agent) {
         return Err(ProxyGetRequestError::InvalidUserAgent);
     }
-    Ok(build_get_request(ftp_url, options))
+    let (request_url, request) = create_get_request(ftp_url, options);
+    let request_bytes = request.try_to_bytes()?;
+    Ok(ProxyGetRequest {
+        request_bytes,
+        request_url,
+    })
 }
 
 /// Build the GET request used by an HTTP forward proxy for an FTP resource.
@@ -53,6 +61,17 @@ pub fn try_build_get_request(
 /// This compatibility entry point serializes the supplied fields as-is. Use
 /// [`try_build_get_request`] when any field value may come from configuration.
 pub fn build_get_request(ftp_url: &Url, options: &ProxyGetRequestOptions<'_>) -> ProxyGetRequest {
+    let (request_url, request) = create_get_request(ftp_url, options);
+    ProxyGetRequest {
+        request_bytes: request.to_bytes(),
+        request_url,
+    }
+}
+
+fn create_get_request(
+    ftp_url: &Url,
+    options: &ProxyGetRequestOptions<'_>,
+) -> (String, crate::http::request::HttpRequest) {
     let request_url = build_request_url(ftp_url, options.ftp_username);
     let host_header = build_host_header(ftp_url);
     let mut headers = vec![
@@ -80,14 +99,8 @@ pub fn build_get_request(ftp_url: &Url, options: &ProxyGetRequestOptions<'_>) ->
         ));
     }
 
-    let request_bytes = crate::http::request::HttpRequest::get(request_url.clone())
-        .with_headers(headers)
-        .to_bytes();
-
-    ProxyGetRequest {
-        request_bytes,
-        request_url,
-    }
+    let request = crate::http::request::HttpRequest::get(request_url.clone()).with_headers(headers);
+    (request_url, request)
 }
 
 fn build_request_url(ftp_url: &Url, ftp_username: &str) -> String {

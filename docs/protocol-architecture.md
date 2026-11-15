@@ -689,8 +689,11 @@ Do not add pass-through engine clients around these public interfaces.
 - **Narrow** Linux splice HTTP parsing to the shared protocol header parser.
   The splice path retains its Linux socket/file I/O and fallback decisions;
   header framing and response syntax use `aria2-protocol::http::header_processor`.
-- **Narrow** raw HTTP request framing in proxy and splice paths to
-  `aria2-protocol::http::request`. Core keeps proxy routing, auth retries,
+- **Narrow** HTTP request framing in proxy and splice paths to
+  `aria2-protocol::http::request`. Internal network paths use the fallible
+  serializer, which validates the method token, request target, field names,
+  and field values before producing bytes. Existing infallible serializers
+  remain raw compatibility helpers. Core keeps proxy routing, auth retries,
   Range policy, outbound networking and zero-copy transfer decisions.
   The core request builder treats standard header names case-insensitively
   when preserving caller-supplied overrides, matching HTTP field-name rules.

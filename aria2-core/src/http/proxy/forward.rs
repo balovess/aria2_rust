@@ -59,6 +59,15 @@ impl HttpProxyForward {
     /// without any probe request. This is useful when the caller will
     /// immediately send their own request.
     pub async fn connect(&self, skip_handshake: bool) -> Result<TcpStream> {
+        let target_url = format!(
+            "http://{}:{}",
+            self.config.target_host, self.config.target_port
+        );
+        let probe_request = if skip_handshake {
+            None
+        } else {
+            Some(self.try_build_forward_request("HEAD", &target_url, "/", None)?)
+        };
         let mut stream = connect_to_proxy(&self.config).await?;
 
         if skip_handshake {
@@ -66,15 +75,13 @@ impl HttpProxyForward {
         }
 
         // Send a probe HEAD request to check if proxy auth is needed
-        let target_url = format!(
-            "http://{}:{}",
-            self.config.target_host, self.config.target_port
-        );
-        let probe_request = self.build_forward_request("HEAD", &target_url, "/", None);
         debug!("Sending probe HEAD request to proxy for {}", target_url);
         write_all_timeout(
             &mut stream,
-            probe_request.as_bytes(),
+            probe_request
+                .as_deref()
+                .expect("probe request exists when handshake is enabled")
+                .as_bytes(),
             self.config.write_timeout,
         )
         .await?;
@@ -117,6 +124,12 @@ impl HttpProxyForward {
                         )
                     })?;
 
+                    let retry_request = self.try_build_forward_request(
+                        "HEAD",
+                        &target_url,
+                        "/",
+                        Some(&auth_value),
+                    )?;
                     auth_nc += 1;
                     warn!(
                         "Proxy returned 407, retrying with authentication (attempt {})",
@@ -127,8 +140,6 @@ impl HttpProxyForward {
                     drop(stream);
                     stream = connect_to_proxy(&self.config).await?;
 
-                    let retry_request =
-                        self.build_forward_request("HEAD", &target_url, "/", Some(&auth_value));
                     write_all_timeout(
                         &mut stream,
                         retry_request.as_bytes(),
@@ -165,6 +176,9 @@ impl HttpProxyForward {
     /// * path - Retained for compatibility; `full_url` determines the request
     ///   target and the caller supplies any computed authentication header.
     /// * proxy_auth - Optional Proxy-Authorization header value
+    ///
+    /// This is a raw compatibility serializer. Use
+    /// [`Self::try_build_forward_request`] for data sent over a network.
     pub fn build_forward_request(
         &self,
         method: &str,
@@ -187,6 +201,28 @@ impl HttpProxyForward {
             method, full_url, &headers, None,
         ))
         .expect("HTTP request fields are UTF-8")
+    }
+
+    /// Build and validate a forward-proxy request before it is sent.
+    pub fn try_build_forward_request(
+        &self,
+        method: &str,
+        full_url: &str,
+        path: &str,
+        proxy_auth: Option<&str>,
+    ) -> Result<String> {
+        let host = self.config.target_host_port();
+        let mut headers = vec![("Host", host.as_str())];
+        if let Some(auth) = proxy_auth {
+            headers.push(("Proxy-Authorization", auth));
+        }
+        headers.extend([
+            ("User-Agent", crate::constants::USER_AGENT),
+            ("Accept", "*/*"),
+            ("Connection", "close"),
+        ]);
+        let _ = path;
+        serialize_forward_request(method, full_url, &headers)
     }
 
     /// Extract credentials or return an error.
@@ -227,26 +263,20 @@ pub async fn forward_get_with_auth(
         "http://{}:{}{}",
         config.target_host, config.target_port, path
     );
+    let host = config.target_host_port();
+    let mut headers = vec![("Host", host.as_str())];
+    headers.extend([
+        ("User-Agent", crate::constants::USER_AGENT),
+        ("Accept", "*/*"),
+        ("Connection", "close"),
+    ]);
+    let mut request = serialize_forward_request("GET", &full_url, &headers)?;
 
     let mut stream = connect_to_proxy(config).await?;
     let mut auth_nc = 1u32;
-    let mut current_auth: Option<String> = None;
 
     loop {
-        let host = config.target_host_port();
-        let mut headers = vec![("Host", host.as_str())];
-        if let Some(auth) = current_auth.as_deref() {
-            headers.push(("Proxy-Authorization", auth));
-        }
-        headers.extend([
-            ("User-Agent", crate::constants::USER_AGENT),
-            ("Accept", "*/*"),
-            ("Connection", "close"),
-        ]);
-        let request =
-            aria2_protocol::http::request::serialize_http_request("GET", &full_url, &headers, None);
-
-        write_all_timeout(&mut stream, &request, config.write_timeout).await?;
+        write_all_timeout(&mut stream, request.as_bytes(), config.write_timeout).await?;
         let head = read_proxy_response(&mut stream, config.read_timeout).await?;
         let proxy_resp = ProxyResponse::from_head(head);
 
@@ -279,8 +309,16 @@ pub async fn forward_get_with_auth(
                     )
                 })?;
 
+                let mut authenticated_headers = vec![("Host", host.as_str())];
+                authenticated_headers.push(("Proxy-Authorization", auth_value.as_str()));
+                authenticated_headers.extend([
+                    ("User-Agent", crate::constants::USER_AGENT),
+                    ("Accept", "*/*"),
+                    ("Connection", "close"),
+                ]);
+                request = serialize_forward_request("GET", &full_url, &authenticated_headers)?;
+
                 auth_nc += 1;
-                current_auth = Some(auth_value);
 
                 warn!(
                     "Proxy returned 407, retrying GET with auth (attempt {})",
@@ -302,4 +340,18 @@ pub async fn forward_get_with_auth(
             }
         }
     }
+}
+
+fn serialize_forward_request(
+    method: &str,
+    full_url: &str,
+    headers: &[(&str, &str)],
+) -> Result<String> {
+    let bytes =
+        aria2_protocol::http::request::try_serialize_http_request(method, full_url, headers, None)
+            .map_err(|_| {
+                Aria2Error::InvalidArgument("invalid HTTP forward-proxy request fields".into())
+            })?;
+    String::from_utf8(bytes)
+        .map_err(|_| Aria2Error::InvalidArgument("HTTP request fields are not UTF-8".into()))
 }

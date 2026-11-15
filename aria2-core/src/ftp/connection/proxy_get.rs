@@ -418,6 +418,9 @@ impl FtpProxyGetRequestBuilder {
                     "user-agent contains invalid HTTP field characters".to_string(),
                 )
             }
+            aria2_protocol::ftp::proxy::ProxyGetRequestError::InvalidRequest(_) => {
+                Aria2Error::InvalidArgument("invalid FTP proxy HTTP request fields".to_string())
+            }
         })?;
         Ok(FtpProxyGetRequest {
             request_bytes: request.request_bytes,

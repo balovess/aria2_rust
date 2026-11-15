@@ -117,6 +117,19 @@ fn request_builder_respects_custom_headers_case_insensitively() {
 }
 
 #[test]
+fn request_builder_rejects_injected_custom_header_values() {
+    let url = Url::parse("http://example.com/file").unwrap();
+    let result = HttpRequestBuilder::new(HttpMethod::Get, url)
+        .header("X-Test", "safe\r\nX-Injected: yes")
+        .build();
+
+    assert!(matches!(
+        result,
+        Err(crate::error::Aria2Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
 fn test_request_to_bytes_with_body() {
     let url = Url::parse("http://example.com/api").unwrap();
     let request = HttpRequestBuilder::new(HttpMethod::Post, url)

@@ -6,6 +6,23 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
+/// Failure to serialize invalid HTTP/1.1 request fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HttpRequestSerializationError {
+    /// The method contains bytes outside the HTTP token grammar.
+    #[error("invalid HTTP method")]
+    InvalidMethod,
+    /// The request target contains whitespace or control bytes.
+    #[error("invalid HTTP request target")]
+    InvalidTarget,
+    /// A field name contains bytes outside the HTTP token grammar.
+    #[error("invalid HTTP field name")]
+    InvalidFieldName,
+    /// A field value contains forbidden control bytes.
+    #[error("invalid HTTP field value")]
+    InvalidFieldValue,
+}
+
 /// Return whether a value can be serialized as an HTTP field value.
 ///
 /// Horizontal tab, visible ASCII, and obs-text octets are permitted. Other
@@ -95,7 +112,8 @@ impl HttpRequest {
     /// Serialize this request as an HTTP/1.1 message.
     ///
     /// `url` is emitted as supplied, allowing either origin-form targets or
-    /// absolute-form targets for forward proxies.
+    /// absolute-form targets for forward proxies. This is a raw compatibility
+    /// serializer; use [`Self::try_to_bytes`] for network transmission.
     pub fn to_bytes(&self) -> Vec<u8> {
         let headers = self
             .headers
@@ -106,9 +124,83 @@ impl HttpRequest {
             .collect::<Vec<_>>();
         serialize_http_request(&self.method, &self.url, &headers, self.body.as_deref())
     }
+
+    /// Validate and serialize this request for use on a network connection.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, HttpRequestSerializationError> {
+        let headers = self
+            .headers
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        try_serialize_http_request(&self.method, &self.url, &headers, self.body.as_deref())
+    }
+}
+
+/// Validate and serialize an HTTP/1.1 request from borrowed fields.
+pub fn try_serialize_http_request(
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Result<Vec<u8>, HttpRequestSerializationError> {
+    validate_http_request(method, target, headers)?;
+    Ok(serialize_http_request(method, target, headers, body))
+}
+
+/// Validate HTTP/1.1 request-line and field components without allocating a
+/// serialized request buffer.
+pub fn validate_http_request(
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+) -> Result<(), HttpRequestSerializationError> {
+    if !is_http_token(method) {
+        return Err(HttpRequestSerializationError::InvalidMethod);
+    }
+    if target.is_empty() || !target.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        return Err(HttpRequestSerializationError::InvalidTarget);
+    }
+    for (name, value) in headers {
+        if !is_http_token(name) {
+            return Err(HttpRequestSerializationError::InvalidFieldName);
+        }
+        if !is_valid_http_field_value(value) {
+            return Err(HttpRequestSerializationError::InvalidFieldValue);
+        }
+    }
+    Ok(())
+}
+
+fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 /// Serialize an HTTP/1.1 request from borrowed fields without copying its body.
+///
+/// This is a raw compatibility primitive. Use [`try_serialize_http_request`]
+/// for request data that will be sent over a network connection.
 pub fn serialize_http_request(
     method: &str,
     target: &str,
@@ -140,7 +232,10 @@ pub fn serialize_http_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpRequest, is_valid_http_field_value};
+    use super::{
+        HttpRequest, HttpRequestSerializationError, is_valid_http_field_value,
+        try_serialize_http_request, validate_http_request,
+    };
 
     #[test]
     fn validates_http_field_value_control_bytes() {
@@ -149,6 +244,27 @@ mod tests {
         for invalid in ["agent\r\nX-Injected: yes", "agent\0", "agent\u{7f}"] {
             assert!(!is_valid_http_field_value(invalid), "accepted {invalid:?}");
         }
+    }
+
+    #[test]
+    fn validated_serializer_rejects_request_line_and_field_injection() {
+        assert_eq!(
+            try_serialize_http_request("GET\r\nX", "/file", &[], None),
+            Err(HttpRequestSerializationError::InvalidMethod)
+        );
+        assert_eq!(
+            try_serialize_http_request("GET", "/file\r\nX: y", &[], None),
+            Err(HttpRequestSerializationError::InvalidTarget)
+        );
+        assert_eq!(
+            try_serialize_http_request("GET", "/file", &[("X-Test\r\nX", "v")], None),
+            Err(HttpRequestSerializationError::InvalidFieldName)
+        );
+        assert_eq!(
+            try_serialize_http_request("GET", "/file", &[("X-Test", "v\r\nX: y")], None),
+            Err(HttpRequestSerializationError::InvalidFieldValue)
+        );
+        assert_eq!(validate_http_request("GET", "/file", &[]), Ok(()));
     }
 
     #[test]

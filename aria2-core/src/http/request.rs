@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use url::Url;
 
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 
 /// HTTP request method enum
 #[derive(Debug, Clone, PartialEq)]
@@ -55,14 +55,10 @@ impl HttpRequest {
     /// Serialize the HTTP request to raw bytes
     ///
     /// Serializes the request to a byte sequence according to the HTTP/1.1 specification.
-    /// Format: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`
+    /// Format: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`. This is a raw
+    /// compatibility serializer; use [`Self::try_to_bytes`] for network transmission.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let path = self.url.path();
-        let target = if let Some(query) = self.url.query() {
-            format!("{path}?{query}")
-        } else {
-            path.to_owned()
-        };
+        let target = self.request_target();
         let method = self.method.to_string();
         let headers = self
             .headers
@@ -75,6 +71,45 @@ impl HttpRequest {
             &headers,
             self.body.as_deref(),
         )
+    }
+
+    /// Validate and serialize this request for network transmission.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
+        let target = self.request_target();
+        let method = self.method.to_string();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        aria2_protocol::http::request::try_serialize_http_request(
+            &method,
+            &target,
+            &headers,
+            self.body.as_deref(),
+        )
+        .map_err(|error| Aria2Error::InvalidArgument(format!("invalid HTTP request: {error}")))
+    }
+
+    fn request_target(&self) -> String {
+        let path = self.url.path();
+        if let Some(query) = self.url.query() {
+            format!("{path}?{query}")
+        } else {
+            path.to_owned()
+        }
+    }
+
+    fn validate_for_serialization(&self) -> Result<()> {
+        let target = self.request_target();
+        let method = self.method.to_string();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        aria2_protocol::http::request::validate_http_request(&method, &target, &headers)
+            .map_err(|error| Aria2Error::InvalidArgument(format!("invalid HTTP request: {error}")))
     }
 }
 
@@ -478,12 +513,14 @@ impl HttpRequestBuilder {
             final_headers.insert("Content-Length".to_string(), len.to_string());
         }
 
-        Ok(HttpRequest {
+        let request = HttpRequest {
             method: self.method,
             url: self.url,
             headers: final_headers,
             body: self.body,
-        })
+        };
+        request.validate_for_serialization()?;
+        Ok(request)
     }
 }
 

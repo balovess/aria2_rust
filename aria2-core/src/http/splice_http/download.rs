@@ -156,8 +156,13 @@ pub async fn try_splice_download_with_policy(
         ("User-Agent", crate::constants::USER_AGENT),
         ("Accept", "*/*"),
     ];
-    let request =
-        aria2_protocol::http::request::serialize_http_request("GET", &path_query, &headers, None);
+    let request = aria2_protocol::http::request::try_serialize_http_request(
+        "GET",
+        &path_query,
+        &headers,
+        None,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     stream.write_all(&request).await?;
     debug!(range = %range_value, "splice_download: request sent");
 

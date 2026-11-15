@@ -267,6 +267,14 @@ behavior. An unlisted behavior has not been audited here.
   map their existing policy fields into it. Request headers, absolute-form
   targets, body bytes, and ordering are covered by focused tests. The Linux
   splice transfer itself remains unverified on this Windows host.
+- The fallible serializer validates the method token, request target, field
+  names, and field values before emitting network bytes. The core request
+  builder, FTP proxy GET path, HTTP CONNECT, forward-proxy probes, and
+  `forward_get_with_auth` use validated construction; malformed targets and
+  CR/LF/control-byte header injection are rejected. The existing infallible
+  raw serializers and builders remain available unchanged for public API
+  compatibility. Focused regressions cover request-line/field injection and
+  verify that invalid forward-GET paths fail before opening the proxy socket.
 - HTTP proxy response status classification, Basic/Digest challenge selection,
   and timeout-bound response-head reads now use protocol-owned implementations.
   The response-head transport reader consumes exactly the header terminator,

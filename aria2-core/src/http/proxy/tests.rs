@@ -335,6 +335,23 @@ fn test_forward_build_request_no_auth() {
 }
 
 #[test]
+fn validated_forward_request_builder_rejects_request_target_injection() {
+    let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 80);
+    let forward = HttpProxyForward::new(config);
+    let result = forward.try_build_forward_request(
+        "GET",
+        "http://target.com/file\r\nX-Injected: yes",
+        "/file",
+        None,
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::error::Aria2Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
 fn test_forward_build_request_with_auth() {
     let config = HttpProxyConfig::new("proxy.com".into(), 3128, "target.com".into(), 80);
     let forward = HttpProxyForward::new(config);
@@ -540,6 +557,24 @@ async fn forward_get_authentication_preserves_response_body_after_headers() {
     stream.read_exact(&mut body).await.unwrap();
     assert_eq!(&body, b"BODY");
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn forward_get_rejects_injected_path_before_connecting_to_proxy() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let config = HttpProxyConfig::new("127.0.0.1".into(), address.port(), "example.com".into(), 80);
+
+    let result = forward_get_with_auth(&config, "/file\r\nX-Injected: yes").await;
+    assert!(matches!(
+        result,
+        Err(crate::error::Aria2Error::InvalidArgument(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

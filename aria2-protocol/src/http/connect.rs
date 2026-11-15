@@ -12,7 +12,9 @@ use tracing::debug;
 use super::auth::basic_authorization;
 use super::digest::{DigestChallenge, DigestResponse};
 use super::header_processor::{HttpResponseHeadReadError, read_response_head};
-use super::request::{is_valid_http_field_value, serialize_http_request};
+use super::request::{
+    HttpRequestSerializationError, is_valid_http_field_value, try_serialize_http_request,
+};
 
 /// Settings for one HTTP CONNECT handshake.
 pub struct HttpConnectOptions<'a> {
@@ -263,7 +265,22 @@ async fn send_request(
     if proxy_connection_keep_alive {
         headers.push(("Proxy-Connection", "keep-alive"));
     }
-    let request = serialize_http_request("CONNECT", &target, &headers, None);
+    let request = try_serialize_http_request("CONNECT", &target, &headers, None).map_err(
+        |error| match error {
+            HttpRequestSerializationError::InvalidMethod => {
+                HttpConnectError::InvalidRequestField("method")
+            }
+            HttpRequestSerializationError::InvalidTarget => {
+                HttpConnectError::InvalidRequestField("target authority")
+            }
+            HttpRequestSerializationError::InvalidFieldName => {
+                HttpConnectError::InvalidRequestField("header name")
+            }
+            HttpRequestSerializationError::InvalidFieldValue => {
+                HttpConnectError::InvalidRequestField("header value")
+            }
+        },
+    )?;
     debug!(target = %target, authenticated = auth_header.is_some(), "Sending HTTP CONNECT request");
     timeout(options.write_timeout, stream.write_all(&request))
         .await
@@ -320,9 +337,9 @@ async fn consume_response_body(
             timeout(read_timeout, consume_chunked_body(stream))
                 .await
                 .map_err(|_| HttpConnectError::Timeout)??;
-            return Ok(());
+            Ok(())
         }
-        ProxyResponseBodyFraming::ContentLength(0) => return Ok(()),
+        ProxyResponseBodyFraming::ContentLength(0) => Ok(()),
         ProxyResponseBodyFraming::ContentLength(length)
             if length <= MAX_AUTH_RESPONSE_BODY_BYTES =>
         {
@@ -341,13 +358,11 @@ async fn consume_response_body(
                 .map_err(|_| HttpConnectError::Timeout)?
                 .map_err(HttpConnectError::Io)?;
             debug!(length, "Consumed proxy authentication response body");
-            return Ok(());
+            Ok(())
         }
-        ProxyResponseBodyFraming::ContentLength(_) => {
-            return Err(HttpConnectError::InvalidResponse(
-                "proxy authentication response body exceeds the discard limit".to_string(),
-            ));
-        }
+        ProxyResponseBodyFraming::ContentLength(_) => Err(HttpConnectError::InvalidResponse(
+            "proxy authentication response body exceeds the discard limit".to_string(),
+        )),
     }
 }
 
