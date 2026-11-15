@@ -403,6 +403,22 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    Coordinators send peer commands and consume peer events rather than doing
    parallel socket I/O. `BtPeerConn` therefore remains the actor-owned
    connection/state object at runtime; only pre-actor ownership is temporary.
+   Dial concurrency is scoped by workflow: initial swarm admission is limited
+   by available `bt-max-peers` slots and the selected peer list, then attempts
+   those candidates concurrently and settles for one second after the first
+   success. Magnet metadata admission is bounded by its candidate/peer limits;
+   seeding batches are capped at 32 candidates. Later tracker, DHT, and PEX
+   discovery uses `PeerDialQueue`, which retains at most 512 unique pending
+   endpoints and dials at most 10 candidates from one source at a time. These
+   are separate core policies, not one protocol-library connection limit. All
+   TCP paths still establish sockets through `OutboundNetworkPolicy` before
+   passing them to protocol handshake APIs; dropping the owning batch cancels
+   unfinished handshakes and closes their streams. Initial admission returns
+   checked-out peers that did not become active; the seeding manager likewise
+   returns unadmitted peers after a batch and aborts/joins its pending batch
+   before returning all checked-out peers on shutdown. Discovery-queue
+   candidates remain queue-owned until selected, and its `JoinSet` aborts the
+   active batch when the piece session exits.
    BEP 11 payload encoding, compact-address conversion, and message framing use
    protocol types; core selects, filters, and schedules the peers to advertise.
    The torrent-scoped `TorrentSession` owns the `PeerSwarm`, which the
@@ -674,13 +690,21 @@ Do not add pass-through engine clients around these public interfaces.
   parser from its owning protocol module. The reusable `NoProxyMatcher` also
   lives in `aria2-protocol::http::proxy`; core owns proxy
   precedence, task-option application, DNS pinning, and outbound socket policy.
+  HTTP proxy credential precedence and reqwest auth construction both consume
+  decoded userinfo from this shared parser; they do not reinterpret proxy
+  credentials through `url::Url`.
   The public `aria2-core::http::socks_connector` module re-exports both protocol
   APIs to preserve their historical library paths.
-- **Narrow** URI component percent encoding into `aria2-protocol::uri`; FTP,
-  SFTP, and the historical core URI module keep their public helpers as
-  re-exports. `ProxyUrl` decodes percent-escaped userinfo, and
+- **Narrow** URI component percent encoding and byte-oriented percent decoding
+  into `aria2-protocol::uri`; FTP, SFTP, and the historical core URI module
+  keep their public helpers as re-exports. `MagnetLink::url_decode` and CLI
+  magnet-URI rendering use the same primitives instead of maintaining copies.
+  `ProxyUrl` matches schemes case-insensitively and decodes percent-escaped
+  userinfo, and
   `ProxyConfig::to_url` re-encodes credentials and brackets IPv6 authorities,
-  matching the original URI parser's parse/construct contract.
+  matching the original URI parser's parse/construct contract. HTTP and FTP
+  proxy configuration both use this parser for credential decoding; FTP no
+  longer reparses proxy userinfo through `url::Url`.
 - **Narrow** the core Metalink/HTTP module to compatibility exports. Link and
   Digest header parsing and its values live in
   `aria2-protocol::http::metalink_http`; task integration remains in the core
@@ -971,6 +995,14 @@ Do not add pass-through engine clients around these public interfaces.
   size is observed, return a typed transfer failure instead of successful
   incomplete progress. Close the remote handle on both paths; preserve the
   existing public error enum and its source compatibility.
+- **Improve** SFTP transfer finalization and resume boundaries: upload CLOSE
+  failure is a transfer error because the remote operation did not fully
+  finalize; after a complete download, CLOSE failure is only a cleanup warning
+  and does not discard the received file. An upload resume offset beyond the
+  local source is rejected before opening the remote destination, while a
+  remote file larger than the source restarts from offset zero with truncation.
+  Loopback protocol tests cover these decisions. The core download path also
+  logs CLOSE failure and finalizes the received data through its `DiskWriter`.
 - **Improve** SFTP packet validation: the decoder rejects unexplained bytes
   after a packet's defined fields, impossible directory entry counts, and
   length-prefixed fields not present in the received payload; frame arithmetic
@@ -983,7 +1015,9 @@ Do not add pass-through engine clients around these public interfaces.
   direct-resource groups and, when enabled, torrent metadata graphs from the
   same normalized entries and GID sequence. Remove the unused mirror types and
   forwarding entry points; `MetalinkFile` remains the parsed protocol model,
-  while the core owns task expansion and lifecycle.
+  while the core owns task expansion and lifecycle. The CLI obtains every
+  generated group ID from the shared atomic manager allocator as needed, so
+  concurrent task creation cannot overlap an estimated local GID range.
 - **Narrow** Metalink command execution to parsed file data. The initial
   expansion passes each normalized `MetalinkFile` through its in-memory
   request group to the execution adapter, avoiding a second XML parse per
@@ -1261,10 +1295,13 @@ Do not add pass-through engine clients around these public interfaces.
   range requests, and magnet exact-source HTTP retrieval. The peer-ID prefix
   remains a protocol default unless an option overrides it.
 - **Keep** runtime option application and lifecycle classification in core.
-  RPC normalizes wire values in `aria2`, while the C API converts its string
-  pairs at its own boundary; both converge on the public core option-update
-  contract. Core owns immediate versus pending application and active-task
-  restart semantics, which depend on request-group state. **Narrow** HTTP
+  `aria2-rpc` owns RPC wire decoding and task `changeOption` string-value
+  normalization; `aria2` maps the resulting backend request to core. Global
+  RPC option values are typed by the core registry, while the C API converts
+  its string pairs at its own boundary. All adapters converge on core-owned
+  runtime application and lifecycle policy. Core owns immediate versus
+  pending application and active-task restart semantics, which depend on
+  request-group state. **Narrow** HTTP
   connection, adaptive, HTTP/2, Range-size, and version mapping into the
   private `options_ops::runtime_update::http` child module. Batch application
   prevalidates every value before mutating the group, so a rejected batch
@@ -1306,6 +1343,13 @@ Do not add pass-through engine clients around these public interfaces.
   dispatch live in private child modules. Keep the existing crate-internal
   `engine::dispatch_wire_entries` path used by HTTP and WebSocket servers; the
   batch snapshot and mutation ordering remain unchanged.
+- **Narrow** task `changeOption` input conversion to the dedicated
+  `aria2-rpc::rpc_helpers::normalize_change_option_options` boundary. The
+  handler preserves positional parameters, the core RPC adapter delegates
+  task validation and lifecycle transitions to `RequestGroupMan`, and response
+  option normalization remains separate from input validation. Global
+  `changeGlobalOption` array filtering also stays at the RPC input boundary;
+  the core registry owns option types and scalar value validation.
 - **Narrow** `aria2/src/app/rpc_backend/query.rs`: keep status snapshots,
   pagination, and shared RPC query coordination in the parent module; move
   BitTorrent peer/tracker/DHT projections and file/URI/server projections into

@@ -36,27 +36,31 @@ impl ProxyUrl {
     ///
     /// Supported forms are `socks5://[username:password@]host[:port]`,
     /// `socks4://[username@]host[:port]`, `http://[username:password@]host[:port]`,
-    /// and `https://[username:password@]host[:port]`. Any path, query, or
-    /// fragment is ignored because proxy routing uses only the authority.
+    /// and `https://[username:password@]host[:port]`. Schemes are matched
+    /// case-insensitively. Any path, query, or fragment is ignored because
+    /// proxy routing uses only the authority.
     pub fn parse(url: &str) -> Result<Self, String> {
         let url = url.trim();
-        let (protocol, rest) = if let Some(rest) = url.strip_prefix("socks5://") {
-            (ProxyProtocol::Socks5, rest)
-        } else if let Some(rest) = url.strip_prefix("socks4://") {
-            (ProxyProtocol::Socks4, rest)
-        } else if let Some(rest) = url.strip_prefix("http://") {
-            (ProxyProtocol::Http, rest)
-        } else if let Some(rest) = url.strip_prefix("https://") {
-            (ProxyProtocol::Https, rest)
+        let (scheme, rest) = url
+            .split_once("://")
+            .ok_or_else(|| "Invalid proxy URL: expected scheme://authority".to_string())?;
+        let protocol = if scheme.eq_ignore_ascii_case("socks5") {
+            ProxyProtocol::Socks5
+        } else if scheme.eq_ignore_ascii_case("socks4") {
+            ProxyProtocol::Socks4
+        } else if scheme.eq_ignore_ascii_case("http") {
+            ProxyProtocol::Http
+        } else if scheme.eq_ignore_ascii_case("https") {
+            ProxyProtocol::Https
         } else {
-            return Err(format!("Unsupported proxy protocol in URL: {url}"));
+            return Err(format!("Unsupported proxy protocol '{scheme}'"));
         };
 
-        let (auth_part, host_port) = match rest.find('@') {
-            Some(index) => (&rest[..index], &rest[index + 1..]),
-            None => ("", rest),
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let (auth_part, host_port) = match authority.find('@') {
+            Some(index) => (&authority[..index], &authority[index + 1..]),
+            None => ("", authority),
         };
-        let host_port = host_port.split(['/', '?', '#']).next().unwrap_or(host_port);
         let (username, password) = if !auth_part.is_empty() {
             if let Some(index) = auth_part.find(':') {
                 (
@@ -86,9 +90,9 @@ impl ProxyUrl {
             } else if let Some(port_text) = suffix.strip_prefix(':') {
                 port_text
                     .parse()
-                    .map_err(|_| format!("Invalid port number in proxy URL: {port_text}"))?
+                    .map_err(|_| "Invalid port number in proxy URL".to_string())?
             } else {
-                return Err(format!("Invalid bracketed proxy host: {host_port}"));
+                return Err("Invalid bracketed proxy host".to_string());
             };
             (host.to_string(), port)
         } else if let Some(index) = host_port.rfind(':') {
@@ -96,7 +100,7 @@ impl ProxyUrl {
             let port_text = &host_port[index + 1..];
             let port = port_text
                 .parse()
-                .map_err(|_| format!("Invalid port number in proxy URL: {port_text}"))?;
+                .map_err(|_| "Invalid port number in proxy URL".to_string())?;
             (host.to_string(), port)
         } else {
             (host_port.to_string(), default_port)
@@ -134,5 +138,42 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("private-user"));
         assert!(!debug.contains("private-password"));
+    }
+
+    #[test]
+    fn proxy_url_parses_case_insensitive_scheme_and_decodes_credentials() {
+        let proxy = ProxyUrl::parse("HtTp://user%40name:p%3A%40%25@proxy.example").unwrap();
+
+        assert_eq!(proxy.protocol, ProxyProtocol::Http);
+        assert_eq!(proxy.host, "proxy.example");
+        assert_eq!(proxy.port, 8080);
+        assert_eq!(proxy.username.as_deref(), Some("user@name"));
+        assert_eq!(proxy.password.as_deref(), Some("p:@%"));
+    }
+
+    #[test]
+    fn proxy_url_ignores_userinfo_delimiters_after_authority() {
+        let proxy = ProxyUrl::parse("http://proxy.example/path@marker?next=@query#@fragment")
+            .expect("path, query, and fragment are ignored");
+
+        assert_eq!(proxy.host, "proxy.example");
+        assert_eq!(proxy.port, 8080);
+        assert_eq!(proxy.username, None);
+        assert_eq!(proxy.password, None);
+
+        let proxy = ProxyUrl::parse("http://user:pass@proxy.example/path@marker")
+            .expect("authority userinfo should still parse");
+        assert_eq!(proxy.username.as_deref(), Some("user"));
+        assert_eq!(proxy.password.as_deref(), Some("pass"));
+        assert_eq!(proxy.host, "proxy.example");
+    }
+
+    #[test]
+    fn proxy_url_parse_errors_do_not_include_userinfo() {
+        let error = ProxyUrl::parse("unknown://private-user:private-password@proxy.example")
+            .expect_err("unknown schemes should be rejected");
+
+        assert!(!error.contains("private-user"));
+        assert!(!error.contains("private-password"));
     }
 }

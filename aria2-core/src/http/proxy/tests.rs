@@ -107,6 +107,21 @@ fn test_proxy_config_from_proxy_url_no_credentials() {
 }
 
 #[test]
+fn proxy_config_ignores_at_signs_outside_proxy_authority() {
+    let config = HttpProxyConfig::from_proxy_url(
+        "http://proxy.local/path@marker?next=@query#fragment",
+        "target.example".into(),
+        443,
+    )
+    .expect("proxy path, query, and fragment should not affect its authority");
+
+    assert_eq!(config.proxy_host, "proxy.local");
+    assert_eq!(config.proxy_port, 8080);
+    assert!(config.proxy_username.is_none());
+    assert!(config.proxy_password.is_none());
+}
+
+#[test]
 fn test_proxy_config_from_proxy_url_socks5_accepted() {
     // SOCKS5 proxy URLs are now supported (via socks_connector)
     let result = HttpProxyConfig::from_proxy_url("socks5://proxy.local:1080", "t".into(), 80);
@@ -119,6 +134,20 @@ fn test_proxy_config_from_proxy_url_socks5_accepted() {
     assert_eq!(config.proxy_host, "proxy.local");
     assert_eq!(config.proxy_port, 1080);
     assert!(config.is_socks());
+}
+
+#[test]
+fn invalid_proxy_url_errors_do_not_expose_userinfo() {
+    let error = HttpProxyConfig::from_proxy_url(
+        "unknown://private-user:private-password@proxy.example:3128",
+        "target.example".into(),
+        80,
+    )
+    .expect_err("unsupported proxy schemes should fail");
+    let error = error.to_string();
+
+    assert!(!error.contains("private-user"));
+    assert!(!error.contains("private-password"));
 }
 
 #[test]

@@ -1521,6 +1521,36 @@ async fn test_torrent_and_metalink_file_options_enter_input_detection() {
     );
 }
 
+#[cfg(feature = "metalink")]
+#[tokio::test]
+async fn metalink_expansion_advances_the_shared_gid_allocator_for_every_group() {
+    let metalink = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+      <file name="first.bin"><url>https://mirror.example/first.bin</url></file>
+      <file name="second.bin"><url>https://mirror.example/second.bin</url></file>
+    </metalink>"#;
+    let mut app = App::new();
+    app.detected_inputs = vec![aria2_core::validation::protocol_detector::DetectedInput {
+        input_type: aria2_core::validation::protocol_detector::InputType::MetalinkFile,
+        raw: "input.meta4".to_string(),
+        file_data: Some(metalink.to_vec()),
+        options: HashMap::new(),
+    }];
+    app.initialize_engine().await;
+
+    let gids = app
+        .add_downloads()
+        .await
+        .expect("Metalink resource groups should be submitted");
+    assert_eq!(gids.len(), 2);
+
+    let next_gid = app.request_man.next_available_gid().value();
+    assert!(
+        !gids.contains(&next_gid),
+        "the next regular allocation must not collide with Metalink groups: {gids:?}"
+    );
+    assert_eq!(next_gid, gids[1] + 1);
+}
+
 #[tokio::test]
 async fn test_input_file_session_is_not_added_as_a_duplicate_uri_input() {
     let temp_dir = TempDir::new().expect("temporary session directory");

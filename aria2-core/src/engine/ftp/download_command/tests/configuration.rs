@@ -113,6 +113,54 @@ fn ftp_proxy_rpc_options_reach_the_core_proxy_configuration() {
 }
 
 #[test]
+fn ftp_proxy_uses_shared_decoded_userinfo_and_normalized_scheme() {
+    let options = DownloadOptions {
+        ftp_proxy: Some("HtTp://user%40name:p%3A%40%25@proxy.example".to_string()),
+        ..DownloadOptions::default()
+    };
+    let command = FtpDownloadCommand::new(
+        GroupId::new(104),
+        "ftp://download.example/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .expect("FTP command should accept a case-insensitive HTTP proxy URL");
+
+    let (proxy, _) = command
+        .ftp_proxy_config()
+        .expect("proxy configuration should parse")
+        .expect("HTTP proxy should be selected");
+    assert_eq!(proxy.proxy_host, "proxy.example");
+    assert_eq!(proxy.proxy_port, 8080);
+    assert_eq!(proxy.proxy_username, "user@name");
+    assert_eq!(proxy.proxy_password, "p:@%");
+}
+
+#[test]
+fn invalid_ftp_proxy_errors_do_not_expose_userinfo() {
+    let options = DownloadOptions {
+        ftp_proxy: Some("unknown://private-user:private-password@proxy.example".to_string()),
+        ..DownloadOptions::default()
+    };
+    let command = FtpDownloadCommand::new(
+        GroupId::new(105),
+        "ftp://download.example/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .expect("FTP download command should be constructed");
+    let error = command
+        .ftp_proxy_config()
+        .expect_err("unsupported proxy scheme should fail");
+    let error = error.to_string();
+
+    assert!(!error.contains("private-user"));
+    assert!(!error.contains("private-password"));
+}
+
+#[test]
 fn ftp_no_proxy_uses_exact_host_matching_for_proxy_selection() {
     let options = DownloadOptions {
         ftp_proxy: Some("http://proxy.example:3128".to_string()),

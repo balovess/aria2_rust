@@ -34,6 +34,41 @@ fn kv(name: &str, value: &str) -> (Aria2RustKeyValue, CString, CString) {
 }
 
 #[test]
+fn c_api_session_uses_protocol_identity_defaults() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_str("user-agent"))
+            .as_deref(),
+        Some(aria2_protocol::identity::DEFAULT_USER_AGENT)
+    );
+    #[cfg(feature = "bittorrent")]
+    {
+        assert_eq!(
+            session
+                .runtime
+                .block_on(session.config.get_global_str("peer-agent"))
+                .as_deref(),
+            Some(aria2_protocol::identity::DEFAULT_PEER_AGENT)
+        );
+        assert_eq!(
+            session
+                .runtime
+                .block_on(session.config.get_global_str("peer-id-prefix"))
+                .as_deref(),
+            Some(aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX)
+        );
+    }
+
+    session.finalize();
+}
+
+#[test]
 fn c_api_reports_failed_global_runtime_option_dispatch() {
     let _guard = TEST_LOCK
         .lock()

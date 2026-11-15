@@ -131,7 +131,7 @@ impl HttpProxyConfig {
     /// Uses the protocol crate's shared [ProxyUrl] parser.
     pub fn from_proxy_url(proxy_url: &str, target_host: String, target_port: u16) -> Result<Self> {
         let parsed = ProxyUrl::parse(proxy_url)
-            .map_err(|e| Aria2Error::Parse(format!("Invalid proxy URL '{}': {}", proxy_url, e)))?;
+            .map_err(|e| Aria2Error::Parse(format!("Invalid proxy URL: {e}")))?;
 
         let proxy_type = match parsed.protocol {
             ProxyProtocol::Http => ProxyType::Http,

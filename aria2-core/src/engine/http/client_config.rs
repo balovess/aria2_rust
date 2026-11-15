@@ -444,14 +444,12 @@ pub(crate) fn build_reqwest_proxy(
     // Preserve credentials embedded in the proxy URL unless an option
     // explicitly overrides them, matching AbstractCommand::makeProxyUri().
     if username.is_some() || password.is_some() {
-        let embedded = proxy_url.parse::<reqwest::Url>().ok();
+        let embedded = ProxyUrl::parse(proxy_url).ok();
         let embedded_user = embedded
             .as_ref()
-            .filter(|url| !url.username().is_empty())
-            .map(|url| url.username().to_string());
-        let embedded_password = embedded
-            .as_ref()
-            .and_then(|url| url.password().map(str::to_string));
+            .and_then(|proxy| proxy.username.as_deref())
+            .map(str::to_string);
+        let embedded_password = embedded.and_then(|proxy| proxy.password);
         let effective_user = username.map(str::to_owned).or(embedded_user);
         let effective_password = password
             .map(str::to_owned)

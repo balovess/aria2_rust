@@ -473,10 +473,18 @@ async fn empty_public_tracker_sources_are_accepted_and_applied() {
         None,
         "test",
     );
+    let original_excluded_trackers = config
+        .read()
+        .await
+        .get_global_option("bt-exclude-tracker")
+        .await;
 
     for value in [serde_json::json!(""), serde_json::json!([])] {
         backend
-            .change_global_option(HashMap::from([("bt-tracker-source".to_string(), value)]))
+            .change_global_option(HashMap::from([
+                ("bt-tracker-source".to_string(), value),
+                ("bt-exclude-tracker".to_string(), serde_json::json!([])),
+            ]))
             .await
             .unwrap();
 
@@ -492,5 +500,67 @@ async fn empty_public_tracker_sources_are_accepted_and_applied() {
             receiver.recv().await.unwrap(),
             EngineCommand::SetPublicTrackerSources { sources } if sources.is_empty()
         ));
+        assert_eq!(
+            config
+                .read()
+                .await
+                .get_global_option("bt-exclude-tracker")
+                .await,
+            original_excluded_trackers,
+            "other empty arrays retain the upstream no-op behavior"
+        );
     }
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn global_option_arrays_skip_non_strings_and_ignore_non_cumulative_arrays() {
+    let config = Arc::new(RwLock::new(ConfigManager::new()));
+    let original_max_concurrent = config
+        .read()
+        .await
+        .get_global_i64("max-concurrent-downloads")
+        .await;
+    let (sender, mut receiver) = channel();
+    let backend = CoreRpcBackend::new(
+        Arc::new(RequestGroupMan::new()),
+        sender,
+        Arc::clone(&config),
+        None,
+        "test",
+    );
+
+    backend
+        .change_global_option(HashMap::from([
+            (
+                "bt-tracker-source".to_string(),
+                serde_json::json!([
+                    "https://tracker-one.test/announce",
+                    17,
+                    null,
+                    "https://tracker-two.test/announce"
+                ]),
+            ),
+            (
+                "max-concurrent-downloads".to_string(),
+                serde_json::json!([9]),
+            ),
+        ]))
+        .await
+        .expect("non-string array members are skipped and wrong-shaped arrays ignored");
+
+    assert!(matches!(
+        receiver.recv().await.unwrap(),
+        EngineCommand::SetPublicTrackerSources { sources }
+            if sources == "https://tracker-one.test/announce\nhttps://tracker-two.test/announce"
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
+        config
+            .read()
+            .await
+            .get_global_i64("max-concurrent-downloads")
+            .await,
+        original_max_concurrent
+    );
 }

@@ -467,13 +467,21 @@ behavior. An unlisted behavior has not been audited here.
   C API global option tests verify that SOCKS `all-proxy` values reach the
   resulting `DownloadOptions`.
 - **Proxy URL userinfo:** `ProxyUrl` percent-decodes username/password
-  components, and `ProxyConfig::to_url` percent-encodes them and brackets IPv6
-  proxy hosts. For valid UTF-8 userinfo, this matches the local original aria2
-  URI parser and constructor; protocol and core proxy-config tests cover
-  encoded delimiters and an IPv6 authority. The public credential fields are
+  components and matches schemes case-insensitively; `ProxyConfig::to_url`
+  percent-encodes credentials and brackets IPv6 proxy hosts. For valid UTF-8
+  userinfo, this matches the local original aria2 URI parser and constructor;
+  protocol and core proxy-config tests cover encoded delimiters, an IPv6
+  authority, and `@` characters in ignored path/query/fragment components.
+  HTTP and FTP core configuration share the decoded parser result;
+  a local HTTP proxy regression verifies the actual Basic authorization header
+  for escaped username/password delimiters, and an FTP configuration test
+  verifies mixed-case schemes and decoded credentials. The public credential
+  fields are
   `String`, so percent-encoded invalid UTF-8 octets decode lossily and are not
   byte-for-byte compatible. No external proxy requiring escaped credentials
-  was contacted.
+  was contacted. Invalid proxy URL errors omit raw userinfo; core HTTP and FTP
+  error-path tests verify that configured credentials do not appear in
+  returned diagnostics.
 
 ## HTTP live connection status
 
@@ -1260,6 +1268,11 @@ behavior. An unlisted behavior has not been audited here.
   selection, source ordering, retry, mirror failover, and staged-file
   publication. Protocol code supplies parsing, metadata, and ordering
   primitives; it does not decide the engine's retry or task lifecycle policy.
+- **GID allocation:** the CLI requests each Metalink-generated group ID from
+  the shared atomic `RequestGroupMan` allocator as groups are built. It no
+  longer reparses documents to estimate a contiguous range after reserving
+  only that range's first ID; this prevents concurrent task creation from
+  receiving an ID already assigned to an expanded Metalink group.
 - **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
   BitTorrent metaurls use the same parser output as before. Parsing errors are
   still surfaced by command construction, before task execution.
@@ -1282,7 +1295,9 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** focused Metalink constructor and execution tests cover
   direct mirrors, torrent-metaurl-only inputs, integrity data, grouped files,
   manager-restored source handling, parsed-file handoff, and restored-source
-  fallback. The initial-path regression deliberately provides invalid source
+  fallback. An application regression verifies that expanding multiple
+  resources advances the shared GID allocator past every generated group.
+  The initial-path regression deliberately provides invalid source
   XML alongside a valid cached parsed file. A local FTP-over-HTTP-proxy fixture
   confirms FTP mirror dispatch and payload commit; a local HTTP proxy fixture
   confirms engine-injected proxy policy reaches Metalink payload traffic. The
@@ -1326,9 +1341,11 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** protocol identity tests reject upstream `aria2/` strings;
   core option-registry tests check protocol defaults, and `ConfigManager`
   tests cover embedding identity injection with and without config-file
-  loading. CLI option parsing and C API global-option application are tested
-  through `DownloadOptions`; the RPC backend test covers global defaults and
-  per-call `aria2.addUri` override precedence. Loopback request tests verify
+  loading. CLI tests check application defaults, and a C API session test
+  checks its effective protocol identity defaults. CLI option parsing and C
+  API global-option application are tested through `DownloadOptions`; the RPC
+  backend test covers global defaults and per-call `aria2.addUri` override
+  precedence. Loopback request tests verify
   the configured header on WebSeed and magnet exact-source traffic. A
   packet-level capture through each public adapter was not run in this audit.
 
@@ -1535,16 +1552,13 @@ behavior. An unlisted behavior has not been audited here.
   while XML `<base64>` values are decoded. XML multicall error entries expose
   `faultCode` and `faultString`. `changeUri` returns its two counts as JSON
   numbers, matching the original examples.
-- **Input extension and difference:** `changeGlobalOption` accepts native
-  JSON number and boolean scalars and converts them through the shared option
-  registry. Its registry also stringifies numeric and boolean members in
-  cumulative arrays, rejects null/object array members, and rejects arrays
-  for non-cumulative options. Original aria2 accepts string scalars, skips
-  non-string members in cumulative arrays, and ignores arrays for
-  non-cumulative options. The native scalar extension is covered by registry
-  and core-backed adapter tests; the remaining input-shape difference is a
-  known compatibility gap without live original-binary differential coverage.
-  Task `changeOption` follows the original string-only scalar and
+- **Input extensions:** `changeGlobalOption` accepts native JSON number and
+  boolean scalars as an additive Rust convenience. Cumulative arrays retain
+  only string members; arrays for non-cumulative options are ignored. Empty
+  arrays are no-ops except for `bt-tracker-source`, where the explicitly
+  user-selected behavior is to clear the list. Original aria2 treats an empty
+  array as a no-op. Registry and core-backed tests cover these cases. Task
+  `changeOption` follows the original string-only scalar and
   string-members-only array behavior.
 - **Extensions:** Rust-only methods such as `aria2.getPeerStats`,
   `aria2.getPeerDetails`, `aria2.getTrackers`, `aria2.getDhtStatus`,

@@ -96,13 +96,8 @@ impl HttpProxyOptions {
             ),
         };
         let embedded = proxy_url
-            .and_then(|value| url::Url::parse(value).ok())
-            .map(|url| {
-                (
-                    (!url.username().is_empty()).then(|| url.username().to_string()),
-                    url.password().map(str::to_string),
-                )
-            })
+            .and_then(|value| ProxyUrl::parse(value).ok())
+            .map(|proxy| (proxy.username, proxy.password))
             .unwrap_or((None, None));
         (
             user.clone()
@@ -113,5 +108,24 @@ impl HttpProxyOptions {
                 .or_else(|| self.all_proxy_passwd.clone())
                 .or(embedded.1),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_for_scheme_decodes_embedded_proxy_userinfo() {
+        let options = super::super::DownloadOptions {
+            http_proxy: Some("http://user%40name:p%3A%40%25@proxy.example:8080".to_string()),
+            ..Default::default()
+        };
+        let proxy_options = HttpProxyOptions::from_download_options(&options);
+
+        assert_eq!(
+            proxy_options.credentials_for_scheme("http"),
+            (Some("user@name".to_string()), Some("p:@%".to_string()))
+        );
     }
 }

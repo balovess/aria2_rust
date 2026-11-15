@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use aria2_core::config::{OptionRegistry, is_global_option_changeable};
 use aria2_core::engine::runtime_option_updates::runtime_commands_for_global_option_changes;
+use aria2_rpc::rpc_helpers::normalize_change_global_option_options;
 use aria2_rpc::{BackendError, BackendResponse, BackendResult};
 
 use super::CoreRpcBackend;
@@ -11,11 +12,19 @@ impl CoreRpcBackend {
         &self,
         changes: HashMap<String, serde_json::Value>,
     ) -> Result<BackendResult, BackendError> {
-        let changes: HashMap<_, _> = changes
-            .into_iter()
-            .filter(|(key, _)| is_global_option_changeable(key))
-            .collect();
         let registry = OptionRegistry::new();
+        let changes: HashMap<_, _> = normalize_change_global_option_options(&changes)
+            .into_iter()
+            .filter(|(key, value)| {
+                is_global_option_changeable(key)
+                    && !(value.is_array()
+                        && registry
+                            .get(key)
+                            .is_some_and(|definition| definition.cumulative_delimiter.is_none()))
+                    && !(value.as_array().is_some_and(Vec::is_empty)
+                        && OptionRegistry::canonical_name(key) != "bt-tracker-source")
+            })
+            .collect();
         let mut parsed = Vec::with_capacity(changes.len());
         for (key, value) in &changes {
             let value = registry

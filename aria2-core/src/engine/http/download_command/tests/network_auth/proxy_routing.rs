@@ -1,6 +1,153 @@
 use super::*;
 
 #[tokio::test]
+async fn all_proxy_percent_decodes_embedded_basic_credentials() {
+    use base64::Engine;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTP proxy fixture");
+    let proxy_address = listener.local_addr().expect("read proxy address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept proxy connection");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 1024];
+            let read = stream.read(&mut chunk).await.expect("read proxy request");
+            assert_ne!(read, 0, "proxy request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let expected = format!(
+            "Proxy-Authorization: Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("user@name:p:@%")
+        );
+        let request = String::from_utf8_lossy(&request);
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case(&expected)),
+            "proxy received unexpected authorization header: {request}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("write proxy response");
+    });
+
+    let uri = "http://download.example.test/file.bin";
+    let options = DownloadOptions {
+        all_proxy: Some(format!(
+            "http://user%40name:p%3A%40%25@proxy.invalid:{}",
+            proxy_address.port()
+        )),
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1210),
+        vec![uri.to_string()],
+        options.clone(),
+    )));
+    let command = DownloadCommand::new_with_group_and_resolved_network_addresses(
+        group,
+        uri,
+        &options,
+        None,
+        None,
+        crate::engine::http::client_config::ResolvedNetworkAddresses {
+            target: None,
+            proxy: Some(vec![proxy_address]),
+        },
+        Arc::new(OutboundNetworkPolicy::direct()),
+    )
+    .expect("build HTTP-proxied download");
+
+    let response = command
+        .client
+        .get(uri)
+        .send()
+        .await
+        .expect("proxy should accept the request");
+    assert_eq!(response.text().await.expect("read response body"), "ok");
+    server.await.expect("proxy fixture should finish");
+}
+
+#[tokio::test]
+async fn all_proxy_path_at_sign_does_not_become_proxy_credentials() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTP proxy fixture");
+    let proxy_address = listener.local_addr().expect("read proxy address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept proxy connection");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 1024];
+            let read = stream.read(&mut chunk).await.expect("read proxy request");
+            assert_ne!(read, 0, "proxy request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        assert!(
+            !request.lines().any(|line| line
+                .to_ascii_lowercase()
+                .starts_with("proxy-authorization:")),
+            "path/query @ characters must not synthesize proxy credentials: {request}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("write proxy response");
+    });
+
+    let uri = "http://download.example.test/file.bin";
+    let options = DownloadOptions {
+        all_proxy: Some(format!(
+            "http://proxy.invalid:{}/path@marker?next=@query",
+            proxy_address.port()
+        )),
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1211),
+        vec![uri.to_string()],
+        options.clone(),
+    )));
+    let command = DownloadCommand::new_with_group_and_resolved_network_addresses(
+        group,
+        uri,
+        &options,
+        None,
+        None,
+        crate::engine::http::client_config::ResolvedNetworkAddresses {
+            target: None,
+            proxy: Some(vec![proxy_address]),
+        },
+        Arc::new(OutboundNetworkPolicy::direct()),
+    )
+    .expect("build HTTP-proxied download");
+
+    let response = command
+        .client
+        .get(uri)
+        .send()
+        .await
+        .expect("proxy URL suffix should not prevent routing");
+    assert_eq!(response.text().await.expect("read response body"), "ok");
+    server.await.expect("proxy fixture should finish");
+}
+
+#[tokio::test]
 async fn all_proxy_socks5_routes_http_and_authenticates() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

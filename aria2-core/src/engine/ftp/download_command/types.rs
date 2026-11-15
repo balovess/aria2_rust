@@ -9,13 +9,12 @@ use std::{
     time::Duration,
 };
 
-use tracing::info;
-use url::Url;
-
 use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
 use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
+use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
+use tracing::info;
 
 use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
 use crate::ftp::connection_pool::{ControlSessionIdentity, ControlSessionKey, FtpConnectionPool};
@@ -242,35 +241,33 @@ impl FtpDownloadCommand {
             return Ok(None);
         };
 
-        let proxy_url = Url::parse(proxy_uri).map_err(|error| {
+        let proxy_url = ProxyUrl::parse(proxy_uri).map_err(|error| {
             Aria2Error::Fatal(FatalError::Config(format!(
-                "Invalid FTP proxy URL '{}': {}",
-                proxy_uri, error
+                "Invalid FTP proxy URL: {error}"
             )))
         })?;
-        if !proxy_url.scheme().eq_ignore_ascii_case("http") {
+        if proxy_url.protocol != ProxyProtocol::Http {
+            let scheme = match proxy_url.protocol {
+                ProxyProtocol::Socks4 => "socks4",
+                ProxyProtocol::Socks5 => "socks5",
+                ProxyProtocol::Http => "http",
+                ProxyProtocol::Https => "https",
+            };
             return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                "Unsupported FTP proxy scheme '{}'; expected http",
-                proxy_url.scheme()
+                "Unsupported FTP proxy scheme '{scheme}'; expected http"
             ))));
         }
-        let proxy_host = proxy_url.host_str().ok_or_else(|| {
-            Aria2Error::Fatal(FatalError::Config("FTP proxy URL has no host".to_string()))
-        })?;
         let (username, password) = options.proxy_credentials_for_scheme("ftp");
-        let embedded_username =
-            (!proxy_url.username().is_empty()).then(|| proxy_url.username().to_string());
-        let embedded_password = proxy_url.password().map(str::to_string);
-        let proxy_username = username.or(embedded_username).unwrap_or_default();
-        let proxy_password = password.or(embedded_password).unwrap_or_default();
+        let proxy_username = username.unwrap_or_default();
+        let proxy_password = password.unwrap_or_default();
 
         let explicit_method = ProxyMethod::parse(&options.proxy_method);
         let method = explicit_method.unwrap_or_default();
 
         Ok(Some((
             FtpProxyConfig {
-                proxy_host: proxy_host.to_string(),
-                proxy_port: proxy_url.port().unwrap_or(8080),
+                proxy_host: proxy_url.host,
+                proxy_port: proxy_url.port,
                 proxy_username,
                 proxy_password,
                 ftp_username: self.username.clone(),

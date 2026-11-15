@@ -157,28 +157,7 @@ impl MagnetLink {
     }
 
     pub fn url_decode(s: &str) -> String {
-        let input = s.as_bytes();
-        let mut result = Vec::with_capacity(input.len());
-        let mut index = 0;
-
-        while index < input.len() {
-            if input[index] == b'%'
-                && index + 2 < input.len()
-                && let (Some(high), Some(low)) =
-                    (hex_value(input[index + 1]), hex_value(input[index + 2]))
-            {
-                result.push((high << 4) | low);
-                index += 3;
-                continue;
-            }
-
-            // Magnet query decoding follows aria2's percent-byte decoding;
-            // unlike form decoding, '+' is a literal plus sign.
-            result.push(input[index]);
-            index += 1;
-        }
-
-        String::from_utf8_lossy(&result).into_owned()
+        crate::uri::percent_decode(s)
     }
 
     pub fn info_hash_hex(&self) -> String {
@@ -190,15 +169,6 @@ impl MagnetLink {
 
     pub fn info_hash_v2_hex(&self) -> Option<String> {
         self.info_hash_v2.map(hex::encode)
-    }
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
 
