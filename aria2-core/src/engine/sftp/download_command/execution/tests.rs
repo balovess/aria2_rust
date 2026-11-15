@@ -194,4 +194,54 @@ mod timeout_tests {
         assert!(matches!(result, Err(Aria2Error::DownloadFailed(_))));
         removal.await.expect("removal task should finish");
     }
+
+    #[tokio::test]
+    async fn save_control_notification_keeps_pending_operation_alive() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let command = SftpDownloadCommand::new(
+            GroupId::new(2),
+            "sftp://user@example.com/file.bin",
+            &DownloadOptions::default(),
+            None,
+            None,
+        )
+        .expect("construct SFTP command");
+        let group = Arc::clone(&command.group);
+        let operation_dropped = Arc::new(AtomicBool::new(false));
+        let operation_drop_signal = Arc::clone(&operation_dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+
+        let operation = async move {
+            let _drop_signal = DropSignal(operation_drop_signal);
+            let _ = started_tx.send(());
+            finish_rx.await.expect("release pending operation")
+        };
+        let task = tokio::spawn(async move { command.await_with_lifecycle(operation).await });
+
+        started_rx.await.expect("operation should start");
+        assert!(group.recover().save_control_file());
+        tokio::task::yield_now().await;
+        assert!(!operation_dropped.load(Ordering::Acquire));
+
+        finish_tx
+            .send(Ok::<_, Aria2Error>(17))
+            .expect("operation is pending");
+        assert_eq!(
+            task.await
+                .expect("lifecycle waiter should finish")
+                .expect("operation should survive notification"),
+            17
+        );
+        assert!(operation_dropped.load(Ordering::Acquire));
+    }
 }

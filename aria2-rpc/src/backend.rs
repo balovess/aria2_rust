@@ -17,7 +17,8 @@ use crate::types::{
 };
 
 /// Metadata advertised by a backend through `system.listMethods` and
-/// `aria2.getVersion`.
+/// `aria2.getVersion`. The method catalog is stable; optional operations may
+/// return `Unsupported` when the backend lacks their implementation.
 #[derive(Debug, Clone)]
 pub struct BackendMetadata {
     pub product_version: String,
@@ -44,23 +45,9 @@ impl BackendMetadata {
         }
     }
 
-    /// Add BitTorrent capabilities while preserving aria2's catalog order.
+    /// Advertise BitTorrent support and its feature-specific notification.
     pub fn with_bittorrent(mut self) -> Self {
         self.enabled_features.insert(1, "BitTorrent".to_string());
-        self.methods.splice(
-            1..1,
-            [
-                "aria2.addTorrent",
-                "aria2.getPeers",
-                "aria2.getPeerStats",
-                "aria2.getPeerDetails",
-                "aria2.getTrackers",
-                "aria2.getDhtStatus",
-                "aria2.saveDhtState",
-                "aria2.evictDhtNodes",
-            ]
-            .map(str::to_string),
-        );
         self.notifications
             .push("aria2.onBtDownloadComplete".to_string());
         self
@@ -95,6 +82,14 @@ impl BackendMetadata {
 fn base_method_names() -> Vec<String> {
     [
         "aria2.addUri",
+        "aria2.addTorrent",
+        "aria2.getPeers",
+        "aria2.getPeerStats",
+        "aria2.getPeerDetails",
+        "aria2.getTrackers",
+        "aria2.getDhtStatus",
+        "aria2.saveDhtState",
+        "aria2.evictDhtNodes",
         "aria2.remove",
         "aria2.pause",
         "aria2.forcePause",

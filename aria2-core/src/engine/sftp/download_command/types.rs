@@ -23,6 +23,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::sftp::connection::{HostKeyCheckingMode, SshError, SshOptions};
 use aria2_protocol::sftp::file_ops::FileOpError;
 use aria2_protocol::sftp::session::SftpSessionError;
+use aria2_protocol::sftp::transfer::SftpDownloadReadError;
 use aria2_protocol::sftp::uri::SftpUriError;
 
 /// Command that executes an SFTP file download from a remote server to local disk.
@@ -415,6 +416,21 @@ impl SftpDownloadCommand {
                 })
             }
             _ => Aria2Error::DownloadFailed(format!("SFTP file op error: {err}")),
+        }
+    }
+
+    pub(super) fn map_download_read_error(
+        err: SftpDownloadReadError,
+        host: &str,
+        path: &str,
+    ) -> Aria2Error {
+        match err {
+            SftpDownloadReadError::Remote(error) => Self::map_file_op_error(&error, host, path),
+            SftpDownloadReadError::UnexpectedEof { offset, total_size } => {
+                Aria2Error::DownloadFailed(format!(
+                    "SFTP remote file ended before the advertised length: {offset} < {total_size}"
+                ))
+            }
         }
     }
 }

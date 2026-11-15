@@ -510,12 +510,13 @@ fn test_download_options_to_map_all_fields() {
         private_key: Some("/tmp/client.key".to_string()),
         min_tls_version: Some("TLSv1.3".to_string()),
         // Metalink
-        metalink_version: None,
-        metalink_language: None,
-        metalink_os: None,
-        metalink_location: None,
-        metalink_preferred_protocol: None,
-        select_file: None,
+        metalink_version: Some("4.0".to_string()),
+        metalink_language: Some("en".to_string()),
+        metalink_os: Some("linux".to_string()),
+        metalink_location: Some("us,jp".to_string()),
+        metalink_preferred_protocol: Some("https".to_string()),
+        select_file: Some("2-3".to_string()),
+        metalink_base_uri: Some("https://example.test/metalink/".to_string()),
         bt_remove_unselected_file: true,
         piece_length: Some(1024 * 1024),
         metalink_enable_unique_protocol: false,
@@ -634,6 +635,16 @@ fn test_download_options_to_map_all_fields() {
 
     // Connection and authentication options
     assert_eq!(map.get("piece-length").unwrap(), "1048576");
+    assert_eq!(map.get("metalink-version").unwrap(), "4.0");
+    assert_eq!(map.get("metalink-language").unwrap(), "en");
+    assert_eq!(map.get("metalink-os").unwrap(), "linux");
+    assert_eq!(map.get("metalink-location").unwrap(), "us,jp");
+    assert_eq!(map.get("metalink-preferred-protocol").unwrap(), "https");
+    assert_eq!(
+        map.get("metalink-base-uri").unwrap(),
+        "https://example.test/metalink/"
+    );
+    assert_eq!(map.get("select-file").unwrap(), "2-3");
     assert_eq!(map.get("metalink-enable-unique-protocol").unwrap(), "false");
     assert_eq!(map.get("timeout").unwrap(), "90");
     assert_eq!(map.get("connect-timeout").unwrap(), "30");
@@ -727,6 +738,19 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(restored.listen_port.as_deref(), Some("6881-6999"));
     assert_eq!(restored.dht_listen_port.as_deref(), Some("6881-6999"));
     assert!(!restored.metalink_enable_unique_protocol);
+    assert_eq!(restored.metalink_version.as_deref(), Some("4.0"));
+    assert_eq!(restored.metalink_language.as_deref(), Some("en"));
+    assert_eq!(restored.metalink_os.as_deref(), Some("linux"));
+    assert_eq!(restored.metalink_location.as_deref(), Some("us,jp"));
+    assert_eq!(
+        restored.metalink_preferred_protocol.as_deref(),
+        Some("https")
+    );
+    assert_eq!(
+        restored.metalink_base_uri.as_deref(),
+        Some("https://example.test/metalink/")
+    );
+    assert_eq!(restored.select_file.as_deref(), Some("2-3"));
     assert_eq!(restored.piece_length, Some(1024 * 1024));
     assert_eq!(restored.follow_torrent, Some(FollowMode::Memory));
     assert_eq!(restored.follow_metalink, Some(FollowMode::Disabled));

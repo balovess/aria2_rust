@@ -10,16 +10,19 @@ use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
 pub(crate) struct MetalinkCommandAdapter {
+    ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
     #[cfg(feature = "bittorrent")]
     bittorrent: crate::engine::bittorrent::command_adapter::BtCommandServices,
 }
 
 impl MetalinkCommandAdapter {
     pub(crate) fn new(
+        ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
         #[cfg(feature = "bittorrent")]
         bittorrent: crate::engine::bittorrent::command_adapter::BtCommandServices,
     ) -> Self {
         Self {
+            ftp_connection_pool,
             #[cfg(feature = "bittorrent")]
             bittorrent,
         }
@@ -65,7 +68,9 @@ impl ProtocolCommandAdapter for MetalinkCommandAdapter {
             command.set_global_limiter(limiter);
         }
         command.set_protocol_runtime(
-            crate::engine::protocol_adapter::ProtocolAdapterRegistry::source_protocols(),
+            crate::engine::protocol_adapter::ProtocolAdapterRegistry::source_protocols(Arc::clone(
+                &self.ftp_connection_pool,
+            )),
             services.clone(),
         );
         #[cfg(feature = "bittorrent")]

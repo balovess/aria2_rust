@@ -52,6 +52,42 @@ fn manager_resource_groups_apply_select_file_and_location_priority() {
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[test]
+fn bittorrent_url_resource_becomes_a_torrent_metaurl_graph() {
+    let data = br#"<?xml version="1.0"?><metalink xmlns="http://www.metalinker.org/"><files><file name="payload.bin"><resources><url type="bittorrent" preference="80">https://torrent.example/payload.torrent</url></resources></file></files></metalink>"#;
+    let mut gids = [
+        crate::request::request_group::GroupId::new(38),
+        crate::request::request_group::GroupId::new(39),
+    ]
+    .into_iter();
+
+    let expansion = MetalinkToRequestGroup::new()
+        .create_groups_from_bytes(data, &DownloadOptions::default(), &mut gids)
+        .expect("BitTorrent resource should expand into a metadata graph");
+
+    assert!(expansion.resource_groups.is_empty());
+    assert_eq!(expansion.torrent_graphs.len(), 1);
+    assert_eq!(
+        expansion.torrent_graphs[0]
+            .metadata
+            .recover()
+            .uris()
+            .iter()
+            .map(|uri| uri.as_ref())
+            .collect::<Vec<_>>(),
+        ["https://torrent.example/payload.torrent"]
+    );
+    assert_eq!(
+        expansion.torrent_graphs[0].metadata.recover().gid(),
+        crate::request::request_group::GroupId::new(38)
+    );
+    assert_eq!(
+        expansion.torrent_graphs[0].payload.recover().gid(),
+        crate::request::request_group::GroupId::new(39)
+    );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[test]
 fn create_torrent_graphs_allocates_metadata_and_payload_pairs() {
     let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="one.bin"><metaurl mediatype="torrent">https://example.test/one.torrent</metaurl></file><file name="two.bin"><metaurl mediatype="torrent">https://example.test/two.torrent</metaurl></file></metalink>"#;
     let converter = MetalinkToRequestGroup::new();

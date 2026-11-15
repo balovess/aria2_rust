@@ -487,7 +487,10 @@ fn c_api_metalink_returns_all_created_gids() {
     let _keep_alive = [pause_name, pause_value];
     assert!(!session.is_null());
 
-    let metalink = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="file.bin"><size>4</size><url>http://127.0.0.1:1/file.bin</url></file></metalink>"#;
+    let metalink = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="first.bin"><size>4</size><url>http://127.0.0.1:1/first.bin</url></file><file name="second.bin"><size>4</size><url>http://127.0.0.1:1/second.bin</url></file></metalink>"#;
+    let (select_file_entry, select_file_name, select_file_value) = kv("select-file", "2");
+    let options = [select_file_entry];
+    let _keep_options = [select_file_name, select_file_value];
     let mut gids = [0u64; 2];
     let mut gid_count = 0usize;
     assert_eq!(
@@ -496,8 +499,8 @@ fn c_api_metalink_returns_all_created_gids() {
                 session,
                 metalink.as_ptr(),
                 metalink.len(),
-                ptr::null(),
-                0,
+                options.as_ptr(),
+                options.len(),
                 gids.as_mut_ptr(),
                 gids.len(),
                 &mut gid_count,
@@ -508,6 +511,15 @@ fn c_api_metalink_returns_all_created_gids() {
     assert_eq!(gid_count, 1);
     assert_ne!(gids[0], 0);
     assert_eq!(unsafe { aria2_rust_get_file_count(session, gids[0]) }, 1);
+    let required = unsafe { aria2_rust_get_file_path(session, gids[0], 1, ptr::null_mut(), 0) };
+    assert!(required > 1);
+    let mut path = vec![0 as c_char; required];
+    assert_eq!(
+        unsafe { aria2_rust_get_file_path(session, gids[0], 1, path.as_mut_ptr(), path.len()) },
+        required
+    );
+    let path = unsafe { CStr::from_ptr(path.as_ptr()) }.to_str().unwrap();
+    assert!(path.ends_with("second.bin"));
 
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
     assert_eq!(aria2_rust_library_deinit(), 0);

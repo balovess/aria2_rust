@@ -44,6 +44,7 @@ async fn add_uri_task(engine: &RpcEngine) -> JsonRpcResponse {
         .await
 }
 
+#[cfg(feature = "bittorrent")]
 fn valid_torrent() -> String {
     base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -51,6 +52,7 @@ fn valid_torrent() -> String {
     )
 }
 
+#[cfg(feature = "bittorrent")]
 fn multi_file_torrent() -> String {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
     use std::collections::BTreeMap;
@@ -177,6 +179,7 @@ async fn regression_add_uri_rejects_negative_position() {
 }
 
 /// Test: aria2.addTorrent validates base64 torrent data.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_add_torrent_validates_bencode() {
     let engine = core_engine();
@@ -188,6 +191,7 @@ async fn regression_add_torrent_validates_bencode() {
 }
 
 /// Test: aria2.addTorrent rejects invalid bencode.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_add_torrent_rejects_invalid() {
     let engine = core_engine();
@@ -910,6 +914,7 @@ async fn regression_change_option_accepts_max_connection_per_server() {
 // =========================================================================
 
 /// Test: aria2.getPeers returns array for torrent download.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_get_peers_returns_array() {
     let engine = core_engine();
@@ -960,6 +965,7 @@ async fn regression_get_uris_format() {
 }
 
 /// Test: aria2.getUris follows the original first-FileEntry behavior.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
     let engine = core_engine();
@@ -1002,6 +1008,7 @@ async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
 
 /// Test: changeUri follows aria2's fileIndex contract even for an unselected
 /// file entry in a multi-file task.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_change_uri_allows_unselected_file_entry() {
     let engine = core_engine();
@@ -1701,9 +1708,9 @@ async fn regression_remove_download_files_cleans_stopped_child_tree() {
 // System Discovery Methods (2 methods)
 // =========================================================================
 
-/// Test: system.listMethods matches aria2's feature-specific method order.
+/// Test: system.listMethods exposes a stable method surface across build tiers.
 #[tokio::test]
-async fn regression_list_methods_returns_feature_specific_methods() {
+async fn regression_list_methods_returns_stable_methods() {
     let engine = core_engine();
 
     let req = make_request("system.listMethods", serde_json::json!([]));
@@ -1712,7 +1719,6 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     assert_success(&resp);
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
     let mut expected = vec!["aria2.addUri"];
-    #[cfg(feature = "bittorrent")]
     expected.extend([
         "aria2.addTorrent",
         "aria2.getPeers",
@@ -1777,6 +1783,39 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     assert!(methods.contains(&"aria2.getVersion".to_string()));
     assert!(methods.contains(&"system.listMethods".to_string()));
     assert!(methods.contains(&"system.listNotifications".to_string()));
+}
+
+/// Build tiers retain discoverable BitTorrent RPC methods and fail explicitly
+/// when the engine was compiled without BitTorrent support.
+#[cfg(not(feature = "bittorrent"))]
+#[tokio::test]
+async fn regression_bittorrent_methods_are_unsupported_without_feature() {
+    let engine = core_engine();
+    let requests = [
+        ("aria2.addTorrent", serde_json::json!(["", []])),
+        ("aria2.getPeers", serde_json::json!(["0000000000000000"])),
+        (
+            "aria2.getPeerStats",
+            serde_json::json!(["0000000000000000"]),
+        ),
+        (
+            "aria2.getPeerDetails",
+            serde_json::json!(["0000000000000000"]),
+        ),
+        ("aria2.getTrackers", serde_json::json!(["0000000000000000"])),
+        ("aria2.getDhtStatus", serde_json::json!([])),
+        ("aria2.saveDhtState", serde_json::json!([])),
+        ("aria2.evictDhtNodes", serde_json::json!([])),
+    ];
+
+    for (method, params) in requests {
+        let response = engine.handle_request(&make_request(method, params)).await;
+        assert_error_code(&response, 1);
+        assert!(
+            response.error.unwrap().message.contains("BitTorrent"),
+            "{method} should report the unavailable feature"
+        );
+    }
 }
 
 /// Test: system.listNotifications matches aria2's feature-specific order.

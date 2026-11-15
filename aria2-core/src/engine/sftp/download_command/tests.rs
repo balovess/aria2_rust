@@ -280,6 +280,24 @@ fn test_map_unclassified_server_status_to_terminal_failure() {
 }
 
 #[test]
+fn sftp_download_reader_preserves_early_eof_task_error() {
+    let mapped = SftpDownloadCommand::map_download_read_error(
+        aria2_protocol::sftp::transfer::SftpDownloadReadError::UnexpectedEof {
+            offset: 7,
+            total_size: 9,
+        },
+        "host",
+        "/file",
+    );
+
+    assert!(matches!(
+        mapped,
+        Aria2Error::DownloadFailed(message)
+            if message == "SFTP remote file ended before the advertised length: 7 < 9"
+    ));
+}
+
+#[test]
 fn sftp_session_protocol_errors_are_terminal_but_timeouts_are_retryable() {
     let mut command = create_test_cmd();
     command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(2, 0);

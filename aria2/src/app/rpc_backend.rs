@@ -5,6 +5,7 @@
 //! `aria2-core` state changes, queries, and engine commands.
 
 use std::collections::HashMap;
+#[cfg(feature = "bittorrent")]
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ mod values;
 
 const RPC_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
+#[cfg(feature = "bittorrent")]
 fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
     if is_incoming { 0 } else { addr.port() }
 }
@@ -50,6 +52,7 @@ mod peer_id_tests {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 fn rpc_peer_id(peer_id: &[u8; 20]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut output = String::with_capacity(peer_id.len() * 3);
@@ -251,6 +254,56 @@ mod tests {
             .await
             .expect("per-task User-Agent should be accepted");
         assert_eq!(task_options.user_agent.as_deref(), Some("task-agent/1.0"));
+    }
+
+    #[cfg(feature = "metalink")]
+    #[tokio::test]
+    async fn add_metalink_options_inherit_globals_and_accept_task_overrides() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, _receiver) = aria2_core::engine::engine_command::channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            Arc::clone(&config),
+            None,
+            "test",
+        );
+
+        config
+            .write()
+            .await
+            .set_global_option("metalink-language", OptionValue::Str("en".to_string()))
+            .await
+            .expect("global Metalink language should be accepted");
+        let (global, _) = backend
+            .merged_task_options(HashMap::new())
+            .await
+            .expect("global Metalink options should reach DownloadOptions");
+        assert_eq!(global.metalink_language.as_deref(), Some("en"));
+
+        let (task, _) = backend
+            .merged_task_options(HashMap::from([
+                (
+                    "metalink-language".to_string(),
+                    serde_json::Value::String("fr".to_string()),
+                ),
+                (
+                    "metalink-base-uri".to_string(),
+                    serde_json::Value::String("https://example.test/meta/".to_string()),
+                ),
+                (
+                    "select-file".to_string(),
+                    serde_json::Value::String("2".to_string()),
+                ),
+            ]))
+            .await
+            .expect("per-task Metalink options should be accepted");
+        assert_eq!(task.metalink_language.as_deref(), Some("fr"));
+        assert_eq!(
+            task.metalink_base_uri.as_deref(),
+            Some("https://example.test/meta/")
+        );
+        assert_eq!(task.select_file.as_deref(), Some("2"));
     }
 
     #[tokio::test]

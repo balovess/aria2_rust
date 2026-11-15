@@ -209,6 +209,31 @@ fn metaurl_only_torrent_entry_is_not_dropped() {
     );
 }
 
+#[cfg(all(feature = "metalink", not(feature = "bittorrent")))]
+#[test]
+fn bittorrent_url_resource_is_removed_without_its_adapter() {
+    let document = MetalinkDocument::parse(
+        br#"<metalink xmlns="http://www.metalinker.org/"><files><file name="payload.bin"><resources><url type="bittorrent" preference="90">https://torrent.test/payload.torrent</url><url type="http" preference="80">https://mirror.test/payload.bin</url></resources></file></files></metalink>"#,
+        None,
+    )
+    .expect("Metalink v3 should parse");
+    let converter = MetalinkToRequestGroup::new();
+    let files = converter
+        .prepare_files(&document, &DownloadOptions::default())
+        .expect("Metalink file should normalize");
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0]
+            .1
+            .urls
+            .iter()
+            .map(|url| url.url.as_str())
+            .collect::<Vec<_>>(),
+        ["https://mirror.test/payload.bin"]
+    );
+}
+
 #[test]
 fn pause_requested_marks_generated_commands() {
     let commands = MetalinkToRequestGroup::new()

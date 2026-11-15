@@ -23,13 +23,12 @@ pub(crate) struct ProtocolCommandRequest {
     pub(crate) options: Arc<DownloadOptions>,
 }
 
-/// Shared, protocol-neutral services available to command adapters.
+/// Shared engine services available to command adapters.
 #[derive(Clone)]
 pub(crate) struct ProtocolServices {
     pub(crate) dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
     pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     pub(crate) global_limiter: Option<RateLimiter>,
-    pub(crate) ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
 }
 
 #[allow(clippy::double_must_use)]
@@ -46,6 +45,43 @@ pub(crate) trait ProtocolCommandAdapter: Send + Sync {
     ) -> Result<Box<dyn Command>>;
 }
 
+pub(crate) fn is_sftp_uri(uri: &str) -> bool {
+    uri.split_once(':')
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("sftp"))
+}
+
+#[cfg(not(feature = "sftp"))]
+struct UnsupportedSftpCommandAdapter;
+
+#[cfg(not(feature = "sftp"))]
+#[async_trait]
+impl ProtocolCommandAdapter for UnsupportedSftpCommandAdapter {
+    fn supports(&self, request: &ProtocolCommandRequest) -> bool {
+        is_sftp_uri(&request.first_uri)
+    }
+
+    async fn create(
+        &self,
+        _request: ProtocolCommandRequest,
+        _services: &ProtocolServices,
+    ) -> Result<Box<dyn Command>> {
+        Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
+            protocol: "sftp".into(),
+        }))
+    }
+}
+
+fn sftp_command_adapter() -> Box<dyn ProtocolCommandAdapter> {
+    #[cfg(feature = "sftp")]
+    {
+        Box::new(crate::engine::sftp::command_adapter::SftpCommandAdapter)
+    }
+    #[cfg(not(feature = "sftp"))]
+    {
+        Box::new(UnsupportedSftpCommandAdapter)
+    }
+}
+
 pub(crate) struct ProtocolAdapterRegistry {
     adapters: Vec<Box<dyn ProtocolCommandAdapter>>,
 }
@@ -59,6 +95,7 @@ impl ProtocolAdapterRegistry {
     /// shared state is injected into its owning adapter rather than carried by
     /// the generic task spawner.
     pub(crate) fn for_engine(_context: &EngineLoopContext) -> Self {
+        let ftp_connection_pool = Arc::clone(&_context.ftp_connection_pool);
         #[cfg(feature = "bittorrent")]
         let bittorrent = crate::engine::bittorrent::command_adapter::BtCommandServices {
             public_tracker_catalog: Arc::clone(&_context.public_tracker_catalog),
@@ -69,12 +106,14 @@ impl ProtocolAdapterRegistry {
         };
 
         Self::builtins(
+            ftp_connection_pool,
             #[cfg(feature = "bittorrent")]
             bittorrent,
         )
     }
 
     pub(crate) fn builtins(
+        ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
         #[cfg(feature = "bittorrent")]
         bittorrent: crate::engine::bittorrent::command_adapter::BtCommandServices,
     ) -> Self {
@@ -82,7 +121,9 @@ impl ProtocolAdapterRegistry {
         // formats are inserted ahead of their URI-scheme fallbacks below.
         #[allow(unused_mut)]
         let mut adapters: Vec<Box<dyn ProtocolCommandAdapter>> = vec![
-            Box::new(crate::engine::ftp::command_adapter::FtpCommandAdapter),
+            Box::new(crate::engine::ftp::command_adapter::FtpCommandAdapter::new(
+                Arc::clone(&ftp_connection_pool),
+            )),
             Box::new(crate::engine::http::command_adapter::HttpCommandAdapter),
         ];
 
@@ -91,16 +132,16 @@ impl ProtocolAdapterRegistry {
             0,
             Box::new(
                 crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(
+                    Arc::clone(&ftp_connection_pool),
                     #[cfg(feature = "bittorrent")]
                     bittorrent.clone(),
                 ),
             ),
         );
 
-        #[cfg(feature = "sftp")]
         adapters.insert(
             usize::from(cfg!(feature = "metalink")),
-            Box::new(crate::engine::sftp::command_adapter::SftpCommandAdapter),
+            sftp_command_adapter(),
         );
 
         #[cfg(feature = "bittorrent")]
@@ -116,18 +157,18 @@ impl ProtocolAdapterRegistry {
     /// metadata URL. Metadata dispatch is owned by Metalink, so this registry
     /// deliberately excludes Metalink itself and BitTorrent task commands.
     #[cfg(feature = "metalink")]
-    pub(crate) fn source_protocols() -> Self {
+    pub(crate) fn source_protocols(
+        ftp_connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
+    ) -> Self {
         #[allow(unused_mut)]
         let mut adapters: Vec<Box<dyn ProtocolCommandAdapter>> = vec![
-            Box::new(crate::engine::ftp::command_adapter::FtpCommandAdapter),
+            Box::new(crate::engine::ftp::command_adapter::FtpCommandAdapter::new(
+                ftp_connection_pool,
+            )),
             Box::new(crate::engine::http::command_adapter::HttpCommandAdapter),
         ];
 
-        #[cfg(feature = "sftp")]
-        adapters.insert(
-            1,
-            Box::new(crate::engine::sftp::command_adapter::SftpCommandAdapter),
-        );
+        adapters.insert(1, sftp_command_adapter());
 
         Self::new(adapters)
     }
@@ -158,6 +199,15 @@ mod tests {
     use crate::engine::command::CommandStatus;
     use crate::request::request_group::GroupId;
     use crate::util::rwlock_ext::RwLockRecover;
+
+    #[test]
+    fn sftp_scheme_match_is_case_insensitive_and_requires_a_scheme_boundary() {
+        assert!(is_sftp_uri("sftp://host/file"));
+        assert!(is_sftp_uri("SFTP://host/file"));
+        assert!(is_sftp_uri("sftp:opaque"));
+        assert!(!is_sftp_uri("sftpish://host/file"));
+        assert!(!is_sftp_uri("https://host/sftp://file"));
+    }
 
     struct FakeAdapter;
 
@@ -215,7 +265,6 @@ mod tests {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
-            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
 
         let command = registry
@@ -249,7 +298,9 @@ mod tests {
             .set_parsed_metalink_file(Arc::new(document.files.into_iter().next().unwrap()));
 
         let registry = ProtocolAdapterRegistry::new(vec![Box::new(
-            crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(),
+            crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(Arc::new(
+                crate::ftp::connection_pool::FtpConnectionPool::new(4),
+            )),
         )]);
         let request = ProtocolCommandRequest {
             group,
@@ -260,7 +311,6 @@ mod tests {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
-            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
 
         let command = registry
@@ -290,13 +340,14 @@ mod tests {
             options,
         };
         let registry = ProtocolAdapterRegistry::new(vec![Box::new(
-            crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(),
+            crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(Arc::new(
+                crate::ftp::connection_pool::FtpConnectionPool::new(4),
+            )),
         )]);
         let services = ProtocolServices {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
-            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
 
         let command = registry
@@ -332,9 +383,7 @@ mod tests {
         });
 
         let output_dir = tempfile::tempdir_in("../target").expect("output directory");
-        let xml = format!(
-            "<metalink xmlns=\"urn:ietf:params:xml:ns:metalink\"><file name=\"payload.bin\"><size>7</size><url>http://mirror.test/payload.bin</url></file></metalink>"
-        );
+        let xml = "<metalink xmlns=\"urn:ietf:params:xml:ns:metalink\"><file name=\"payload.bin\"><size>7</size><url>http://mirror.test/payload.bin</url></file></metalink>".to_string();
         let options = Arc::new(DownloadOptions {
             dir: Some(output_dir.path().to_string_lossy().into_owned()),
             http_proxy: Some(format!("http://{proxy_address}")),
@@ -358,6 +407,7 @@ mod tests {
 
         #[cfg(feature = "bittorrent")]
         let adapter = crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(
+            Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
             crate::engine::bittorrent::command_adapter::BtCommandServices {
                 public_tracker_catalog: Arc::new(
                     aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
@@ -373,13 +423,14 @@ mod tests {
             },
         );
         #[cfg(not(feature = "bittorrent"))]
-        let adapter = crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new();
+        let adapter = crate::engine::metalink::command_adapter::MetalinkCommandAdapter::new(
+            Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
+        );
         let adapter = ProtocolAdapterRegistry::new(vec![Box::new(adapter)]);
         let services = ProtocolServices {
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
-            ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         };
         let mut command = adapter
             .create(

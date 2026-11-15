@@ -166,6 +166,7 @@ impl App {
         set_str!("metalink-os", g.metalink_os);
         set_str!("metalink-location", g.metalink_location);
         set_str!("metalink-preferred-protocol", g.metalink_preferred_protocol);
+        set_str!("select-file", g.select_file);
         set_bool_true!("parameterized-uri", g.parameterized_uri);
         set_bool_true!("pause", g.pause);
         set_bool_true!("remove-control-file", g.remove_control_file);
@@ -454,7 +455,6 @@ impl App {
         set_path!("dht-file-path6", b.dht_file_path6);
         set_str!("peer-id-prefix", b.peer_id_prefix);
         set_str!("peer-agent", b.peer_agent);
-        set_str!("select-file", b.select_file);
         if !b.index_out.is_empty() {
             conf.set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
                 .await

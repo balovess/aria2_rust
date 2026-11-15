@@ -27,10 +27,8 @@ pub(crate) struct CommandDependencies {
 /// Spawns a download command as a tokio task and wires up the completion
 /// channel. Returns the `JoinHandle` for task management.
 ///
-/// The command is created based on the group's URIs and options:
-/// - BitTorrent magnet URIs → BtDownloadCommand
-/// - FTP URIs (`ftp://`, `ftps://`) → FtpDownloadCommand
-/// - HTTP/HTTPS → DownloadCommand
+/// The command is selected by `ProtocolAdapterRegistry` from the group's
+/// metadata and first URI, then constructed with the shared engine services.
 ///
 /// Before spawning, increments `RequestGroup::num_commands`
 /// (mirrors C++ AbstractCommand constructor).
@@ -187,11 +185,9 @@ mod tests {
                 dns_cache,
                 outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
                 global_limiter: None,
-                ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(
-                    4,
-                )),
             },
             protocol_adapters: Arc::new(ProtocolAdapterRegistry::builtins(
+                Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
                 #[cfg(feature = "bittorrent")]
                 crate::engine::bittorrent::command_adapter::BtCommandServices {
                     public_tracker_catalog: Arc::new(
@@ -318,6 +314,33 @@ mod tests {
             0,
             "async-dns=false direct binding must not query explicit async DNS servers"
         );
+    }
+
+    #[cfg(not(feature = "sftp"))]
+    #[tokio::test]
+    async fn sftp_uri_is_rejected_instead_of_falling_through_to_http() {
+        let uri = "sftp://user@example.test/file.bin";
+        let options = DownloadOptions::default();
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(79),
+            vec![uri.to_string()],
+            options.clone(),
+        )));
+
+        let result = create_command_for_uri(
+            uri,
+            group,
+            &options,
+            dependencies(Arc::new(tokio::sync::Mutex::new(DnsCache::new()))),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Aria2Error::Fatal(
+                crate::error::FatalError::UnsupportedProtocol { protocol }
+            )) if protocol == "sftp"
+        ));
     }
 
     #[tokio::test]

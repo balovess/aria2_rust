@@ -7,19 +7,26 @@ behavior. An unlisted behavior has not been audited here.
 
 - **External behavior:** the minimal artifact (`--no-default-features
   --features http`) supports HTTP/FTP and the JSON-RPC, XML-RPC, and WebSocket
-  server. Standard adds BitTorrent; TUI adds the local TUI and its dependencies;
-  full additionally adds Metalink and SFTP.
+  server and RPC method surface. The RPC method catalog is stable across the
+  minimal and standard tiers; BitTorrent-specific operations report
+  `Unsupported` when BitTorrent is disabled. Standard adds BitTorrent download
+  support. TUI adds the local TUI and its
+  dependencies; full additionally adds Metalink and SFTP.
 - **Feature ownership:** HTTP is unconditional in the CLI, core, and protocol
   APIs. RPC is unconditional in the CLI and `aria2-rpc`; core remains independent
   of the RPC crate. The CLI `http`/`rpc` features and `aria2-protocol/http` are
   retained tier markers, not source-code gates. BitTorrent, Metalink, and SFTP
   are actual optional features propagated to the crates that own their code.
 - **Verification:** source cfg inspection found no `http` or `rpc` feature
-  gates in the CLI/RPC implementation. Cargo feature-tree inspection confirms
-  the minimal and standard artifacts both include `aria2-rpc`; the `rpc`
-  feature itself changes only the feature label, while standard additionally
-  enables BitTorrent's RPC projections. Release binaries were not rebuilt or
-  compared in this documentation audit.
+  gates for the RPC server or method parsing. Cargo feature-tree inspection
+  confirms the minimal and standard artifacts both include `aria2-rpc`; the
+  `rpc` feature itself changes only the feature label. Core dispatch retains
+  BitTorrent-specific methods in the advertised method catalog in both builds
+  and returns `Unsupported` for all of them when BitTorrent is disabled. The
+  BT completion notification remains feature-specific. Focused no-BitTorrent
+  RPC regression tests verify method discovery and the unsupported result.
+  Some result fields are populated only when that feature is enabled. Release
+  binaries were not rebuilt or compared in this audit.
 
 ## Continue default
 
@@ -1085,6 +1092,14 @@ behavior. An unlisted behavior has not been audited here.
   and C API global runtime changes ignore these names without storing values or
   dispatching engine commands. This corrects the former behavior where those
   settings were accepted by SFTP-disabled builds.
+- **URI dispatch:** the core registry claims `sftp:` even when the SFTP feature
+  is absent and returns `UnsupportedProtocol` before the HTTP fallback. This
+  covers core, RPC, and C API task creation; the CLI rejects SFTP earlier.
+  Without this guard, RPC and library callers could route an unsupported SFTP
+  URI into the HTTP command. Original aria2's
+  `InitiateConnectionCommandFactory::createInitiateConnectionCommand` only
+  admits SFTP when `HAVE_LIBSSH2` is enabled and otherwise reports it as
+  unsupported. A no-SFTP task-spawner regression verifies the URI is rejected.
 - **Verification:** focused CLI, RPC option validation, C API global and
   task-option propagation, protocol option construction, and session restore
   tests cover the path, including global/task RPC overrides for all SFTP
@@ -1103,7 +1118,7 @@ behavior. An unlisted behavior has not been audited here.
   `connect_with_stream` returns `ConnectTimeout` within the configured
   connection deadline. The current focused protocol loopback run passes 12/12,
   and the CLI/RPC SFTP option tests pass 2/2. The core SFTP-filtered library
-  run passes 34/34, including C API global/task propagation, shared option
+  run passes 38/38, including C API global/task propagation, shared option
   parsing, session restoration, and protocol-option construction. Its session
   persistence case requires a writable temporary directory; on the sandboxed
   Windows host, `TEMP` and `TMP` were pointed inside the workspace for this run.
@@ -1129,6 +1144,18 @@ behavior. An unlisted behavior has not been audited here.
   `SessionPoisoned`. Core cancellation continues to discard the SSH connection
   instead of queueing CLOSE behind an outstanding read. A loopback regression
   cancels a stalled STAT and verifies the next request is never sent.
+  During core downloads, non-terminal lifecycle notifications such as a
+  control-file save retain the in-flight read future; terminal pause/remove/halt
+  still cancel it and discard the connection. This avoids poisoning a session
+  when a save request arrives during a slow remote read. A focused lifecycle
+  regression verifies a pending operation survives a control-file-save
+  notification.
+  Core and standalone downloads share protocol crate's `SftpDownloadReader`,
+  which owns read-only OPEN, bounded sequential READs, offset advancement,
+  early-EOF detection, and remote handle close. Core retains its lifecycle
+  waiter and durable output and checkpoint path. The focused protocol transfer
+  suite passes 23/23, the SFTP-filtered core library suite passes 38/38, and the
+  core SSH/SFTP end-to-end suite passes 21/21.
   `cargo check -p aria2-protocol --features sftp` and
   `cargo check -p aria2-core --features "bittorrent metalink sftp"` pass.
   Original aria2 has no matching SFTP-specific timeout options; these are Rust
@@ -1164,7 +1191,7 @@ behavior. An unlisted behavior has not been audited here.
   recording, known-key acceptance, and changed-key rejection. End-to-end
   loopback tests use the local mock SFTP server; focused tests verify host-key
   rejection is terminal even when retries are unlimited. The latest focused
-  SFTP run passed 33/33 core tests and 23/23 standalone protocol transfer
+  SFTP run passed 38/38 core tests and 23/23 standalone protocol transfer
   tests; protocol SSH option tests cover secret redaction. These include
   authentication, fingerprint checks, cancellation, resume,
   and transfer lifecycle. The full `aria2-protocol` all-features library suite
@@ -1187,6 +1214,12 @@ behavior. An unlisted behavior has not been audited here.
   **Verification:** packet tests reject an over-limit length prefix without a
   body and reject oversized encoded packets. Remote-server interoperability
   for frames near the cap has not been exercised.
+- **READ response length:** the client rejects a DATA response longer than its
+  corresponding READ request before returning bytes to either the standalone
+  transfer or core writer. SFTP v3 requires the server not to exceed the
+  requested length; shorter data remains valid. Protocol unit tests cover
+  overlong, short, and EOF responses. See the [SFTP v3 READ request and DATA
+  response definitions](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-13#section-8.2.1).
 - **Version negotiation:** the client sends `SSH_FXP_INIT` with version 3 and
   accepts the negotiated v3 version only, as required by the SFTP negotiation
   rule that the server selects the lower of its version and the client's.
@@ -1255,9 +1288,10 @@ behavior. An unlisted behavior has not been audited here.
   failure is logged while the original transfer error is preserved. A local
   passive data-connection timeout fixture verifies the ABOR exchange and a
   successful subsequent NOOP; a local file-setup failure fixture verifies the
-  data socket closes and the control session handles a subsequent NOOP. Local
-  file-write failure and exhausted data-read retry behavior are not separately
-  fault-injected yet.
+  data socket closes and the control session handles a subsequent NOOP. A
+  post-RETR lazy-writer open failure fixture verifies ABOR followed by QUIT.
+  Failure after a writer has opened and exhausted data-read retry behavior are
+  not separately fault-injected yet.
 - **Transfer completion reply:** the standalone downloader accepts only a
   positive-completion 2xx reply after data EOF. A preliminary 1xx reply cannot
   be mistaken for successful completion; a loopback regression covers 150.
@@ -1366,6 +1400,10 @@ behavior. An unlisted behavior has not been audited here.
   selection, source ordering, retry, mirror failover, and staged-file
   publication. Protocol code supplies parsing, metadata, and ordering
   primitives; it does not decide the engine's retry or task lifecycle policy.
+  `select-file` is shared by BitTorrent and Metalink, so its option definition
+  lives with the unconditional general Metalink options rather than inside the
+  BitTorrent-only registry. This keeps selection available in Metalink-only
+  builds through CLI, RPC, and C API option parsing.
 - **GID allocation:** the CLI requests each Metalink-generated group ID from
   the shared atomic `RequestGroupMan` allocator as groups are built. It no
   longer reparses documents to estimate a contiguous range after reserving
@@ -1373,7 +1411,14 @@ behavior. An unlisted behavior has not been audited here.
   receiving an ID already assigned to an expanded Metalink group.
 - **Behavior:** mirror ordering, expected size, hashes, piece hashes, and
   BitTorrent metaurls use the same parser output as before. Parsing errors are
-  still surfaced by command construction, before task execution.
+  still surfaced by command construction, before task execution. The protocol
+  model recognizes BitTorrent resource URLs independently of Cargo features.
+  Core converts these parsed resources into torrent metaurls when BitTorrent
+  support is enabled, and removes them when it is disabled while retaining
+  usable HTTP/FTP mirrors. This matches the `ENABLE_BITTORRENT` condition in
+  upstream `MetalinkParserController::commitResourceTransaction()` and
+  `MetalinkEntry::dropUnsupportedResource()`, while keeping build policy out
+  of the protocol parser.
 - **Public model helper:** `MetalinkDocument::total_size` continues to sum
   known file sizes and preserve its empty-document result of `Some(0)`. It now
   returns `None` if known sizes overflow `u64`, instead of panicking in debug
@@ -1410,9 +1455,18 @@ behavior. An unlisted behavior has not been audited here.
   known-size summation, and the empty-document result. No public remote-server
   or original-binary comparison was run; Metalink-over-SFTP wire
   interoperability and custom-DNS end-to-end
-  behavior remain unverified. The lifecycle integration target passes 17/17,
+  behavior remain unverified. Feature-specific regressions cover direct
+  BitTorrent resource conversion into a metadata graph when enabled and
+  removal while retaining the HTTP mirror when disabled; they do not establish
+  remote interoperability. The lifecycle integration target passes 17/17,
   including pause/resume from the staging checkpoint, force-halt checkpoint
   retention, and removal cleanup.
+  Metalink-only regressions additionally verify C API `select-file` execution,
+  RPC global/task option propagation, and session save/restore of Metalink
+  filters, base URI, and file selection. The CLI's `--select-file` mapping is
+  covered by the existing Metalink option test, but a Metalink-only CLI build
+  has not yet been rerun after moving the argument into the general option
+  group.
 
 ## Pause and unpause lifecycle status
 

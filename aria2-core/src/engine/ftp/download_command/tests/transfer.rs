@@ -77,6 +77,117 @@ async fn ftp_proxy_records_each_payload_chunk_for_timeout() {
 }
 
 #[tokio::test]
+async fn ftp_writer_open_failure_aborts_the_active_transfer() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    let control_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind FTP control fixture");
+    let control_address = control_listener
+        .local_addr()
+        .expect("read FTP control address");
+    let server = tokio::spawn(async move {
+        let (stream, _) = control_listener
+            .accept()
+            .await
+            .expect("accept FTP control connection");
+        let mut control = BufReader::new(stream);
+        control
+            .get_mut()
+            .write_all(b"220 FTP fixture ready\r\n")
+            .await
+            .expect("write FTP greeting");
+
+        let mut commands = Vec::new();
+        for (expected, response) in [
+            ("ABOR", b"226 transfer aborted\r\n".as_slice()),
+            ("QUIT", b"221 goodbye\r\n".as_slice()),
+        ] {
+            let mut command = String::new();
+            tokio::time::timeout(Duration::from_secs(2), control.read_line(&mut command))
+                .await
+                .expect("FTP cleanup command should arrive")
+                .expect("read FTP cleanup command");
+            let command = command.trim_end().to_owned();
+            assert_eq!(command, expected);
+            commands.push(command);
+            control
+                .get_mut()
+                .write_all(response)
+                .await
+                .expect("write FTP cleanup response");
+        }
+        commands
+    });
+
+    let data_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind FTP data fixture");
+    let data_address = data_listener.local_addr().expect("read FTP data address");
+    let data_client = TcpStream::connect(data_address)
+        .await
+        .expect("connect FTP data fixture");
+    let (mut data_server, _) = data_listener
+        .accept()
+        .await
+        .expect("accept FTP data connection");
+    data_server
+        .write_all(b"payload")
+        .await
+        .expect("write FTP payload");
+    data_server.shutdown().await.expect("finish FTP payload");
+
+    let output = tempfile::tempdir().expect("create output directory");
+    let uri = format!("ftp://127.0.0.1:{}/remote.bin", control_address.port());
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(9_905),
+        vec![uri],
+        DownloadOptions::default(),
+    )));
+    group
+        .recover_mut()
+        .start()
+        .expect("start FTP request group");
+    let mut command = FtpDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        output.path().to_str(),
+        Some("remote.bin"),
+    )
+    .expect("construct FTP command");
+    // A directory is a deterministic target that makes the lazy writer's
+    // first payload open fail after RETR has already entered its data phase.
+    command.output_path = output.path().to_path_buf();
+    let control = RawFtpControl::connect_at(
+        "127.0.0.1",
+        control_address.port(),
+        control_address,
+        Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        None,
+    )
+    .await
+    .expect("connect FTP control session");
+
+    let result = command
+        .receive_data_transfer(super::super::transfer::FtpReceiveTransfer {
+            ctrl: control,
+            data_stream: aria2_protocol::ftp::tls::FtpDataStream::Plain(data_client),
+            file_size: Some(7),
+            in_memory_download: false,
+            remote_modified_time: None,
+            write_offset: 0,
+            reuse_key: None,
+        })
+        .await;
+
+    assert!(result.is_err(), "writing to a directory target must fail");
+    assert_eq!(
+        server.await.expect("FTP cleanup fixture should finish"),
+        ["ABOR", "QUIT"]
+    );
+}
+
+#[tokio::test]
 async fn ftp_reuses_authenticated_control_session_across_downloads() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;

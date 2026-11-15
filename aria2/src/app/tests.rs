@@ -136,6 +136,7 @@ async fn test_cli_metalink_options_reach_download_options() {
         "--metalink-os=linux",
         "--metalink-location=us,jp",
         "--metalink-preferred-protocol=https",
+        "--metalink-base-uri=https://example.test/meta/",
         "--select-file=2",
         "https://example.test/metadata",
     ])
@@ -158,6 +159,10 @@ async fn test_cli_metalink_options_reach_download_options() {
     assert_eq!(
         options.metalink_preferred_protocol.as_deref(),
         Some("https")
+    );
+    assert_eq!(
+        options.metalink_base_uri.as_deref(),
+        Some("https://example.test/meta/")
     );
     assert_eq!(options.select_file.as_deref(), Some("2"));
 }

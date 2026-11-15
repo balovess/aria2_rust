@@ -461,10 +461,6 @@ pub struct BitTorrentArgs {
     #[arg(long = "peer-agent")]
     pub peer_agent: Option<String>,
 
-    /// Comma-separated list of file indices to download (BT/Metalink, 1-indexed)
-    #[arg(long = "select-file")]
-    pub select_file: Option<String>,
-
     /// Set output filename for a BitTorrent file index (INDEX=PATH, repeatable)
     #[arg(short = 'O', long = "index-out")]
     pub index_out: Vec<String>,

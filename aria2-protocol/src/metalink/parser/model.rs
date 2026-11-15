@@ -135,8 +135,10 @@ impl UrlEntry {
         self.resource_type.is_non_p2p()
     }
 
-    /// Whether this URL's protocol is supported for downloading.
-    /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()`.
+    /// Whether this URL has a resource type recognized by the Metalink model.
+    ///
+    /// This is independent of which transfer adapters an application build
+    /// includes; execution layers apply their own feature availability.
     pub fn is_supported(&self) -> bool {
         self.resource_type.is_supported()
     }
@@ -318,13 +320,13 @@ impl MetalinkFile {
         self.oses.iter().any(|o| o.eq_ignore_ascii_case(os))
     }
 
-    /// Remove URLs whose resource type is not supported for downloading.
+    /// Remove URLs whose resource type is not recognized by the Metalink model.
     ///
     /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()` which
     /// erases resources whose type is not FTP, HTTP, HTTPS, or BitTorrent.
-    /// In this Rust port we treat HTTPS and BitTorrent as always supported
-    /// (the C++ code gates them behind `ENABLE_SSL` / `ENABLE_BITTORRENT`
-    /// compile-time flags which are always enabled in our build).
+    /// This is format-level filtering, independent of application features.
+    /// The core execution layer removes recognized resources whose transfer
+    /// adapters are unavailable in its current build.
     ///
     /// Both `NotSupported` and `Unknown` types are removed, matching C++
     /// where the `default` case in the switch covers all non-FTP/HTTP/HTTPS/BT types.

@@ -139,16 +139,15 @@ impl super::MetalinkDownloadCommand {
     fn protocol_runtime(&self) -> ProtocolRuntime {
         self.protocol_runtime.as_ref().map_or_else(
             || ProtocolRuntime {
-                adapters: Arc::new(ProtocolAdapterRegistry::source_protocols()),
+                adapters: Arc::new(ProtocolAdapterRegistry::source_protocols(Arc::new(
+                    crate::ftp::connection_pool::FtpConnectionPool::new(4),
+                ))),
                 services: ProtocolServices {
                     dns_cache: Arc::new(tokio::sync::Mutex::new(
                         crate::dns::dns_cache::DnsCache::new(),
                     )),
                     outbound_network_policy: Arc::clone(&self.outbound_network_policy),
                     global_limiter: self.global_limiter.clone(),
-                    ftp_connection_pool: Arc::new(
-                        crate::ftp::connection_pool::FtpConnectionPool::new(4),
-                    ),
                 },
             },
             |runtime| ProtocolRuntime {

@@ -69,8 +69,12 @@ The Metalink adapter claims groups with Metalink source metadata before URI
 dispatch. It expands metadata into payload request groups; each payload then
 uses the adapter for its underlying route, such as HTTP, FTP, SFTP, or
 BitTorrent. The built-in registry orders metadata and scheme-specific adapters
-before the HTTP fallback. The HTTP adapter delegates construction to
-`engine::http::command_factory`, which resolves target and proxy addresses.
+before the HTTP fallback. When SFTP is not compiled in, a small registry entry
+still claims the `sftp:` scheme and returns `UnsupportedProtocol`; this keeps
+core, RPC, and C API task creation from accidentally treating SFTP URIs as
+HTTP. The CLI rejects the same unsupported protocol at input validation. The
+HTTP adapter delegates construction to `engine::http::command_factory`, which
+resolves target and proxy addresses.
 
 Cargo feature propagation follows the same ownership boundary. BitTorrent,
 Metalink, and SFTP are real optional features: the CLI forwards each to core and
@@ -164,7 +168,7 @@ retry admission.
 | FTP/FTPS | `ProtocolAdapterRegistry` → `engine::ftp::command_adapter` → `FtpDownloadCommand` → proxy GET or FTP control/data transfer. | `aria2-protocol::ftp::proxy` serializes FTP-over-HTTP-proxy GET requests; `aria2-protocol::ftp::connection::FtpControlSession` owns FTP command sequencing, response parsing, and path/passive-mode grammar over an injected control stream. `aria2-protocol::ftp::tls::FtpsClient` owns reusable TLS configuration, TLS handshakes, and RFC 4217 protection negotiation. For HTTP CONNECT, FTP supplies its policy-approved proxy stream and challenge-only auth setting to `aria2-protocol::http::connect`; core retains socket setup and error mapping. Core composes proxy selection, DNS/address policy, data sockets, active bind/accept policy, task lifecycle, filesystem state, and the process-scoped control-session pool. The pool retains the entire protocol session and its TLS/network context, keyed by origin credentials, proxy route, TLS policy, and outbound-source policy; only synchronized successful transfers return sessions to it. The standalone public `FtpDownload` API is not used by the engine; its mutable transfer buffer is bounded at the protocol use site. | `SingleWorkAdapter` supplies attempts; `SequentialWorkCommitter` writes chunks and syncs payload before advancing a checkpoint. Whole-file checksum policy uses the shared checksum service. |
 | SFTP | `ProtocolAdapterRegistry` → `engine::sftp::command_adapter` → `SftpDownloadCommand` → shared `DnsCache` when `async-dns=true` / system DNS otherwise → `OutboundNetworkPolicy` TCP stream → `SshConnection::connect_with_stream` → `SftpSession` → `SftpFileOps`. | `aria2-protocol::sftp` owns SSH handshake/authentication, SFTP framing and request IDs, packet codec, and file operations. A cancelled in-flight request/response exchange poisons the shared session so late packets cannot be mistaken for a later operation; core discards the SSH connection on task cancellation. The adapter supplies URI/auth resolution and shared network services; the command keeps address attempts, retry classification, and task policy. | `SingleWorkAdapter` supplies attempts; source chunks use `SequentialWorkCommitter` for local writing, progress, and checkpoints. Payload is synced before checkpoint advancement. Whole-file checksum policy uses the shared checksum service. |
 | BitTorrent | `ProtocolAdapterRegistry` → `engine::bittorrent::command_adapter`; torrent payloads use `download::command` → `download::execute`, while magnet input resolves metadata before the payload command. | `aria2-protocol::bittorrent` owns Bencode, torrent/magnet parsing, LPD announcement encoding/parsing, wire messages, TCP peer-listener bind/accept primitives, TCP plain/MSE peer handshakes, DHT (including `announce_peer` storage, peer lookup responses, and BEP 51 sampling), tracker announce URL classification and the `AnnounceList` tier/event state machine, UDP tracker URL syntax/default port, WebSocket tracker URL parsing/validation and handshake/framing/announce exchange, uTP packet/connection state machines, BitTorrent peer handshake/framing, and BEP 9 metadata piece collection. `PublicTrackerList` owns tracker-source catalog state, parsing, refresh scheduling, and health; it accepts an injected source fetcher. Core supplies the engine fetcher, which applies its DNS cache, outbound source-address policy, TLS options, scheme-specific HTTP/HTTPS proxies, proxy credentials, and `no-proxy` rules. HTTP tracker announces use the same option-aware proxy selection and bind through the selected proxy endpoint; the announce client cache separates direct requests from proxy routes and HTTP from HTTPS. Core owns announce timing and task lifecycle, selects event-eligible tiers, merges newly announced tiers, and applies transport/network policy. It also owns the process-level TCP/uTP listener manager, shared info-hash routes, address/port binding policy, handshake admission limits, connected-peer storage/admission, and async uTP socket actor. The core LPD adapter attaches the observed sender and applies local-address classification; the core uTP peer adapter bridges actor handles to the protocol `PeerTransport` interface and maps errors without parsing BitTorrent handshakes or frames. The adapter owns peer discovery, availability, rarity/endgame selection, and per-piece hashes. | Core `WorkScheduler` leases piece and WebSeed work. Received blocks are staged after layout checks and can be checkpointed only after their payload is synced. Complete pieces pass v1/v2 hash validation, then stable-storage sync, then live completion/checkpoint publication through `WorkCommitter`; BT-specific peer feedback and piece accounting remain in the adapter. |
-| Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `MetalinkDownloadCommand`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | `aria2-protocol::metalink` owns XML parsing, the parsed document/resource/hash model, URL-resolution and resource-ordering primitives, plus a standalone synchronous file-checksum utility. Core applies task options to file/resource selection and ordering, chooses mirror attempts, coordinates retries, and verifies whole-file/piece hashes through the shared checksum service. Each mirror and metadata URL is dispatched through a source-only registry to the ordinary HTTP, FTP, or feature-gated SFTP command. The parent injects shared DNS, outbound-address, and global-limiter services. HTTP mirror children keep one sequential request at a time and the Metalink 30-second default connect timeout. Child transfers write to a per-mirror staging path and relay progress/lifecycle; verified payloads are atomically promoted to the selected output path. Torrent MetaURLs still enter the BitTorrent command. | Source protocol commands own transport attempts, protocol-specific output/checkpoint behavior, and network options. Core's Metalink coordinator commits only after declared hashes pass. FTP/SFTP URI classification remains represented by the existing FTP resource enum for public API compatibility; the original URI scheme selects the actual adapter. |
+| Metalink | `ProtocolAdapterRegistry` → `engine::metalink::command_adapter` → `MetalinkDownloadCommand`; parsing uses `aria2-protocol::metalink` and expands through `engine::metalink::to_request_group`. | `aria2-protocol::metalink` owns XML parsing, the parsed document/resource/hash model, URL-resolution and resource-ordering primitives, plus a standalone synchronous file-checksum utility. Core applies task options to file/resource selection and ordering, maps parsed BitTorrent resource URLs to torrent metaurls when that adapter is enabled and removes them otherwise, chooses mirror attempts, coordinates retries, and verifies whole-file/piece hashes through the shared checksum service. Each mirror and metadata URL is dispatched through a source-only registry to the ordinary HTTP, FTP, or feature-gated SFTP command. The parent injects shared DNS, outbound-address, and global-limiter services. HTTP mirror children keep one sequential request at a time and the Metalink 30-second default connect timeout. Child transfers write to a per-mirror staging path and relay progress/lifecycle; verified payloads are atomically promoted to the selected output path. Torrent MetaURLs still enter the BitTorrent command when that feature is enabled. | Source protocol commands own transport attempts, protocol-specific output/checkpoint behavior, and network options. Core's Metalink coordinator commits only after declared hashes pass. FTP/SFTP URI classification remains represented by the existing FTP resource enum for public API compatibility; the original URI scheme selects the actual adapter. |
 
 ### HTTP assembly and transfer path
 
@@ -300,22 +304,28 @@ connection paths omit `USER` and `PASS` arguments from command diagnostics.
    failures. `SftpFileOps` translates filesystem status packets into
    `FileOpError` and preserves session errors as sources; `SftpRemoteFile`
    provides positioned reads/writes and explicit handle closure with the same
-   file-operation error type. The core retries only errors classified by the
-   protocol layer as connectivity or timeout failures; protocol violations and
-   unclassified remote statuses terminate the attempt.
-5. The engine stats and opens the remote file, reconciles the local length and
-   checkpoint, then reads chunks at explicit offsets. It passes each chunk
-   through the core `SequentialWorkCommitter` for local writing and progress;
-   the payload is synced before checkpoint updates and final checksum
-   verification/task completion.
+   file-operation error type. `SftpDownloadReader` owns read-only OPEN, bounded
+   sequential READs, offset advancement, advertised-size enforcement, and
+   premature-EOF detection; it is shared by standalone and core downloads. The
+   core retries only errors classified by the protocol layer as connectivity
+   or timeout failures; protocol violations and unclassified remote statuses
+   terminate the attempt.
+5. The engine stats the remote file, reconciles the local length and checkpoint,
+   and supplies the chosen resume offset to `SftpDownloadReader`. It passes each
+   returned chunk through the core `SequentialWorkCommitter` for local writing
+   and progress; the payload is synced before checkpoint updates and final
+   checksum verification/task completion. A non-terminal control-file-save
+   notification keeps the current read future alive; pause, removal, and halt
+   cancel it and discard the SSH connection so a late SFTP response cannot
+   desynchronize a later request.
 
 Keep `SftpDownloadCommand` as the engine-level coordinator. It calls the
-protocol library's typed `SftpSession` and `SftpFileOps` interfaces, while
-retaining the request-group lifecycle, resume/checkpoint policy, read offset,
-rate-limited `DiskWriter`, retry classification, and task errors in core.
-Moving this loop into `SftpTransfer` would make protocol code own core output
-and checkpoint policy; adding another protocol wrapper around the existing
-file-operation interface would only forward calls.
+protocol library's typed `SftpSession`, `SftpFileOps`, and
+`SftpDownloadReader` interfaces. Core retains request-group lifecycle,
+resume/checkpoint policy, rate-limited `DiskWriter`, retry classification, and
+task errors; the protocol reader owns remote OPEN/READ offset and size rules,
+and handle closure. Keep core output and checkpoint policy out of the protocol
+crate, and avoid duplicating the sequential READ loop in core.
 
 **Keep** SFTP option definitions and source-precedence policy in core, where
 CLI/config, RPC, C API, and session restoration converge. **Narrow** their
@@ -710,6 +720,22 @@ Do not add pass-through engine clients around these public interfaces.
   `ProtocolAdapterRegistry` selects the first supporting adapter; each protocol
   directory owns its command construction and dependency setup. HTTP is the
   final fallback, after metadata and scheme-specific adapters.
+- **Keep** `engine::protocol_adapter::ProtocolAdapterRegistry` as the core
+  command-construction boundary. `engine_loop::commands` creates it from the
+  engine context, `task_spawner` uses it for promoted groups, and protocol
+  adapters own their injected services. The FTP adapter holds its process
+  connection-pool handle directly instead of placing FTP state in generic
+  `ProtocolServices`; Metalink passes that same pool to its source registry.
+  SFTP dispatch uses a case-insensitive scheme check without copying the URI;
+  in SFTP-disabled builds, a rejecting adapter reserves the scheme before the
+  HTTP catch-all. This preserves the protocol error at RPC and C API ingress.
+  The Metalink source registry contains
+  only HTTP, FTP, and feature-enabled SFTP because Metalink owns mirror retry
+  and metadata dispatch; BitTorrent payloads enter the ordinary task registry
+  through the metadata/payload graph. Feature-specific Metalink normalization
+  converts parsed BitTorrent URL resources into metadata entries before graph
+  expansion. Registry tests cover adapter selection and Metalink service
+  propagation.
 - **Narrow** HTTP construction to its protocol directory: the HTTP factory now
   owns target/proxy DNS resolution, and `client_config` owns reqwest setup.
   Generic task dispatch no longer assembles HTTP-specific addresses or client
@@ -1037,6 +1063,13 @@ Do not add pass-through engine clients around these public interfaces.
   implementations. Each module exports its canonical public types at the
   owning module boundary. Keep the standalone `SftpTransfer` interface
   separate from the engine's request-group and `DiskWriter` lifecycle.
+- **Narrow** sequential SFTP download reads into protocol-owned
+  `SftpDownloadReader`: read-only OPEN, bounded READ sizing, offset advancement,
+  advertised-size enforcement, premature-EOF errors, and remote-handle close
+  live in `aria2-protocol`. Core and standalone transfers share this reader.
+  Core keeps lifecycle-aware request waiting, `DiskWriter`, rate limiting,
+  progress, checkpointing, and task error mapping; the protocol crate does not
+  depend on core storage or request-group types.
 - **Delete** the unused SFTP SSH connection pool. It had no production callers,
   keyed connections without authentication or host-key policy, treated
   connection age as idle time, and could only drop pool references when asked
@@ -1075,6 +1108,15 @@ Do not add pass-through engine clients around these public interfaces.
   remote file larger than the source restarts from offset zero with truncation.
   Loopback protocol tests cover these decisions. The core download path also
   logs CLOSE failure and finalizes the received data through its `DiskWriter`.
+- **Improve** SFTP download lifecycle waits: retain an in-flight READ across
+  non-terminal lifecycle notifications such as a control-file save, because
+  cancelling its request/response future poisons the serialized session. Pause,
+  removal, and halt still cancel the read and discard the SSH connection. A
+  focused test verifies the shared lifecycle waiter preserves its operation.
+- **Improve** SFTP READ response validation: reject DATA longer than the
+  requested length before it reaches standalone transfer or core output. This
+  enforces the SFTP v3 response bound and prevents overlong writes from
+  advancing local progress/checkpoint state.
 - **Improve** SFTP packet validation: the decoder rejects unexplained bytes
   after a packet's defined fields, impossible directory entry counts, and
   length-prefixed fields not present in the received payload; frame arithmetic
@@ -1443,6 +1485,11 @@ Do not add pass-through engine clients around these public interfaces.
   dispatch live in private child modules. Keep the existing crate-internal
   `engine::dispatch_wire_entries` path used by HTTP and WebSocket servers; the
   batch snapshot and mutation ordering remain unchanged.
+- **Keep** `aria2-rpc::BackendMetadata` as the wire-layer discovery model and
+  keep its method catalog stable across build tiers. The application-owned
+  `CoreRpcBackend` reports unavailable optional operations as `Unsupported`;
+  only actually available capabilities and notifications appear in feature
+  metadata. This keeps method discovery independent from core feature gates.
 - **Narrow** task `changeOption` input conversion to the dedicated
   `aria2-rpc::rpc_helpers::normalize_change_option_options` boundary. The
   handler preserves positional parameters, the core RPC adapter delegates

@@ -13,10 +13,7 @@ pub(crate) struct SftpCommandAdapter;
 #[async_trait]
 impl ProtocolCommandAdapter for SftpCommandAdapter {
     fn supports(&self, request: &ProtocolCommandRequest) -> bool {
-        request
-            .first_uri
-            .to_ascii_lowercase()
-            .starts_with("sftp://")
+        crate::engine::protocol_adapter::is_sftp_uri(&request.first_uri)
     }
 
     async fn create(

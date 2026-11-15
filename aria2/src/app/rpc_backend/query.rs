@@ -9,6 +9,7 @@ use aria2_rpc::{
 
 use super::CoreRpcBackend;
 
+#[cfg(feature = "bittorrent")]
 mod bittorrent;
 mod files;
 

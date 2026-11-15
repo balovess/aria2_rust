@@ -12,9 +12,9 @@ pub enum ResourceType {
     Http,
     /// HTTPS protocol
     Https,
-    /// BitTorrent (magnet or .torrent) — requires BT feature flag
+    /// BitTorrent (magnet or .torrent), recognized by the format model
     BitTorrent,
-    /// Protocol not supported by this build
+    /// Resource type not recognized by the Metalink model
     NotSupported,
     /// Could not determine the protocol
     Unknown,
@@ -72,11 +72,11 @@ impl ResourceType {
         }
     }
 
-    /// Whether this resource type is supported for downloading.
+    /// Whether this resource type is recognized by the Metalink format model.
     ///
-    /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()` — only
-    /// HTTP, HTTPS, FTP-family (including SFTP), and BitTorrent are kept;
-    /// the rest are dropped.
+    /// This format-level check is independent of the adapters enabled in an
+    /// application build. The execution layer must apply its own availability
+    /// policy before attempting a transfer.
     pub fn is_supported(&self) -> bool {
         matches!(
             self,

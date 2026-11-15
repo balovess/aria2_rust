@@ -74,6 +74,36 @@ fn test_open_flags_display() {
 }
 
 #[test]
+fn read_response_rejects_data_larger_than_requested_length() {
+    let response = SftpPacket::Data {
+        request_id: 9,
+        data: vec![1, 2, 3],
+    };
+
+    assert!(matches!(
+        read_response_data(response, 2),
+        Err(FileOpError::Other { message }) if message.contains("3 bytes") && message.contains("request of 2")
+    ));
+}
+
+#[test]
+fn read_response_accepts_short_data_and_eof() {
+    let response = SftpPacket::Data {
+        request_id: 9,
+        data: vec![1, 2],
+    };
+    assert_eq!(read_response_data(response, 3).unwrap(), [1, 2]);
+
+    let eof = SftpPacket::Status {
+        request_id: 9,
+        code: crate::sftp::packet::SSH_FX_EOF,
+        message: "EOF".to_string(),
+        language: String::new(),
+    };
+    assert!(read_response_data(eof, 3).unwrap().is_empty());
+}
+
+#[test]
 fn test_file_attributes_default() {
     let attrs = FileAttributes::default();
     assert_eq!(attrs.size, 0);

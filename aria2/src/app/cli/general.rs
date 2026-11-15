@@ -248,6 +248,9 @@ pub struct GeneralArgs {
     /// Preferred Metalink download protocol
     #[arg(long = "metalink-preferred-protocol")]
     pub metalink_preferred_protocol: Option<String>,
+    /// Comma-separated list of file indices to download (BitTorrent/Metalink, 1-indexed)
+    #[arg(long = "select-file")]
+    pub select_file: Option<String>,
     /// Enable parameterized URI support (e.g. {a,b})
     #[arg(
         short = 'P',

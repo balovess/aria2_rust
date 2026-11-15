@@ -51,6 +51,23 @@ fn unexpected_response(operation: &str, packet: SftpPacket) -> FileOpError {
     ))
 }
 
+fn read_response_data(response: SftpPacket, requested_length: u32) -> Result<Vec<u8>, FileOpError> {
+    match response {
+        SftpPacket::Data { data, .. } if (data.len() as u64) <= u64::from(requested_length) => {
+            Ok(data)
+        }
+        SftpPacket::Data { data, .. } => Err(FileOpError::other(format!(
+            "READ returned {} bytes for a request of {requested_length}",
+            data.len()
+        ))),
+        SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
+        SftpPacket::Status { code, message, .. } => {
+            Err(FileOpError::from_status("Read", code, message, None))
+        }
+        other => Err(unexpected_response("READ", other)),
+    }
+}
+
 fn expect_handle(
     response: SftpPacket,
     operation: &'static str,
@@ -164,14 +181,7 @@ impl<'a> SftpRemoteFile<'a> {
 
         let resp = request(self.session, pkt, "READ").await?;
 
-        match resp {
-            SftpPacket::Data { data, .. } => Ok(data),
-            SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
-            SftpPacket::Status { code, message, .. } => {
-                Err(FileOpError::from_status("Read", code, message, None))
-            }
-            other => Err(unexpected_response("READ", other)),
-        }
+        read_response_data(resp, len)
     }
 
     /// Write `data` starting at `offset` to the remote file.

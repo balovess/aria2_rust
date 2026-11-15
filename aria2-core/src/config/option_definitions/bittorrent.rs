@@ -359,17 +359,6 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
-        self.register(OptionDef {
-            name: "select-file".into(),
-            opt_type: OptionType::IntegerRange,
-            min: Some(1),
-            max: Some(1_000_000),
-            description:
-                "Comma-separated list of file indices to download (BT/Metalink, 1-indexed)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-
         // --- File Index Output Mapping ---
         self.register(OptionDef {
             name: "index-out".into(),
