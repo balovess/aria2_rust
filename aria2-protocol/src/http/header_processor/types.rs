@@ -47,7 +47,7 @@ impl HttpHeaderParseState {
 ///
 /// Header names are stored in lowercase for efficient case-insensitive lookup.
 /// Duplicate header names are preserved (important for `Set-Cookie` etc.).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpResponseHead {
     /// HTTP version string (e.g., `"HTTP/1.1"`)
     pub http_version: String,
@@ -57,6 +57,18 @@ pub struct HttpResponseHead {
     pub reason_phrase: String,
     /// Ordered header name-value pairs; names are lowercase.
     headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for HttpResponseHead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpResponseHead")
+            .field("http_version", &self.http_version)
+            .field("status_code", &self.status_code)
+            .field("reason_phrase", &self.reason_phrase)
+            .field("header_count", &self.headers.len())
+            .finish()
+    }
 }
 
 impl HttpResponseHead {
@@ -92,6 +104,36 @@ impl HttpResponseHead {
                 .map(|(name, value)| (name.to_ascii_lowercase(), value))
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpResponseHead;
+
+    #[test]
+    fn response_head_debug_redacts_sensitive_header_values() {
+        let response = HttpResponseHead::from_parts(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            vec![
+                (
+                    "Set-Cookie".to_string(),
+                    "session=cookie-secret".to_string(),
+                ),
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Digest nonce=challenge-secret".to_string(),
+                ),
+            ],
+        );
+
+        let debug = format!("{response:?}");
+        assert!(debug.contains("status_code: 200"));
+        assert!(debug.contains("header_count: 2"));
+        assert!(!debug.contains("cookie-secret"));
+        assert!(!debug.contains("challenge-secret"));
     }
 }
 

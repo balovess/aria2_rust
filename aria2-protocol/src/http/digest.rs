@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 /// A parsed HTTP Digest authentication challenge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DigestChallenge {
     pub realm: String,
     pub nonce: String,
@@ -13,8 +13,22 @@ pub struct DigestChallenge {
     pub stale: bool,
 }
 
+impl std::fmt::Debug for DigestChallenge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DigestChallenge")
+            .field("realm", &self.realm)
+            .field("nonce", &"[REDACTED]")
+            .field("qop", &self.qop)
+            .field("algorithm", &self.algorithm)
+            .field("opaque", &self.opaque.as_ref().map(|_| "[REDACTED]"))
+            .field("stale", &self.stale)
+            .finish()
+    }
+}
+
 /// Parsed Digest challenge parameters before applying RFC validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DigestChallengeParameters {
     pub realm: Option<String>,
     pub nonce: Option<String>,
@@ -22,6 +36,20 @@ pub struct DigestChallengeParameters {
     pub algorithm: Option<String>,
     pub opaque: Option<String>,
     pub stale: bool,
+}
+
+impl std::fmt::Debug for DigestChallengeParameters {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DigestChallengeParameters")
+            .field("realm", &self.realm)
+            .field("nonce", &self.nonce.as_ref().map(|_| "[REDACTED]"))
+            .field("qop", &self.qop)
+            .field("algorithm", &self.algorithm)
+            .field("opaque", &self.opaque.as_ref().map(|_| "[REDACTED]"))
+            .field("stale", &self.stale)
+            .finish()
+    }
 }
 
 /// Parse failure for a Digest challenge header.
@@ -575,5 +603,25 @@ mod tests {
             assert!(!debug.contains(secret));
         }
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn digest_challenge_debug_redacts_nonce_and_opaque_values() {
+        let challenge = DigestChallenge::parse(
+            "Digest realm=example, nonce=private-nonce, qop=auth, opaque=private-opaque",
+        )
+        .unwrap();
+        let debug = format!("{challenge:?}");
+        assert!(!debug.contains("private-nonce"));
+        assert!(!debug.contains("private-opaque"));
+        assert!(debug.contains("[REDACTED]"));
+
+        let parameters = parse_challenge_parameters(
+            "Digest realm=example, nonce=private-nonce, opaque=private-opaque",
+        )
+        .unwrap();
+        let debug = format!("{parameters:?}");
+        assert!(!debug.contains("private-nonce"));
+        assert!(!debug.contains("private-opaque"));
     }
 }

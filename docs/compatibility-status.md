@@ -432,6 +432,9 @@ behavior. An unlisted behavior has not been audited here.
   values, and protocol `AuthCredentials` now redact usernames and passwords in
   `Debug` output. `AuthConfig::auth_text()` and its explicit `Display`
   implementation retain their existing credential-returning behavior.
+- Protocol `HttpRequest`, `HttpResponse`, and `HttpResponseHead` debug output
+  exposes metadata/counts only; it omits request URL details, headers, and
+  bodies. Digest challenge debug output redacts nonce and opaque values.
 - Core Basic/Digest and `.netrc` resolution diagnostics no longer print
   usernames. Malformed Digest challenges preserve their source status: proxy
   challenges report 407, while origin challenges report 401.
@@ -718,7 +721,10 @@ behavior. An unlisted behavior has not been audited here.
   registry, accepted through CLI and RPC task creation, included in request
   option snapshots, and preserved by session serialization. The peer download
   session configures both `PiecePicker` and `BtPieceSelector` from the same
-  endgame threshold so selection and endgame reporting cannot diverge.
+  endgame threshold so selection and endgame reporting cannot diverge. Both
+  are also supported by the shared `changeGlobalOption` policy and update the
+  stored global defaults; the engine does not mutate already active task
+  snapshots for these settings.
 - **Compatibility impact:** these are additive Rust implementation settings;
   original aria2 does not expose this exact strategy set or threshold option.
   Invalid strategy strings fail download initialization with a configuration
@@ -877,7 +883,8 @@ behavior. An unlisted behavior has not been audited here.
 ## BitTorrent tracker announce diagnostics
 
 - **Logging behavior:** tracker announce logs for HTTP, UDP, and WebSocket use
-  only the scheme, host, and port. Request and response transport failures do
+  only the scheme, host, and port, including magnet-discovery announce
+  outcomes. Request and response transport failures do
   not log raw reqwest/WebSocket error text when it can echo the full request
   URL; they retain the failure category, HTTP status, or tracker rejection
   reason where available. Detailed announce results and tracker state continue
@@ -888,6 +895,19 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** `url_origin_for_logging` tests cover credentials, path,
   query, fragment, and invalid input. Focused tracker announce tests cover the
   affected HTTP, UDP, WebSocket, and stopped/completed lifecycle paths.
+
+## BitTorrent MSE key diagnostics
+
+- **Logging behavior:** `Debug` for `MseDhKeyExchange`, `MseDerivedKeys`,
+  `Arc4Cipher`, `Rc4State`, and `MseCryptoState` no longer exposes the DH
+  private key, derived RC4 keys, or cipher permutation state. Cipher method
+  and whether encryption is active remain visible.
+- **Compatibility impact:** diagnostics only; key generation, MSE handshake
+  state, and encrypted wire bytes are unchanged.
+- **Verification:** `cargo check -p aria2-protocol -p aria2-core`,
+  `cargo fmt --all -- --check`, and `git diff --check` passed for this change.
+  A dedicated MSE Debug redaction test has not been added or run in this audit
+  turn.
 
 ## BitTorrent DHT process configuration
 
@@ -1815,6 +1835,45 @@ behavior. An unlisted behavior has not been audited here.
   change policy, such as process-startup `interface`. Focused FFI regression
   tests cover both behaviors.
 
+## HTTP multi-mirror URI selector
+
+- **Configuration contract:** `uri-selector` accepts `inorder`, `feedback`,
+  or `adaptive`; its default is `feedback`. CLI, RPC task options, and session
+  option serialization preserve the configured value.
+- **Behavior and fix:** HTTP multi-mirror setup previously always constructed
+  `AdaptiveUriSelector`, silently ignoring the selected strategy. Setup now
+  constructs the matching selector and rejects an unsupported internal value.
+  This restores the documented option behavior without changing the strategy
+  algorithms themselves.
+- **Verification:** focused setup tests verify dispatch for all three values,
+  including the observable difference between ordered selection and feedback
+  skipping an already-used host. Upstream source selection in
+  `aria2_original/src/RequestGroupMan.cc` was checked; no live original-binary
+  differential run was available.
+
+## Protocol option propagation audit
+
+- **Initial task options:** the core contract iterates all 165 registered
+  initial request options and verifies config-file parsing, CLI parsing,
+  RPC-to-`DownloadOptions` conversion, typed task consumers, and session
+  serialization. A separate CLI contract verifies every registered option
+  has exactly one Clap long argument. A source-level cross-check of the 103
+  protocol/shared task options found a corresponding `load_cli_args` mapping
+  for each.
+- **Runtime updates:** the core contract iterates each supported
+  `changeOption` policy entry, validates it, and applies it to a request group.
+  RPC and C API task updates both enter `RequestGroupMan` policy; settings
+  accepted while active are queued and applied when a new command generation
+  starts, while immediate options update the live task state.
+- **Global updates:** RPC and C API both use the core global-change policy and
+  `runtime_commands_for_global_option_changes` projection. Global settings
+  without an engine command remain in `ConfigManager` for subsequent task or
+  process-owned reads. Core contract tests verify every listed global option
+  is registered and round-trips through configuration storage.
+- **Result:** no further missing protocol-option propagation was found in
+  these paths. This records source and contract-test coverage; it is not a
+  live original-aria2 binary comparison.
+
 ## HTTP(S) multi-mirror range resume
 
 - **Upstream format:** aria2 documents `.aria2` in-flight piece records as an
@@ -1836,6 +1895,11 @@ behavior. An unlisted behavior has not been audited here.
   not exercised. The project parser and writer use the documented native
   in-flight record layout, but this does not establish an end-to-end
   cross-binary interoperability result.
+- **Malformed checkpoint safety:** the native parser no longer reserves
+  in-flight record storage from the untrusted count field before reading those
+  records. A truncated file with a `u32::MAX` count now returns a parse error
+  without attempting a count-sized allocation; valid native checkpoint bytes
+  and resume behavior are unchanged. A focused regression covers this input.
 
 ## HTTP body decoder ownership
 

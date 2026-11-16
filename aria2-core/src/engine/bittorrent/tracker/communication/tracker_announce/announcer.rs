@@ -127,6 +127,10 @@ impl TrackerAnnouncer {
     /// Apply per-download proxy and timeout options to tracker transports.
     pub fn set_websocket_options(&mut self, options: &DownloadOptions) {
         self.websocket_options = options.clone();
+        self.set_timeouts(
+            Duration::from_secs(options.bt_tracker_timeout),
+            Duration::from_secs(options.bt_tracker_connect_timeout),
+        );
         self.http_clients.clear();
     }
 

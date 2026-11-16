@@ -50,6 +50,16 @@ const RUST_BITTORRENT_POLICY_EXTENSIONS: &[&str] = &[
     "bt-snubbed-timeout",
 ];
 
+const RUST_BITTORRENT_INITIAL_POLICY_EXTENSIONS: &[&str] = &[
+    "bt-piece-selection-strategy",
+    "bt-endgame-threshold",
+    "enable-utp",
+    "utp-listen-port",
+];
+
+const RUST_BITTORRENT_GLOBAL_POLICY_EXTENSIONS: &[&str] =
+    &["bt-piece-selection-strategy", "bt-endgame-threshold"];
+
 const RUST_DHT_POLICY_EXTENSIONS: &[&str] = &[
     "enable-dht",
     "enable-dht6",
@@ -141,6 +151,7 @@ fn assert_policy_matches_baseline(
 fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions() {
     let mut initial_extensions = vec!["bt-tracker-stopped-timeout"];
     initial_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_BITTORRENT_INITIAL_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
@@ -167,6 +178,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         "enable-public-trackers",
     ];
     global_extensions.extend_from_slice(RUST_DHT_GLOBAL_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_BITTORRENT_GLOBAL_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
@@ -180,6 +192,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     );
     let mut reserved_extensions = vec!["enable-public-trackers"];
     reserved_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_BITTORRENT_INITIAL_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);

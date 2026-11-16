@@ -705,9 +705,122 @@ Do not add pass-through engine clients around these public interfaces.
 
 ## Module audit
 
+### Finite audit scope and coverage
+
+This audit covers protocol execution and its configuration/lifecycle path in
+`aria2-protocol`, `aria2-core`, `aria2`, and `aria2-rpc`. It is not a general
+line-by-line audit of every workspace crate. Stop this audit when every row
+marked **Open** has a concrete module/contract checklist completed, its result
+recorded here or in `compatibility-status.md`, and focused validation recorded.
+Reopen a completed row only when a code change, regression, or new evidence
+touches it.
+
+| Area | Coverage | Remaining finite work |
+| --- | --- | --- |
+| Protocol routing and ownership | HTTP, FTP/FTPS, SFTP, BitTorrent, Metalink, and magnet routes are described above; module decisions are recorded below. | None for route ownership. |
+| Protocol-library public interfaces | Root exports are fixed to `http`, `ftp`, `bittorrent`, `metalink`, `sftp`, `socks`, `proxy`, `uri`, and `identity`. The last four are reviewed below. HTTP's fifteen, FTP's six, SFTP's six, Metalink's three, and BitTorrent's 13 public root modules (including their recursively exported public children) have ownership decisions and error/resource contracts recorded below. | None for protocol-library public interfaces. Private modules are excluded; completed groups close permanently unless touched by new evidence. |
+| Core execution and lifecycle | The six routes and all four cases are cross-checked in the finite matrix below. Existing implementation and focused-test locations are recorded per route. | No internal audit work remains. Run focused behavior suites when verification is requested; live original-aria2/server interoperability remains the separate external evidence gap. Reopen only after a code change, regression, or new evidence. |
+| Configuration propagation | **Covered** for protocol/task settings: all 165 initial request options are checked across config parsing, CLI parsing, RPC conversion, typed task state, and session serialization; all task runtime-policy entries are checked against typed consumers; all 103 protocol/shared CLI task options have a Clap argument and `load_cli_args` mapping. RPC and C API task changes converge on `RequestGroupMan`; global changes share core policy and the same engine-command projector. `uri-selector` now reaches HTTP multi-mirror assembly. | None for this row. Reopen only if option definitions, adapters, or these contract tests change. |
+| Bindings and packaging | C API process setup has a focused compatibility section. | Python/Node binding pass-through and feature/package surfaces are outside this protocol runtime audit; do not block this audit unless they expose protocol options or public protocol APIs. |
+| External interoperability | Upstream source/docs and focused fixtures are recorded per behavior. | Live original-aria2 cross-binary tests remain unavailable; this is a verification gap, not a reason to repeat completed source audits. |
+
+The audit is not reopened merely to reread already classified modules. An open
+row closes with source/caller evidence, a Keep/Narrow/Delete/Improve decision
+where applicable, and focused validation or an explicit external evidence gap.
+The protocol-library public-interface row has exactly nine root module groups;
+new private helpers do not expand that inventory. Feature-gated groups are
+audited with their feature enabled.
+
+#### Core execution lifecycle matrix
+
+Each cell below points to the owning path and existing focused regression
+coverage; it records audit coverage, not a claim that those tests ran in this
+turn. The four columns are the complete checklist for each route.
+
+| Route | Setup/protocol failure | Cancellation/shutdown | Retry/reconnect | Resource release/persistence |
+| --- | --- | --- | --- | --- |
+| HTTP/HTTPS | `engine/http/segment_downloader/downloader/tests` | `engine/http/concurrent_download/segment/cancel.rs`; `engine/http/download_command/lifecycle.rs` | `engine/http/segment_downloader/downloader/tests/retry_after.rs`; `engine/http/concurrent_download` retry paths | `engine/http/sequential_download/checkpoint_tests.rs`; `engine/http/concurrent_download/segment/resume.rs`; shared `engine/work_commit.rs` |
+| FTP/FTPS | `engine/ftp/download_command/tests/configuration.rs`; `tests/transfer.rs` | `engine/ftp/download_command/tests/lifecycle.rs` | `engine/ftp/download_command/attempt.rs`; `tests/lifecycle.rs` | `SequentialWorkCommitter` in `engine/work_runner`; FTP checkpoint and cleanup decisions in `compatibility-status.md`'s FTP sections |
+| SFTP | `engine/sftp/download_command/tests.rs` (host-key, protocol, and error classification) | `engine/sftp/download_command/execution.rs`; removal-interruptible retry case in `tests.rs` | `tests.rs` transient-network and total-attempt cases | resume-offset cases in `tests.rs`; explicit remote-handle close and synced local checkpoint path in the SFTP route above |
+| Metalink mirror/metadata children | `engine/metalink/download_command/execution/tests.rs` (mirror status and metadata parsing) | slow metadata pause case in the same test module; staged-file removal/halt semantics in `compatibility-status.md` → “Metalink parsed execution data” | 504 mirror and torrent-metaurl retry cases in the same test module | staged-file promotion and pause/resume/removal checkpoint cases in “Metalink parsed execution data” |
+| BitTorrent payload | `engine/bittorrent/peer` message validation; `engine/bittorrent/download/execute` piece validation/commit path | peer actors, WebSeed tasks, tracker stop, and piece-session shutdown paths in the BitTorrent route above | `engine/work_scheduler/tests.rs`; BitTorrent piece requeue and tracker retry paths | `engine/bittorrent/download/execute/piece_download/session/{piece_completion,lifecycle}.rs`; checkpoint persistence path above |
+| Magnet metadata discovery | `engine/bittorrent/magnet/download_command/tests/{discovery,metadata}.rs` | magnet command awaits nested payload shutdown; discovery actors and cancellation paths in `magnet/download_command.rs` | tracker/DHT source progression and metadata peer retry limits in `magnet/{download_command,metadata_exchange}.rs` | saved metadata/info-hash checks and restored metainfo snapshot in the BitTorrent route above; task-scoped DHT shutdown/persistence there |
+
+The matrix closes internal route/lifecycle auditing. The remaining gaps are
+external interoperability (live original-aria2 and remote FTP/FTPS/SFTP servers)
+and execution of the cited focused behavior suites when requested; neither
+requires repeating the completed module audit.
+
+HTTP's `http/mod.rs` has fifteen public child modules, all reviewed with
+source/caller evidence and ownership decisions below. Parsers and serializers
+return values or typed/string errors without owning sockets; `HttpResponseStream`
+owns its response body and dropping it cancels the read; CONNECT operates on a
+caller-owned stream; stateful body filters report parse, I/O, or protocol errors
+and own no external resources. The whole-buffer encoding helpers remain a
+separate public compatibility interface. Core remains responsible for cookie
+policy, proxy routing, task retries, and response lifecycle.
+
+FTP's `ftp/mod.rs` exports six child modules. The URI, listing, and proxy
+helpers are pure parsers/serializers; FTP control I/O is bounded and reports
+framing/transport failures; `FtpControlSession` operates on an injected stream;
+FTPS upgrades transfer caller-owned streams; the standalone `FtpDownload`
+owns its transfer loop and cancellation cleanup. The engine uses protocol FTP
+control-session, TLS, URI, and proxy primitives, while the standalone
+`FtpConnection`/`FtpDownload` remain independently public and have no engine
+callers. Their resume, completion, cleanup, and allocation contracts are
+recorded in `compatibility-status.md`. Live remote FTP/FTPS interoperability
+remains the explicit external evidence gap.
+
+SFTP's `sftp/mod.rs` exports six child modules. The engine call graph uses the
+protocol URI, SSH connection, SFTP session, file operations, and bounded
+download reader; packet codecs provide the shared wire implementation.
+`SftpPacket::decode` enforces the 16 MiB frame ceiling and exact packet
+consumption. Session and file-operation failures remain typed by layer, and
+remote handles require explicit asynchronous close because `Drop` cannot send
+SFTP requests. The standalone transfer interface remains public; upload and
+download close, resume, cancellation, and read-validation behavior are
+recorded below. Validation is feature-gated; live remote-server
+interoperability remains the explicit external evidence gap.
+
+Metalink's `metalink/mod.rs` exports three child modules. Core uses the XML
+document/model parser and resource classification during source expansion;
+selection, URL resolution, and ordering remain pure model operations. The
+standalone checksum verifier has no production workspace caller and remains a
+public library utility, while active engine verification uses core's shared
+checksum service. Parser failures are returned to the caller as `String`
+errors; the protocol parser owns no file handles, network requests, or task
+lifecycle. Metalink module ownership, parse-once expansion, and staged-output
+verification are recorded above and in `compatibility-status.md`.
+
+BitTorrent's `bittorrent/mod.rs` exports thirteen public root modules; their
+public interfaces and descendants are classified in this section. The
+extension modules own MSE handshake/crypto and PEX wire parsing; core consumes
+PEX candidates and retains peer admission. The public metadata-request tracker
+has no production workspace caller and remains a standalone utility whose
+caller coordinates `avail` and `add`. BEP 6 fast-set generation is a pure,
+deterministic helper; engine callers cap its requested set at ten. The
+protocol `piece::bitfield::Bitfield` is the shared compact representation used
+by core's availability tracker; core validates each peer bitfield against
+torrent geometry before applying it. These three module contracts, including
+MSE diagnostic redaction, are recorded in the decisions below.
+
 - **Keep** the protocol-library folders and their codecs, clients, parsers,
   and transport-specific state. They provide independently usable protocol
   behavior.
+- **Keep** the `uri` helpers as shared protocol-library primitives. FTP, SFTP,
+  magnet parsing, and other component-specific parsers consume the same
+  percent codec. The public contract preserves `+`, leaves malformed escapes
+  unchanged, and converts decoded non-UTF-8 bytes lossily; it does not apply
+  form-urlencoded semantics.
+- **Keep** `identity` as the protocol library's explicit standalone product
+  identity source. Core task defaults and BitTorrent peer identity consume
+  these constants; applications may override them through their own options.
+  `PACKAGE_VERSION` intentionally reports the protocol package version.
+- **Keep** the root `proxy` model as the owner of scheme, authority, default
+  port, and decoded credentials. It redacts credentials from `Debug` and
+  ignores path/query/fragment after the authority. HTTP, FTP, BitTorrent
+  metadata, and the SOCKS re-export consume this model; route selection and
+  network policy stay in core.
 - **Keep** `bittorrent::tracker::AnnounceList` in the protocol crate: it owns
   ordered announce tiers, event eligibility, and success/failure cursor
   transitions. Core `BtAnnounce` composes that state with download lifecycle
@@ -884,7 +997,9 @@ Do not add pass-through engine clients around these public interfaces.
   credential-bearing core and protocol values redacts usernames/passwords;
   proxy URL/configuration, FTP/SFTP URI, FTP options, and serialized
   FTP-proxy request and HTTP Digest response debug output follow the same
-  redaction rule.
+  redaction rule. HTTP request/response and parsed response-head `Debug`
+  output also omits headers and bodies, and reports only URL origin and
+  collection sizes; Digest challenge debug output redacts nonce/opaque values.
   Explicit credential accessors and the legacy `AuthConfig` Display behavior
   remain available to callers.
 - **Narrow** HTTP metadata authentication retry inputs into the named
@@ -1191,6 +1306,30 @@ Do not add pass-through engine clients around these public interfaces.
   `PeerWireSession`. This keeps TCP encryption and socket behavior together
   without duplicating frame decoding. Session tests cover handshake buffering,
   hybrid response hashes, and oversized frames.
+- **Keep** `bittorrent::extension` as protocol-owned MSE and extension-wire
+  code. `MseHandshake` composes DH key exchange and cipher state; core consumes
+  the resulting peer connection but owns encryption policy and connection
+  lifecycle. `PexHandler` parses/builds `ut_pex` payloads, while core filters
+  and admits returned peers. `UTMetadataRequestTracker` remains a documented
+  standalone utility without production workspace callers; its one-request
+  limit is exposed through `avail`/`request_piece`, and callers using `add`
+  must honor that capacity contract.
+- **Keep** `bittorrent::fast_set::compute_fast_set` as a deterministic BEP 6
+  calculation over peer address, torrent info-hash, and caller-supplied piece
+  count. The engine requests ten entries; invalid addresses and zero piece or
+  set counts return an empty set. IPv6 folding remains the documented Rust
+  extension to the original IPv4-only helper.
+- **Keep** `bittorrent::piece::bitfield::Bitfield` as compact protocol-shared
+  piece availability storage. Core uses it in peer tracking and piece
+  coordination; scheduling and ownership remain in core. Its `from_bytes`
+  constructor intentionally pads or truncates to the requested bit count,
+  while the peer message path first validates exact byte length against torrent
+  geometry before mutating session state.
+- **Improve** BitTorrent MSE diagnostics: DH key exchanges, derived MSE keys,
+  ARC4/RC4 state, and live MSE cipher state keep their public `Debug`
+  implementations but redact private key material and the secret-dependent
+  permutation state. Handshake framing, key derivation, and cipher output are
+  unchanged.
 - **Keep** `peer::incoming::IncomingHandshake` as the TCP plain/MSE handshake
   seam before torrent routing. MSE exposes the info-hash only after matching
   the obfuscated hash against registered routes; the selected route supplies
@@ -1661,3 +1800,29 @@ Do not add pass-through engine clients around these public interfaces.
   eligible candidates. Its private round-robin helper is called only after
   that empty-candidate check, so the helper's nonempty precondition panic is
   not reachable through the production entry point.
+- **Improve** native `ControlFile` checkpoint decoding by growing in-flight
+  records only as validated bytes are consumed. The persisted count is input,
+  so it must not control an eager allocation before record validation. Keep the
+  native layout and resume policy in the core filesystem module; HTTP and
+  BitTorrent callers continue to supply their own layout compatibility rules.
+- **Keep** session persistence split by caller contract: `session_serializer`
+  owns aria2 text-format entries and file I/O; `ActiveSessionManager` adapts
+  that format for CLI restore and shutdown; `AutoSaveCoordinator` schedules
+  engine session/control-file saves; and `SaveSessionCommand` performs the
+  explicit RPC save. Keep `session_persistence::SessionPersistence` as a
+  separate documented core-library JSON resume store. It has no production
+  workspace caller, but its public module and rustdoc examples make it a
+  supported standalone library surface; it must not be mistaken for or folded
+  into aria2's text session format without an API decision.
+- **Improve** HTTP multi-mirror selector assembly: the `uri-selector` option
+  is applied where `ConcurrentSegmentManager` and `MirrorCoordinator` are
+  constructed. `inorder`, `feedback`, and `adaptive` each construct their
+  corresponding strategy; unsupported internal values fail setup explicitly.
+  `RequestGroupMan` remains a scheduler and does not own a selector instance.
+- **Delete** `aria2/src/download_coordinator.rs`. The tracked file has no Rust
+  module declaration, path inclusion, exported module path, or production
+  caller, so it is not compiled and is not a supported library interface. Its
+  `restore_session` implementation only counts resumable entries (the source
+  itself marks restoration incomplete). The actual CLI restoration path is
+  `aria2/src/app/session.rs`, which reconstructs request groups through
+  `RequestGroupMan`; keep that implementation and its lifecycle semantics.

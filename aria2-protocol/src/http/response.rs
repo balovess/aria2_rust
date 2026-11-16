@@ -8,12 +8,24 @@ pub fn is_redirect_status(status_code: u16) -> bool {
     matches!(status_code, 300..=303 | 307 | 308)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpResponse {
     pub status_code: u16,
     pub status_text: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpResponse")
+            .field("status_code", &self.status_code)
+            .field("status_text", &self.status_text)
+            .field("header_count", &self.headers.len())
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl HttpResponse {
@@ -219,6 +231,33 @@ mod tests {
             parse_retry_after("Wed, 09 Jun 2021 10:18:14 GMT", 1_623_233_000),
             Some(std::time::Duration::from_secs(894))
         );
+    }
+
+    #[test]
+    fn response_debug_redacts_headers_and_body() {
+        let response = HttpResponse {
+            status_code: 200,
+            status_text: "OK".to_string(),
+            headers: vec![
+                (
+                    "set-cookie".to_string(),
+                    "session=cookie-secret".to_string(),
+                ),
+                (
+                    "authorization".to_string(),
+                    "Bearer header-secret".to_string(),
+                ),
+            ],
+            body: b"body-secret".to_vec(),
+        };
+
+        let debug = format!("{response:?}");
+        assert!(debug.contains("status_code: 200"));
+        assert!(debug.contains("header_count: 2"));
+        assert!(debug.contains("body_len: 11"));
+        for secret in ["cookie-secret", "header-secret", "body-secret"] {
+            assert!(!debug.contains(secret), "Debug leaked {secret}");
+        }
     }
 
     #[test]

@@ -198,7 +198,7 @@ pub enum AuthChallenge {
     Digest(DigestChallenge),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DigestChallenge {
     pub realm: String,
     pub nonce: String,
@@ -206,6 +206,20 @@ pub struct DigestChallenge {
     pub algorithm: String,
     pub opaque: String,
     pub stale: bool,
+}
+
+impl std::fmt::Debug for DigestChallenge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DigestChallenge")
+            .field("realm", &self.realm)
+            .field("nonce", &"<redacted>")
+            .field("qop", &self.qop)
+            .field("algorithm", &self.algorithm)
+            .field("opaque", &(!self.opaque.is_empty()).then_some("<redacted>"))
+            .field("stale", &self.stale)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +244,19 @@ mod tests {
         assert!(formatted.contains("<redacted>"));
         assert!(!formatted.contains("debug-user"));
         assert!(!formatted.contains("debug-secret"));
+    }
+
+    #[test]
+    fn parsed_digest_challenge_debug_redacts_nonce_and_opaque_values() {
+        let challenge = HttpAuth::parse_www_authenticate(
+            "Digest realm=example, nonce=private-nonce, qop=auth, opaque=private-opaque",
+        )
+        .unwrap();
+        let formatted = format!("{challenge:?}");
+
+        assert!(!formatted.contains("private-nonce"));
+        assert!(!formatted.contains("private-opaque"));
+        assert!(formatted.contains("<redacted>"));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use num_bigint_dig::BigUint;
 use num_traits::{Num, Zero};
+use std::fmt;
 
 /// MSE 768-bit prime from C++ aria2 MSEHandshake.cc.
 /// This is NOT RFC 3526; it is the original MSE spec prime.
@@ -43,10 +44,19 @@ pub const SHA1_LENGTH: usize = 20;
 
 /// MSE DH Key Exchange implementation matching C++ aria2.
 /// Uses the 768-bit MSE prime with generator 2.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MseDhKeyExchange {
     /// Internal DH key pair
     keypair: DhKeyPair,
+}
+
+impl fmt::Debug for MseDhKeyExchange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MseDhKeyExchange")
+            .field("keypair", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl MseDhKeyExchange {
@@ -91,7 +101,7 @@ impl Default for MseDhKeyExchange {
 }
 
 /// DH key pair with 768-bit MSE prime.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct DhKeyPair {
     /// Private key as big-endian bytes (variable length).
     private: Vec<u8>,

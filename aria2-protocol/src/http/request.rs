@@ -1,9 +1,24 @@
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
     pub headers: Option<Vec<(String, String)>>,
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field(
+                "url",
+                &crate::http::redirect::url_origin_for_logging(&self.url),
+            )
+            .field("header_count", &self.headers.as_ref().map_or(0, Vec::len))
+            .field("body_len", &self.body.as_ref().map_or(0, Vec::len))
+            .finish()
+    }
 }
 
 /// Failure to serialize invalid HTTP/1.1 request fields.
@@ -293,5 +308,28 @@ mod tests {
             .with_body(vec![0, 0xff, b'x'])
             .to_bytes();
         assert!(request.ends_with(&[0, 0xff, b'x']));
+    }
+
+    #[test]
+    fn request_debug_redacts_url_headers_and_body() {
+        let request =
+            HttpRequest::post("https://user:password@example.test/private?token=url-secret")
+                .with_header("Authorization", "Bearer header-secret")
+                .with_header("Cookie", "session=cookie-secret")
+                .with_body_str("body-secret");
+
+        let debug = format!("{request:?}");
+        assert!(debug.contains("https://example.test/"));
+        assert!(debug.contains("header_count: 2"));
+        assert!(debug.contains("body_len: 11"));
+        for secret in [
+            "password",
+            "url-secret",
+            "header-secret",
+            "cookie-secret",
+            "body-secret",
+        ] {
+            assert!(!debug.contains(secret), "Debug leaked {secret}");
+        }
     }
 }

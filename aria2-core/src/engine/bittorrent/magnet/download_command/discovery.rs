@@ -264,17 +264,24 @@ impl MagnetDownloadCommand {
                 {
                     Ok(response) if !response.peers.is_empty() => {
                         info!(
-                            tracker = %tracker_url,
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
                             peers = response.peers.len(),
                             "WebSocket tracker announce returned peers"
                         );
                         append_unique_tracker_peers(&mut discovered_peers, response.peers);
                     }
                     Ok(_) => {
-                        warn!(tracker = %tracker_url, "WebSocket tracker returned no TCP peers");
+                        warn!(
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
+                            "WebSocket tracker returned no TCP peers"
+                        );
                     }
                     Err(error) => {
-                        warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
+                        warn!(
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
+                            %error,
+                            "WebSocket tracker announce failed"
+                        );
                     }
                 }
                 if discovered_peers.len() >= MAX_MAGNET_TRACKER_PEERS {
@@ -302,7 +309,10 @@ impl MagnetDownloadCommand {
                 .await;
 
             let Some(result) = result else {
-                warn!(tracker = %tracker_url, "Magnet tracker announce failed");
+                warn!(
+                    tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
+                    "Magnet tracker announce failed"
+                );
                 continue;
             };
 
@@ -312,7 +322,7 @@ impl MagnetDownloadCommand {
                 .filter_map(|(ip, port)| tracker_peer_socket_addr(ip, *port))
                 .collect();
             info!(
-                tracker = %tracker_url,
+                tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
                 peers = peers.len(),
                 "Magnet tracker announce returned peers"
             );

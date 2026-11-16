@@ -989,9 +989,11 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     const EXPECTED_RUST_EXTENSIONS: &[&str] = &[
         "bt-incoming-peer-handshake-timeout",
         "bt-enable-web-seed",
+        "bt-endgame-threshold",
         "bt-max-upload-slots",
         "bt-optimistic-unchoke-interval",
         "bt-peer-blocklist",
+        "bt-piece-selection-strategy",
         "bt-snubbed-timeout",
         "bt-tracker-source",
         "bt-tracker-source-concurrency",
@@ -1090,7 +1092,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     );
     assert_eq!(
         registered.len(),
-        276,
+        278,
         "all-features registry inventory changed"
     );
 }

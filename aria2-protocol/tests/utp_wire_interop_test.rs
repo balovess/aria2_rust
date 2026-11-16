@@ -25,6 +25,46 @@ async fn readable(socket: &UtpSocket) {
         .unwrap();
 }
 
+async fn grow_window_to(
+    client: &mut UtpSocket,
+    peer: &UdpSocket,
+    conn_id: u16,
+    mut next_data_sequence: u16,
+    mut next_peer_sequence: u16,
+    target_window: u32,
+) -> (u16, u16) {
+    while client.connection_stats(conn_id).unwrap().congestion_window < target_window {
+        let window = client.connection_stats(conn_id).unwrap().congestion_window as usize;
+        let data = vec![0xa5; window];
+        let bytes_sent = client.send(conn_id, &data).unwrap();
+        assert_eq!(bytes_sent, data.len());
+
+        let mut bytes_received = 0;
+        let mut ack_nr = next_data_sequence.wrapping_sub(1);
+        while bytes_received < bytes_sent {
+            let packet = receive(peer).await;
+            assert_eq!(packet.packet_type().unwrap(), PacketType::StData);
+            assert_eq!(packet.seq_nr, next_data_sequence);
+            bytes_received += packet.payload.len();
+            ack_nr = packet.seq_nr;
+            next_data_sequence = next_data_sequence.wrapping_add(1);
+        }
+        assert_eq!(bytes_received, bytes_sent);
+
+        peer.send_to(
+            &UtpPacket::ack(conn_id, ack_nr, next_peer_sequence, 65536).to_bytes(),
+            client.local_addr(),
+        )
+        .await
+        .unwrap();
+        readable(client).await;
+        client.poll_recv().unwrap();
+        next_peer_sequence = next_peer_sequence.wrapping_add(1);
+    }
+
+    (next_data_sequence, next_peer_sequence)
+}
+
 #[test]
 fn packet_type_values_match_bep29_wire_assignments() {
     for (packet_type, wire_value) in [
@@ -248,12 +288,22 @@ async fn sender_applies_bep29_selective_ack_and_fast_retransmits_the_gap() {
     client.poll_recv().unwrap();
     assert_eq!(client.connection_stats(conn_id).unwrap().bytes_in_flight, 0);
 
+    let (first_data_sequence, next_peer_sequence) =
+        grow_window_to(&mut client, &peer, conn_id, 4, 72, 5600).await;
     assert_eq!(client.send(conn_id, &[0x22; 5600]).unwrap(), 5600);
-    for sequence in 4..=7 {
-        assert_eq!(receive(&peer).await.seq_nr, sequence);
+    for offset in 0..4 {
+        assert_eq!(
+            receive(&peer).await.seq_nr,
+            first_data_sequence.wrapping_add(offset)
+        );
     }
 
-    let mut selective_ack = UtpPacket::ack(conn_id, 3, 72, 65536);
+    let mut selective_ack = UtpPacket::ack(
+        conn_id,
+        first_data_sequence.wrapping_sub(1),
+        next_peer_sequence,
+        65536,
+    );
     selective_ack.extension = 1;
     selective_ack.payload = [0, 4, 0x07, 0, 0, 0].to_vec();
     peer.send_to(&selective_ack.to_bytes(), client.local_addr())
@@ -270,7 +320,7 @@ async fn sender_applies_bep29_selective_ack_and_fast_retransmits_the_gap() {
     let retransmission = receive(&peer).await;
     assert_eq!(retransmission.packet_type().unwrap(), PacketType::StData);
     assert_eq!(
-        retransmission.seq_nr, 4,
+        retransmission.seq_nr, first_data_sequence,
         "the missing packet is fast-retransmitted"
     );
     assert_eq!(retransmission.payload, vec![0x22; 1400]);
@@ -303,14 +353,25 @@ async fn sender_fast_retransmits_after_three_duplicate_cumulative_acks() {
     readable(&client).await;
     client.poll_recv().unwrap();
 
+    let (first_data_sequence, first_peer_sequence) =
+        grow_window_to(&mut client, &peer, conn_id, 4, 72, 5600).await;
     assert_eq!(client.send(conn_id, &[0x42; 5600]).unwrap(), 5600);
-    for sequence in 4..=7 {
-        assert_eq!(receive(&peer).await.seq_nr, sequence);
+    for offset in 0..4 {
+        assert_eq!(
+            receive(&peer).await.seq_nr,
+            first_data_sequence.wrapping_add(offset)
+        );
     }
 
-    for peer_sequence in 72..=74 {
+    for offset in 0..3 {
         peer.send_to(
-            &UtpPacket::ack(conn_id, 3, peer_sequence, 65536).to_bytes(),
+            &UtpPacket::ack(
+                conn_id,
+                first_data_sequence.wrapping_sub(1),
+                first_peer_sequence.wrapping_add(offset),
+                65536,
+            )
+            .to_bytes(),
             client.local_addr(),
         )
         .await
@@ -321,7 +382,7 @@ async fn sender_fast_retransmits_after_three_duplicate_cumulative_acks() {
 
     let retransmission = receive(&peer).await;
     assert_eq!(retransmission.packet_type().unwrap(), PacketType::StData);
-    assert_eq!(retransmission.seq_nr, 4);
+    assert_eq!(retransmission.seq_nr, first_data_sequence);
     assert_eq!(retransmission.payload, vec![0x42; 1400]);
 }
 

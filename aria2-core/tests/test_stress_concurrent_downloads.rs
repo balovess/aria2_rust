@@ -95,7 +95,7 @@ async fn test_stress_50_concurrent_downloads() {
 
     // Track memory after test
     let mem_after = get_memory_usage();
-    let mem_growth = mem_after - mem_before;
+    let mem_growth = mem_after.saturating_sub(mem_before);
 
     // Memory should not grow excessively (allow up to 30MB growth for 50 downloads)
     assert!(

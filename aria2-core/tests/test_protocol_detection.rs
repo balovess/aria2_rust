@@ -37,9 +37,8 @@ fn test_detect_magnet_link() {
 }
 
 #[test]
-fn test_detect_magnet_short_form() {
-    let d = detect("magnet?xt=urn:btih:test").unwrap();
-    assert_eq!(d.input_type, InputType::MagnetLink);
+fn test_detect_rejects_malformed_magnet_prefix() {
+    assert!(detect("magnet?xt=urn:btih:test").is_err());
 }
 
 #[test]

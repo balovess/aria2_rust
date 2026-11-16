@@ -10,6 +10,7 @@
 //! - Both encryptor and decryptor discard first 1024 bytes of RC4 keystream
 
 use sha1::{Digest, Sha1};
+use std::fmt;
 
 use super::mse_dh::{INFO_HASH_LENGTH, KEY_LENGTH, SHA1_LENGTH, VC_LENGTH};
 
@@ -49,11 +50,20 @@ impl MseCryptoMethod {
 
 /// ARC4 (Alleged RC4) stream cipher implementation for MSE.
 /// Symmetric: encryption and decryption are the same operation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Arc4Cipher {
     s: [u8; 256],
     i: u8,
     j: u8,
+}
+
+impl fmt::Debug for Arc4Cipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Arc4Cipher")
+            .field("state", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Arc4Cipher {
@@ -98,7 +108,7 @@ impl Arc4Cipher {
 ///
 /// All keys are full 20-byte SHA-1 digests, matching C++ which uses the
 /// complete `localCipherKey[20]` / `peerCipherKey[20]` as RC4 keys.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MseDerivedKeys {
     /// `SHA1("keyA" || S || infoHash)` — encryptor key for initiator,
     /// decryptor key for receiver.
@@ -112,6 +122,19 @@ pub struct MseDerivedKeys {
     pub req2: [u8; SHA1_LENGTH],
     /// `SHA1("req3" || S)` — XORed with req2 to conceal info_hash.
     pub req3: [u8; SHA1_LENGTH],
+}
+
+impl fmt::Debug for MseDerivedKeys {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MseDerivedKeys")
+            .field("key_a", &"[REDACTED]")
+            .field("key_b", &"[REDACTED]")
+            .field("req1", &"[REDACTED]")
+            .field("req2", &"[REDACTED]")
+            .field("req3", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl MseDerivedKeys {
@@ -204,11 +227,19 @@ fn sha1_digest_array(data: &[u8]) -> [u8; SHA1_LENGTH] {
 }
 
 /// RC4 cipher state with 1024-byte keystream discard (MSE spec section 5.2).
-#[derive(Debug)]
 pub struct Rc4State {
     s: [u8; 256],
     i: u8,
     j: u8,
+}
+
+impl fmt::Debug for Rc4State {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Rc4State")
+            .field("state", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Rc4State {
@@ -265,11 +296,20 @@ pub fn compute_vc(cipher: &mut Rc4State) -> [u8; VC_LENGTH] {
 
 /// Ongoing MSE crypto state used after the handshake completes.
 /// Provides encrypt/decrypt for the BT message stream.
-#[derive(Debug)]
 pub struct MseCryptoState {
     send_cipher: Option<Rc4State>,
     recv_cipher: Option<Rc4State>,
     method: MseCryptoMethod,
+}
+
+impl fmt::Debug for MseCryptoState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MseCryptoState")
+            .field("method", &self.method)
+            .field("encrypted", &self.is_encrypted())
+            .finish()
+    }
 }
 
 impl MseCryptoState {

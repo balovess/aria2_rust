@@ -3,6 +3,20 @@ use super::persistence::{CONTROL_HEADER_LEN, CONTROL_MAGIC, CONTROL_VERSION, FLA
 use super::{ControlFile, ControlFileInFlightPiece};
 use std::path::{Path, PathBuf};
 
+#[test]
+fn native_control_file_rejects_huge_truncated_in_flight_count_without_reserving_it() {
+    let mut data = vec![0, 1];
+    data.extend_from_slice(&0u32.to_be_bytes()); // extension flags
+    data.extend_from_slice(&0u32.to_be_bytes()); // info hash length
+    data.extend_from_slice(&1u32.to_be_bytes()); // piece length
+    data.extend_from_slice(&0u64.to_be_bytes()); // total length
+    data.extend_from_slice(&0u64.to_be_bytes()); // upload length
+    data.extend_from_slice(&0u32.to_be_bytes()); // bitfield length
+    data.extend_from_slice(&u32::MAX.to_be_bytes()); // in-flight count, no records
+
+    assert!(super::native::parse_native_control_file(Path::new("resume.aria2"), &data).is_err());
+}
+
 #[tokio::test]
 async fn original_aria2_bt_control_file_fixtures_restore_verified_progress() {
     const INFO_HASH: [u8; 20] = [

@@ -78,7 +78,7 @@ fn test_reject_unsupported_scheme() {
 #[test]
 fn test_is_magnet_link() {
     assert!(is_magnet_link("magnet:?xt=urn:btih:abc"));
-    assert!(is_magnet_link("magnet?xt=urn:btih:abc"));
+    assert!(!is_magnet_link("magnet?xt=urn:btih:abc"));
     assert!(!is_magnet_link("http://example.com"));
 }
 
