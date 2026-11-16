@@ -90,7 +90,7 @@ impl WebSeedHttpClient {
             piece_index,
             offset = piece_offset,
             length,
-            url = self.url,
+            url = %crate::http::redirect::url_origin_for_logging(&self.url),
             range = %range_header,
             "Web-seed HTTP Range request"
         );

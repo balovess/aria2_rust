@@ -50,7 +50,10 @@ impl WebSeedClient {
     }
 
     pub(crate) fn new_with_tls(base_url: &str, tls: &ClientTlsConfig) -> Result<Self, String> {
-        debug!(url = base_url, "Creating WebSeedClient");
+        debug!(
+            url = %aria2_protocol::http::redirect::url_origin_for_logging(base_url),
+            "Creating WebSeedClient"
+        );
         crate::http::client_pool::ensure_rustls_provider();
 
         // Build client with sensible defaults for large file downloads
@@ -81,7 +84,10 @@ impl WebSeedClient {
         stats: Arc<WebSeedStats>,
         tls: &ClientTlsConfig,
     ) -> Result<Self, String> {
-        debug!(url = base_url, "Creating WebSeedClient with shared stats");
+        debug!(
+            url = %aria2_protocol::http::redirect::url_origin_for_logging(base_url),
+            "Creating WebSeedClient with shared stats"
+        );
         crate::http::client_pool::ensure_rustls_provider();
         let timeout = Duration::from_secs(DEFAULT_WEB_SEED_TIMEOUT_SECS);
         let client = build_client(tls, None, timeout, &HttpProxyOptions::default())?;
@@ -268,7 +274,7 @@ impl WebSeedClient {
             piece_index,
             offset = piece_offset,
             length,
-            url = self.base_url,
+            url = %aria2_protocol::http::redirect::url_origin_for_logging(&self.base_url),
             "Web-seed HTTP Range request"
         );
         let received = self

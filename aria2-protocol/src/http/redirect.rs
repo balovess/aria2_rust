@@ -5,6 +5,25 @@ pub fn same_origin(left: &url::Url, right: &url::Url) -> bool {
     left.origin() == right.origin()
 }
 
+/// Return a URL suitable for diagnostics without credentials or resource
+/// identifiers that may contain signed data.
+///
+/// The result retains only the scheme, host, and port. Invalid URLs are
+/// replaced with a fixed marker so their original text cannot leak through a
+/// logging path.
+pub fn url_origin_for_logging(raw_url: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw_url) else {
+        return "<invalid URL>".to_string();
+    };
+
+    url.set_username("").ok();
+    url.set_password(None).ok();
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
 /// Identify standard and conventional application credentials in custom
 /// headers so they are dropped together on a cross-origin redirect.
 pub fn is_sensitive_header(name: &str) -> bool {
@@ -74,7 +93,21 @@ impl RedirectOriginScope {
 
 #[cfg(test)]
 mod tests {
-    use super::{RedirectOriginScope, is_sensitive_header, same_origin};
+    use super::{RedirectOriginScope, is_sensitive_header, same_origin, url_origin_for_logging};
+
+    #[test]
+    fn logging_url_keeps_only_origin_and_hides_invalid_input() {
+        assert_eq!(
+            url_origin_for_logging(
+                "https://user:password@example.test:8443/private/file?token=secret#fragment"
+            ),
+            "https://example.test:8443/"
+        );
+        assert_eq!(
+            url_origin_for_logging("not a URL with secret data"),
+            "<invalid URL>"
+        );
+    }
 
     #[test]
     fn origin_comparison_includes_scheme_host_and_effective_port() {

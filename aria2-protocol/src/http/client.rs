@@ -6,7 +6,7 @@ use reqwest::{Certificate, Client, ClientBuilder};
 use tracing::{debug, info};
 
 use crate::crypto::ensure_ring_provider;
-use crate::http::redirect::{RedirectOriginScope, is_sensitive_header};
+use crate::http::redirect::{RedirectOriginScope, is_sensitive_header, url_origin_for_logging};
 use crate::http::request::HttpRequest;
 use crate::http::response::{HttpResponse, is_redirect_status};
 
@@ -165,7 +165,7 @@ impl HttpClient {
         debug!(
             "Sending HTTP request: {} {}",
             request.method,
-            request_log_origin(&request.url)
+            url_origin_for_logging(&request.url)
         );
 
         let mut reqwest_request = match request.method.to_uppercase().as_str() {
@@ -336,21 +336,6 @@ impl HttpClient {
     pub fn options_ref(&self) -> &HttpClientOptions {
         &self.options
     }
-}
-
-fn request_log_origin(raw_url: &str) -> String {
-    let Ok(mut url) = url::Url::parse(raw_url) else {
-        return "<invalid URL>".to_string();
-    };
-
-    // Paths and query parameters can contain signed download links or other
-    // credentials. Keep only the origin in diagnostics.
-    url.set_username("").ok();
-    url.set_password(None).ok();
-    url.set_path("/");
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
 }
 
 fn redirect_referer(current: &url::Url, target: &url::Url) -> Option<String> {

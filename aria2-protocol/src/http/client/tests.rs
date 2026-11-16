@@ -3,17 +3,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 #[test]
-fn request_diagnostics_redact_userinfo_path_query_and_fragment() {
-    assert_eq!(
-        super::request_log_origin(
-            "https://alice:secret@example.test/private/token?signature=secret#fragment"
-        ),
-        "https://example.test/"
-    );
-    assert_eq!(super::request_log_origin("not a URL"), "<invalid URL>");
-}
-
-#[test]
 fn default_options_do_not_advertise_gzip() {
     assert!(!HttpClientOptions::default().accept_gzip);
 }

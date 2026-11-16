@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tracing::{debug, warn};
 
-use super::client::WebSeedClient;
+use super::client::{WebSeedClient, WebSeedError};
 use super::stats::WebSeedStats;
 use super::uri_state::{UriProbeAdmission, WebSeedUriState};
 use crate::engine::http::auth;
@@ -276,7 +276,7 @@ impl WebSeedManager {
             if !client.is_available() || !client.can_request(piece_index) {
                 debug!(
                     index = i,
-                    url = client.url(),
+                    url = %aria2_protocol::http::redirect::url_origin_for_logging(client.url()),
                     "Skipping unavailable or busy web-seed"
                 );
                 continue;
@@ -313,7 +313,7 @@ impl WebSeedManager {
                     debug!(
                         piece_index,
                         seed_index = i,
-                        url = client.url(),
+                        url = %aria2_protocol::http::redirect::url_origin_for_logging(client.url()),
                         size = data.len(),
                         "Piece downloaded from web-seed"
                     );
@@ -326,8 +326,9 @@ impl WebSeedManager {
                     warn!(
                         piece_index,
                         seed_index = i,
-                        url = client.url(),
-                        error = %e,
+                        url = %aria2_protocol::http::redirect::url_origin_for_logging(client.url()),
+                        error_kind = web_seed_error_kind(&e),
+                        http_status = web_seed_error_status(&e),
                         "Web-seed download failed, trying next"
                     );
                     last_error = format!("seed[{}]={}: {}", i, client.url(), e);
@@ -371,7 +372,7 @@ impl WebSeedManager {
             if !client.is_available() {
                 debug!(
                     index = i,
-                    url = client.url(),
+                    url = %aria2_protocol::http::redirect::url_origin_for_logging(client.url()),
                     "Skipping unavailable web-seed"
                 );
                 continue;
@@ -408,7 +409,7 @@ impl WebSeedManager {
                     debug!(
                         piece_index,
                         seed_index = i,
-                        url = client.url(),
+                        url = %aria2_protocol::http::redirect::url_origin_for_logging(client.url()),
                         size = data.len(),
                         "Piece downloaded from web-seed"
                     );
@@ -421,8 +422,9 @@ impl WebSeedManager {
                     warn!(
                         piece_index,
                         seed_index = i,
-                        url = client.url(),
-                        error = %e,
+                        url = %aria2_protocol::http::redirect::url_origin_for_logging(client.url()),
+                        error_kind = web_seed_error_kind(&e),
+                        http_status = web_seed_error_status(&e),
                         "Web-seed download failed, trying next"
                     );
                     last_error = format!("seed[{}]={}: {}", i, client.url(), e);
@@ -457,5 +459,19 @@ impl WebSeedManager {
     /// Get reference to the underlying web-seed clients.
     pub fn clients(&self) -> &[WebSeedClient] {
         &self.clients
+    }
+}
+
+fn web_seed_error_kind(error: &WebSeedError) -> &'static str {
+    match error {
+        WebSeedError::HttpStatus(_) => "http_status",
+        WebSeedError::Failure(_) => "request_failure",
+    }
+}
+
+fn web_seed_error_status(error: &WebSeedError) -> Option<u16> {
+    match error {
+        WebSeedError::HttpStatus(status) => Some(*status),
+        WebSeedError::Failure(_) => None,
     }
 }

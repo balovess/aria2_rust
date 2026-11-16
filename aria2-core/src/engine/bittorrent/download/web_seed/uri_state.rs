@@ -82,7 +82,7 @@ impl WebSeedUriState {
             state.probed.remove(uri);
             state.unavailable.insert(uri.to_string());
             warn!(
-                url = uri,
+                url = %aria2_protocol::http::redirect::url_origin_for_logging(uri),
                 "Web-seed returned HTTP 404; skipping it until URI configuration changes"
             );
         }
