@@ -35,43 +35,6 @@ fn parse_piece_selection_strategy(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn piece_selection_options_configure_picker_and_selector_consistently() {
-        let strategy = parse_piece_selection_strategy("sequential").unwrap();
-        let mut picker = PiecePicker::new(4);
-        let selector_config = configure_piece_selection(&mut picker, strategy, 2);
-        picker.set_frequencies_from_peers(&[3, 1, 2, 4]);
-
-        assert_eq!(picker.pick_next(), Some(0));
-        assert!(!picker.endgame_active());
-        assert_eq!(selector_config.endgame_threshold, 2);
-
-        picker.mark_completed(0);
-        picker.mark_completed(1);
-        assert!(picker.endgame_active());
-    }
-
-    #[test]
-    fn zero_endgame_threshold_disables_endgame() {
-        let mut picker = PiecePicker::new(1);
-        let selector_config =
-            configure_piece_selection(&mut picker, PieceSelectionStrategy::RarestFirst, 0);
-        picker.mark_in_progress(0, true);
-
-        assert_eq!(selector_config.endgame_threshold, 0);
-        assert!(!picker.endgame_active());
-    }
-
-    #[test]
-    fn piece_selection_strategy_rejects_unknown_values() {
-        assert!(parse_piece_selection_strategy("unknown").is_err());
-    }
-}
-
 fn configure_piece_selection(
     picker: &mut PiecePicker,
     strategy: PieceSelectionStrategy,
@@ -540,5 +503,42 @@ impl<'a> PieceDownloadSession<'a> {
             stop_timeout,
             in_flight_pieces,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piece_selection_options_configure_picker_and_selector_consistently() {
+        let strategy = parse_piece_selection_strategy("sequential").unwrap();
+        let mut picker = PiecePicker::new(4);
+        let selector_config = configure_piece_selection(&mut picker, strategy, 2);
+        picker.set_frequencies_from_peers(&[3, 1, 2, 4]);
+
+        assert_eq!(picker.pick_next(), Some(0));
+        assert!(!picker.endgame_active());
+        assert_eq!(selector_config.endgame_threshold, 2);
+
+        picker.mark_completed(0);
+        picker.mark_completed(1);
+        assert!(picker.endgame_active());
+    }
+
+    #[test]
+    fn zero_endgame_threshold_disables_endgame() {
+        let mut picker = PiecePicker::new(1);
+        let selector_config =
+            configure_piece_selection(&mut picker, PieceSelectionStrategy::RarestFirst, 0);
+        picker.mark_in_progress(0, true);
+
+        assert_eq!(selector_config.endgame_threshold, 0);
+        assert!(!picker.endgame_active());
+    }
+
+    #[test]
+    fn piece_selection_strategy_rejects_unknown_values() {
+        assert!(parse_piece_selection_strategy("unknown").is_err());
     }
 }

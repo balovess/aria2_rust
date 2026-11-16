@@ -38,7 +38,11 @@ impl TrackerAnnouncer {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
+                warn!(
+                    tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                    error_kind = ?error.kind,
+                    "WebSocket tracker announce failed"
+                );
                 self.last_failure_kind = Some(error.kind);
                 self.announce.announce_failure();
                 return None;

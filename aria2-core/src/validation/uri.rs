@@ -73,21 +73,6 @@ pub fn is_magnet_link(uri: &str) -> bool {
     t.starts_with("magnet:?")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{is_magnet_link, validate};
-
-    #[test]
-    fn magnet_requires_colon_and_query_delimiter() {
-        assert!(is_magnet_link("magnet:?xt=urn:btih:hash"));
-        assert!(is_magnet_link("MAGNET:?xt=urn:btih:hash"));
-        assert!(!is_magnet_link("magnet?xt=urn:btih:hash"));
-        assert!(validate("magnet:?xt=urn:btih:hash").is_ok());
-        assert!(validate("MAGNET:?xt=urn:btih:hash").is_ok());
-        assert!(validate("magnet?xt=urn:btih:hash").is_err());
-    }
-}
-
 pub fn is_torrent_file(path: &str) -> bool {
     path.trim().ends_with(".torrent")
 }
@@ -180,4 +165,19 @@ fn is_windows_reserved_name(name: &str) -> bool {
             && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
             && bytes[3].is_ascii_digit()
             && bytes[3] != b'0')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_magnet_link, validate};
+
+    #[test]
+    fn magnet_requires_colon_and_query_delimiter() {
+        assert!(is_magnet_link("magnet:?xt=urn:btih:hash"));
+        assert!(is_magnet_link("MAGNET:?xt=urn:btih:hash"));
+        assert!(!is_magnet_link("magnet?xt=urn:btih:hash"));
+        assert!(validate("magnet:?xt=urn:btih:hash").is_ok());
+        assert!(validate("MAGNET:?xt=urn:btih:hash").is_ok());
+        assert!(validate("magnet?xt=urn:btih:hash").is_err());
+    }
 }

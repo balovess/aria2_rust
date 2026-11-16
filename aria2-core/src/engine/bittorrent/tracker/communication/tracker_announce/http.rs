@@ -32,10 +32,10 @@ fn ensure_tracker_response_size(size: usize) -> Result<(), TrackerBodyReadError>
 async fn read_tracker_response_body(
     mut response: reqwest::Response,
 ) -> Result<Vec<u8>, TrackerBodyReadError> {
-    if let Some(size) = response.content_length() {
-        if size > MAX_TRACKER_HTTP_RESPONSE_BYTES as u64 {
-            return Err(TrackerBodyReadError::TooLarge);
-        }
+    if let Some(size) = response.content_length()
+        && size > MAX_TRACKER_HTTP_RESPONSE_BYTES as u64
+    {
+        return Err(TrackerBodyReadError::TooLarge);
     }
 
     let capacity = response
@@ -82,7 +82,8 @@ impl TrackerAnnouncer {
 
         debug!(
             "[BT] Announcing to HTTP tracker {} (event={:?})",
-            tracker_url, event
+            aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+            event
         );
 
         // Send HTTP request
@@ -113,7 +114,11 @@ impl TrackerAnnouncer {
                 {
                     Ok(address) => address,
                     Err(error) => {
-                        warn!(tracker = %tracker_url, %error, "HTTP tracker has no compatible outbound source");
+                        warn!(
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                            %error,
+                            "HTTP tracker has no compatible outbound source"
+                        );
                         self.last_failure_kind = Some(TrackerFailureKind::Network);
                         self.announce.announce_failure();
                         return None;
@@ -122,7 +127,10 @@ impl TrackerAnnouncer {
             }
             None if self.outbound_network_policy.is_direct() => None,
             None => {
-                warn!(tracker = %tracker_url, "HTTP tracker URL has no host");
+                warn!(
+                    tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                    "HTTP tracker URL has no host"
+                );
                 self.last_failure_kind = Some(TrackerFailureKind::Network);
                 self.announce.announce_failure();
                 return None;
@@ -148,7 +156,11 @@ impl TrackerAnnouncer {
             ) {
                 Ok(client) => client,
                 Err(error) => {
-                    warn!(tracker = %tracker_url, %error, "Failed to build HTTP tracker client");
+                    warn!(
+                        tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                        %error,
+                        "Failed to build HTTP tracker client"
+                    );
                     self.last_failure_kind = Some(TrackerFailureKind::Network);
                     self.announce.announce_failure();
                     return None;
@@ -163,7 +175,7 @@ impl TrackerAnnouncer {
                 if !resp.status().is_success() {
                     warn!(
                         "[BT] HTTP tracker {} returned status {}",
-                        tracker_url,
+                        aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
                         resp.status()
                     );
                     self.last_failure_kind = Some(
@@ -189,7 +201,13 @@ impl TrackerAnnouncer {
                                     let reason = tracker_resp
                                         .failure_reason
                                         .unwrap_or_else(|| "tracker failure".to_string());
-                                    warn!("[BT] HTTP tracker {} failure: {}", tracker_url, reason);
+                                    warn!(
+                                        "[BT] HTTP tracker {} failure: {}",
+                                        aria2_protocol::http::redirect::url_origin_for_logging(
+                                            tracker_url
+                                        ),
+                                        reason
+                                    );
                                     self.last_failure_kind =
                                         Some(TrackerFailureKind::TrackerRejected);
                                     self.announce.announce_failure();
@@ -227,7 +245,10 @@ impl TrackerAnnouncer {
                                     Err(e) => {
                                         warn!(
                                             "[BT] HTTP tracker {} response processing failed: {}",
-                                            tracker_url, e
+                                            aria2_protocol::http::redirect::url_origin_for_logging(
+                                                tracker_url
+                                            ),
+                                            e
                                         );
                                         self.last_failure_kind =
                                             Some(TrackerFailureKind::MalformedResponse);
@@ -239,7 +260,10 @@ impl TrackerAnnouncer {
                             Err(e) => {
                                 warn!(
                                     "[BT] HTTP tracker {} response parse failed: {}",
-                                    tracker_url, e
+                                    aria2_protocol::http::redirect::url_origin_for_logging(
+                                        tracker_url
+                                    ),
+                                    e
                                 );
                                 self.last_failure_kind =
                                     Some(TrackerFailureKind::MalformedResponse);
@@ -249,7 +273,19 @@ impl TrackerAnnouncer {
                         }
                     }
                     Err(e) => {
-                        warn!("[BT] HTTP tracker {} body read failed: {}", tracker_url, e);
+                        let error_kind = match &e {
+                            TrackerBodyReadError::TooLarge => "response_too_large",
+                            TrackerBodyReadError::SizeOverflow => "response_size_overflow",
+                            TrackerBodyReadError::Transport(error) if error.is_timeout() => {
+                                "timeout"
+                            }
+                            TrackerBodyReadError::Transport(_) => "network",
+                        };
+                        warn!(
+                            "[BT] HTTP tracker {} body read failed ({})",
+                            aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                            error_kind
+                        );
                         self.last_failure_kind = Some(match e {
                             TrackerBodyReadError::TooLarge | TrackerBodyReadError::SizeOverflow => {
                                 TrackerFailureKind::MalformedResponse
@@ -265,8 +301,13 @@ impl TrackerAnnouncer {
                 }
             }
             Err(e) => {
-                warn!("[BT] HTTP tracker {} request failed: {}", tracker_url, e);
-                self.last_failure_kind = Some(if e.is_timeout() {
+                let timed_out = e.is_timeout();
+                warn!(
+                    "[BT] HTTP tracker {} request failed ({})",
+                    aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                    if timed_out { "timeout" } else { "network" }
+                );
+                self.last_failure_kind = Some(if timed_out {
                     TrackerFailureKind::Timeout
                 } else {
                     TrackerFailureKind::Network

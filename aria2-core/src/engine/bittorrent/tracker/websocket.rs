@@ -128,7 +128,7 @@ pub(crate) async fn announce_with_policy(
     .await
     .map_err(classify_websocket_announce_error)?;
     debug!(
-        tracker = %tracker_url,
+        tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
         peers = response.peers.len(),
         "WebSocket tracker announce completed"
     );

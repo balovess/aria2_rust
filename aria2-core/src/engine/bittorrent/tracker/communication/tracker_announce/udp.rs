@@ -26,7 +26,11 @@ impl TrackerAnnouncer {
                     addr
                 }
                 Err(error) => {
-                    warn!(tracker = %tracker_url, %error, "Failed to resolve UDP tracker using the outbound network policy");
+                    warn!(
+                        tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                        %error,
+                        "Failed to resolve UDP tracker using the outbound network policy"
+                    );
                     self.last_failure_kind = Some(TrackerFailureKind::Network);
                     self.announce.announce_failure();
                     return None;
@@ -59,7 +63,9 @@ impl TrackerAnnouncer {
 
         debug!(
             "[BT] Announcing to UDP tracker {} (event={:?}, udp_event={})",
-            tracker_url, event, udp_event
+            aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+            event,
+            udp_event
         );
 
         let response = match self
@@ -83,7 +89,11 @@ impl TrackerAnnouncer {
         {
             Ok(response) => response,
             Err(error) => {
-                warn!(tracker = %tracker_url, %error, "UDP tracker announce failed");
+                warn!(
+                    tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                    %error,
+                    "UDP tracker announce failed"
+                );
                 self.last_failure_kind = Some(match error {
                     UdpError::TrackerError => TrackerFailureKind::TrackerRejected,
                     UdpError::MalformedResponse => TrackerFailureKind::MalformedResponse,

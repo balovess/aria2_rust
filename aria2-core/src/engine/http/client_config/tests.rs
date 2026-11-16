@@ -84,8 +84,10 @@ async fn proxy_request_routing_uses_exact_no_proxy_hostname_matching() {
 
 #[test]
 fn download_connect_timeout_uses_the_request_option() {
-    let mut options = DownloadOptions::default();
-    options.connect_timeout = Some(47);
+    let options = DownloadOptions {
+        connect_timeout: Some(47),
+        ..DownloadOptions::default()
+    };
     assert_eq!(http_connect_timeout(&options), Duration::from_secs(47));
 }
 

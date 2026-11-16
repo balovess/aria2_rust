@@ -153,11 +153,13 @@ async fn stopped_announce_respects_total_shutdown_budget() {
     .await;
     assert!(result.is_ok(), "stopped announce exceeded shutdown budget");
     assert!(!announcer.stopped_sent);
-    let snapshot = shared.read().expect("tracker runtime snapshot lock");
-    assert_eq!(snapshot.in_flight, 0);
-    assert_eq!(snapshot.trackers.len(), 1);
-    assert_eq!(snapshot.trackers[0].in_flight, 0);
-    assert_ne!(snapshot.trackers[0].status, "announcing");
+    {
+        let snapshot = shared.read().expect("tracker runtime snapshot lock");
+        assert_eq!(snapshot.in_flight, 0);
+        assert_eq!(snapshot.trackers.len(), 1);
+        assert_eq!(snapshot.trackers[0].in_flight, 0);
+        assert_ne!(snapshot.trackers[0].status, "announcing");
+    }
 
     server.await.expect("tracker test server should exit");
 }

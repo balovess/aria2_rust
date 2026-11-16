@@ -51,6 +51,9 @@ impl Drop for ActiveRequestGuard {
     }
 }
 
+type ObservedRange = (usize, String, usize, usize, u16);
+type InvalidRange = (usize, String, Option<String>);
+
 #[derive(Clone)]
 struct JitterStats {
     active: Arc<AtomicUsize>,
@@ -61,8 +64,8 @@ struct JitterStats {
     proxy_errors: Arc<AtomicUsize>,
     capacity_rejections_after_final_recovery: Arc<AtomicUsize>,
     release_successes: Arc<tokio::sync::watch::Sender<bool>>,
-    ranges: Arc<std::sync::Mutex<Vec<(usize, String, usize, usize, u16)>>>,
-    invalid_ranges: Arc<std::sync::Mutex<Vec<(usize, String, Option<String>)>>>,
+    ranges: Arc<std::sync::Mutex<Vec<ObservedRange>>>,
+    invalid_ranges: Arc<std::sync::Mutex<Vec<InvalidRange>>>,
 }
 
 impl Default for JitterStats {

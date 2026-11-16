@@ -874,6 +874,21 @@ behavior. An unlisted behavior has not been audited here.
   serviceable while initial public announces are pending. External tracker
   interoperability is not relevant to this local cancellation-state contract.
 
+## BitTorrent tracker announce diagnostics
+
+- **Logging behavior:** tracker announce logs for HTTP, UDP, and WebSocket use
+  only the scheme, host, and port. Request and response transport failures do
+  not log raw reqwest/WebSocket error text when it can echo the full request
+  URL; they retain the failure category, HTTP status, or tracker rejection
+  reason where available. Detailed announce results and tracker state continue
+  to use the original tracker URL.
+- **Compatibility impact:** this changes diagnostic text only. Announce
+  selection, returned result URLs, tracker state keys, failover, and failure
+  classification are unchanged.
+- **Verification:** `url_origin_for_logging` tests cover credentials, path,
+  query, fragment, and invalid input. Focused tracker announce tests cover the
+  affected HTTP, UDP, WebSocket, and stopped/completed lifecycle paths.
+
 ## BitTorrent DHT process configuration
 
 - **Behavior:** the shared IPv4/IPv6 DHT engines take their listen, bootstrap,
@@ -1176,6 +1191,9 @@ behavior. An unlisted behavior has not been audited here.
   HTTP/HTTPS/all proxy selection, credentials, and `no-proxy` reach live
   WebSeed clients through the task's `DownloadOptions`. Cookie-jar integration
   and HTTP challenge retries are not yet wired into WebSeed requests.
+  WebSeed tracing now records only the URL origin; failure logs retain the
+  error category and HTTP status without the raw error text. Errors returned to
+  callers by `WebSeedManager` keep their existing detailed text.
 - **Verification:** protocol loopback tests cover range/header construction,
   partial and full-content responses, status reporting, oversized bodies, and
   cross-origin removal of Authorization, Cookie, and sensitive custom headers

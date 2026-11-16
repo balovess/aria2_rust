@@ -149,8 +149,12 @@ impl PieceDownloadSession<'_> {
     ) -> Result<bool> {
         let web_seed_data = match result {
             Ok(data) => data,
-            Err(error) => {
-                tracing::warn!(piece_index, %error, "WebSeed piece request failed");
+            Err(_) => {
+                tracing::warn!(
+                    piece_index,
+                    error_kind = "request_failure",
+                    "WebSeed piece request failed"
+                );
                 self.piece_picker.mark_reserved(piece_index, false);
                 return Ok(false);
             }
