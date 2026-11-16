@@ -213,10 +213,16 @@ behavior. An unlisted behavior has not been audited here.
   `bt-tracker-connect-timeout`; the WebSocket handshake and announce exchange
   use `bt-tracker-timeout`. Rustls only negotiates TLS 1.2 or newer, so a
   configured TLS 1.1 minimum is enforced as TLS 1.2.
+- **Response resource bound:** `announce_over_stream_with_connector` passes no
+  explicit WebSocket config, so the locked Tungstenite 0.30.0 defaults apply:
+  64 MiB per complete message and 16 MiB per frame. This bounds the text/binary
+  response copied into the JSON decoder, but the bound currently follows the
+  dependency default rather than a protocol-owned constant.
 - **Verification:** a local WSS tracker test verifies task-specific CA
   propagation. Public tracker interoperability, mutual-TLS identity selection,
   and TLS-version negotiation have not been externally exercised. A local
-  plain-WebSocket fixture verifies that unused TLS file paths are not loaded.
+  plain-WebSocket fixture verifies that unused TLS file paths are not loaded;
+  WebSocket size-limit behavior has no dedicated regression test.
 
 ## BitTorrent IPv6 tracker peer list compatibility
 
@@ -621,6 +627,12 @@ behavior. An unlisted behavior has not been audited here.
   with an 8 MiB cap before bencode parsing. Local metainfo is parsed from the
   input buffer already supplied by its caller. The shared decoder retains the
   50-level nesting guard to prevent recursion-driven stack exhaustion.
+- **Peer transport ownership:** protocol `PeerConnection` frames TCP peer
+  messages, and `PeerWireSession` frames messages over an injected transport
+  used by the engine's uTP adapter. Both use the same 64 MiB frame-length cap.
+  Core validates negotiated BEP 9 metadata size as nonzero and at most 8 MiB
+  before constructing the protocol's public `MetadataCollector`; direct users
+  of that collector remain responsible for validating their own input size.
 - **Legacy integer-field floats:** original aria2 accepts numeric text such as
   `i+343243.342E-1333e` in an integer field and decodes it as zero. The Rust
   decoder now preserves this narrow behavior and still rejects unrelated bad
@@ -632,6 +644,48 @@ behavior. An unlisted behavior has not been audited here.
   original aria2 has no matching cap in the inspected path. Parser tests cover
   large declared lengths, large containers, and the nesting boundary. No live
   original-binary differential was run for oversized metainfo or tracker data.
+
+## BitTorrent uTP LEDBAT congestion control
+
+- **Implementation path:** `UtpConnection::send_data` limits outstanding data
+  by the controller window and peer receive window. ACK processing applies
+  RFC 6817's congestion-avoidance formula with `MSS / cwnd` normalization and
+  caps growth at the pre-ACK flight size plus one MSS. The current-delay
+  filter is the RFC-permitted null filter. Base delay is the minimum across
+  ten rolling one-minute minima, including empty windows during idle periods.
+  Loss halves the window; retransmission timeout reduces it to one MSS, while
+  the retransmission scheduler applies exponential backoff.
+- **Remaining differences:** `GAIN` remains 0.5 (RFC permits values up to 1),
+  and the implementation retains its 1000-MSS maximum window. Loss reduction
+  is limited per received-packet handling batch, not explicitly guarded once
+  per RTT. The public `is_slow_start()` accessor remains, but returns false:
+  RFC 6817 allows conservative implementations to omit slow start. See
+  [RFC 6817, Sections 2.4.2, 2.5, and 3](https://www.rfc-editor.org/rfc/rfc6817).
+- **Constructor bounds:** `with_mss(0)` normalizes to 1 byte; large MSS values
+  are capped so the 1000-packet maximum window remains representable. A zero
+  target delay normalizes to 1 microsecond, and very large durations saturate
+  at the largest representable microsecond value.
+- **Verification:** 119 uTP unit tests pass. A deterministic offline model
+  covers an uncontended path, persistent and bursty cross traffic, a capacity
+  reduction, and a base-delay increase. It models one ACK per MSS-sized
+  segment in fixed 100 ms RTT rounds, a 200 ms queue limit, one loss signal
+  per overflowing RTT, and a null current-delay filter. Before the correction,
+  the legacy controller and corrected implementation produced these
+  goodput/loss-round results:
+
+  | Scenario | Before -> corrected goodput/RTT | Before -> corrected loss RTTs |
+  |---|---:|---:|
+  | Uncontended | 99,130 -> 88,276 bytes | 338 -> 0 |
+  | Persistent 70% cross traffic | 29,864 -> 29,062 bytes | 340 -> 0 |
+  | 70% cross-traffic burst | 75,796 -> 60,081 bytes | 338 -> 2 |
+  | Capacity halves mid-run | 74,130 -> 62,536 bytes | 340 -> 2 |
+  | Path base delay rises by 20 ms | 99,710 -> 96,092 bytes | 1,024 -> 0 |
+
+  The checked-in simulation now asserts exact metric equality between the
+  production controller and an independent RFC control-law reference for all
+  five traces. It is a deterministic model, not a live network result: fixed
+  RTT, cross-traffic service, queue policy, and ACK timing are assumptions.
+  No live uTP interoperability or congestion-fairness run was performed.
 
 ## BitTorrent uTP socket options
 

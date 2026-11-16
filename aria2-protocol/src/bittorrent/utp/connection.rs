@@ -33,6 +33,13 @@ pub enum ConnectionState {
     TimeWait,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RetransmitEvent {
+    None,
+    Loss,
+    Timeout,
+}
+
 /// Errors that can occur during uTP connection operations
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionError {

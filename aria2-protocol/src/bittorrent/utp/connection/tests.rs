@@ -103,7 +103,9 @@ fn send_window_tracks_ledbat_ack_growth_and_timeout_loss() {
     assert_eq!(conn.send_data(&vec![0x44; 1400]).unwrap().len(), 1);
 
     let before_loss = conn.congestion_window();
-    let retransmission = conn.retransmit_packet(3, true).unwrap();
+    let retransmission = conn
+        .retransmit_packet(3, super::RetransmitEvent::Loss)
+        .unwrap();
     assert_eq!(retransmission.seq_nr, 3);
     assert!(conn.congestion_window() < before_loss);
     assert_eq!(conn.bytes_in_flight(), 2800);
@@ -136,7 +138,8 @@ fn connection_rtt_uses_local_send_time_and_excludes_retransmits() {
 
     let retransmitted = conn.send_data(b"retry").unwrap().pop().unwrap();
     conn.send_buffer.back_mut().unwrap().sent_at = Instant::now() - Duration::from_secs(1);
-    conn.retransmit_packet(retransmitted.seq_nr, true).unwrap();
+    conn.retransmit_packet(retransmitted.seq_nr, super::RetransmitEvent::Timeout)
+        .unwrap();
     conn.on_packet_received(&UtpPacket::ack(
         syn.connection_id,
         retransmitted.seq_nr,

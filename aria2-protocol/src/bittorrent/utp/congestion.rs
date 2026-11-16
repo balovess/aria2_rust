@@ -6,6 +6,7 @@
 //! - Yield to standard TCP traffic
 //! - Provide efficient background data transfer
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Target delay for LEDBAT (100ms as per RFC 6817)
@@ -48,9 +49,6 @@ pub struct LedbatController {
     /// Time of last data send
     last_send_time: Option<Instant>,
 
-    /// Whether we're in slow start mode
-    slow_start: bool,
-
     /// Maximum segment size in bytes
     mss: u32,
 
@@ -60,8 +58,14 @@ pub struct LedbatController {
     /// Maximum number of delay samples to keep
     max_history: usize,
 
-    /// Number of ACKs received in slow start
-    slow_start_acks: u32,
+    /// One minimum delay for each of the ten most recent one-minute windows.
+    base_delay_history: VecDeque<Option<u64>>,
+
+    /// Start time used to advance base-delay minute windows.
+    base_delay_started: Instant,
+
+    /// Current minute index in the base-delay history.
+    base_delay_minute: u64,
 }
 
 impl Default for LedbatController {
@@ -80,18 +84,22 @@ impl LedbatController {
             current_delay: 0,
             target_delay_us: LEDBAT_TARGET_DELAY.as_micros() as u64,
             last_send_time: None,
-            slow_start: true,
             mss: DEFAULT_MSS,
             delay_history: Vec::with_capacity(60),
             max_history: 60, // ~1 minute of samples at 1 sample/second
-            slow_start_acks: 0,
+            base_delay_history: VecDeque::from([None; 10]),
+            base_delay_started: Instant::now(),
+            base_delay_minute: 0,
         }
     }
 
     /// Create a new LEDBAT controller with custom MSS
     pub fn with_mss(mss: u32) -> Self {
+        // Keep window arithmetic representable and packet division defined
+        // when an embedding caller supplies an invalid MSS.
+        let mss = mss.clamp(1, u32::MAX / LEDBAT_MAX_CWND);
         Self {
-            cwnd: LEDBAT_MIN_CWND * mss,
+            cwnd: LEDBAT_MIN_CWND.saturating_mul(mss),
             mss,
             ..Self::new()
         }
@@ -100,7 +108,9 @@ impl LedbatController {
     /// Create a new LEDBAT controller with custom target delay
     pub fn with_target_delay(target_delay: Duration) -> Self {
         Self {
-            target_delay_us: target_delay.as_micros() as u64,
+            target_delay_us: u64::try_from(target_delay.as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1),
             ..Self::new()
         }
     }
@@ -156,86 +166,30 @@ impl LedbatController {
         self.last_send_time = Some(Instant::now());
     }
 
-    /// Process an ACK and update congestion window
-    ///
-    /// This implements the core LEDBAT algorithm:
-    /// - In slow start: increase cwnd by bytes_acked
-    /// - In congestion avoidance: adjust based on queuing delay
+    /// Process an ACK and update the LEDBAT congestion window.
     ///
     /// # Arguments
     /// * `timestamp_diff` - The timestamp difference from the ACK (in microseconds)
     /// * `bytes_acked` - Number of bytes acknowledged
     pub fn on_ack_received(&mut self, timestamp_diff: u64, bytes_acked: u32) {
-        // Update delay measurements
+        let flight_size_before_ack = self.bytes_in_flight;
         self.update_delay(timestamp_diff);
-
-        // Decrease bytes in flight
+        let queuing_delay_us = self
+            .current_delay
+            .saturating_sub(self.base_delay.unwrap_or(self.current_delay));
+        let off_target =
+            (self.target_delay_us as f64 - queuing_delay_us as f64) / self.target_delay_us as f64;
+        let delta = GAIN * off_target * f64::from(bytes_acked) * f64::from(self.mss)
+            / f64::from(self.cwnd.max(1));
+        let updated_cwnd = (f64::from(self.cwnd) + delta).max(0.0) as u32;
+        let max_allowed_cwnd = flight_size_before_ack.saturating_add(self.mss);
+        let min_cwnd = LEDBAT_MIN_CWND.saturating_mul(self.mss);
+        let max_cwnd = LEDBAT_MAX_CWND.saturating_mul(self.mss);
+        self.cwnd = updated_cwnd
+            .min(max_allowed_cwnd)
+            .max(min_cwnd)
+            .min(max_cwnd);
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes_acked);
-
-        // Calculate queuing delay
-        // We need at least 3 samples to reliably calculate queuing delay
-        let has_enough_samples = self.delay_history.len() >= 3;
-        let queuing_delay_us = if has_enough_samples {
-            self.current_delay
-                .saturating_sub(self.base_delay.unwrap_or(0))
-        } else {
-            // Not enough samples, assume no queuing delay
-            0
-        };
-
-        if self.slow_start {
-            // Check if we should exit slow start BEFORE increasing cwnd
-            // Exit slow start if:
-            // 1. We have enough samples AND queuing delay exceeds target, or
-            // 2. We've sent enough packets to establish baseline
-            if (has_enough_samples && queuing_delay_us > self.target_delay_us)
-                || self.slow_start_acks >= 10
-            {
-                self.slow_start = false;
-                // Immediately apply congestion avoidance logic
-                if has_enough_samples {
-                    self.update_cwnd_congestion_avoidance(bytes_acked, queuing_delay_us);
-                }
-            } else {
-                // Slow start: exponential increase
-                self.slow_start_acks += 1;
-                // Increase cwnd by bytes_acked
-                self.cwnd = self.cwnd.saturating_add(bytes_acked);
-            }
-        } else {
-            // Congestion avoidance: LEDBAT algorithm
-            // Only adjust cwnd if we have enough samples
-            if has_enough_samples {
-                self.update_cwnd_congestion_avoidance(bytes_acked, queuing_delay_us);
-            }
-        }
-
-        // Clamp cwnd to bounds
-        self.clamp_cwnd();
-    }
-
-    /// Update congestion window in congestion avoidance mode
-    ///
-    /// LEDBAT formula:
-    /// cwnd += GAIN * (target_delay - queuing_delay) / target_delay * bytes_acked
-    fn update_cwnd_congestion_avoidance(&mut self, bytes_acked: u32, queuing_delay_us: u64) {
-        let target = self.target_delay_us as f64;
-        let queuing = queuing_delay_us as f64;
-
-        // Calculate the delay factor
-        // Positive: below target, increase cwnd
-        // Negative: above target, decrease cwnd
-        let delay_factor = (target - queuing) / target;
-
-        // Apply gain
-        let delta = GAIN * delay_factor * bytes_acked as f64;
-
-        // Update cwnd (can be negative, so use saturating operations)
-        if delta >= 0.0 {
-            self.cwnd = self.cwnd.saturating_add(delta as u32);
-        } else {
-            self.cwnd = self.cwnd.saturating_sub((-delta) as u32);
-        }
     }
 
     /// Update delay measurements
@@ -249,29 +203,32 @@ impl LedbatController {
     pub fn update_delay(&mut self, delay_us: u64) {
         self.current_delay = delay_us;
 
-        // Add to history
+        self.update_base_delay_at(delay_us, self.base_delay_started.elapsed().as_secs() / 60);
+
         self.delay_history.push(delay_us);
         if self.delay_history.len() > self.max_history {
             self.delay_history.remove(0);
         }
+    }
 
-        // Update base delay (minimum in history)
-        self.base_delay = self.delay_history.iter().min().copied();
+    fn update_base_delay_at(&mut self, delay_us: u64, minute: u64) {
+        while self.base_delay_minute < minute {
+            self.base_delay_history.pop_front();
+            self.base_delay_history.push_back(None);
+            self.base_delay_minute += 1;
+        }
+        if let Some(current_minute) = self.base_delay_history.back_mut() {
+            *current_minute =
+                Some(current_minute.map_or(delay_us, |minimum| minimum.min(delay_us)));
+        }
+        self.base_delay = self.base_delay_history.iter().flatten().copied().min();
     }
 
     /// Handle timeout event
     ///
     /// Reduces congestion window significantly on timeout
     pub fn on_timeout(&mut self) {
-        // Reduce cwnd to minimum
-        self.cwnd = LEDBAT_MIN_CWND * self.mss;
-
-        // Reset bytes in flight
-        self.bytes_in_flight = 0;
-
-        // Re-enter slow start
-        self.slow_start = true;
-        self.slow_start_acks = 0;
+        self.cwnd = self.mss;
     }
 
     /// Handle packet loss
@@ -280,9 +237,6 @@ impl LedbatController {
     pub fn on_loss(&mut self) {
         // Reduce cwnd by half
         self.cwnd = (self.cwnd / 2).max(LEDBAT_MIN_CWND * self.mss);
-
-        // Exit slow start if we were in it
-        self.slow_start = false;
     }
 
     /// Reset controller to initial state
@@ -292,21 +246,15 @@ impl LedbatController {
         self.base_delay = None;
         self.current_delay = 0;
         self.last_send_time = None;
-        self.slow_start = true;
         self.delay_history.clear();
-        self.slow_start_acks = 0;
-    }
-
-    /// Clamp congestion window to valid bounds
-    fn clamp_cwnd(&mut self) {
-        let min_cwnd = LEDBAT_MIN_CWND * self.mss;
-        let max_cwnd = LEDBAT_MAX_CWND * self.mss;
-        self.cwnd = self.cwnd.clamp(min_cwnd, max_cwnd);
+        self.base_delay_history = VecDeque::from([None; 10]);
+        self.base_delay_started = Instant::now();
+        self.base_delay_minute = 0;
     }
 
     /// Check if we're in slow start mode
     pub fn is_slow_start(&self) -> bool {
-        self.slow_start
+        false
     }
 
     /// Get the target delay
@@ -338,3 +286,7 @@ impl LedbatController {
 #[cfg(test)]
 #[path = "congestion/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "congestion/simulation.rs"]
+mod simulation;

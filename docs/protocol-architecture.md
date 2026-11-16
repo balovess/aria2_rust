@@ -1231,7 +1231,9 @@ Do not add pass-through engine clients around these public interfaces.
   `aria2_protocol::bittorrent::message::extension::MetadataCollector`.
   Core retains its historical `magnet::metadata_collector` public path as a
   re-export; metadata exchange state, peer retries, and source selection
-  remain in core.
+  remain in core. Core validates the negotiated size as nonzero and at most
+  `MAX_UT_METADATA_SIZE` before constructing the collector, so the collector
+  stays a piece-assembly primitive rather than owning swarm admission policy.
 - **Keep** `aria2_protocol::bittorrent::message::factory` as the public typed
   frame parser. It owns length-prefix validation, message-specific payload
   parsing, incremental byte-buffer parsing, and the zero-copy `Piece` payload
@@ -1272,6 +1274,16 @@ Do not add pass-through engine clients around these public interfaces.
   port policy.
 - **Keep** `bittorrent::utp::packet` as a protocol-owned uTP wire codec; it
   validates packet fields and extensions.
+- **Improve** `bittorrent::utp::congestion::LedbatController` to use RFC 6817's
+  ACK growth formula (`GAIN * off_target * bytes_acked * MSS / cwnd`),
+  pre-ACK flight-size growth cap, null current-delay filter, and ten rolling
+  one-minute base-delay minima. Loss halves the window and an RTO reduces it
+  to one MSS; the retransmission scheduler backs off exponentially. The
+  controller starts at two MSS without slow start. Remaining differences
+  include the 0.5 gain, 1000-MSS ceiling, and lack of an explicit once-per-RTT
+  loss guard. Constructor inputs remain bounded against zero division and
+  integer overflow. Five deterministic traces match an independent reference;
+  live-network interoperability and fairness remain unverified.
 - **Narrow** outbound uTP connection ID allocation: choose a random starting
   ID, scan the complete 16-bit space for an unused ID, and only then allocate
   connection state. This preserves random IDs in the normal case and avoids

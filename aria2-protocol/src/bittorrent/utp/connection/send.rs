@@ -37,7 +37,7 @@ impl UtpConnection {
     pub(crate) fn retransmit_packet(
         &mut self,
         seq_nr: u16,
-        congestion_loss: bool,
+        event: super::RetransmitEvent,
     ) -> Option<UtpPacket> {
         if self.state == ConnectionState::SynSent && seq_nr == self.syn_seq_nr {
             self.syn_retransmitted = true;
@@ -60,8 +60,12 @@ impl UtpConnection {
             });
         if let Some(mut packet) = packet {
             self.stamp_packet(&mut packet);
-            if congestion_loss && packet.packet_type().ok() == Some(PacketType::StData) {
-                self.congestion.on_loss();
+            if packet.packet_type().ok() == Some(PacketType::StData) {
+                match event {
+                    super::RetransmitEvent::None => {}
+                    super::RetransmitEvent::Loss => self.congestion.on_loss(),
+                    super::RetransmitEvent::Timeout => self.congestion.on_timeout(),
+                }
             }
             Some(packet)
         } else {

@@ -367,9 +367,14 @@ impl UtpSocket {
                             let mut congestion_loss_applied = false;
                             let mut fast_retransmissions = Vec::new();
                             for seq_nr in handling.fast_retransmit {
-                                if let Some(retransmission) =
-                                    conn.retransmit_packet(seq_nr, !congestion_loss_applied)
-                                {
+                                if let Some(retransmission) = conn.retransmit_packet(
+                                    seq_nr,
+                                    if congestion_loss_applied {
+                                        super::connection::RetransmitEvent::None
+                                    } else {
+                                        super::connection::RetransmitEvent::Loss
+                                    },
+                                ) {
                                     if retransmission.packet_type().ok() == Some(PacketType::StData)
                                     {
                                         congestion_loss_applied = true;

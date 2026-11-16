@@ -7,7 +7,7 @@ fn test_controller_initialization() {
     assert_eq!(controller.get_window_size(), LEDBAT_MIN_CWND * DEFAULT_MSS);
     assert_eq!(controller.get_bytes_in_flight(), 0);
     assert!(controller.can_send());
-    assert!(controller.is_slow_start());
+    assert!(!controller.is_slow_start());
     assert_eq!(controller.get_target_delay(), LEDBAT_TARGET_DELAY);
 }
 
@@ -22,6 +22,30 @@ fn test_controller_with_custom_mss() {
 fn test_controller_with_custom_target_delay() {
     let controller = LedbatController::with_target_delay(Duration::from_millis(200));
     assert_eq!(controller.get_target_delay(), Duration::from_millis(200));
+}
+
+#[test]
+fn custom_mss_and_target_delay_keep_window_math_defined() {
+    let zero_mss = LedbatController::with_mss(0);
+    assert_eq!(zero_mss.get_mss(), 1);
+    assert_eq!(zero_mss.get_window_packets(), LEDBAT_MIN_CWND);
+
+    let huge_mss = LedbatController::with_mss(u32::MAX);
+    assert_eq!(huge_mss.get_mss(), u32::MAX / LEDBAT_MAX_CWND);
+    assert_eq!(huge_mss.get_window_packets(), LEDBAT_MIN_CWND);
+
+    let mut zero_delay = LedbatController::with_target_delay(Duration::ZERO);
+    assert_eq!(zero_delay.get_target_delay(), Duration::from_micros(1));
+    for _ in 0..12 {
+        zero_delay.on_ack_received(0, 1400);
+    }
+    assert!(zero_delay.get_window_size() >= LEDBAT_MIN_CWND * zero_delay.get_mss());
+
+    let huge_delay = LedbatController::with_target_delay(Duration::MAX);
+    assert_eq!(
+        huge_delay.get_target_delay(),
+        Duration::from_micros(u64::MAX)
+    );
 }
 
 #[test]
@@ -66,21 +90,21 @@ fn test_available_window() {
 }
 
 #[test]
-fn test_slow_start_increase() {
+fn rfc_initial_window_increases_at_most_one_mss_per_ack() {
     let mut controller = LedbatController::new();
 
     let initial_cwnd = controller.get_window_size();
 
-    // In slow start, cwnd should increase by bytes_acked
+    controller.on_data_sent(initial_cwnd);
     controller.on_ack_received(50_000, 1500);
 
-    // cwnd should increase
     assert!(controller.get_window_size() > initial_cwnd);
-    assert!(controller.is_slow_start());
+    assert!(controller.get_window_size() <= initial_cwnd + controller.get_mss());
+    assert!(!controller.is_slow_start());
 }
 
 #[test]
-fn test_slow_start_exit_on_target_delay() {
+fn one_minute_base_delay_tracks_the_minimum_delay() {
     let mut controller = LedbatController::new();
 
     // Send enough to fill window
@@ -101,12 +125,13 @@ fn test_slow_start_exit_on_target_delay() {
     let high_delay = LEDBAT_TARGET_DELAY.as_micros() as u64 + 50_000; // 150ms
     controller.on_ack_received(high_delay, 1500);
 
-    // Should exit slow start because queuing_delay (150-45=105ms) > target (100ms)
+    // The controller reacts because queuing_delay (150-45=105ms) is above
+    // the target.
     assert!(!controller.is_slow_start());
 }
 
 #[test]
-fn test_slow_start_exit_on_ack_count() {
+fn controller_has_no_slow_start_phase() {
     let mut controller = LedbatController::new();
 
     // Send and ACK multiple times with low delay
@@ -115,16 +140,13 @@ fn test_slow_start_exit_on_ack_count() {
         controller.on_ack_received(50_000, 1500);
     }
 
-    // Should exit slow start after enough ACKs
+    // This accessor stays false because the controller has no slow-start phase.
     assert!(!controller.is_slow_start());
 }
 
 #[test]
 fn test_congestion_avoidance_below_target() {
     let mut controller = LedbatController::new();
-
-    // Force exit slow start
-    controller.slow_start = false;
 
     let initial_cwnd = controller.get_window_size();
 
@@ -143,12 +165,14 @@ fn test_congestion_avoidance_below_target() {
 fn test_congestion_avoidance_above_target() {
     let mut controller = LedbatController::new();
 
-    // Force exit slow start
-    controller.slow_start = false;
+    controller.cwnd = 10_000;
 
     // Establish a base delay first
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(20_000, 1500); // 20ms - this will be base
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(25_000, 1500); // 25ms
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(22_000, 1500); // 22ms
 
     // Now we have 3 samples, base_delay should be 20ms
@@ -162,14 +186,17 @@ fn test_congestion_avoidance_above_target() {
 
     // ACK with queuing delay above target (should decrease cwnd)
     let high_delay = 150_000; // 150ms, queuing = 130ms > target (100ms)
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(high_delay, 1500);
 
     // cwnd should decrease from the value before high delay
     assert!(controller.get_window_size() < cwnd_before_high_delay);
 
-    // Continue with high delays to further reduce cwnd
-    controller.on_ack_received(high_delay, 1500);
-    controller.on_ack_received(high_delay, 1500);
+    // Continue with high delays to further reduce cwnd.
+    for _ in 0..50 {
+        controller.bytes_in_flight = controller.cwnd;
+        controller.on_ack_received(high_delay, 1500);
+    }
 
     // After multiple high delay ACKs, cwnd should be significantly lower
     assert!(controller.get_window_size() < cwnd_before_high_delay - 500);
@@ -179,22 +206,14 @@ fn test_congestion_avoidance_above_target() {
 fn test_on_timeout() {
     let mut controller = LedbatController::new();
 
-    // Increase cwnd first
-    controller.on_data_sent(1500);
-    controller.on_ack_received(50_000, 1500);
-    controller.on_data_sent(1500);
-    controller.on_ack_received(50_000, 1500);
-
-    let cwnd_before = controller.get_window_size();
-    assert!(cwnd_before > LEDBAT_MIN_CWND * DEFAULT_MSS);
-
+    controller.cwnd = 10_000;
+    controller.bytes_in_flight = 10_000;
     // Timeout
     controller.on_timeout();
 
-    // Should reset to minimum
-    assert_eq!(controller.get_window_size(), LEDBAT_MIN_CWND * DEFAULT_MSS);
-    assert_eq!(controller.get_bytes_in_flight(), 0);
-    assert!(controller.is_slow_start());
+    assert_eq!(controller.get_window_size(), DEFAULT_MSS);
+    assert!(controller.get_bytes_in_flight() > 0);
+    assert!(!controller.is_slow_start());
 }
 
 #[test]
@@ -202,11 +221,8 @@ fn test_on_loss() {
     let mut controller = LedbatController::new();
 
     // Increase cwnd
-    controller.on_data_sent(1500);
-    controller.on_ack_received(50_000, 1500);
-    controller.on_data_sent(1500);
-    controller.on_ack_received(50_000, 1500);
-
+    controller.cwnd = 10_000;
+    controller.bytes_in_flight = 10_000;
     let cwnd_before = controller.get_window_size();
 
     // Loss
@@ -225,14 +241,13 @@ fn test_reset() {
     controller.on_data_sent(1500);
     controller.on_ack_received(50_000, 1500);
     controller.on_data_sent(1500);
-    controller.slow_start = false;
 
     // Reset
     controller.reset();
 
     assert_eq!(controller.get_window_size(), LEDBAT_MIN_CWND * DEFAULT_MSS);
     assert_eq!(controller.get_bytes_in_flight(), 0);
-    assert!(controller.is_slow_start());
+    assert!(!controller.is_slow_start());
     assert!(controller.get_base_delay().is_none());
     assert_eq!(controller.get_current_delay(), Duration::ZERO);
 }
@@ -276,6 +291,33 @@ fn test_delay_measurements() {
 }
 
 #[test]
+fn base_delay_minimum_ages_out_after_ten_minute_windows() {
+    let mut controller = LedbatController::new();
+    controller.update_base_delay_at(20_000, 0);
+    for _ in 0..100 {
+        controller.update_base_delay_at(50_000, 0);
+    }
+    assert_eq!(
+        controller.get_base_delay(),
+        Some(Duration::from_micros(20_000))
+    );
+
+    for minute in 1..10 {
+        controller.update_base_delay_at(50_000, minute);
+    }
+    assert_eq!(
+        controller.get_base_delay(),
+        Some(Duration::from_micros(20_000))
+    );
+
+    controller.update_base_delay_at(50_000, 10);
+    assert_eq!(
+        controller.get_base_delay(),
+        Some(Duration::from_micros(50_000))
+    );
+}
+
+#[test]
 fn test_queuing_delay() {
     let mut controller = LedbatController::new();
 
@@ -292,6 +334,7 @@ fn test_window_bounds() {
 
     // Try to increase cwnd beyond max
     controller.cwnd = LEDBAT_MAX_CWND * DEFAULT_MSS + 10000;
+    controller.bytes_in_flight = u32::MAX;
     controller.on_ack_received(50_000, 1500);
 
     // Should be clamped to max
@@ -343,13 +386,13 @@ fn test_delay_sample_count() {
 }
 
 #[test]
-fn test_rfc6817_scenario() {
+fn test_ledbat_queue_delay_scenario() {
     // Test scenario based on RFC 6817 principles
     let mut controller = LedbatController::new();
 
-    // Initial slow start phase with low delays
+    // Probe with low delays, bounded to one MSS of growth per ACK.
     for i in 0..3 {
-        controller.on_data_sent(1500);
+        controller.bytes_in_flight = controller.cwnd;
         controller.on_ack_received(50_000 - i * 1000, 1500); // Decreasing delays
         println!(
             "Iteration {}: cwnd = {}, slow_start = {}, base_delay = {:?}",
@@ -360,7 +403,7 @@ fn test_rfc6817_scenario() {
         );
     }
 
-    // Should have grown cwnd in slow start
+    // The congestion-avoidance controller grows within the RFC flight cap.
     assert!(controller.get_window_size() > LEDBAT_MIN_CWND * DEFAULT_MSS);
 
     // Now we have 3 samples with base_delay ~47ms
@@ -368,7 +411,7 @@ fn test_rfc6817_scenario() {
 
     // Simulate congestion (high delay)
     for i in 0..3 {
-        controller.on_data_sent(1500);
+        controller.bytes_in_flight = controller.cwnd;
         controller.on_ack_received(150_000, 1500); // 150ms delay, queuing = 103ms > target
         println!(
             "Congestion {}: cwnd = {}, slow_start = {}, queuing_delay = {:?}",
@@ -380,7 +423,7 @@ fn test_rfc6817_scenario() {
     }
 
     // cwnd should have decreased due to high delay
-    // and should have exited slow start
+    // This accessor remains false.
     assert!(!controller.is_slow_start());
 }
 
@@ -388,12 +431,14 @@ fn test_rfc6817_scenario() {
 fn test_gain_factor() {
     // Verify that the gain factor is applied correctly
     let mut controller = LedbatController::new();
-    controller.slow_start = false;
     controller.cwnd = 10000;
 
     // Establish a base delay first
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(20_000, 1500); // 20ms - this will be base
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(25_000, 1500); // 25ms
+    controller.bytes_in_flight = controller.cwnd;
     controller.on_ack_received(22_000, 1500); // 22ms
 
     // Now we have 3 samples, base_delay should be 20ms
@@ -406,13 +451,14 @@ fn test_gain_factor() {
 
     // Queuing delay = 70ms - 20ms = 50ms, target = 100ms
     // delay_factor = (100 - 50) / 100 = 0.5
-    // delta = 0.5 * 0.5 * 1500 = 375 bytes
+    // delta = GAIN * off_target * bytes_acked * MSS / cwnd
+    controller.on_data_sent(10_000);
     controller.on_ack_received(70_000, 1500);
 
     let new_cwnd = controller.get_window_size();
-    // cwnd should increase by approximately 375 bytes
+    // The RFC normalization keeps this increase below one ACK-sized step.
     assert!(new_cwnd > initial_cwnd);
-    assert!(new_cwnd < initial_cwnd + 500); // Reasonable bound
+    assert!(new_cwnd < initial_cwnd + 100); // RFC-normalized growth
 }
 
 #[test]
