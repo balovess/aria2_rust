@@ -1,11 +1,5 @@
 use std::collections::BTreeMap;
 
-/// Maximum byte-string payload accepted by the bencode decoder.
-///
-/// This bounds allocations for untrusted torrent and extension metadata while
-/// remaining well above normal torrent metadata sizes.
-pub const MAX_BYTE_STRING_LENGTH: usize = 64 * 1024 * 1024;
-
 /// Maximum nesting depth accepted by the decoder.
 ///
 /// Mirrors the C++ `BencodeParser::pushState` guard (`stateStack_.size() >= 50`
@@ -14,10 +8,17 @@ pub const MAX_BYTE_STRING_LENGTH: usize = 64 * 1024 * 1024;
 /// and aborts the process on stack overflow, which Rust cannot catch.
 pub const MAX_NESTING_DEPTH: usize = 50;
 
-/// Maximum number of direct elements accepted in one list or dictionary.
+/// Historical byte-string threshold retained for source compatibility.
 ///
-/// The count is based on wire entries, so duplicate dictionary keys still
-/// consume the budget even though the decoded map keeps only the last value.
+/// The shared decoder no longer enforces a fixed byte-string limit. Apply
+/// resource limits at the input boundary that knows the data source.
+#[deprecated(note = "BencodeValue no longer enforces a fixed byte-string limit")]
+pub const MAX_BYTE_STRING_LENGTH: usize = 64 * 1024 * 1024;
+
+/// Historical container threshold retained for source compatibility.
+///
+/// The shared decoder no longer enforces a per-container element limit.
+#[deprecated(note = "BencodeValue no longer enforces a container element limit")]
 pub const MAX_CONTAINER_ELEMENTS: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +75,13 @@ impl BencodeValue {
             return Err("Integer is empty".to_string());
         }
         let raw = &bytes[1..end];
+        // Original aria2 accepts a legacy torrent-generator quirk where a
+        // floating-point value appears in an integer field, then treats it as
+        // zero. Keep that compatibility only for the same narrow numeric
+        // alphabet; malformed content still fails below.
+        if Self::is_legacy_float_number(raw) {
+            return Ok((BencodeValue::Int(0), end + 1));
+        }
         if (raw.len() > 1 && raw.first() == Some(&b'0'))
             || (raw.first() == Some(&b'-') && raw.get(1) == Some(&b'0'))
         {
@@ -85,6 +93,20 @@ impl BencodeValue {
             .parse()
             .map_err(|e| format!("Failed to parse integer: {} (content: '{}')", e, num_str))?;
         Ok((BencodeValue::Int(value), end + 1))
+    }
+
+    fn is_legacy_float_number(raw: &[u8]) -> bool {
+        let digits_start = usize::from(matches!(raw.first(), Some(b'+') | Some(b'-')));
+        if digits_start == raw.len() || !raw[digits_start].is_ascii_digit() {
+            return false;
+        }
+
+        raw[digits_start..]
+            .iter()
+            .any(|byte| matches!(byte, b'.' | b'E' | b'+' | b'-'))
+            && raw
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'E' | b'+' | b'-'))
     }
 
     fn decode_bytes(bytes: &[u8]) -> Result<(Self, usize), String> {
@@ -100,12 +122,6 @@ impl BencodeValue {
         let length: usize = len_str
             .parse()
             .map_err(|e| format!("Failed to parse byte string length: {}", e))?;
-        if length > MAX_BYTE_STRING_LENGTH {
-            return Err(format!(
-                "Byte string length {} exceeds maximum {}",
-                length, MAX_BYTE_STRING_LENGTH
-            ));
-        }
         let data_start = colon_pos + 1;
         // `length` comes straight off the wire; a value near `usize::MAX` would
         // wrap on a plain add and make the bounds check below pass, then panic
@@ -137,12 +153,6 @@ impl BencodeValue {
         let mut pos = 1;
         let mut items = Vec::new();
         while pos < bytes.len() && bytes[pos] != b'e' {
-            if items.len() >= MAX_CONTAINER_ELEMENTS {
-                return Err(format!(
-                    "List contains more than maximum {} elements",
-                    MAX_CONTAINER_ELEMENTS
-                ));
-            }
             let (item, consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             items.push(item);
             pos += consumed;
@@ -160,14 +170,7 @@ impl BencodeValue {
         let inner_depth = Self::descend(depth)?;
         let mut pos = 1;
         let mut entries = BTreeMap::new();
-        let mut element_count = 0;
         while pos < bytes.len() && bytes[pos] != b'e' {
-            if element_count >= MAX_CONTAINER_ELEMENTS {
-                return Err(format!(
-                    "Dictionary contains more than maximum {} elements",
-                    MAX_CONTAINER_ELEMENTS
-                ));
-            }
             let (key, key_consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             let key_bytes = match key {
                 BencodeValue::Bytes(b) => b,
@@ -182,7 +185,6 @@ impl BencodeValue {
             // Preserve the existing compatibility behavior: later duplicate
             // keys replace earlier values in the decoded map.
             entries.insert(key_bytes, value);
-            element_count += 1;
             pos += val_consumed;
         }
         if pos >= bytes.len() {
@@ -431,6 +433,14 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_float_in_integer_field_matches_original_aria2() {
+        let (value, consumed) = BencodeValue::decode(b"i+343243.342E-1333e").unwrap();
+        assert_eq!(value, BencodeValue::Int(0));
+        assert_eq!(consumed, b"i+343243.342E-1333e".len());
+        assert!(BencodeValue::decode(b"i-1.134a+33e").is_err());
+    }
+
+    #[test]
     fn test_partial_decode() {
         let input = b"i42e4:test";
         let (val, consumed) = BencodeValue::decode(input).unwrap();
@@ -477,27 +487,25 @@ mod tests {
     }
 
     #[test]
-    fn test_container_element_limit_is_enforced() {
+    fn test_large_containers_are_limited_by_input_length() {
         let mut list = vec![b'l'];
-        for _ in 0..MAX_CONTAINER_ELEMENTS {
+        for _ in 0..65_537 {
             list.extend_from_slice(b"i0e");
         }
         list.push(b'e');
-        assert!(BencodeValue::decode(&list).is_ok());
-
-        list.insert(1, b'i');
-        list.insert(2, b'0');
-        list.insert(3, b'e');
-        let err = BencodeValue::decode(&list).unwrap_err();
-        assert!(err.contains("maximum"), "unexpected error: {err}");
+        let (decoded_list, consumed) = BencodeValue::decode(&list).unwrap();
+        assert_eq!(consumed, list.len());
+        assert_eq!(decoded_list.as_list().unwrap().len(), 65_537);
 
         let mut dict = b"d".to_vec();
-        for _ in 0..=MAX_CONTAINER_ELEMENTS {
+        for _ in 0..65_537 {
             dict.extend_from_slice(b"1:ai0e");
         }
         dict.push(b'e');
-        let err = BencodeValue::decode(&dict).unwrap_err();
-        assert!(err.contains("maximum"), "unexpected error: {err}");
+        let (decoded_dict, consumed) = BencodeValue::decode(&dict).unwrap();
+        assert_eq!(consumed, dict.len());
+        // Duplicate keys still replace earlier values as before.
+        assert_eq!(decoded_dict.as_dict().unwrap().len(), 1);
     }
 
     /// A hostile torrent used to abort the process via stack overflow here.
@@ -514,18 +522,13 @@ mod tests {
         // add and panicked inside the slice index before the checked_add fix.
         let input = format!("{}:", usize::MAX).into_bytes();
         let err = BencodeValue::decode(&input).unwrap_err();
-        assert!(
-            err.contains("exceeds maximum")
-                || err.contains("overflow")
-                || err.contains("insufficient"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("overflow"), "unexpected error: {err}");
     }
 
     #[test]
-    fn test_byte_string_above_allocation_limit_is_rejected() {
-        let input = format!("{}:", MAX_BYTE_STRING_LENGTH + 1);
+    fn test_byte_string_length_is_bounded_by_available_input() {
+        let input = format!("{}:", 64 * 1024 * 1024 + 1);
         let err = BencodeValue::decode(input.as_bytes()).unwrap_err();
-        assert!(err.contains("exceeds maximum"), "unexpected error: {err}");
+        assert!(err.contains("insufficient"), "unexpected error: {err}");
     }
 }

@@ -347,6 +347,14 @@ definitions to private child modules. These are registry organization seams;
 the external option names, values, categories, and registration availability
 remain unchanged.
 
+**Keep** piece selection and endgame policy in the BitTorrent engine. The
+registered `bt-piece-selection-strategy` and `bt-endgame-threshold` options
+flow from CLI/config, RPC, C API, and session restoration into
+`DownloadOptions`; `PieceDownloadSession` configures both `PiecePicker` and
+`BtPieceSelector` with the same strategy and threshold. Zero disables endgame.
+These settings are Rust extensions and remain separate from protocol wire
+message parsing.
+
 `aria2-protocol::sftp::transfer::SftpTransfer` remains a public standalone
 transfer interface. It adds local-file I/O, configurable buffering, resume,
 progress callbacks, and optional source permission and timestamp preservation
@@ -939,7 +947,9 @@ Do not add pass-through engine clients around these public interfaces.
   lifecycle, filter-chain execution, and the null sink remain in core. The
   protocol selector also owns the supported `Transfer-Encoding: chunked`
   classifier used by both the core response processor and Linux splice path,
-  preventing wire-token checks from diverging across download paths.
+  preventing wire-token checks from diverging across download paths. Unknown
+  and unsupported content codings, including Brotli, remain undecoded and pass
+  through as encoded payload, matching the original response path.
 - **Narrow** rustls `ring` provider initialization inside `aria2-protocol` to
   one private helper shared by its HTTP client, FTPS connector, WebSocket
   tracker, and tracker-list test transport. Core keeps a separate initializer
@@ -1017,10 +1027,11 @@ Do not add pass-through engine clients around these public interfaces.
   FTPS configuration, output naming, and task lifecycle. The parsed secure-scheme
   flag is carried into core policy without reparsing the URI. FTP and SFTP
   default ports are defined by their protocol modules; the public core constants
-  remain aliases for compatibility. FTP percent decoding and user-info
-  percent-encoding are owned by the URI module; the decoder remains
-  re-exported through the historical connection module path for compatibility.
-  SFTP decoding remains in its URI parser rather than the engine.
+  remain aliases for compatibility. FTP path and credential percent decoding
+  and user-info percent-encoding are owned by the URI module; credential
+  decoding matches the shared core URI parser and `aria2_original`. The decoder
+  remains re-exported through the historical connection module path for
+  compatibility. SFTP decoding remains in its URI parser rather than the engine.
 - **Narrow** FTP engine parser access: `download_command` imports the core FTP
   parsers directly instead of re-exporting them through its control module.
   Remove the unused private FTP error classifier; live response handling stays
@@ -1292,6 +1303,11 @@ Do not add pass-through engine clients around these public interfaces.
   maximum concurrent source fetches a bounded protocol setting: retain the
   default safety ceiling of four and let the process option lower it for future
   refreshes without changing the public `TrackerCatalogConfig` layout.
+- **Improve** `PublicTrackerList` source ingestion resource bounds: cap decoded
+  response bodies at 8 MiB while streaming and reject a source that parses to
+  more than 4096 unique trackers. A shared body reader keeps standalone and
+  engine-injected transports on the same byte limit; the catalog also checks
+  output from caller-provided fetchers before parsing.
 - **Narrow** HTTP client and protocol test source layout: retain the HTTP
   request/response client interface while moving its tests beside the client;
   group Content-Disposition compatibility cases and DHT UDP pressure coverage
@@ -1342,6 +1358,15 @@ Do not add pass-through engine clients around these public interfaces.
   infallible, so `DhtMessage::encode` returns its buffer without a redundant
   `Result` layer. Keep parsing errors at the `decode` boundary and pass
   announce tokens as opaque bytes.
+- **Keep** `bittorrent::bencode::BencodeValue` as the protocol-owned shared
+  decoder for torrent/metainfo, magnet metadata, DHT, trackers, and extensions.
+  It enforces a 50-level nesting limit matching original aria2, while avoiding
+  fixed byte-string and per-container count limits that rejected valid large
+  metainfo. Resource bounds belong at their input boundaries: DHT packets use
+  a 4 KiB receive buffer, BEP 9 metadata is capped at 8 MiB, peer frames at
+  64 MiB, and HTTP tracker announce bodies at 8 MiB. The decoder also preserves
+  original aria2's narrow legacy behavior for floating-point text in integer
+  fields by decoding those values as zero; malformed text remains an error.
 - **Narrow** the DHT UDP seam: keep the Tokio socket behind `DhtSocket` and
   route the engine receive loop through it instead of exposing the raw shared
   socket. The engine still handles timeout and shutdown selection around reads.
@@ -1404,7 +1429,10 @@ Do not add pass-through engine clients around these public interfaces.
   same core-owned rules and preserving their existing paths. Resolve registry
   aliases to canonical names before runtime availability/changeability checks
   and before projecting engine commands, so aliases cannot be silently
-  filtered or bypass feature gating.
+  filtered or bypass feature gating. Keep `enable-utp` and `utp-listen-port`
+  as request options and support them through RPC task creation, task snapshots,
+  and reserved/pending `changeOption` updates; active-task changes take effect
+  after restart, when the peer route is rebuilt.
 - **Narrow** `OptionRegistry` ownership metadata into the private
   `config::option::owner` module. Keep the public `OptionRegistry::owner_for_name`
   API and registration-time exhaustive-owner invariant unchanged; the map
@@ -1586,3 +1614,17 @@ Do not add pass-through engine clients around these public interfaces.
   policy-aware connection establishment and the BitTorrent handshake. The old
   type was reachable only through the engine implementation path, not the
   supported crate-root library interface.
+- **Keep** BitTorrent choke and optimistic-unchoke policy in core. It consumes
+  live peer statistics, snub state, and engine upload-slot limits; the peer
+  actor applies the resulting identity-based actions to active connections.
+  The ordinary swarm path in `download::command::choke_api` and the
+  concurrent normal/endgame schedulers in `peer_scheduler::peer_actor` use the
+  same `ChokingAlgorithm`; they adapt stable peer identities to their
+  respective actor handles rather than duplicating selection policy. Interest
+  changes and disconnects synchronize policy state and rebalance immediately;
+  periodic rotations wake from the configured deadline. Ending a piece
+  generation drains its request work but leaves torrent-owned peer actors
+  alive. `optimistically_unchoke_by_identity` returns `None` when there are no
+  eligible candidates. Its private round-robin helper is called only after
+  that empty-candidate check, so the helper's nonempty precondition panic is
+  not reachable through the production entry point.

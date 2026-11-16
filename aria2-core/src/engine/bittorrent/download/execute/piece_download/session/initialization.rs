@@ -6,7 +6,8 @@ use crate::engine::bittorrent::download::command::BtDownloadCommand;
 use crate::engine::bittorrent::download::execute::types::DiscoveredPeer;
 use crate::engine::bittorrent::peer::connection::BtPeerConn;
 use crate::engine::bittorrent::peer::message_handler::PeerSwarm;
-use crate::engine::bittorrent::piece::selector::BtPieceSelector;
+use crate::engine::bittorrent::piece::selector::{BtPieceSelector, PieceSelectorConfig};
+use crate::engine::bittorrent::piece::{PiecePicker, PieceSelectionStrategy};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -16,6 +17,73 @@ use tracing::info;
 use super::super::BtStopTimeoutState;
 use super::PieceDownloadSession;
 use crate::engine::bittorrent::download::execute::types::{EndgameState, PeerKey};
+
+fn parse_piece_selection_strategy(
+    value: &str,
+) -> std::result::Result<PieceSelectionStrategy, String> {
+    match value {
+        "default" | "rarest-first" => Ok(PieceSelectionStrategy::RarestFirst),
+        "sequential" => Ok(PieceSelectionStrategy::Sequential),
+        "random" => Ok(PieceSelectionStrategy::Random),
+        "longest-sequence" => Ok(PieceSelectionStrategy::LongestSequence),
+        "priority" => Ok(PieceSelectionStrategy::Priority),
+        "geometric" => Ok(PieceSelectionStrategy::Geometric),
+        _ => Err(format!(
+            "Invalid value '{}' for bt-piece-selection-strategy",
+            value
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piece_selection_options_configure_picker_and_selector_consistently() {
+        let strategy = parse_piece_selection_strategy("sequential").unwrap();
+        let mut picker = PiecePicker::new(4);
+        let selector_config = configure_piece_selection(&mut picker, strategy, 2);
+        picker.set_frequencies_from_peers(&[3, 1, 2, 4]);
+
+        assert_eq!(picker.pick_next(), Some(0));
+        assert!(!picker.endgame_active());
+        assert_eq!(selector_config.endgame_threshold, 2);
+
+        picker.mark_completed(0);
+        picker.mark_completed(1);
+        assert!(picker.endgame_active());
+    }
+
+    #[test]
+    fn zero_endgame_threshold_disables_endgame() {
+        let mut picker = PiecePicker::new(1);
+        let selector_config =
+            configure_piece_selection(&mut picker, PieceSelectionStrategy::RarestFirst, 0);
+        picker.mark_in_progress(0, true);
+
+        assert_eq!(selector_config.endgame_threshold, 0);
+        assert!(!picker.endgame_active());
+    }
+
+    #[test]
+    fn piece_selection_strategy_rejects_unknown_values() {
+        assert!(parse_piece_selection_strategy("unknown").is_err());
+    }
+}
+
+fn configure_piece_selection(
+    picker: &mut PiecePicker,
+    strategy: PieceSelectionStrategy,
+    endgame_threshold: u32,
+) -> PieceSelectorConfig {
+    picker.set_strategy(strategy);
+    picker.set_endgame_threshold(endgame_threshold as usize);
+    PieceSelectorConfig {
+        endgame_threshold,
+        ..PieceSelectorConfig::default()
+    }
+}
 
 impl<'a> PieceDownloadSession<'a> {
     #[allow(clippy::too_many_arguments)]
@@ -36,6 +104,15 @@ impl<'a> PieceDownloadSession<'a> {
         verified_piece_indices: &[usize],
     ) -> Result<Self> {
         swarm.remove_dead().await;
+        let (piece_selection_strategy, endgame_threshold) = {
+            let group = command.group.recover();
+            let options = group.options();
+            (
+                parse_piece_selection_strategy(&options.bt_piece_selection_strategy)
+                    .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?,
+                options.bt_endgame_threshold,
+            )
+        };
         let discovered_peer_count = initial_peers.len();
         let initial_peers = initial_peers
             .into_iter()
@@ -108,8 +185,6 @@ impl<'a> PieceDownloadSession<'a> {
         // P1 integration: progress save time tracking
         let last_progress_save = Instant::now();
 
-        let piece_selector = BtPieceSelector::new(num_pieces);
-
         // PieceManager owns the hashes needed during the download loop. The
         // parsed piece-layer map is only an input to its construction, so
         // release that second representation before entering the long-lived
@@ -163,7 +238,13 @@ impl<'a> PieceDownloadSession<'a> {
         drop(piece_layers);
         drop(v2_files);
 
-        let mut piece_picker = crate::engine::bittorrent::piece::PiecePicker::new(num_pieces);
+        let mut piece_picker = PiecePicker::new(num_pieces);
+        let piece_selector_config = configure_piece_selection(
+            &mut piece_picker,
+            piece_selection_strategy,
+            endgame_threshold,
+        );
+        let piece_selector = BtPieceSelector::with_config(num_pieces, piece_selector_config);
         if meta.info.meta_version == Some(2) {
             for index in 0..num_pieces {
                 if piece_manager.expected_piece_verification(index).is_none() {
@@ -175,9 +256,6 @@ impl<'a> PieceDownloadSession<'a> {
         // aria2_original uses RarestPieceSelector as the base BitTorrent
         // selector. `bt-prioritize-piece` is an additive wrapper around it,
         // not a replacement for the torrent-wide selection strategy.
-        piece_picker
-            .set_strategy(crate::engine::bittorrent::piece::PieceSelectionStrategy::RarestFirst);
-
         let allowed_pieces = {
             let group = command.group.recover();
             group.get_download_context().and_then(|context| {

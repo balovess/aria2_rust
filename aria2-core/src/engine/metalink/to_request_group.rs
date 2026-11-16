@@ -299,8 +299,12 @@ impl MetalinkToRequestGroup {
         metalink_data: &[u8],
         options: &DownloadOptions,
     ) -> Result<Vec<MetalinkDownloadCommand>> {
-        let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
-            .map_err(Aria2Error::MetalinkParse)?;
+        let base_uri = self
+            .base_uri
+            .as_deref()
+            .or(options.metalink_base_uri.as_deref());
+        let doc =
+            MetalinkDocument::parse(metalink_data, base_uri).map_err(Aria2Error::MetalinkParse)?;
         self.create_request_groups(doc, options)
     }
 

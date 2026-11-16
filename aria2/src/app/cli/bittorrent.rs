@@ -21,6 +21,14 @@ pub struct BitTorrentArgs {
     #[arg(short = 'B', long = "bt-max-peers")]
     pub bt_max_peers: Option<u64>,
 
+    /// BitTorrent piece selection strategy
+    #[arg(long = "bt-piece-selection-strategy")]
+    pub bt_piece_selection_strategy: Option<String>,
+
+    /// Remaining pieces at which endgame mode starts (0 disables it)
+    #[arg(long = "bt-endgame-threshold")]
+    pub bt_endgame_threshold: Option<u64>,
+
     /// Maximum upload slots to unchoke
     #[arg(long = "bt-max-upload-slots")]
     pub bt_max_upload_slots: Option<u64>,

@@ -258,6 +258,34 @@ fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
+#[test]
+fn utp_task_options_follow_reserved_and_pending_change_policy() {
+    for name in ["enable-utp", "utp-listen-port"] {
+        assert_eq!(
+            crate::config::is_option_changeable(name, false),
+            crate::config::ChangeableKind::Immediate,
+            "reserved tasks should accept {name} immediately"
+        );
+        assert_eq!(
+            crate::config::is_option_changeable(name, true),
+            crate::config::ChangeableKind::Pending,
+            "active tasks should defer {name} until restart"
+        );
+    }
+
+    let mut options = DownloadOptions::default();
+    assert!(
+        apply_runtime_option_value(&mut options, "enable-utp", &serde_json::json!(true)).unwrap()
+    );
+    assert!(
+        apply_runtime_option_value(&mut options, "utp-listen-port", &serde_json::json!(6882))
+            .unwrap()
+    );
+    assert!(options.enable_utp);
+    assert_eq!(options.utp_listen_port, Some(6882));
+}
+
 #[test]
 fn string_options_reach_their_typed_fields() {
     let cases = [

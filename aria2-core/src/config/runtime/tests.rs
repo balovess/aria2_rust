@@ -112,6 +112,24 @@ fn compatibility_aliases_use_the_canonical_runtime_policy() {
             is_option_changeable("enable-lpd", true),
             ChangeableKind::Pending
         );
+        for option in [
+            "enable-utp",
+            "utp-listen-port",
+            "bt-piece-selection-strategy",
+            "bt-endgame-threshold",
+        ] {
+            assert!(is_initial_option(option));
+            assert_eq!(
+                is_option_changeable(option, false),
+                ChangeableKind::Immediate,
+                "reserved task should apply {option} immediately"
+            );
+            assert_eq!(
+                is_option_changeable(option, true),
+                ChangeableKind::Pending,
+                "active task should defer {option} until restart"
+            );
+        }
     }
 
     #[cfg(not(feature = "bittorrent"))]
@@ -121,6 +139,20 @@ fn compatibility_aliases_use_the_canonical_runtime_policy() {
             is_option_changeable("enable-lpd", false),
             ChangeableKind::NotChangeable
         );
+        for option in [
+            "enable-utp",
+            "utp-listen-port",
+            "bt-piece-selection-strategy",
+            "bt-endgame-threshold",
+        ] {
+            assert!(!is_option_available(option));
+            assert!(!is_initial_option(option));
+            assert_eq!(
+                is_option_changeable(option, false),
+                ChangeableKind::NotChangeable,
+                "{option} must remain unavailable without BitTorrent"
+            );
+        }
     }
 }
 
@@ -148,9 +180,9 @@ fn initial_option_projection_keeps_request_options_only() {
 fn task_policy_matches_runtime_changeability_axes() {
     assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
     #[cfg(feature = "bittorrent")]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 131);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 135);
     #[cfg(not(feature = "bittorrent"))]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 130);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 134);
     assert_eq!(
         is_option_changeable("max-download-limit", true),
         ChangeableKind::Immediate

@@ -601,6 +601,37 @@ behavior. An unlisted behavior has not been audited here.
   from protocol messages and does not need a CLI/RPC setting.
 - **Verification:** protocol tests cover choke/interest transitions and request
   completion; core peer-connection tests and choking-policy tests pass.
+- **Core policy boundary:** the core choking algorithm owns upload-slot,
+  snubbing, and optimistic-unchoke selection. Its public optimistic selection
+  returns no peer when no candidate is eligible; the private round-robin
+  helper's nonempty precondition is guarded by that entry point. Selection is
+  applied by the peer actor to live connection state.
+
+## BitTorrent bencode input boundaries
+
+- **Shared protocol boundary:** `aria2_protocol::bittorrent::bencode::BencodeValue`
+  is used by torrent/metainfo and magnet metadata parsing, DHT KRPC, tracker
+  responses, and extension messages. Its 50-level nesting limit matches the
+  original `BencodeParser` guard. The shared decoder does not impose fixed
+  byte-string or per-container item-count limits; lengths are checked against
+  available input, and valid larger values remain accepted.
+- **Input-specific resource bounds:** DHT packets enter through a 4 KiB UDP
+  buffer; magnet metadata is limited to 8 MiB by BEP 9 handling; BitTorrent
+  peer frames are limited to 64 MiB; HTTP tracker announce bodies are streamed
+  with an 8 MiB cap before bencode parsing. Local metainfo is parsed from the
+  input buffer already supplied by its caller. The shared decoder retains the
+  50-level nesting guard to prevent recursion-driven stack exhaustion.
+- **Legacy integer-field floats:** original aria2 accepts numeric text such as
+  `i+343243.342E-1333e` in an integer field and decodes it as zero. The Rust
+  decoder now preserves this narrow behavior and still rejects unrelated bad
+  characters. A focused unit test covers both paths.
+- **Compatibility impact:** the shared parser now accepts byte strings larger
+  than 64 MiB and containers with more than 65,536 entries when they fit in the
+  supplied input. HTTP tracker announce responses above 8 MiB are rejected as
+  malformed to bound network-driven buffering and decoded-tree allocation;
+  original aria2 has no matching cap in the inspected path. Parser tests cover
+  large declared lengths, large containers, and the nesting boundary. No live
+  original-binary differential was run for oversized metainfo or tracker data.
 
 ## BitTorrent uTP socket options
 
@@ -615,6 +646,30 @@ behavior. An unlisted behavior has not been audited here.
 - **Compatibility impact:** these are Rust extensions; original aria2 does
   not expose the corresponding process-level settings. Defaults match the
   protocol library's existing socket defaults.
+- **Per-task RPC options:** `enable-utp` and `utp-listen-port` are Rust task
+  extensions. They can be supplied through CLI and RPC task creation, are
+  retained in the task option snapshot, and `changeOption` applies them to
+  reserved tasks or defers active-task changes until restart. They remain
+  omitted from aria2's standard global-option projection because that response
+  follows the upstream wire vocabulary.
+
+## BitTorrent piece-selection settings
+
+- **Rust extension options:** `bt-piece-selection-strategy` accepts
+  `default` and `rarest-first` (both select the default rarest-first behavior),
+  plus `sequential`, `random`, `longest-sequence`, `priority`, and `geometric`.
+  `bt-endgame-threshold` defaults to 20 remaining
+  pieces; 0 disables endgame duplicate selection.
+- **Propagation:** the options are registered in the BitTorrent option
+  registry, accepted through CLI and RPC task creation, included in request
+  option snapshots, and preserved by session serialization. The peer download
+  session configures both `PiecePicker` and `BtPieceSelector` from the same
+  endgame threshold so selection and endgame reporting cannot diverge.
+- **Compatibility impact:** these are additive Rust implementation settings;
+  original aria2 does not expose this exact strategy set or threshold option.
+  Invalid strategy strings fail download initialization with a configuration
+  error. Focused picker, CLI, RPC, runtime-policy, and session tests cover the
+  propagation path.
 - **Capacity behavior:** when the configured endpoint is below its connection
   limit and a 16-bit ID is free, outbound setup searches the entire ID space
   from a random start before reporting capacity exhaustion. This fixes a
@@ -635,7 +690,7 @@ behavior. An unlisted behavior has not been audited here.
   local keepalive sends do not refresh that deadline, and preservation of a
   live connection after an inbound connection-ID collision.
 
-## Public BitTorrent tracker source timeout
+## Public BitTorrent tracker sources
 
 - **Setting:** `bt-tracker-source-timeout` bounds the complete HTTP fetch for
   each remote public tracker list, including response-body reading. It defaults
@@ -651,6 +706,13 @@ behavior. An unlisted behavior has not been audited here.
   users lower bursts for multi-source refreshes. Runtime changes apply to
   future refreshes; an in-progress refresh keeps its captured limit. CLI/config,
   C API, and `changeGlobalOption` pass the process setting to `PublicTrackerList`.
+- **Resource bounds:** each fetched response is capped at 8 MiB after HTTP
+  content decoding, and each source is capped at 4096 unique valid tracker
+  entries. Oversized bodies stop during streaming; sources exceeding the entry
+  limit are rejected as a whole, preserving that source's previous snapshot.
+  The public in-memory `PublicTrackerList::parse` helper remains unrestricted;
+  limits apply to remote source ingestion. The process source-fetcher and the
+  standalone protocol fetcher share the same streaming byte-limit helper.
 - **Configuration ownership:** `bt-tracker-source`,
   `bt-tracker-update-interval`, `bt-tracker-source-concurrency`, and
   `enable-public-trackers` configure the process-shared public tracker catalog
@@ -677,6 +739,8 @@ behavior. An unlisted behavior has not been audited here.
 - **Compatibility impact:** these are Rust extensions; original aria2 does not
   provide public tracker-list source timeout or concurrency options. Defaults
   preserve the prior 15-second timeout and four-fetch concurrency ceiling.
+  The 8 MiB body and 4096-entry source limits can reject unusually large custom
+  tracker lists; this is an intentional resource bound.
 - **Verification:** protocol tests delay an HTTP response body and assert the
   configured deadline aborts the complete fetch; CLI, RPC, and C API tests
   verify empty tracker sources remain an empty list through their configuration
@@ -685,7 +749,8 @@ behavior. An unlisted behavior has not been audited here.
   above the protocol cap. A core loopback test verifies that the engine fetcher
   reaches the tracker source using the selected local source address. A second
   loopback test verifies HTTP proxy absolute-form requests and Basic proxy
-  credentials.
+  credentials. Protocol regressions verify rejection just beyond the body and
+  entry limits and acceptance at the exact unique-entry limit.
   An announce-specific loopback test verifies the tracker request traverses
   the configured proxy, carries the configured proxy credentials, and binds to
   the selected outbound source address. A second announce test verifies one
@@ -1043,7 +1108,10 @@ behavior. An unlisted behavior has not been audited here.
   historical FTP anonymous defaults, SFTP URL/netrc/CLI credential resolution,
   FTPS TLS policy, and engine error mapping. Existing focused FTP URI tests and
   protocol SFTP parser tests pass; the SFTP engine URI compatibility tests are
-  run with the optional `sftp` feature.
+  run with the optional `sftp` feature. FTP path and credential userinfo are
+  percent-decoded at the protocol boundary, matching the shared core URI parser
+  and `aria2_original::uri::parse`; focused protocol and engine mapping tests
+  cover encoded delimiters in credentials.
 - FTP proxy GET request serialization now lives in
   `aria2-protocol::ftp::proxy`, including the absolute FTP request target,
   Host/Range/cache headers, Basic proxy authentication, and FTP username
@@ -1393,7 +1461,14 @@ behavior. An unlisted behavior has not been audited here.
   adapter does not parse the same XML again for every resource group. Restored
   groups reconstruct the parsed file from persisted source XML and file index.
   Commands retain parsed execution data; request groups retain source bytes for
-  session reconstruction. `aria2-protocol::metalink::checksum_verifier` remains
+  session reconstruction and the effective base URI used to resolve relative
+  resource URLs. Both the direct command converter and manager-owned group
+  expansion use an explicit converter base URI when supplied, otherwise the
+  task's `metalink-base-uri` option. This applies the option at the shared
+  expansion seam for CLI, RPC, C API, and library callers. Focused core tests
+  cover relative URL resolution in both converter APIs, persistence of the
+  effective URI, and explicit builder precedence.
+  `aria2-protocol::metalink::checksum_verifier` remains
   a standalone synchronous file-checksum API; engine execution instead uses
   core's shared asynchronous checksum service and Metalink piece verifier.
 - **Policy:** Core's `engine::metalink` applies task-level file and resource
@@ -1464,8 +1539,11 @@ behavior. An unlisted behavior has not been audited here.
   C API `select-file` execution, RPC global/task option propagation, and
   session save/restore of Metalink filters, base URI, and file selection have
   focused regressions; those tests passed after the option-definition move.
-  With BitTorrent disabled, the option-registry regression and the CLI option
-  regression (including `--select-file` and `--metalink-base-uri`) both pass.
+  The Metalink base-URI expansion regression also verifies that the typed
+  option resolves relative resources and is retained on the resulting task
+  group. With BitTorrent disabled, the option-registry regression and the CLI
+  option regression (including `--select-file` and `--metalink-base-uri`) both
+  pass.
   BitTorrent-only RPC peer-port and peer-ID tests also pass with that feature
   enabled. These checks establish configuration and unit behavior, not remote
   server interoperability.
@@ -1474,7 +1552,12 @@ behavior. An unlisted behavior has not been audited here.
   feature they exercise. The matching `aria2-core` library suite passes
   2734/2734. Runtime availability treats `select-file` as supported when
   either Metalink or BitTorrent is enabled, matching its shared registry
-  definition.
+  definition. The `--no-default-features --features bittorrent` tier also
+  passes its full `aria2` (153/153) and `aria2-core` (3547 passed, 1 ignored)
+  library suites. With all three protocol features enabled, the full protocol
+  crate suite passes 1357 tests (2 ignored), the core suite passes 3652 (1
+  ignored), and the application suite passes 162. No remote-server
+  interoperability is implied by these local tests.
 
 ## Pause and unpause lifecycle status
 
@@ -1659,6 +1742,11 @@ behavior. An unlisted behavior has not been audited here.
   formats, streaming state, and decoder error categories are preserved.
   Response filter-chain execution and null-sink behavior remain in core.
   `bzip2-rs` is now a protocol dependency rather than a core dependency.
+- Unsupported or unknown `Content-Encoding` values, including `br`, select no
+  decoder and leave the payload encoded. This matches `aria2_original`'s
+  `HttpResponseCommand` behavior, which logs that decoding is unsupported and
+  skips it. The protocol selector test covers `br` and an unknown coding; this
+  is not Brotli support.
 - The protocol crate owns the supported `Transfer-Encoding: chunked`
   classifier, shared by the core response processor and Linux splice path.
   This removes a core substring check that treated values such as `xchunked`

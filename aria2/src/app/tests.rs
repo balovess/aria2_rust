@@ -277,12 +277,16 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--bt-keep-alive-interval=31",
         "--bt-timeout=181",
         "--bt-request-timeout=61",
+        "--bt-piece-selection-strategy=sequential",
+        "--bt-endgame-threshold=0",
         "--peer-connection-timeout=16",
         "--bt-incoming-peer-handshake-timeout=45",
         "--bt-utp-max-connections=73",
         "--bt-utp-connect-timeout=14",
         "--bt-utp-idle-timeout=46",
         "--bt-utp-keepalive-interval=19",
+        "--enable-utp=true",
+        "--utp-listen-port=6882",
         "--bt-tracker-source-timeout=47",
         "--bt-tracker-source-concurrency=2",
         "--bt-peer-blocklist=blocked-peers.txt",
@@ -310,7 +314,11 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.bt_keep_alive_interval, 31);
     assert_eq!(options.bt_timeout, 181);
     assert_eq!(options.bt_request_timeout, 61);
+    assert_eq!(options.bt_piece_selection_strategy, "sequential");
+    assert_eq!(options.bt_endgame_threshold, 0);
     assert_eq!(options.peer_connection_timeout, 16);
+    assert!(options.enable_utp);
+    assert_eq!(options.utp_listen_port, Some(6882));
     assert_eq!(
         app.config
             .read()

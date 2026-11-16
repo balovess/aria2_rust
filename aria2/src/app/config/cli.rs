@@ -361,6 +361,8 @@ impl App {
         set_f64!("seed-time", b.seed_time);
         set_f64!("seed-ratio", b.seed_ratio);
         set_u64!("bt-max-peers", b.bt_max_peers);
+        set_str!("bt-piece-selection-strategy", b.bt_piece_selection_strategy);
+        set_u64!("bt-endgame-threshold", b.bt_endgame_threshold);
         set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
         set_u64!(
             "bt-optimistic-unchoke-interval",

@@ -63,6 +63,26 @@ fn test_generate_from_bytes_no_filter() {
     assert_eq!(commands.len(), 2);
 }
 
+#[cfg(feature = "metalink")]
+#[test]
+fn generate_from_bytes_resolves_relative_urls_with_option_base_uri() {
+    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>payload.bin</url></file></metalink>"#;
+    let options = DownloadOptions {
+        metalink_base_uri: Some("https://cdn.example/base/".to_string()),
+        ..DownloadOptions::default()
+    };
+
+    let commands = MetalinkToRequestGroup::new()
+        .generate_from_bytes(data, &options)
+        .expect("option base URI should resolve relative command URLs");
+
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        commands[0].group.read().unwrap().uris(),
+        ["https://cdn.example/base/payload.bin".into()]
+    );
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[test]
 fn generate_from_bytes_groups_named_shared_torrent_metaurl_files() {

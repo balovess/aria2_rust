@@ -50,6 +50,69 @@ fn manager_resource_groups_apply_select_file_and_location_priority() {
     );
 }
 
+#[cfg(feature = "metalink")]
+#[test]
+fn manager_resource_groups_resolve_and_retain_option_base_uri() {
+    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>payload.bin</url></file></metalink>"#;
+    let options = DownloadOptions {
+        metalink_base_uri: Some("https://cdn.example/base/".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut gids = [crate::request::request_group::GroupId::new(71)].into_iter();
+
+    let groups = MetalinkToRequestGroup::new()
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("option base URI should resolve relative Metalink resources")
+        .resource_groups;
+
+    assert_eq!(groups.len(), 1);
+    let group = groups[0].recover();
+    assert_eq!(
+        group
+            .uris()
+            .iter()
+            .map(|uri| uri.as_ref())
+            .collect::<Vec<_>>(),
+        ["https://cdn.example/base/payload.bin"]
+    );
+    assert_eq!(
+        group.metalink_base_uri().as_deref(),
+        Some("https://cdn.example/base/")
+    );
+}
+
+#[cfg(feature = "metalink")]
+#[test]
+fn explicit_builder_base_uri_overrides_option_base_uri() {
+    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>payload.bin</url></file></metalink>"#;
+    let options = DownloadOptions {
+        metalink_base_uri: Some("https://option.example/base/".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut gids = [crate::request::request_group::GroupId::new(72)].into_iter();
+
+    let groups = MetalinkToRequestGroup::new()
+        .with_base_uri("https://builder.example/base/")
+        .create_groups_from_bytes(data, &options, &mut gids)
+        .expect("builder base URI should resolve relative Metalink resources")
+        .resource_groups;
+
+    assert_eq!(groups.len(), 1);
+    let group = groups[0].recover();
+    assert_eq!(
+        group
+            .uris()
+            .iter()
+            .map(|uri| uri.as_ref())
+            .collect::<Vec<_>>(),
+        ["https://builder.example/base/payload.bin"]
+    );
+    assert_eq!(
+        group.metalink_base_uri().as_deref(),
+        Some("https://builder.example/base/")
+    );
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[test]
 fn bittorrent_url_resource_becomes_a_torrent_metaurl_graph() {

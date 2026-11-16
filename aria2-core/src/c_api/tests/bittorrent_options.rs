@@ -20,6 +20,10 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
     let (file_limit_entry, file_limit_name, file_limit_value) = kv("bt-max-open-files", "17");
     let (dht_limit_entry, dht_limit_name, dht_limit_value) = kv("dht-max-peer-info-hashes", "128");
     let (dht_items_entry, dht_items_name, dht_items_value) = kv("dht-max-items", "512");
+    let (piece_strategy_entry, piece_strategy_name, piece_strategy_value) =
+        kv("bt-piece-selection-strategy", "sequential");
+    let (endgame_threshold_entry, endgame_threshold_name, endgame_threshold_value) =
+        kv("bt-endgame-threshold", "0");
     let entries = [
         timeout_entry,
         utp_entry,
@@ -29,6 +33,8 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
         file_limit_entry,
         dht_limit_entry,
         dht_items_entry,
+        piece_strategy_entry,
+        endgame_threshold_entry,
     ];
     let result =
         unsafe { aria2_rust_change_global_option(&mut session, entries.as_ptr(), entries.len()) };
@@ -77,6 +83,18 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
             .runtime
             .block_on(session.config.get_global_i64("dht-max-items")),
         Some(512)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_str("bt-piece-selection-strategy")),
+        Some("sequential".to_string())
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("bt-endgame-threshold")),
+        Some(0)
     );
     assert!(matches!(
         command_rx.try_recv(),
@@ -151,6 +169,10 @@ fn c_api_dispatches_bittorrent_listener_runtime_options() {
         dht_limit_value,
         dht_items_name,
         dht_items_value,
+        piece_strategy_name,
+        piece_strategy_value,
+        endgame_threshold_name,
+        endgame_threshold_value,
     ));
     session.finalize();
 }

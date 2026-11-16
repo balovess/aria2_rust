@@ -780,10 +780,30 @@ fn test_download_options_to_map_defaults_excluded() {
     // enable_dht and enable_public_trackers default to true -> NOT saved
     assert!(!map.contains_key("enable-dht"));
     assert!(!map.contains_key("enable-public-trackers"));
+    assert!(!map.contains_key("bt-piece-selection-strategy"));
+    assert!(!map.contains_key("bt-endgame-threshold"));
 
     // The omitted wire value must still restore aria2's typed default.
     let restored = DownloadOptions::from_option_strings(&map);
     assert_eq!(restored.seed_ratio, Some(1.0));
+}
+
+#[test]
+fn session_preserves_disabled_endgame_threshold() {
+    let options = DownloadOptions {
+        bt_endgame_threshold: 0,
+        ..DownloadOptions::default()
+    };
+    let serialized = download_options_to_map(&options);
+
+    assert_eq!(
+        serialized.get("bt-endgame-threshold").map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        DownloadOptions::from_option_strings(&serialized).bt_endgame_threshold,
+        0
+    );
 }
 
 #[test]

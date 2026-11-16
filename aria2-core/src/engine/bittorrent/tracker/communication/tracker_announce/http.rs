@@ -1,5 +1,63 @@
 use super::*;
 
+const MAX_TRACKER_HTTP_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+enum TrackerBodyReadError {
+    TooLarge,
+    SizeOverflow,
+    Transport(reqwest::Error),
+}
+
+impl std::fmt::Display for TrackerBodyReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => write!(
+                formatter,
+                "HTTP tracker response exceeds {} byte limit",
+                MAX_TRACKER_HTTP_RESPONSE_BYTES
+            ),
+            Self::SizeOverflow => formatter.write_str("HTTP tracker response size overflow"),
+            Self::Transport(error) => write!(formatter, "Read body failed: {error}"),
+        }
+    }
+}
+
+fn ensure_tracker_response_size(size: usize) -> Result<(), TrackerBodyReadError> {
+    if size > MAX_TRACKER_HTTP_RESPONSE_BYTES {
+        return Err(TrackerBodyReadError::TooLarge);
+    }
+    Ok(())
+}
+
+async fn read_tracker_response_body(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, TrackerBodyReadError> {
+    if let Some(size) = response.content_length() {
+        if size > MAX_TRACKER_HTTP_RESPONSE_BYTES as u64 {
+            return Err(TrackerBodyReadError::TooLarge);
+        }
+    }
+
+    let capacity = response
+        .content_length()
+        .map(|size| size as usize)
+        .unwrap_or(0);
+    let mut body = Vec::with_capacity(capacity);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(TrackerBodyReadError::Transport)?
+    {
+        let size = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(TrackerBodyReadError::SizeOverflow)?;
+        ensure_tracker_response_size(size)?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 impl TrackerAnnouncer {
     /// Execute an HTTP tracker announce.
     #[allow(clippy::too_many_arguments)]
@@ -121,7 +179,7 @@ impl TrackerAnnouncer {
                     return None;
                 }
 
-                match resp.bytes().await {
+                match read_tracker_response_body(resp).await {
                     Ok(body) => {
                         match aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(
                             &body,
@@ -192,10 +250,14 @@ impl TrackerAnnouncer {
                     }
                     Err(e) => {
                         warn!("[BT] HTTP tracker {} body read failed: {}", tracker_url, e);
-                        self.last_failure_kind = Some(if e.is_timeout() {
-                            TrackerFailureKind::Timeout
-                        } else {
-                            TrackerFailureKind::Network
+                        self.last_failure_kind = Some(match e {
+                            TrackerBodyReadError::TooLarge | TrackerBodyReadError::SizeOverflow => {
+                                TrackerFailureKind::MalformedResponse
+                            }
+                            TrackerBodyReadError::Transport(error) if error.is_timeout() => {
+                                TrackerFailureKind::Timeout
+                            }
+                            TrackerBodyReadError::Transport(_) => TrackerFailureKind::Network,
                         });
                         self.announce.announce_failure();
                         None
@@ -213,5 +275,19 @@ impl TrackerAnnouncer {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracker_response_size_limit_is_inclusive() {
+        assert!(ensure_tracker_response_size(MAX_TRACKER_HTTP_RESPONSE_BYTES).is_ok());
+        assert!(matches!(
+            ensure_tracker_response_size(MAX_TRACKER_HTTP_RESPONSE_BYTES + 1),
+            Err(TrackerBodyReadError::TooLarge)
+        ));
     }
 }

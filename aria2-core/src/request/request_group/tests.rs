@@ -786,6 +786,21 @@ fn test_try_update_option_new_runtime_changeable() {
     );
     assert_eq!(group.options().bt_endgame_threshold, 50);
 
+    assert!(
+        group
+            .try_update_option(
+                "bt-piece-selection-strategy",
+                serde_json::json!("sequential")
+            )
+            .unwrap()
+    );
+    assert_eq!(group.options().bt_piece_selection_strategy, "sequential");
+    assert!(
+        group
+            .try_update_option("bt-piece-selection-strategy", serde_json::json!("unknown"))
+            .is_err()
+    );
+
     // seed-time
     assert!(
         group

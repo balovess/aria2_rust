@@ -64,9 +64,12 @@ pub fn parse_uri(uri: &str) -> Option<FtpUri> {
     let (username, password) = if userinfo.is_empty() {
         (None, None)
     } else if let Some((username, password)) = userinfo.split_once(':') {
-        (Some(username.to_owned()), Some(password.to_owned()))
+        (
+            Some(percent_decode(username)),
+            Some(percent_decode(password)),
+        )
     } else {
-        (Some(userinfo.to_owned()), Some(String::new()))
+        (Some(percent_decode(userinfo)), Some(String::new()))
     };
 
     let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
@@ -112,6 +115,15 @@ mod tests {
                 secure: true,
             })
         );
+    }
+
+    #[test]
+    fn percent_decodes_credentials_without_treating_encoded_at_as_authority() {
+        let parsed = parse_uri("ftp://user%40name:pass%3Aword%40x@example.test/file")
+            .expect("FTP URI should parse");
+
+        assert_eq!(parsed.username.as_deref(), Some("user@name"));
+        assert_eq!(parsed.password.as_deref(), Some("pass:word@x"));
     }
 
     #[test]

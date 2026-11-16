@@ -95,6 +95,34 @@ pub(super) fn parse_tracker_list(text: &str) -> Vec<TrackerEntry> {
     result
 }
 
+pub(super) fn parse_tracker_source_list(text: &str) -> Result<Vec<TrackerEntry>, String> {
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains("://") {
+            continue;
+        }
+
+        if let Some(entry) =
+            normalize_tracker_url(trimmed).and_then(|url| parse_single_tracker_url(&url))
+            && seen.insert(entry.url.clone())
+        {
+            if result.len() == super::MAX_TRACKERS_PER_SOURCE {
+                return Err(format!(
+                    "Tracker source contains more than {} unique trackers",
+                    super::MAX_TRACKERS_PER_SOURCE
+                ));
+            }
+            result.push(entry);
+        }
+    }
+    if result.is_empty() {
+        return Err("Parsed 0 entries from response".to_string());
+    }
+    Ok(result)
+}
+
 fn normalize_tracker_url(raw: &str) -> Option<String> {
     let raw = raw.trim();
     let parsed = url::Url::parse(raw).ok()?;

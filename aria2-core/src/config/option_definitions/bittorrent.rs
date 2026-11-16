@@ -45,6 +45,33 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-piece-selection-strategy".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str(crate::constants::DEFAULT_PIECE_STRATEGY.to_string()),
+            allowed_values: &[
+                "default",
+                "sequential",
+                "rarest-first",
+                "random",
+                "longest-sequence",
+                "priority",
+                "geometric",
+            ],
+            description: "BitTorrent piece selection strategy (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-endgame-threshold".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as i64),
+            min: Some(0),
+            max: Some(u32::MAX as u64),
+            description: "Remaining piece count at which BitTorrent endgame mode starts; 0 disables it (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "bt-request-peer-speed-limit".into(),
             opt_type: OptionType::Size,
             default_value: OptionValue::Int((50 * 1024) as i64),

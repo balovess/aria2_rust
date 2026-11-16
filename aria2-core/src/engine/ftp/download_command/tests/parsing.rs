@@ -17,6 +17,16 @@ fn test_parse_uri_with_auth() {
 }
 
 #[test]
+fn test_parse_uri_percent_decodes_credentials() {
+    let result =
+        FtpDownloadCommand::parse_uri("ftp://user%40name:pass%3Aword@example.com/file.txt")
+            .unwrap();
+
+    assert_eq!(result.username, "user@name");
+    assert_eq!(result.password, "pass:word");
+}
+
+#[test]
 fn test_parse_uri_with_encoded_chars() {
     let uri = "ftp://example.com/my%20file.txt";
     let result = FtpDownloadCommand::parse_uri(uri).unwrap();

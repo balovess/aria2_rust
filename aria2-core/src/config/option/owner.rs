@@ -133,6 +133,8 @@ impl OptionRegistry {
             | "bt-max-upload-slots"
             | "bt-optimistic-unchoke-interval"
             | "bt-snubbed-timeout"
+            | "bt-piece-selection-strategy"
+            | "bt-endgame-threshold"
             | "bt-request-peer-speed-limit"
             | "bt-seed-unverified"
             | "bt-save-metadata"

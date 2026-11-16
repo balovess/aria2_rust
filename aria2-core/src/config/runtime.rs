@@ -127,6 +127,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-open-files",
+    "bt-piece-selection-strategy",
+    "bt-endgame-threshold",
     "dht-max-peer-info-hashes",
     "dht-max-peers-per-info-hash",
     "dht-max-items",
@@ -183,10 +185,11 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
 
 /// Options copied into a request group when aria2 creates a download.
 ///
-/// This is the original aria2 `setInitialOption(true)` set from
-/// `OptionHandlerFactory.cc`. `aria2.getOption` serializes only these values
-/// from a group's option state; RPC listener, authentication, logging, and
-/// other process-wide settings must never become task options.
+/// This includes aria2's `setInitialOption(true)` set from
+/// `OptionHandlerFactory.cc` and supported Rust task extensions.
+/// `aria2.getOption` serializes only these values from a group's option state;
+/// RPC listener, authentication, logging, and other process-wide settings must
+/// never become task options.
 pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "allow-overwrite",
     "allow-piece-length-change",
@@ -204,6 +207,8 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
     "bt-max-peers",
+    "bt-piece-selection-strategy",
+    "bt-endgame-threshold",
     "bt-max-upload-slots",
     "bt-optimistic-unchoke-interval",
     "bt-snubbed-timeout",
@@ -217,6 +222,8 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-seed-unverified",
     "bt-stop-timeout",
     "bt-tracker",
+    "enable-utp",
+    "utp-listen-port",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",

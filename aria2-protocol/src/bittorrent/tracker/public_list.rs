@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use futures::Stream;
 use futures::stream::{self, StreamExt};
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::sleep;
@@ -22,11 +24,38 @@ use source_fetcher::{ReqwestTrackerSourceFetcher, fetch_tracker_source};
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
 pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(604_800);
 pub const DEFAULT_TRACKER_SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum decoded response body accepted from one public tracker source.
+pub const MAX_TRACKER_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum number of unique valid trackers accepted from one source.
+pub const MAX_TRACKERS_PER_SOURCE: usize = 4096;
 /// Bound source downloads so a large user-provided source list cannot create
 /// an unbounded burst of outbound HTTP requests.
 pub const MAX_TRACKER_SOURCE_CONCURRENCY: usize = 4;
 const MAX_BACKOFF: Duration = Duration::from_secs(3_600);
 const REMOTE_TEMPORARY_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Read a tracker-source response stream with the shared byte limit.
+///
+/// Engine integrations use this helper for their policy-configured HTTP
+/// transports so they enforce the same resource bound as the standalone
+/// protocol fetcher.
+pub async fn read_tracker_source_body<S, E>(mut chunks: S) -> Result<String, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut body = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|error| format!("Read body failed: {error}"))?;
+        if chunk.len() > MAX_TRACKER_SOURCE_BYTES.saturating_sub(body.len()) {
+            return Err(format!(
+                "Tracker source response exceeds the {MAX_TRACKER_SOURCE_BYTES}-byte limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
 
 /// Fetches the body of a configured public tracker-list source.
 ///

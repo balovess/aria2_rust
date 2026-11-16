@@ -6,7 +6,9 @@ use tracing::debug;
 
 use crate::crypto::ensure_ring_provider;
 
-use super::{PublicTrackerList, TrackerEntry, TrackerSourceFetcher};
+use super::{
+    TrackerEntry, TrackerSourceFetcher, parse::parse_tracker_source_list, read_tracker_source_body,
+};
 
 pub(super) async fn fetch_tracker_source(
     fetcher: &dyn TrackerSourceFetcher,
@@ -22,11 +24,13 @@ pub(super) async fn fetch_tracker_source(
                 request_timeout.as_secs_f64()
             )
         })??;
-    let entries = PublicTrackerList::parse(&body);
-    if entries.is_empty() {
-        return Err("Parsed 0 entries from response".to_string());
+    if body.len() > super::MAX_TRACKER_SOURCE_BYTES {
+        return Err(format!(
+            "Tracker source response exceeds the {}-byte limit",
+            super::MAX_TRACKER_SOURCE_BYTES
+        ));
     }
-    Ok(entries)
+    parse_tracker_source_list(&body)
 }
 
 pub(super) struct ReqwestTrackerSourceFetcher {
@@ -59,10 +63,7 @@ impl TrackerSourceFetcher for ReqwestTrackerSourceFetcher {
             if !response.status().is_success() {
                 return Err(format!("HTTP error: {}", response.status()));
             }
-            response
-                .text()
-                .await
-                .map_err(|error| format!("Read body failed: {error}"))
+            read_tracker_source_body(response.bytes_stream()).await
         })
     }
 }

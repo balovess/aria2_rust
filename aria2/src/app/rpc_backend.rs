@@ -675,6 +675,51 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "bittorrent")]
+    #[tokio::test]
+    async fn utp_task_options_are_settable_and_reported_through_rpc() {
+        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let (sender, _receiver) = aria2_core::engine::engine_command::channel();
+        let backend = CoreRpcBackend::new(
+            Arc::new(RequestGroupMan::new()),
+            sender,
+            config,
+            None,
+            "test",
+        );
+
+        let (options, snapshot) = backend
+            .merged_task_options(HashMap::from([
+                ("enable-utp".to_string(), serde_json::Value::Bool(true)),
+                ("utp-listen-port".to_string(), serde_json::json!(6882)),
+                (
+                    "bt-piece-selection-strategy".to_string(),
+                    serde_json::json!("sequential"),
+                ),
+                ("bt-endgame-threshold".to_string(), serde_json::json!(0)),
+            ]))
+            .await
+            .expect("RPC addUri should accept the Rust uTP task options");
+
+        assert!(options.enable_utp);
+        assert_eq!(options.utp_listen_port, Some(6882));
+        assert_eq!(options.bt_piece_selection_strategy, "sequential");
+        assert_eq!(options.bt_endgame_threshold, 0);
+        assert_eq!(snapshot.get("enable-utp"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            snapshot.get("utp-listen-port"),
+            Some(&serde_json::json!(6882))
+        );
+        assert_eq!(
+            snapshot.get("bt-piece-selection-strategy"),
+            Some(&serde_json::json!("sequential"))
+        );
+        assert_eq!(
+            snapshot.get("bt-endgame-threshold"),
+            Some(&serde_json::json!(0))
+        );
+    }
+
     #[tokio::test]
     async fn add_uri_options_apply_http_adaptive_settings_per_download() {
         let config = Arc::new(RwLock::new(ConfigManager::new()));

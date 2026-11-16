@@ -1,3 +1,4 @@
+use super::parse::parse_tracker_source_list;
 use super::*;
 
 struct ConcurrencyRecordingFetcher {
@@ -85,6 +86,120 @@ async fn source_request_timeout_covers_the_complete_response_body() {
     assert_eq!(
         catalog.source_request_timeout().await,
         DEFAULT_TRACKER_SOURCE_TIMEOUT
+    );
+}
+
+#[tokio::test]
+async fn default_source_fetcher_rejects_response_bodies_over_the_byte_limit() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request).await.unwrap();
+        let body_len = MAX_TRACKER_SOURCE_BYTES + 1;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let line = b"udp://tracker.test:6969/announce\n";
+        let mut remaining = body_len;
+        let mut chunk = vec![b'#'; 8192];
+        while remaining > 0 {
+            let count = remaining.min(chunk.len());
+            if remaining == count && count >= line.len() {
+                let start = count - line.len();
+                chunk[start..count].copy_from_slice(line);
+            }
+            stream.write_all(&chunk[..count]).await.unwrap();
+            remaining -= count;
+        }
+    });
+
+    let catalog = PublicTrackerList::new();
+    let error = catalog
+        .fetch_and_update(&format!("http://{address}/trackers.txt"))
+        .await
+        .expect_err("oversized source response must be rejected");
+    assert!(error.contains("exceeds the"), "unexpected error: {error}");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn source_body_reader_accepts_the_exact_byte_limit() {
+    let chunks = futures::stream::iter([Ok::<_, std::convert::Infallible>(Bytes::from(
+        vec![b'x'; MAX_TRACKER_SOURCE_BYTES],
+    ))]);
+
+    let body = read_tracker_source_body(chunks)
+        .await
+        .expect("the exact response-body limit should be accepted");
+
+    assert_eq!(body.len(), MAX_TRACKER_SOURCE_BYTES);
+}
+
+struct OversizedBodyFetcher;
+
+impl TrackerSourceFetcher for OversizedBodyFetcher {
+    fn fetch<'a>(
+        &'a self,
+        _source: &'a str,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async {
+            Ok(format!(
+                "udp://tracker.test:6969/announce\n{}",
+                "#".repeat(MAX_TRACKER_SOURCE_BYTES)
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn custom_source_fetcher_output_is_checked_against_the_byte_limit() {
+    let catalog = PublicTrackerList::new_with_config_and_fetcher(
+        TrackerCatalogConfig {
+            enabled: true,
+            sources: vec!["custom-source".to_string()],
+            update_interval: DEFAULT_TRACKER_UPDATE_INTERVAL,
+        },
+        Arc::new(OversizedBodyFetcher),
+    );
+
+    let error = catalog
+        .refresh()
+        .await
+        .expect_err("custom fetcher output must obey the source body limit");
+    assert!(error.contains("exceeds the"), "unexpected error: {error}");
+}
+
+#[test]
+fn fetched_tracker_sources_enforce_the_unique_entry_limit() {
+    let make_source = |count: usize| {
+        (0..count)
+            .map(|index| format!("udp://tracker-{index}.example:6969/announce"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    assert_eq!(
+        parse_tracker_source_list(&make_source(MAX_TRACKERS_PER_SOURCE))
+            .unwrap()
+            .len(),
+        MAX_TRACKERS_PER_SOURCE
+    );
+    let error = parse_tracker_source_list(&make_source(MAX_TRACKERS_PER_SOURCE + 1))
+        .expect_err("a source above the unique tracker limit must be rejected");
+    assert!(
+        error.contains("more than 4096"),
+        "unexpected error: {error}"
     );
 }
 

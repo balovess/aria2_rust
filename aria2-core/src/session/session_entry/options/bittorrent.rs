@@ -200,13 +200,13 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
     if !opts.enable_public_trackers {
         map.insert("enable-public-trackers".to_string(), "false".to_string());
     }
-    if !opts.bt_piece_selection_strategy.is_empty() {
+    if opts.bt_piece_selection_strategy != crate::constants::DEFAULT_PIECE_STRATEGY {
         map.insert(
             "bt-piece-selection-strategy".to_string(),
             opts.bt_piece_selection_strategy.clone(),
         );
     }
-    if opts.bt_endgame_threshold > 0 {
+    if opts.bt_endgame_threshold != crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32 {
         map.insert(
             "bt-endgame-threshold".to_string(),
             opts.bt_endgame_threshold.to_string(),
