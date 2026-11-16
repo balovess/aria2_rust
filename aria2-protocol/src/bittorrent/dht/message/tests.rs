@@ -33,6 +33,20 @@ fn test_error_message() {
 }
 
 #[test]
+fn test_decode_ignores_bytes_after_the_first_complete_message() {
+    let mut packet = DhtMessageBuilder::ping(1234, &[1u8; 20]).encode();
+    packet.extend_from_slice(b"trailing");
+
+    let decoded = DhtMessage::decode(&packet).expect("first complete KRPC value should decode");
+
+    assert!(decoded.is_query());
+    assert_eq!(
+        decoded.q.as_ref().map(|method| method.0.as_str()),
+        Some("ping")
+    );
+}
+
+#[test]
 fn test_all_krpc_message_kinds_encode_aria2_version() {
     use std::collections::BTreeMap;
 

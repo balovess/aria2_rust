@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use futures::StreamExt;
 use tracing::debug;
 
 use crate::crypto::ensure_ring_provider;
@@ -15,7 +16,10 @@ pub(super) async fn fetch_tracker_source(
     source: &str,
     request_timeout: Duration,
 ) -> Result<Vec<TrackerEntry>, String> {
-    debug!("Fetching public tracker list from {}", source);
+    debug!(
+        "Fetching public tracker list from {}",
+        tracker_source_origin(source)
+    );
     let body = tokio::time::timeout(request_timeout, fetcher.fetch(source, request_timeout))
         .await
         .map_err(|_| {
@@ -31,6 +35,19 @@ pub(super) async fn fetch_tracker_source(
         ));
     }
     parse_tracker_source_list(&body)
+}
+
+pub(super) fn tracker_source_origin(raw_url: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw_url) else {
+        return "<invalid tracker source URL>".to_string();
+    };
+
+    url.set_username("").ok();
+    url.set_password(None).ok();
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 pub(super) struct ReqwestTrackerSourceFetcher {
@@ -59,11 +76,16 @@ impl TrackerSourceFetcher for ReqwestTrackerSourceFetcher {
                 .get(source)
                 .send()
                 .await
-                .map_err(|error| format!("HTTP GET failed: {error}"))?;
+                .map_err(|error| format!("HTTP GET failed: {}", error.without_url()))?;
             if !response.status().is_success() {
                 return Err(format!("HTTP error: {}", response.status()));
             }
-            read_tracker_source_body(response.bytes_stream()).await
+            read_tracker_source_body(
+                response
+                    .bytes_stream()
+                    .map(|chunk| chunk.map_err(reqwest::Error::without_url)),
+            )
+            .await
         })
     }
 }

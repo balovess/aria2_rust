@@ -515,8 +515,10 @@ classification, peer-registry updates, and torrent-activity lifecycle under
    because each socket is shared across torrent routes. If an actor exits,
    existing peer handles fail and may fall back to TCP; a later registration
    reaps the stopped actor and creates a fresh one for that endpoint.
-8. `PublicTrackerList` owns remote source-list fetching and its complete
-   response deadline and catalog state. Its source fetcher is injectable so
+8. `PublicTrackerList` owns remote source-list fetching, its complete response
+   deadline, and catalog state. It caps decoded source bodies at 8 MiB and
+   accepts at most 4096 unique valid tracker entries per source. Its source
+   fetcher is injectable so
    the engine can apply the shared DNS cache, source-address policy, and TLS
    configuration, plus configured HTTP/HTTPS proxy routing and credentials.
    Standalone protocol callers retain the default reqwest fetcher. The
@@ -577,7 +579,15 @@ and scheduled tasks share the same protocol resources.
    drops a packet only when no queue accepts it. The KRPC decoder accepts only
    exact `y` values (`q`, `r`, or `e`), requires response dictionaries to carry
    a 20-byte node ID, and validates the two-field error shape. Invalid messages
-   are dropped before they reach shared state. Responses and errors go to the
+   are dropped before they reach shared state. It consumes the first complete
+   bencoded value and ignores trailing datagram bytes, matching upstream
+   `BencodeParser::parseFinal`, which stops when the top-level value completes.
+   The low-level compact-node record parser keeps complete records before an
+   incomplete tail; response extraction ignores a field whose total length
+   does not identify an address family. Upstream rejects a node field whose
+   length is not an exact record multiple. This malformed-input behavior is
+   recorded in the compatibility status.
+   Responses and errors go to the
    transaction tracker. Unknown transactions and replies from the wrong source
    are ignored; a valid KRPC error closes its matched waiter as a failure so the
    querying task updates node health through the same path as a timeout.
@@ -1308,6 +1318,10 @@ Do not add pass-through engine clients around these public interfaces.
   more than 4096 unique trackers. A shared body reader keeps standalone and
   engine-injected transports on the same byte limit; the catalog also checks
   output from caller-provided fetchers before parsing.
+- **Improve** tracker-source diagnostics: log and refresh errors identify a
+  source by its HTTP origin only. Reqwest errors drop their attached URL before
+  conversion, keeping source userinfo, path, query, and fragment out of logs
+  and the public `last_refresh_error` value.
 - **Narrow** HTTP client and protocol test source layout: retain the HTTP
   request/response client interface while moving its tests beside the client;
   group Content-Disposition compatibility cases and DHT UDP pressure coverage
@@ -1457,6 +1471,13 @@ Do not add pass-through engine clients around these public interfaces.
   HTTP User-Agent is carried to standard HTTP downloads, BitTorrent WebSeed
   range requests, and magnet exact-source HTTP retrieval. The peer-ID prefix
   remains a protocol default unless an option overrides it.
+- **Keep** TLS provider setup at each independently usable crate boundary:
+  standalone protocol TLS/reqwest clients initialize ring through the private
+  protocol helper, while core's public reqwest entry points use
+  `http::client_pool::ensure_rustls_provider`. Both tolerate a provider already
+  installed by the embedding process. Core cannot depend on protocol's private
+  initialization module, and moving the helper would add a public TLS-provider
+  API without consolidating a public caller path.
 - **Keep** runtime option application and lifecycle classification in core.
   `aria2-rpc` owns RPC wire decoding and task `changeOption` string-value
   normalization; `aria2` maps the resulting backend request to core. Global

@@ -713,6 +713,9 @@ behavior. An unlisted behavior has not been audited here.
   The public in-memory `PublicTrackerList::parse` helper remains unrestricted;
   limits apply to remote source ingestion. The process source-fetcher and the
   standalone protocol fetcher share the same streaming byte-limit helper.
+- **Diagnostics:** source-fetch logs and refresh errors retain only the parsed
+  HTTP origin. Reqwest errors have their attached URL removed, so userinfo,
+  paths, query parameters, and fragments do not enter `last_refresh_error`.
 - **Configuration ownership:** `bt-tracker-source`,
   `bt-tracker-update-interval`, `bt-tracker-source-concurrency`, and
   `enable-public-trackers` configure the process-shared public tracker catalog
@@ -750,7 +753,8 @@ behavior. An unlisted behavior has not been audited here.
   reaches the tracker source using the selected local source address. A second
   loopback test verifies HTTP proxy absolute-form requests and Basic proxy
   credentials. Protocol regressions verify rejection just beyond the body and
-  entry limits and acceptance at the exact unique-entry limit.
+  entry limits and acceptance at the exact byte and unique-entry limits. A
+  refresh-error test verifies source URL components are redacted.
   An announce-specific loopback test verifies the tracker request traverses
   the configured proxy, carries the configured proxy credentials, and binds to
   the selected outbound source address. A second announce test verifies one
@@ -929,6 +933,36 @@ behavior. An unlisted behavior has not been audited here.
   External DHT interoperability has not been exercised.
 - **Compatibility reference:** [BEP 5](https://www.bittorrent.org/beps/bep_0005.html)
   defines routing-table responses in terms of the closest good nodes.
+
+## DHT KRPC message decoding
+
+- **Ownership:** `aria2-protocol::bittorrent::dht::message::DhtMessage` owns
+  KRPC bencode envelope parsing and serialization. `engine/receive.rs` owns UDP
+  queueing and dispatch; the query handler owns method-specific argument
+  validation and state changes.
+- **Behavior:** the decoder accepts only exact `q`, `r`, or `e` message-type
+  values and requires response dictionaries to contain a 20-byte node ID. It
+  decodes the first complete bencode value and ignores remaining datagram bytes.
+  Upstream `BencodeParser::parseFinal` likewise stops when the top-level value
+  completes instead of requiring the entire input buffer to be consumed
+  ([upstream source](https://github.com/aria2/aria2/blob/master/src/BencodeParser.cc#L264-L273)).
+- **Compact node extraction:** a malformed optional `nodes` field does not
+  suppress valid `nodes6` records. Upstream response construction selects the
+  family-specific field before extracting nodes; the protocol helper can parse
+  both families from one response and now continues to `nodes6` when `nodes`
+  has an invalid record length ([upstream family selection](https://github.com/aria2/aria2/blob/master/src/DHTMessageFactoryImpl.cc#L364-L378)).
+  The low-level Rust record parser keeps complete records before an incomplete
+  trailing record. The response extractor first infers the record family from
+  total field length and ignores the field if that length is not divisible by
+  either record size; upstream rejects the entire field unless its length is
+  an exact multiple of the selected family size. This remains a documented
+  malformed-input behavior difference in the public low-level parser.
+- **Verification:** protocol tests cover all message kinds, invalid type
+  values, response node-ID validation, malformed error tuples, and ignored
+  trailing bytes. Compact-node regressions cover a malformed `nodes` field
+  beside a valid `nodes6` field and low-level parsing before an incomplete
+  tail. No live original-binary differential or external DHT
+  interoperability run was performed for this surface.
 
 ## BitTorrent peer input error classification
 

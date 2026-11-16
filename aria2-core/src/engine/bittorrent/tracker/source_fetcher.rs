@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use aria2_protocol::bittorrent::tracker::public_list::TrackerSourceFetcher;
 use aria2_protocol::bittorrent::tracker::public_list::read_tracker_source_body;
+use futures::StreamExt;
 
 use crate::dns::dns_cache::DnsCache;
 use crate::http::client_identity::ClientTlsConfig;
@@ -88,11 +89,16 @@ impl CoreTrackerSourceFetcher {
             .get(url)
             .send()
             .await
-            .map_err(|error| format!("HTTP GET failed: {error}"))?;
+            .map_err(|error| format!("HTTP GET failed: {}", error.without_url()))?;
         if !response.status().is_success() {
             return Err(format!("HTTP error: {}", response.status()));
         }
-        read_tracker_source_body(response.bytes_stream()).await
+        read_tracker_source_body(
+            response
+                .bytes_stream()
+                .map(|chunk| chunk.map_err(reqwest::Error::without_url)),
+        )
+        .await
     }
 }
 

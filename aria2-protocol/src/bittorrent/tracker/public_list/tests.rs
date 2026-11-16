@@ -1,4 +1,5 @@
 use super::parse::parse_tracker_source_list;
+use super::source_fetcher::tracker_source_origin;
 use super::*;
 
 struct ConcurrencyRecordingFetcher {
@@ -178,6 +179,53 @@ async fn custom_source_fetcher_output_is_checked_against_the_byte_limit() {
         .await
         .expect_err("custom fetcher output must obey the source body limit");
     assert!(error.contains("exceeds the"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn refresh_error_reports_only_the_tracker_source_origin() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let source = format!("http://alice:secret@{address}/private/path?token=private-token#fragment");
+    let catalog = PublicTrackerList::new_with_config(TrackerCatalogConfig {
+        enabled: true,
+        sources: vec![source],
+        update_interval: DEFAULT_TRACKER_UPDATE_INTERVAL,
+    });
+
+    assert!(catalog.refresh().await.is_err());
+    let error = catalog
+        .last_refresh_error()
+        .await
+        .expect("failed refresh should retain a diagnostic");
+
+    assert!(error.contains(&format!("http://{address}/")));
+    for secret in [
+        "alice",
+        "secret",
+        "/private/path",
+        "private-token",
+        "fragment",
+    ] {
+        assert!(
+            !error.contains(secret),
+            "diagnostic leaked {secret}: {error}"
+        );
+    }
+}
+
+#[test]
+fn tracker_source_diagnostic_origin_removes_userinfo_path_query_and_fragment() {
+    assert_eq!(
+        tracker_source_origin(
+            "https://alice:secret@example.test:8443/private/path?token=private#fragment"
+        ),
+        "https://example.test:8443/"
+    );
+    assert_eq!(
+        tracker_source_origin("not a URL"),
+        "<invalid tracker source URL>"
+    );
 }
 
 #[test]

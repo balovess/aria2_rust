@@ -19,7 +19,7 @@ mod source_fetcher;
 mod tests;
 
 use parse::EMBEDDED_TRACKER_LIST;
-use source_fetcher::{ReqwestTrackerSourceFetcher, fetch_tracker_source};
+use source_fetcher::{ReqwestTrackerSourceFetcher, fetch_tracker_source, tracker_source_origin};
 
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
 pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(604_800);
@@ -445,7 +445,7 @@ impl PublicTrackerList {
                 Ok(entries) => {
                     source_entries.insert(source, entries);
                 }
-                Err(error) => errors.push(format!("{}: {}", source, error)),
+                Err(error) => errors.push(format!("{}: {}", tracker_source_origin(&source), error)),
             }
         }
         let has_source_snapshot = !source_entries.is_empty();
