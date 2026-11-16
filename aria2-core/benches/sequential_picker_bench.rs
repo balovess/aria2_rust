@@ -4,7 +4,8 @@
 use aria2_core::engine::bittorrent::piece::{
     PiecePicker, PiecePriorityMode, PieceSelectionStrategy,
 };
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_sequential_selection(c: &mut Criterion) {
     let mut group = c.benchmark_group("sequential_selection");

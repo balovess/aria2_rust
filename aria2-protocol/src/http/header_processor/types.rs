@@ -107,36 +107,6 @@ impl HttpResponseHead {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::HttpResponseHead;
-
-    #[test]
-    fn response_head_debug_redacts_sensitive_header_values() {
-        let response = HttpResponseHead::from_parts(
-            "HTTP/1.1".to_string(),
-            200,
-            "OK".to_string(),
-            vec![
-                (
-                    "Set-Cookie".to_string(),
-                    "session=cookie-secret".to_string(),
-                ),
-                (
-                    "WWW-Authenticate".to_string(),
-                    "Digest nonce=challenge-secret".to_string(),
-                ),
-            ],
-        );
-
-        let debug = format!("{response:?}");
-        assert!(debug.contains("status_code: 200"));
-        assert!(debug.contains("header_count: 2"));
-        assert!(!debug.contains("cookie-secret"));
-        assert!(!debug.contains("challenge-secret"));
-    }
-}
-
 impl HttpResponseHead {
     /// Look up the first value for a header name (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -170,5 +140,35 @@ impl HttpResponseHead {
     /// Returns an iterator over all header name-value pairs.
     pub fn iter_headers(&self) -> impl Iterator<Item = (&str, &str)> {
         self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpResponseHead;
+
+    #[test]
+    fn response_head_debug_redacts_sensitive_header_values() {
+        let response = HttpResponseHead::from_parts(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            vec![
+                (
+                    "Set-Cookie".to_string(),
+                    "session=cookie-secret".to_string(),
+                ),
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Digest nonce=challenge-secret".to_string(),
+                ),
+            ],
+        );
+
+        let debug = format!("{response:?}");
+        assert!(debug.contains("status_code: 200"));
+        assert!(debug.contains("header_count: 2"));
+        assert!(!debug.contains("cookie-secret"));
+        assert!(!debug.contains("challenge-secret"));
     }
 }

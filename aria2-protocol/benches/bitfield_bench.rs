@@ -1,5 +1,6 @@
 use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_bitfield_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("bitfield_vs_vec_bool");

@@ -1,4 +1,5 @@
-use criterion::{criterion_group, Criterion, black_box};
+use criterion::{criterion_group, Criterion};
+use std::hint::black_box;
 
 fn bench_bencode_encode_dict(c: &mut Criterion) {
     let data: std::collections::BTreeMap<String, aria2_protocol::bittorrent::bencode::BencodeValue> =

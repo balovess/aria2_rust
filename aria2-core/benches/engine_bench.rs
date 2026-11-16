@@ -6,7 +6,8 @@ use aria2_core::segment::PieceStatMan;
 use aria2_core::segment::Segment;
 use aria2_core::segment::bitfield::Bitfield;
 use aria2_core::ui::{MultiProgress, ProgressBar};
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group};
+use std::hint::black_box;
 use std::time::Duration;
 
 fn bench_engine_creation(c: &mut Criterion) {

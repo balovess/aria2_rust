@@ -174,10 +174,10 @@ impl App {
                             group.update_progress(entry.completed_length);
                             group.set_total_length(entry.total_length);
                         }
-                        if entry.paused || entry.status == "paused" {
-                            if let Err(error) = self.request_man.pause_group(gid) {
-                                warn!(gid = %gid.value(), error = %error, "Failed to restore paused task state");
-                            }
+                        if (entry.paused || entry.status == "paused")
+                            && let Err(error) = self.request_man.pause_group(gid)
+                        {
+                            warn!(gid = %gid.value(), error = %error, "Failed to restore paused task state");
                         }
                     }
                     Err(e) => {

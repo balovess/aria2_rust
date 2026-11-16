@@ -1,4 +1,5 @@
-use criterion::{criterion_group, Criterion, black_box};
+use criterion::{criterion_group, Criterion};
+use std::hint::black_box;
 use std::io::Write;
 use tempfile::TempDir;
 

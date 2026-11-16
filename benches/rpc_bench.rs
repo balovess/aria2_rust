@@ -1,4 +1,5 @@
-use criterion::{criterion_group, Criterion, BenchmarkId, black_box};
+use criterion::{criterion_group, Criterion, BenchmarkId};
+use std::hint::black_box;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use aria2_rpc::server::AuthConfig;

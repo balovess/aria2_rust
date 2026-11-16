@@ -1,4 +1,5 @@
-use criterion::{criterion_group, Criterion, black_box};
+use criterion::{criterion_group, Criterion};
+use std::hint::black_box;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::request::request_group::DownloadOptions;

@@ -8,8 +8,9 @@ use aria2_rpc::types::GlobalStat;
 use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse};
 use async_trait::async_trait;
 use base64::Engine;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use futures::future::join_all;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 

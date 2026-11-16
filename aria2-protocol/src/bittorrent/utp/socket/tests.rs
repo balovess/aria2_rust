@@ -75,17 +75,19 @@ async fn incoming_connection_id_collision_does_not_replace_active_connection() {
 }
 
 async fn poll_recv_after_readable(socket: &mut UtpSocket, readiness: &tokio::net::UdpSocket) {
+    wait_for_udp_packet(&socket.socket, readiness).await;
+    socket.poll_recv().unwrap();
+}
+
+async fn wait_for_udp_packet(socket: &UdpSocket, readiness: &tokio::net::UdpSocket) {
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut probe = [0; MAX_UDP_RECV_BUFFER];
         loop {
             readiness.readable().await.unwrap();
             match readiness.try_io(tokio::io::Interest::READABLE, || {
-                socket.socket.peek_from(&mut probe)
+                socket.peek_from(&mut probe)
             }) {
-                Ok(_) => {
-                    socket.poll_recv().unwrap();
-                    return;
-                }
+                Ok(_) => return,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     // The socket clone may still report readiness after the
                     // protocol socket consumed the previous datagram.
@@ -315,10 +317,7 @@ async fn recv_preserves_unread_payload_across_small_buffers() {
 
     let server_conn_id = server.connection_ids()[0];
     assert_eq!(server.send(server_conn_id, b"abcdef").unwrap(), 6);
-    tokio::time::timeout(Duration::from_secs(3), client_readiness.readable())
-        .await
-        .expect("client should become readable for the data")
-        .unwrap();
+    wait_for_udp_packet(&client.socket, &client_readiness).await;
 
     let mut first_half = [0; 3];
     assert_eq!(client.recv(client_conn_id, &mut first_half).unwrap(), 3);

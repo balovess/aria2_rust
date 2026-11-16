@@ -7,8 +7,9 @@
 //!
 //! The goal is to identify serialization bottlenecks and provide optimization recommendations.
 
-use criterion::{Criterion, black_box, criterion_group};
+use criterion::{Criterion, criterion_group};
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::Arc;
 
 // ==================== Session Serialization Benchmarks ====================

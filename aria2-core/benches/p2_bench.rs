@@ -14,9 +14,10 @@ use aria2_core::http::stream_filter::{ChunkedDecoder, GZipDecoder, StreamFilter,
 use aria2_protocol::bittorrent::extension::mse_crypto::Arc4Cipher;
 use aria2_protocol::bittorrent::extension::mse_dh::MseDhKeyExchange;
 use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use std::hint::black_box;
 use std::io::Write as _;
 
 // ====== Helper functions ======
