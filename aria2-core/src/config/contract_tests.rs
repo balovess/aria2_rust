@@ -385,16 +385,19 @@ fn runtime_policy_names_are_unique_and_registered() {
         .chain(RUNTIME_CHANGEABLE_OPTIONS)
         .chain(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS)
     {
+        let registered_and_supported = registry
+            .get(name)
+            .is_some_and(|definition| definition.is_supported());
         if super::runtime::is_option_available(name) {
             assert!(
-                registry.contains(name),
+                registered_and_supported,
                 "runtime policy '{}' has no registered option in this build",
                 name
             );
         } else {
             assert!(
-                !registry.contains(name),
-                "feature-gated runtime policy '{}' must not be registered in this build",
+                !registered_and_supported,
+                "feature-gated runtime policy '{}' must not be supported in this build",
                 name
             );
         }
@@ -428,6 +431,9 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         let Some(definition) = registry.get(name) else {
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         let raw = non_default_sample(definition);
         config_content.push_str(name);
         config_content.push('=');
@@ -469,6 +475,9 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         let Some(definition) = registry.get(name) else {
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         if INITIAL_IDENTITY_OPTIONS.contains(name) {
             continue;
         }
@@ -564,6 +573,9 @@ fn every_task_runtime_policy_has_a_real_download_option_consumer() {
             // corresponding protocol feature.
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         let raw = non_default_sample(definition);
         let value = serde_json::Value::String(raw);
         assert!(
@@ -718,6 +730,9 @@ async fn every_global_runtime_policy_reaches_config_manager_storage() {
         let Some(definition) = registry.get(name) else {
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         let raw = non_default_sample(definition);
         let parsed = definition.parse_value(&raw).unwrap_or_else(|error| {
             panic!("global option '{}' sample is invalid: {}", name, error)

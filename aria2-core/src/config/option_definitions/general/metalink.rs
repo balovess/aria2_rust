@@ -110,3 +110,15 @@ impl crate::config::OptionRegistry {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::OptionRegistry;
+
+    #[test]
+    fn select_file_is_registered_without_bittorrent_feature() {
+        let registry = OptionRegistry::new();
+
+        assert!(registry.contains("select-file"));
+    }
+}

@@ -743,6 +743,7 @@ async fn test_load_cli_args_rejects_invalid_split() {
     assert!(error.contains("--split"), "unexpected error: {error}");
 }
 
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn dht_max_concurrent_lookups_cli_value_reaches_global_config() {
     let cli = CliArgs::try_parse_from(["aria2", "--dht-max-concurrent-lookups=32"])
@@ -763,7 +764,7 @@ async fn dht_max_concurrent_lookups_cli_value_reaches_global_config() {
     );
 }
 
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(feature = "bittorrent", target_pointer_width = "64"))]
 #[tokio::test]
 async fn dht_max_concurrent_lookups_cli_rejects_integer_conversion_overflow() {
     let argument = format!("--dht-max-concurrent-lookups={}", usize::MAX);
@@ -923,6 +924,7 @@ async fn test_process_scheduler_and_rate_limits_reach_core_engine() {
     assert_eq!(app.request_man.global_upload_limit(), Some(2048));
 }
 
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
     let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=head=512K,tail"])
@@ -937,6 +939,7 @@ async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
     assert_eq!(options.bt_prioritize_piece, "head=512K,tail");
 }
 
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_load_cli_args_rejects_legacy_piece_priority_mode() {
     let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=rarest"])

@@ -226,7 +226,7 @@ fn is_sftp_option(option_name: &str) -> bool {
 
 #[cfg(not(feature = "bittorrent"))]
 fn is_bittorrent_option(option_name: &str) -> bool {
-    option_name.starts_with("bt-")
+    let is_bittorrent_option = option_name.starts_with("bt-")
         || option_name.starts_with("dht-")
         || matches!(
             option_name,
@@ -240,11 +240,12 @@ fn is_bittorrent_option(option_name: &str) -> bool {
                 | "bt-lpd-interface"
                 | "seed-ratio"
                 | "seed-time"
-                | "select-file"
                 | "enable-public-trackers"
                 | "enable-utp"
                 | "utp-listen-port"
-        )
+        );
+
+    is_bittorrent_option || (option_name == "select-file" && !cfg!(feature = "metalink"))
 }
 
 /// Classifies how `aria2.changeOption` applies an option for a download.

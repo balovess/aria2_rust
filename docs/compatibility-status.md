@@ -1461,12 +1461,20 @@ behavior. An unlisted behavior has not been audited here.
   remote interoperability. The lifecycle integration target passes 17/17,
   including pause/resume from the staging checkpoint, force-halt checkpoint
   retention, and removal cleanup.
-  Metalink-only regressions additionally verify C API `select-file` execution,
-  RPC global/task option propagation, and session save/restore of Metalink
-  filters, base URI, and file selection. The CLI's `--select-file` mapping is
-  covered by the existing Metalink option test, but a Metalink-only CLI build
-  has not yet been rerun after moving the argument into the general option
-  group.
+  C API `select-file` execution, RPC global/task option propagation, and
+  session save/restore of Metalink filters, base URI, and file selection have
+  focused regressions; those tests passed after the option-definition move.
+  With BitTorrent disabled, the option-registry regression and the CLI option
+  regression (including `--select-file` and `--metalink-base-uri`) both pass.
+  BitTorrent-only RPC peer-port and peer-ID tests also pass with that feature
+  enabled. These checks establish configuration and unit behavior, not remote
+  server interoperability.
+  The full `aria2` library suite with `--no-default-features --features
+  metalink` passes 122/122; DHT and BitTorrent-only CLI tests are gated by the
+  feature they exercise. The matching `aria2-core` library suite passes
+  2734/2734. Runtime availability treats `select-file` as supported when
+  either Metalink or BitTorrent is enabled, matching its shared registry
+  definition.
 
 ## Pause and unpause lifecycle status
 

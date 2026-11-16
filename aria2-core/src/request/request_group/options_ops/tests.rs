@@ -27,6 +27,7 @@ fn runtime_split_update_keeps_values_above_u16() {
     assert_eq!(options.split, Some(1_000_000));
 }
 
+#[cfg(feature = "sftp")]
 #[test]
 fn connection_timeouts_are_valid_rpc_task_options() {
     assert_eq!(
@@ -101,6 +102,7 @@ fn connection_timeouts_are_valid_rpc_task_options() {
     assert_eq!(options.connect_timeout, Some(47));
 }
 
+#[cfg(feature = "sftp")]
 #[test]
 fn ftp_and_sftp_connection_options_follow_reserved_and_pending_change_policy() {
     for name in [

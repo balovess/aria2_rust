@@ -33,7 +33,7 @@ fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
     if is_incoming { 0 } else { addr.port() }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bittorrent"))]
 mod peer_id_tests {
     use super::rpc_peer_id;
 
@@ -775,6 +775,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bittorrent")]
     fn incoming_bt_peer_reports_aria2_compatible_zero_port() {
         let incoming_addr = "127.0.0.1:7673".parse().expect("valid socket address");
         assert_eq!(rpc_peer_port(incoming_addr, true), 0);
