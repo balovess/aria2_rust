@@ -175,8 +175,9 @@ async fn test_concurrent_writes_non_overlapping() {
 #[tokio::test]
 async fn test_concurrent_writes_separate_writers() {
     // True OS-level concurrency: each task opens its OWN writer to the SAME
-    // file path and writes to non-overlapping offsets. pwrite is atomic and
-    // offset-based, so concurrent non-overlapping writes are safe.
+    // file path and writes to non-overlapping offsets. Positioned writes do
+    // not mutate a shared file cursor; this test does not assume transactional
+    // atomicity for an individual write.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_concurrent_sep.bin");
 
