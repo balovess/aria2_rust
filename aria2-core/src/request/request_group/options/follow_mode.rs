@@ -1,6 +1,6 @@
 /// How a metadata file should be handled after it is downloaded.
 ///
-/// `None` on [`DownloadOptions`] means that the option was not explicitly
+/// `None` on `DownloadOptions` means that the option was not explicitly
 /// supplied and the aria2 default applies.  When supplied, the wire values
 /// are `true`, `false`, and `mem`; keeping `mem` as a distinct enum variant is
 /// necessary because it changes the disk-writer lifecycle, not just handler

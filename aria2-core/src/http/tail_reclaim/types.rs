@@ -152,7 +152,7 @@ impl TailReclaimConfig {
     ///
     /// # Arguments
     ///
-    /// Same as [`should_reclaim`].
+    /// Same as `should_reclaim`.
     ///
     /// # Invariants
     ///

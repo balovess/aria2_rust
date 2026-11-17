@@ -2049,3 +2049,20 @@ behavior. An unlisted behavior has not been audited here.
   budget, startup option initialization, runtime command handling, global
   option projection, and RPC/C API command dispatch. Full original-aria2
   runtime comparison and OS-level descriptor instrumentation have not been run.
+
+## Disk writer flush and durability contract
+
+- **Library contract:** `DiskWriter::flush` and `SeekableDiskWriter::flush`
+  both drain software buffers to the underlying file or operating-system cache;
+  neither promises stable-storage durability. `sync_data` and `sync_all` are
+  the explicit persistence barriers, and file-backed `DiskWriter::finalize`
+  synchronizes before successful completion. Implementations without durable
+  synchronization support return an error from the sync methods.
+- **Compatibility impact:** callers that relied on sequential
+  `DiskWriter::flush` to persist data must now call `sync_data` or `sync_all`.
+  This aligns the two writer interfaces and avoids forcing disk barriers into
+  the normal flush path. Checkpoint and finalization paths use explicit sync
+  operations.
+- **Verification:** `cargo check -p aria2-core`, rustfmt, and rustdoc were run
+  for the interface and call-site changes. The focused storage and download
+  behavior tests have not been run for this change.

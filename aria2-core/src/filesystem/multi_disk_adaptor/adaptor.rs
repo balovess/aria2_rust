@@ -67,7 +67,7 @@ pub struct MultiDiskAdaptor {
 impl MultiDiskAdaptor {
     /// Create a new `MultiDiskAdaptor` with the given piece length.
     ///
-    /// File entries must be set via [`set_file_entries`] before calling
+    /// File entries must be set via `set_file_entries` before calling
     /// any open method.
     pub fn new(piece_length: u32) -> Self {
         Self {
@@ -125,7 +125,7 @@ impl MultiDiskAdaptor {
 
     /// Open all files with truncation (fresh download).
     ///
-    /// Calls [`reset_disk_writer_entries`] then opens each entry.
+    /// Calls `reset_disk_writer_entries` then opens each entry.
     pub async fn init_and_open_file(&mut self) -> Result<()> {
         self.reset_disk_writer_entries();
         for idx in 0..self.disk_writer_entries.len() {
@@ -167,7 +167,7 @@ impl MultiDiskAdaptor {
     /// Write `data` at global `offset` in the torrent byte stream.
     ///
     /// The write may span multiple files. Files are lazily opened with
-    /// [`OpenMode::Open`] (no truncation).
+    /// `OpenMode::Open` (no truncation).
     pub async fn write_data(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         if data.is_empty() {
             return Ok(());
@@ -209,7 +209,7 @@ impl MultiDiskAdaptor {
     /// Read `length` bytes from global `offset` in the torrent byte stream.
     ///
     /// The read may span multiple files. Files are lazily opened with
-    /// [`OpenMode::Open`]. Returns the data as a `Vec<u8>`.
+    /// `OpenMode::Open`. Returns the data as a `Vec<u8>`.
     pub async fn read_data(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
         self.read_data_internal(offset, length, false).await
     }
@@ -586,7 +586,7 @@ impl DiskAdaptor for MultiDiskAdaptor {
     /// Open all files without truncation.
     ///
     /// The `path` argument is ignored — file paths come from the
-    /// [`FileEntry`] list set via [`set_file_entries`].
+    /// [`FileEntry`] list set via `set_file_entries`.
     async fn open(&mut self, _path: &Path) -> Result<()> {
         self.open_file().await
     }

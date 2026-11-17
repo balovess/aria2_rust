@@ -44,7 +44,7 @@ use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 ///
 /// # Progress Reporting
 ///
-/// [`current_length`] and [`total_length`] report progress for the
+/// `current_length` and `total_length` report progress for the
 /// *currently active file*, not the overall torrent. This matches the
 /// C++ behavior where the download engine aggregates progress at a
 /// higher level.

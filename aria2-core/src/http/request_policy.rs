@@ -26,7 +26,7 @@ impl Default for RequestPacing {
     }
 }
 
-/// Request-level HTTP behavior derived from [`DownloadOptions`].
+/// Request-level HTTP behavior derived from `DownloadOptions`.
 ///
 /// The policy is cheap to clone and is passed to the sequential, segmented,
 /// probe, and authentication retry paths so those paths cannot silently grow

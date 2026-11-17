@@ -2,7 +2,7 @@
 //!
 //! These functions score server mirrors based on speed, failure history,
 //! and recency of success. Lower score = better source. Used by
-//! [`AdaptiveUriSelector`](super::AdaptiveUriSelector) for mirror ranking.
+//! `AdaptiveUriSelector` for mirror ranking.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

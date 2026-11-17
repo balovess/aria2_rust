@@ -39,7 +39,7 @@
 //!
 //! - **[`http`]** — HTTP request policy and reusable helpers for authentication,
 //!   redirects, cookies, response processing, TLS identity, and stream filters
-//!   ([`GzDecoder`](http::stream_filter::GzDecoder), [`ChunkedDecoder`](http::stream_filter::ChunkedDecoder)).
+//!   (`GzDecoder`, [`ChunkedDecoder`](http::stream_filter::ChunkedDecoder)).
 //!
 //! - **[`ftp`]** — FTP control/data connection support, passive/active negotiation,
 //!   listing parsing, proxy handling, and connection pooling. SFTP lives in its
@@ -55,9 +55,9 @@
 //!
 //! BitTorrent task state and scheduling are exposed from this crate's root so
 //! downstream users do not need to depend on the internal `engine` layout.
-//! Use [`PiecePicker`] for task-level piece selection, [`PieceManager`] for
-//! completion and hash accounting, [`PeerBitfieldTracker`] for peer
-//! availability, and [`BtMessageValidator`] for validation against torrent
+//! Use `PiecePicker` for task-level piece selection, `PieceManager` for
+//! completion and hash accounting, `PeerBitfieldTracker` for peer
+//! availability, and `BtMessageValidator` for validation against torrent
 //! metadata.
 //!
 //! ```rust,no_run
@@ -84,9 +84,7 @@
 //! ```
 //!
 //! For custom seeding integrations, `aria2-core` also exposes
-//! [`BtSeedManager`](engine::bittorrent::download::seed_manager::BtSeedManager),
-//! [`PieceDataProvider`](engine::bittorrent::peer::upload_session::PieceDataProvider),
-//! and [`BtSeedingConfig`](engine::bittorrent::peer::upload_session::BtSeedingConfig).
+//! `BtSeedManager`, `PieceDataProvider`, and `BtSeedingConfig`.
 //! The built-in task lifecycle remains the recommended entry point when the
 //! application needs RPC-visible progress, tracker/DHT discovery, persistence,
 //! and download-to-seed handoff.

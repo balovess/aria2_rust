@@ -121,11 +121,12 @@ can define validation and persistence. Its order is received, validated,
 written, durably persisted, then committed. `Committed` requires a successful
 stable-storage barrier; a successful write into the operating-system page cache
 alone is not persistence. Rust's `std::io::Write::flush` only drains writer
-buffers. File-backed `DiskWriter::flush` explicitly follows it with
-`File::sync_all` and a path namespace barrier; checkpoint paths use
-`DiskWriter::sync_data` to sync payload contents and the initial output path
-entry before advancing a sibling checkpoint. `SeekableDiskWriter::sync_all`
-remains the barrier for positioned writes. On Unix the namespace barrier
+buffers. Both disk-writer interfaces now use `flush` only to drain software
+buffers into the operating-system cache. `DiskWriter::sync_data` synchronizes
+payload contents and the initial output path entry before advancing a sibling
+checkpoint; `DiskWriter::sync_all` also synchronizes file metadata. Positioned
+writers use the same `flush`/`sync_data`/`sync_all` distinction. On Unix the
+namespace barrier
 synchronizes the containing directory chain after syncing the file. On Windows
 it opens and flushes the containing directory handle; unsupported directory
 barriers return an error. BitTorrent multi-file setup also syncs the parent

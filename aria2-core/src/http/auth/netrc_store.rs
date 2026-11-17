@@ -5,7 +5,7 @@ use std::fmt;
 ///
 /// Built from the full [`netrc::NetrcParser`] via conversion. Machine entries
 /// are stored in `entries`; the `default` entry (which matches any host) is
-/// stored separately so that [`find_with_fallback`] can first try a machine
+/// stored separately so that `find_with_fallback` can first try a machine
 /// match then fall back to the default, matching aria2's `findAuthenticator`.
 #[derive(Clone)]
 pub struct NetrcStore {

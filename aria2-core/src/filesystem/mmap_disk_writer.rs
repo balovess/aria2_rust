@@ -3,11 +3,11 @@
 //!
 //! # Architecture
 //!
-//! [`MmapDiskWriter`] uses an [`Inner`] enum to select between two strategies:
-//! - [`Inner::Mmap`]: A writable memory mapping (`MmapMut`) backed by the file.
+//! [`MmapDiskWriter`] uses an internal `Inner` enum to select between two strategies:
+//! - `Inner::Mmap`: A writable memory mapping (`MmapMut`) backed by the file.
 //!   Writes are direct memory copies into the mapped region (no syscalls per
 //!   write). Reads are direct memory reads.
-//! - [`Inner::Fallback`]: A [`PositionedDiskWriter`] used when mmap creation
+//! - `Inner::Fallback`: A [`PositionedDiskWriter`] used when mmap creation
 //!   fails (e.g., zero-length file, unsupported filesystem, permission error)
 //!   or after `truncate` is called (remapping is complex; we switch to
 //!   positioned I/O for v1).

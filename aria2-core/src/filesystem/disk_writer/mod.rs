@@ -52,21 +52,33 @@ pub fn new_sequential_download_writer(
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
 
-    /// Synchronize prior writes through the file and namespace durability
-    /// barriers. Unlike [`SeekableDiskWriter::flush`], this is a durability
-    /// operation, not merely a buffer flush. In-memory writers may implement it
-    /// as a no-op because they do not provide crash-recoverable output.
+    /// Drain buffered data to the underlying file or operating-system cache.
+    /// This does not promise stable-storage durability.
     async fn flush(&mut self) -> Result<()>;
 
-    /// Synchronize file contents before a checkpoint is persisted.
+    /// Synchronize file contents and the output's initial directory entry
+    /// before a checkpoint is persisted.
     ///
-    /// The output's initial directory entry must also be durable before this
-    /// method returns. Implementations that cannot separate the two barriers
-    /// may use the stronger `flush` operation.
+    /// Implementations without durable synchronization support must return an
+    /// error rather than treating `flush` as a persistence barrier.
     async fn sync_data(&mut self) -> Result<()> {
-        self.flush().await
+        Err(Aria2Error::Io(
+            "durable data synchronization is unsupported by this writer".into(),
+        ))
     }
 
+    /// Synchronize file contents, metadata, and the output path's directory
+    /// entry before publishing a completed output.
+    async fn sync_all(&mut self) -> Result<()> {
+        Err(Aria2Error::Io(
+            "durable file and namespace synchronization is unsupported by this writer".into(),
+        ))
+    }
+
+    /// Finish the writer and release its resources.
+    ///
+    /// File-backed implementations must durably synchronize output before
+    /// returning success. In-memory implementations may return their bytes.
     async fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
@@ -82,6 +94,10 @@ impl DiskWriter for Box<dyn DiskWriter> {
 
     async fn sync_data(&mut self) -> Result<()> {
         self.as_mut().sync_data().await
+    }
+
+    async fn sync_all(&mut self) -> Result<()> {
+        self.as_mut().sync_all().await
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {
@@ -108,7 +124,8 @@ pub trait SeekableDiskWriter: Send + Sync {
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize>;
     async fn truncate(&mut self, length: u64) -> Result<()>;
 
-    /// Drain this writer's cache to the operating-system page cache.
+    /// Drain this writer's cache to the underlying file or operating-system
+    /// cache.
     ///
     /// This does not promise stable-storage durability. Use `sync_data` or
     /// `sync_all` before publishing a checkpoint that depends on these bytes.

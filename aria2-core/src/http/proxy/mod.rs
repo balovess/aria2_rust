@@ -15,8 +15,8 @@
 //!   The proxy relays the request and response.
 //!
 //! Both modes support proxy authentication (407 Proxy Authentication Required)
-//! via Basic and Digest schemes, reusing the existing [DigestAuthChallenge]
-//! and [basic_auth] infrastructure.
+//! via Basic and Digest schemes, reusing the existing `DigestAuthChallenge`
+//! and `basic_auth` infrastructure.
 
 pub mod auth;
 pub mod config;

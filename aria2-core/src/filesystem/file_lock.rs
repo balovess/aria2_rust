@@ -55,7 +55,7 @@ impl FileLock {
     /// If another process already holds the lock, returns an error immediately
     /// (non-blocking). The lock is **advisory** -- cooperative processes must
     /// all use `flock` for it to be effective. The lock is released when the
-    /// returned `FileLock` is dropped (or when [`release`] is called).
+    /// returned `FileLock` is dropped (or when `release` is called).
     ///
     /// # Windows Behavior
     ///
@@ -223,7 +223,7 @@ impl FileLock {
 
     /// Check whether we currently hold the lock.
     ///
-    /// Always returns `true` if [`acquire`] succeeded (the lock is held until
+    /// Always returns `true` if `acquire` succeeded (the lock is held until
     /// dropped or explicitly released). Returns `false` only if the lock was
     /// never acquired.
     pub fn is_held(&self) -> bool {

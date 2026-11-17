@@ -27,8 +27,8 @@ const BUF_SIZE: usize = 256 * 1024;
 
 /// Async trait for incremental file allocation.
 ///
-/// Callers invoke [`allocate_chunk`] repeatedly until [`finished`] returns
-/// `true`. After each call, [`current_length`] and [`total_length`] report
+/// Callers invoke `allocate_chunk` repeatedly until `finished` returns
+/// `true`. After each call, `current_length` and `total_length` report
 /// progress. This mirrors the C++ `FileAllocationIterator` interface.
 ///
 /// # C++ Reference
@@ -40,7 +40,7 @@ const BUF_SIZE: usize = 256 * 1024;
 pub trait FileAllocationIterator: Send {
     /// Allocate one chunk of disk space.
     ///
-    /// On return, [`current_length`] will have advanced by at most one chunk
+    /// On return, `current_length` will have advanced by at most one chunk
     /// worth of bytes.
     async fn allocate_chunk(&mut self) -> Result<()>;
 
@@ -288,8 +288,8 @@ impl FileAllocationIterator for TruncFileAllocationIterator {
         // C++ TruncFileAllocationIterator calls stream->allocate(0, totalLength_, true)
         // which maps to ftruncate. In Rust we use set_len via truncate().
         self.writer.truncate(self.total_length).await?;
-        // Flush to ensure metadata is persisted before the caller checks file size.
-        self.writer.flush().await?;
+        // Persist the new length before the caller checks file size.
+        self.writer.sync_all().await?;
         self.offset = self.total_length;
         self.done = true;
         Ok(())

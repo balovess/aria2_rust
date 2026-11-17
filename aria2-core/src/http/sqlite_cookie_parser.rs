@@ -31,7 +31,7 @@ use crate::http::cookie::{Cookie, SameSite};
 
 /// Firefox `cookies.sqlite` query.
 ///
-/// Column order is load-bearing — [`row_to_cookie`] indexes positionally, and
+/// Column order is load-bearing — `row_to_cookie` indexes positionally, and
 /// both browser queries must project the same seven columns in the same order.
 pub const MOZ_QUERY: &str = "SELECT host, path, isSecure, expiry, name, value, lastAccessed \
      FROM moz_cookies";
@@ -41,7 +41,7 @@ pub const MOZ_QUERY: &str = "SELECT host, path, isSecure, expiry, name, value, l
 /// Chromium timestamps are microseconds since 1601-01-01 UTC (the Windows FILE
 /// epoch). 11644473600 is the number of seconds between that epoch and the UNIX
 /// epoch, so the arithmetic below normalises both time columns to UNIX seconds.
-/// Done in SQL rather than in Rust to keep [`row_to_cookie`] schema-agnostic.
+/// Done in SQL rather than in Rust to keep `row_to_cookie` schema-agnostic.
 pub const CHROMIUM_QUERY: &str = "SELECT host_key, path, secure, expires_utc / 1000000 - 11644473600 as expires_utc, \
      name, value, last_access_utc / 1000000 - 11644473600 as last_access_utc \
      FROM cookies";

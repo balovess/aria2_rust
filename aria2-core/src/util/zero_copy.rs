@@ -7,7 +7,7 @@
 //!
 //! # Platform Support
 //!
-//! - **Linux**: Full `splice(2)` support via [`libc`]. The public
+//! - **Linux**: Full `splice(2)` support via `libc`. The public
 //!   [`splice_transfer`] function performs the kernel-mediated transfer.
 //! - **Other platforms** (Windows, macOS, ...): [`splice_transfer`] always
 //!   returns [`Err`](std::io::Result::Err) with kind
@@ -19,7 +19,7 @@
 //!
 //! All `splice(2)` invocations are confined to `#[cfg(target_os = "linux")]`
 //! code paths and operate on valid, open file descriptors owned by the
-//! caller. A RAII [`PipeGuard`] guarantees the intermediate pipe descriptors
+//! caller. A RAII `PipeGuard` guarantees the intermediate pipe descriptors
 //! are closed on every exit path (including early `return` on error and
 //! panics).
 

@@ -2,7 +2,7 @@
 //! writes to non-overlapping offsets without a global async mutex.
 //!
 //! Platform support:
-//! - Unix: [`std::os::unix::fs::FileExt::write_at`] (wraps `pwrite(2)`)
+//! - Unix: `std::os::unix::fs::FileExt::write_at` (wraps `pwrite(2)`)
 //! - Windows: [`std::os::windows::fs::FileExt::seek_write`]
 //!
 //! # Concurrency model
@@ -46,7 +46,7 @@ use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 /// Create the best available positioned writer for the current platform.
 ///
-/// On Linux with the `io_uring` feature enabled, returns an [`IoUringDiskWriter`]
+/// On Linux with the `io_uring` feature enabled, returns an `IoUringDiskWriter`
 /// that uses the io_uring syscall interface for async positioned I/O. On all
 /// other platforms (or without the feature), returns a [`PositionedDiskWriter`]
 /// that uses synchronous `pwrite`/`seek_write`.

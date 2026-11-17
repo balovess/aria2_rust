@@ -2,9 +2,9 @@
 //!
 //! Splits the monolithic implementation into three focused sub-modules:
 //!
-//! - [`downloader`]        — `HttpSegmentDownloader`, `WriteChunk`
-//! - [`connection_limiter`] — `ConnectionLimiter` (per-host + global slot tracking)
-//! - [`segment_size`]      — `calculate_dynamic_segment_size`
+//! - `downloader` — `HttpSegmentDownloader`, `WriteChunk`
+//! - `connection_limiter` — `ConnectionLimiter` (per-host + global slot tracking)
+//! - `segment_size` — `calculate_dynamic_segment_size`
 
 mod connection_limiter;
 mod downloader;
