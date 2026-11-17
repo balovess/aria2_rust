@@ -402,7 +402,8 @@ jobs:
     if: >-
       needs.prepare.outputs.should_release == 'true' &&
       needs.prepare.outputs.release_artifact_run_id == ''
-    runs-on: ubuntu-latest
+    # Python 3.9 is not available from setup-python on Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       contents: read
