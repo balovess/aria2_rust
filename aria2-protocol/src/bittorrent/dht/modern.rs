@@ -119,8 +119,6 @@ pub fn accept_mutable_update(
         if cas.is_some_and(|expected| expected != current.sequence) {
             return MutableUpdate::RejectedCas;
         }
-    } else if cas.is_some() {
-        return MutableUpdate::RejectedCas;
     }
     MutableUpdate::Accepted
 }
@@ -358,6 +356,26 @@ mod tests {
         assert_eq!(
             accept_mutable_update(Some(&item), &next, Some(0)),
             MutableUpdate::RejectedCas
+        );
+    }
+
+    #[test]
+    fn cas_is_ignored_when_no_mutable_value_exists() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let key = SigningKey::from_bytes(&[0x33; 32]);
+        let mut item = MutableValue {
+            public_key: key.verifying_key().to_bytes(),
+            signature: [0; 64],
+            sequence: 1,
+            salt: None,
+            value: BencodeValue::Bytes(b"initial".to_vec()),
+        };
+        item.signature = key.sign(&item.signed_payload()).to_bytes();
+
+        assert_eq!(
+            accept_mutable_update(None, &item, Some(0)),
+            MutableUpdate::Accepted
         );
     }
 

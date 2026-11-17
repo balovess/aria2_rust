@@ -223,7 +223,7 @@ impl DhtQueryHandler {
             }
         };
 
-        let closest = routing_table.find_closest(&target_id, K);
+        let closest = routing_table.find_closest_good(&target_id, K);
         if from.is_ipv6() {
             let compact_nodes = Self::encode_compact_nodes6(&closest);
             Some(DhtMessageBuilder::find_node_response6(
@@ -290,7 +290,7 @@ impl DhtQueryHandler {
         }
 
         if !peers.is_empty() {
-            let closest = routing_table.find_closest(&info_hash, K);
+            let closest = routing_table.find_closest_good(&info_hash, K);
             let compact_nodes = if from.is_ipv6() {
                 Self::encode_compact_nodes6(&closest)
             } else {
@@ -322,7 +322,7 @@ impl DhtQueryHandler {
             }
         } else {
             // No peers known — return closest nodes instead
-            let closest = routing_table.find_closest(&info_hash, K);
+            let closest = routing_table.find_closest_good(&info_hash, K);
             if from.is_ipv6() {
                 let compact_nodes = Self::encode_compact_nodes6(&closest);
                 Some(DhtMessageBuilder::get_peers_response_with_nodes6(

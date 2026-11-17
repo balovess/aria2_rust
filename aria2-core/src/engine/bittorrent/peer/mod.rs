@@ -8,8 +8,6 @@ pub mod choking_algorithm;
 #[cfg(feature = "bittorrent")]
 pub mod connection;
 #[cfg(feature = "bittorrent")]
-pub mod connection_pool;
-#[cfg(feature = "bittorrent")]
 pub(crate) mod coordinator;
 #[cfg(feature = "bittorrent")]
 pub mod handshake_validation;

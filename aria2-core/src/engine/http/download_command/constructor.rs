@@ -270,18 +270,8 @@ impl DownloadCommand {
 
         if let Some(ref cookies_str) = options.cookies {
             let domain = Self::extract_host(uri);
-            for pair in cookies_str.split(';') {
-                let pair = pair.trim();
-                if pair.is_empty() {
-                    continue;
-                }
-                if let Some((name, value)) = pair.split_once('=') {
-                    let name = name.trim();
-                    let value = value.trim();
-                    if !name.is_empty() {
-                        cookie_storage.add(Cookie::new(name, value, &domain));
-                    }
-                }
+            for pair in aria2_protocol::http::cookie::parsing::parse_cookie_header(cookies_str) {
+                cookie_storage.add(Cookie::new(&pair.name, &pair.value, &domain));
             }
             if !cookie_storage.is_empty() {
                 info!("Manually set {} cookies", cookie_storage.count());

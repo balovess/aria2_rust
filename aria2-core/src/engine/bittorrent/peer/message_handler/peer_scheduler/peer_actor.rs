@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use aria2_protocol::bittorrent::message::types::BtMessage;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::trace;
@@ -433,9 +434,15 @@ pub(crate) async fn run_peer_actor(
                         }
                         connection.record_outbound_activity();
                     }
-                    Some(PeerCommand::SendPex(wire_bytes)) => {
-                        connection.queue_message(wire_bytes);
-                        if let Err(error) = connection.flush_send_buffer().await {
+                    Some(PeerCommand::SendPex {
+                        remote_extension_id,
+                        payload,
+                    }) => {
+                        let message = BtMessage::Extended {
+                            ext_id: remote_extension_id,
+                            payload,
+                        };
+                        if let Err(error) = connection.send_bt_message(&message).await {
                             tracing::debug!(actor_id = actor_id.0, %error, "Failed to send BT PEX message");
                             let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
                             break;

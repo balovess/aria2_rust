@@ -212,7 +212,12 @@ pub(crate) async fn wait_for_process_exit(
         }
     };
 
-    let async_fd = match tokio::io::unix::AsyncFd::new(pidfd) {
+    // SAFETY: `pidfd` uniquely owns the descriptor returned by `pidfd_open`.
+    // `AsyncFd` takes ownership and keeps it open and unchanged until dropped;
+    // no other registration or raw descriptor owner exists for this pidfd.
+    let async_fd = match unsafe { tokio::io::unix::AsyncFd::register(pidfd) }
+        .map_err(io::Error::from)
+    {
         Ok(async_fd) => async_fd,
         Err(error) => {
             debug!(pid, error = %error, "Failed to register pidfd; using compatibility watcher");

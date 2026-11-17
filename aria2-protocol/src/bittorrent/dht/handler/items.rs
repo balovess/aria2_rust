@@ -28,20 +28,24 @@ impl DhtQueryHandler {
             Some(target) => target,
             None => return Some(DhtMessageBuilder::error_response(tx, 203, "Protocol Error")),
         };
+        let seq = match query.a.as_ref().and_then(|args| args.dict_get(b"seq")) {
+            Some(value) => match value.as_int() {
+                Some(seq) => Some(seq),
+                None => {
+                    return Some(DhtMessageBuilder::error_response(tx, 203, "Protocol Error"));
+                }
+            },
+            None => None,
+        };
         let token = token_tracker.generate_token(&target, &from);
         let mut result = std::collections::BTreeMap::new();
         result.insert(b"id".to_vec(), BencodeValue::Bytes(self.self_id.to_vec()));
         result.insert(b"token".to_vec(), BencodeValue::Bytes(token.into_bytes()));
         if let Some(item) = item_store.get(&target) {
-            let include = query
-                .a
-                .as_ref()
-                .and_then(|args| args.dict_get(b"seq"))
-                .and_then(|value| value.as_int())
-                .is_none_or(|seq| match &item {
-                    StoredItem::Mutable { item, .. } => item.sequence > seq,
-                    StoredItem::Immutable { .. } => true,
-                });
+            let include = seq.is_none_or(|seq| match &item {
+                StoredItem::Mutable { item, .. } => item.sequence > seq,
+                StoredItem::Immutable { .. } => true,
+            });
             if include {
                 match item {
                     StoredItem::Immutable { value, .. } => {
@@ -62,8 +66,20 @@ impl DhtQueryHandler {
                 }
             }
         }
-        let nodes = Self::encode_compact_nodes(&routing_table.find_closest(&target, K));
-        result.insert(b"nodes".to_vec(), BencodeValue::Bytes(nodes));
+        let closest = routing_table.find_closest_good(&target, K);
+        if from.is_ipv6() {
+            result.insert(b"nodes".to_vec(), BencodeValue::Bytes(Vec::new()));
+            result.insert(
+                b"nodes6".to_vec(),
+                BencodeValue::Bytes(Self::encode_compact_nodes6(&closest)),
+            );
+        } else {
+            result.insert(
+                b"nodes".to_vec(),
+                BencodeValue::Bytes(Self::encode_compact_nodes(&closest)),
+            );
+            result.insert(b"nodes6".to_vec(), BencodeValue::Bytes(Vec::new()));
+        }
         Some(DhtMessage::new_response(
             tx.to_vec(),
             BencodeValue::Dict(result),
@@ -82,6 +98,15 @@ impl DhtQueryHandler {
         let args = match query.a.as_ref() {
             Some(args) => args,
             None => return Some(DhtMessageBuilder::error_response(tx, 203, "Protocol Error")),
+        };
+        let cas = match args.dict_get(b"cas") {
+            Some(value) => match value.as_int() {
+                Some(cas) => Some(cas),
+                None => {
+                    return Some(DhtMessageBuilder::error_response(tx, 203, "Protocol Error"));
+                }
+            },
+            None => None,
         };
         let token = match args.dict_get(b"token").and_then(|v| v.as_bytes()) {
             Some(token) => token,
@@ -141,7 +166,7 @@ impl DhtQueryHandler {
                 salt,
                 value,
             };
-            match item_store.put_mutable(item, args.dict_get(b"cas").and_then(|v| v.as_int())) {
+            match item_store.put_mutable(item, cas) {
                 Ok(_) => {
                     return Some(DhtMessage::new_response(
                         tx.to_vec(),

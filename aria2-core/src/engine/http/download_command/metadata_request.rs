@@ -10,22 +10,52 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
 
+struct GetAuthRetryContext<'a> {
+    current_url: &'a reqwest::Url,
+    cookie_helper: &'a CookieHelper,
+    auth_factory: &'a mut AuthConfigFactory,
+    auth_options: &'a AuthResolveOptions,
+    authentication_used: bool,
+    allow_origin_auth: bool,
+}
+
+fn prepared_response(
+    response: reqwest::Response,
+    effective_uri: String,
+    origin_auth_allowed: bool,
+    auth_factory: AuthConfigFactory,
+) -> PreparedHttpResponse {
+    PreparedHttpResponse {
+        response,
+        effective_uri,
+        origin_auth_allowed,
+        auth_factory: std::sync::Arc::new(std::sync::Mutex::new(auth_factory)),
+    }
+}
+
 impl DownloadCommand {
     async fn retry_get_after_auth_challenge(
         &self,
         response: reqwest::Response,
-        current_url: &reqwest::Url,
-        cookie_helper: &CookieHelper,
-        auth_factory: &mut AuthConfigFactory,
-        auth_options: &AuthResolveOptions,
-        authentication_used: bool,
+        context: GetAuthRetryContext<'_>,
     ) -> reqwest::Response {
+        let GetAuthRetryContext {
+            current_url,
+            cookie_helper,
+            auth_factory,
+            auth_options,
+            authentication_used,
+            allow_origin_auth,
+        } = context;
         let status_code = response.status().as_u16();
         if status_code != 401 && status_code != 407 {
             return response;
         }
 
         let is_proxy = status_code == 407;
+        if !is_proxy && !allow_origin_auth {
+            return response;
+        }
         let header_name = if is_proxy {
             "proxy-authenticate"
         } else {
@@ -82,11 +112,22 @@ impl DownloadCommand {
             "Authorization"
         };
         let cookie_header = cookie_helper.build_cookie_header_from_url(current_url);
-        let request = self.request_policy.apply(
-            self.client.get(current_url.as_str()),
-            (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
-            &[(header_name.to_string(), authorization_header)],
-        );
+        let request = if is_proxy {
+            self.request_policy.apply_for_origin_with_proxy_auth(
+                self.client.get(current_url.as_str()),
+                (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
+                &[],
+                allow_origin_auth,
+                Some(&authorization_header),
+            )
+        } else {
+            self.request_policy.apply_for_origin(
+                self.client.get(current_url.as_str()),
+                (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
+                &[(header_name.to_string(), authorization_header)],
+                allow_origin_auth,
+            )
+        };
         let Ok(retry_response) = request.send().await else {
             return response;
         };
@@ -103,6 +144,8 @@ impl DownloadCommand {
 
     pub(super) async fn send_head_with_redirects(&self, uri: &str) -> Option<PreparedHttpResponse> {
         let mut current_url = reqwest::Url::parse(uri).ok()?;
+        let mut origin_scope =
+            crate::http::request_policy::RedirectOriginScope::new(current_url.clone());
         let cookie_helper = self.create_cookie_helper();
         let initial_scheme = current_url.scheme().to_owned();
         let options = self.group.recover().options_arc();
@@ -111,30 +154,37 @@ impl DownloadCommand {
 
         for _ in 0..=crate::http::skip_response::MAX_REDIRECT_COUNT {
             let cookie_header = cookie_helper.build_cookie_header_from_url(&current_url);
-            let authorization =
-                auth_factory.resolve_basic_authorization(&current_url, &auth_options);
-            let request = self.request_policy.apply_with_basic_auth(
+            let allow_origin_auth = origin_scope.allows_sensitive_headers(&current_url);
+            let authorization = allow_origin_auth
+                .then(|| auth_factory.resolve_basic_authorization(&current_url, &auth_options))
+                .flatten();
+            let request = self.request_policy.apply_with_basic_auth_for_origin(
                 self.client.head(current_url.as_str()),
                 (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
                 &[],
                 authorization.as_deref(),
+                allow_origin_auth,
             );
             let response = request.send().await.ok()?;
             cookie_helper.extract_and_store_cookies(current_url.as_str(), &response);
 
             let status_code = response.status().as_u16();
             if !matches!(status_code, 300..=303 | 307 | 308) {
-                return Some(PreparedHttpResponse {
+                return Some(prepared_response(
                     response,
-                    effective_uri: current_url.to_string(),
-                });
+                    current_url.to_string(),
+                    allow_origin_auth,
+                    auth_factory,
+                ));
             }
 
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())?;
-            current_url = current_url.join(location).ok()?;
+            let next_url = current_url.join(location).ok()?;
+            origin_scope.follow_redirect(&current_url, &next_url);
+            current_url = next_url;
         }
 
         None
@@ -146,6 +196,8 @@ impl DownloadCommand {
     /// range requests instead.
     pub(super) async fn send_get_with_redirects(&self, uri: &str) -> Option<PreparedHttpResponse> {
         let mut current_url = reqwest::Url::parse(uri).ok()?;
+        let mut origin_scope =
+            crate::http::request_policy::RedirectOriginScope::new(current_url.clone());
         let cookie_helper = self.create_cookie_helper();
         let initial_scheme = current_url.scheme().to_owned();
         let options = self.group.recover().options_arc();
@@ -154,32 +206,40 @@ impl DownloadCommand {
 
         for _ in 0..=crate::http::skip_response::MAX_REDIRECT_COUNT {
             let cookie_header = cookie_helper.build_cookie_header_from_url(&current_url);
-            let authorization =
-                auth_factory.resolve_basic_authorization(&current_url, &auth_options);
-            let request = self.request_policy.apply_with_basic_auth(
+            let allow_origin_auth = origin_scope.allows_sensitive_headers(&current_url);
+            let authorization = allow_origin_auth
+                .then(|| auth_factory.resolve_basic_authorization(&current_url, &auth_options))
+                .flatten();
+            let request = self.request_policy.apply_with_basic_auth_for_origin(
                 self.client.get(current_url.as_str()),
                 (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
                 &[],
                 authorization.as_deref(),
+                allow_origin_auth,
             );
             let mut response = request.send().await.ok()?;
             cookie_helper.extract_and_store_cookies(current_url.as_str(), &response);
             response = self
                 .retry_get_after_auth_challenge(
                     response,
-                    &current_url,
-                    &cookie_helper,
-                    &mut auth_factory,
-                    &auth_options,
-                    authorization.is_some(),
+                    GetAuthRetryContext {
+                        current_url: &current_url,
+                        cookie_helper: &cookie_helper,
+                        auth_factory: &mut auth_factory,
+                        auth_options: &auth_options,
+                        authentication_used: authorization.is_some(),
+                        allow_origin_auth,
+                    },
                 )
                 .await;
 
             if !crate::http::response::is_redirect_status(response.status().as_u16()) {
-                return Some(PreparedHttpResponse {
+                return Some(prepared_response(
                     response,
-                    effective_uri: current_url.to_string(),
-                });
+                    current_url.to_string(),
+                    allow_origin_auth,
+                    auth_factory,
+                ));
             }
 
             let Some(location) = response
@@ -187,19 +247,24 @@ impl DownloadCommand {
                 .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())
             else {
-                return Some(PreparedHttpResponse {
+                return Some(prepared_response(
                     response,
-                    effective_uri: current_url.to_string(),
-                });
+                    current_url.to_string(),
+                    allow_origin_auth,
+                    auth_factory,
+                ));
             };
 
             let Ok(next_url) = current_url.join(location) else {
-                return Some(PreparedHttpResponse {
+                return Some(prepared_response(
                     response,
-                    effective_uri: current_url.to_string(),
-                });
+                    current_url.to_string(),
+                    allow_origin_auth,
+                    auth_factory,
+                ));
             };
             self.group.recover_mut().add_redirect_uri(next_url.as_str());
+            origin_scope.follow_redirect(&current_url, &next_url);
             current_url = next_url;
         }
 

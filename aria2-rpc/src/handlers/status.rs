@@ -20,9 +20,7 @@ pub(crate) fn status_key_filter(keys: &[String]) -> Option<StatusKeyFilter> {
 
 pub(crate) fn parse_tell_active(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     Ok(BackendRequest::TellActive {
-        keys: req
-            .take_optional_param::<Vec<String>>(0)?
-            .unwrap_or_default(),
+        keys: super::take_optional_string_list(req, 0)?,
     })
 }
 
@@ -36,9 +34,7 @@ fn parse_pagination(req: &mut JsonRpcRequest) -> Result<(i64, usize, Vec<String>
     }
     let num = usize::try_from(num)
         .map_err(|_| JsonRpcError::RpcExecution("num is out of range".into()))?;
-    let keys = req
-        .take_optional_param::<Vec<String>>(2)?
-        .unwrap_or_default();
+    let keys = super::take_optional_string_list(req, 2)?;
     Ok((offset, num, keys))
 }
 
@@ -118,6 +114,10 @@ fn serialize_status(
     add_number!("downloadSpeed", &status.download_speed);
     add_number!("uploadSpeed", &status.upload_speed);
     add_number!("connections", &status.connections);
+    add_number!("http1Connections", &status.http1_connections);
+    add_number!("http2Sessions", &status.http2_sessions);
+    add_number!("http2Streams", &status.http2_streams);
+    add_optional!("httpVersion", &status.http_version);
     add_number!("errorCode", &status.error_code);
     add_optional!("errorMessage", &status.error_message);
     add!("status", status.status.as_str());
@@ -233,5 +233,24 @@ mod tests {
         assert_eq!(value["numPieces"], "10");
         assert_eq!(value["completedPieces"], "9");
         assert_eq!(value["missingPieces"], "1");
+    }
+
+    #[test]
+    fn status_projection_includes_http_transport_counts() {
+        let status = StatusInfo::new("gid-http").with_http_connection_counts(2, 1, 8);
+
+        let value = serialize_status_response(
+            BackendResponse::Status(status),
+            &[
+                "http1Connections".into(),
+                "http2Sessions".into(),
+                "http2Streams".into(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(value["http1Connections"], "2");
+        assert_eq!(value["http2Sessions"], "1");
+        assert_eq!(value["http2Streams"], "8");
     }
 }

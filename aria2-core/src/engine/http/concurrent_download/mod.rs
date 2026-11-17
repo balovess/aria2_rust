@@ -150,6 +150,7 @@ pub struct ConcurrentDownloader {
     pub(crate) request_policy: HttpRequestPolicy,
     pub(crate) auth_options: AuthResolveOptions,
     pub(crate) netrc_path: Option<String>,
+    pub(crate) auth_factory: Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>,
     pub(crate) cookie_helper: CookieHelper,
     pub(crate) progress_updater: ProgressUpdater,
     pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
@@ -164,6 +165,7 @@ pub struct ConcurrentDownloader {
     /// Protocol observed by the redirect-aware Range probe, scoped to its
     /// final authority so multi-mirror downloads do not infer other servers.
     pub(crate) initial_http_protocol: Option<(String, reqwest::Version)>,
+    pub(crate) origin_sensitive_headers_allowed: bool,
 }
 
 pub(in crate::engine::http::concurrent_download) async fn flush_requested_control_file(
@@ -214,6 +216,10 @@ impl ConcurrentDownloader {
         file_allocation: String,
         global_limiter: Option<RateLimiter>,
     ) -> Self {
+        let auth_factory = crate::engine::http::auth::factory_from_netrc(
+            netrc_path.as_deref(),
+            auth_options.no_netrc,
+        );
         Self {
             range_clients: Arc::new(vec![client.as_ref().clone()]),
             client,
@@ -221,6 +227,7 @@ impl ConcurrentDownloader {
             request_policy,
             auth_options,
             netrc_path,
+            auth_factory: Arc::new(std::sync::Mutex::new(auth_factory)),
             cookie_helper,
             progress_updater,
             group,
@@ -229,7 +236,21 @@ impl ConcurrentDownloader {
             file_allocation,
             global_limiter,
             initial_http_protocol: None,
+            origin_sensitive_headers_allowed: true,
         }
+    }
+
+    pub(crate) fn with_origin_sensitive_headers_allowed(mut self, allowed: bool) -> Self {
+        self.origin_sensitive_headers_allowed = allowed;
+        self
+    }
+
+    pub(crate) fn with_shared_auth_factory(
+        mut self,
+        auth_factory: Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>,
+    ) -> Self {
+        self.auth_factory = auth_factory;
+        self
     }
 
     pub(crate) fn with_range_clients(mut self, clients: Arc<Vec<reqwest::Client>>) -> Self {

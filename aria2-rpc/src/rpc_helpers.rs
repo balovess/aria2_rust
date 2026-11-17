@@ -104,6 +104,66 @@ pub fn normalize_rpc_options(
         .collect()
 }
 
+/// Normalize option values accepted by `aria2.changeOption`.
+///
+/// The aria2 RPC contract accepts string scalars and string members of arrays.
+/// Other scalar values are ignored, and non-string array members are skipped.
+pub fn normalize_change_option_options(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    options
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(value) => Some(value.clone()),
+                serde_json::Value::Array(values) => Some(
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Object(_) => None,
+            }?;
+            Some((key.clone(), serde_json::Value::String(value)))
+        })
+        .collect()
+}
+
+/// Normalize option values accepted by `aria2.changeGlobalOption`.
+///
+/// Numeric and boolean scalars remain available as a Rust input extension.
+/// Arrays retain only string members; an explicitly empty array is preserved
+/// so callers can clear cumulative options that the Rust API exposes as lists.
+pub fn normalize_change_global_option_options(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    options
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Bool(_) => Some(value.clone()),
+                serde_json::Value::Array(values) if values.is_empty() => Some(value.clone()),
+                serde_json::Value::Array(values) => {
+                    let strings = values
+                        .iter()
+                        .filter(|value| value.is_string())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    (!strings.is_empty()).then_some(serde_json::Value::Array(strings))
+                }
+                serde_json::Value::Null | serde_json::Value::Object(_) => None,
+            }?;
+            Some((key.clone(), value))
+        })
+        .collect()
+}
+
 fn option_value_to_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(value) => Some(value.clone()),
@@ -297,6 +357,66 @@ mod tests {
         assert!(summary.contains("5 active"));
         assert!(summary.contains("3 waiting"));
         assert!(summary.contains("2 stopped"));
+    }
+
+    #[test]
+    fn change_option_normalization_matches_string_input_contract() {
+        let options = std::collections::HashMap::from([
+            ("scalar-string".to_string(), serde_json::json!("value")),
+            ("scalar-number".to_string(), serde_json::json!(42)),
+            ("scalar-bool".to_string(), serde_json::json!(true)),
+            (
+                "string-array".to_string(),
+                serde_json::json!(["first", 42, false, null, "last"]),
+            ),
+            (
+                "non-string-array".to_string(),
+                serde_json::json!([42, false, null]),
+            ),
+        ]);
+
+        let normalized = normalize_change_option_options(&options);
+
+        assert_eq!(
+            normalized.get("scalar-string"),
+            Some(&serde_json::json!("value"))
+        );
+        assert!(!normalized.contains_key("scalar-number"));
+        assert!(!normalized.contains_key("scalar-bool"));
+        assert_eq!(
+            normalized.get("string-array"),
+            Some(&serde_json::json!("first\nlast"))
+        );
+        assert_eq!(
+            normalized.get("non-string-array"),
+            Some(&serde_json::json!(""))
+        );
+    }
+
+    #[test]
+    fn change_global_option_arrays_keep_strings_and_preserve_explicit_empty() {
+        let options = std::collections::HashMap::from([
+            (
+                "mixed".to_string(),
+                serde_json::json!(["first", 42, false, null, "last"]),
+            ),
+            ("empty".to_string(), serde_json::json!([])),
+            (
+                "no-strings".to_string(),
+                serde_json::json!([42, false, null]),
+            ),
+            ("null".to_string(), serde_json::Value::Null),
+        ]);
+
+        let normalized = normalize_change_global_option_options(&options);
+
+        assert_eq!(
+            normalized.get("mixed"),
+            Some(&serde_json::json!(["first", "last"]))
+        );
+        assert_eq!(normalized.get("empty"), Some(&serde_json::json!([])));
+        assert!(!normalized.contains_key("no-strings"));
+        assert!(!normalized.contains_key("null"));
     }
 
     #[test]

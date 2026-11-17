@@ -2,6 +2,11 @@
 
 use crate::config::{OptionCategory, OptionDef, OptionType, OptionValue};
 
+mod dht;
+mod dht_entries;
+mod network;
+mod tracker;
+
 impl crate::config::OptionRegistry {
     /// Register BitTorrent-specific options: seeding, DHT, PEX, peer management.
     pub fn register_bt_options(&mut self) {
@@ -36,6 +41,33 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Int(55),
             min: Some(0),
             description: "Max peers per torrent".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-piece-selection-strategy".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str(crate::constants::DEFAULT_PIECE_STRATEGY.to_string()),
+            allowed_values: &[
+                "default",
+                "sequential",
+                "rarest-first",
+                "random",
+                "longest-sequence",
+                "priority",
+                "geometric",
+            ],
+            description: "BitTorrent piece selection strategy (Rust extension)".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-endgame-threshold".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as i64),
+            min: Some(0),
+            max: Some(u32::MAX as u64),
+            description: "Remaining piece count at which BitTorrent endgame mode starts; 0 disables it (Rust extension)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
@@ -83,7 +115,8 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(100),
             min: Some(1),
-            description: "Max open files for BT".into(),
+            description: "Maximum open files across multi-file BitTorrent and Metalink downloads"
+                .into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
@@ -333,173 +366,8 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
-        self.register(OptionDef {
-            name: "bt-tracker".into(),
-            opt_type: OptionType::List,
-            description: "Comma-separated list of tracker announce URIs".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-tracker-source".into(),
-            opt_type: OptionType::List,
-            default_value: OptionValue::List(vec![
-                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE
-                    .to_string(),
-            ]),
-            cumulative_delimiter: Some("\n"),
-            description: "Remote public tracker list sources".into(),
-            category: OptionCategory::BitTorrent,
-            // Rust-only extension: expose it explicitly so RPC clients can
-            // inspect and change the public tracker catalog configuration.
-            expose_in_aria2_rpc: true,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-tracker-update-interval".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(
-                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL
-                    .as_secs() as i64,
-            ),
-            min: Some(1),
-            description: "Public tracker list refresh interval in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: true,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "enable-public-trackers".into(),
-            opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(true),
-            description: "Use public trackers in addition to torrent trackers".into(),
-            category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: true,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-tracker-connect-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(60),
-            min: Some(1),
-            max: Some(600),
-            description: "Connect timeout for tracker in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-tracker-interval".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(0),
-            min: Some(0),
-            description: "Tracker announce interval in seconds (0=use tracker's value)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-tracker-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(60),
-            min: Some(1),
-            max: Some(600),
-            description: "Timeout for tracker in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-tracker-stopped-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(
-                crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS as i64,
-            ),
-            min: Some(1),
-            max: Some(600),
-            description: "Total timeout for stopped tracker announces in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-message-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(10),
-            min: Some(1),
-            max: Some(60),
-            description: "DHT message timeout in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        for (name, default, description) in [
-            (
-                "dht-refresh-check-interval",
-                300,
-                "DHT bucket refresh check interval in seconds",
-            ),
-            (
-                "dht-token-rotation-interval",
-                600,
-                "DHT token rotation interval in seconds",
-            ),
-            (
-                "dht-node-contact-interval",
-                900,
-                "DHT node contact interval in seconds",
-            ),
-            (
-                "dht-cleanup-interval",
-                300,
-                "DHT cleanup and eviction interval in seconds",
-            ),
-            (
-                "dht-save-interval",
-                1800,
-                "DHT routing-table save interval in seconds",
-            ),
-            (
-                "dht-bootstrap-timeout",
-                60,
-                "DHT bootstrap timeout in seconds",
-            ),
-            (
-                "dht-persistence-max-age",
-                24 * 60 * 60,
-                "Maximum age of a persisted DHT snapshot in seconds",
-            ),
-        ] {
-            self.register(OptionDef {
-                name: name.into(),
-                opt_type: OptionType::Integer,
-                default_value: OptionValue::Int(default),
-                min: Some(1),
-                description: description.into(),
-                category: OptionCategory::BitTorrent,
-                ..Default::default()
-            });
-        }
-        self.register(OptionDef {
-            name: "dht-max-concurrent-lookups".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(16),
-            min: Some(1),
-            max: Some(1024),
-            description: "Maximum concurrent DHT lookup tasks".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "enable-dht6".into(),
-            opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
-            description: "Enable IPv6 DHT".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-listen-addr6".into(),
-            opt_type: OptionType::String,
-            description: "IPv6 address for DHT to listen on".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
+        self.register_bt_tracker_options();
+        self.register_bt_dht_options();
         self.register(OptionDef {
             name: "peer-id-prefix".into(),
             opt_type: OptionType::String,
@@ -518,17 +386,6 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
-        self.register(OptionDef {
-            name: "select-file".into(),
-            opt_type: OptionType::IntegerRange,
-            min: Some(1),
-            max: Some(1_000_000),
-            description:
-                "Comma-separated list of file indices to download (BT/Metalink, 1-indexed)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-
         // --- File Index Output Mapping ---
         self.register(OptionDef {
             name: "index-out".into(),
@@ -540,142 +397,7 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
 
-        // --- Peer Blocklist (aria2-next) ---
-        self.register(OptionDef {
-            name: "bt-peer-blocklist".into(),
-            opt_type: OptionType::Path,
-            description: "Path to BT peer blocklist file (one IP/CIDR range per line)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-
-        // --- uTP (UDP Transport Protocol - BEP 29) ---
-        // Note: uTP is not implemented in the original C++ aria2. This is an experimental
-        // feature in aria2-rust that implements BEP 29 (http://www.bittorrent.org/beps/bep_0029.html).
-        // uTP provides congestion control over UDP, making BitTorrent friendlier to network traffic.
-        self.register(OptionDef {
-            name: "enable-utp".into(),
-            opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
-            description: "Enable uTP (UDP Transport Protocol, BEP 29). Experimental feature not in original aria2. Default: false".into(),
-            category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: false,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "utp-listen-port".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(0),
-            min: Some(0),
-            max: Some(65535),
-            description: "UDP port for uTP connections. 0 = auto-assign. Experimental feature not in original aria2".into(),
-            category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: false,
-            ..Default::default()
-        });
-
-        // --- BT Timeouts (Internal) ---
-        self.register(OptionDef {
-            name: "bt-keep-alive-interval".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(120),
-            min: Some(1),
-            max: Some(120),
-            description: "BT keep-alive interval in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            hidden: true,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(180),
-            min: Some(1),
-            max: Some(600),
-            description: "BT overall timeout in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            hidden: true,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "bt-request-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(60),
-            min: Some(1),
-            max: Some(600),
-            description: "BT piece request timeout in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            hidden: true,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "peer-connection-timeout".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(20),
-            min: Some(1),
-            max: Some(600),
-            description: "Peer connection timeout in seconds".into(),
-            category: OptionCategory::BitTorrent,
-            hidden: true,
-            ..Default::default()
-        });
-
-        // --- DHT Entry Points (Fine-Grained) ---
-        self.register(OptionDef {
-            name: "dht-entry-point-host".into(),
-            opt_type: OptionType::String,
-            description: "DHT bootstrap node hostname (IPv4)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-entry-point-port".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(0),
-            min: Some(0),
-            max: Some(65535),
-            description: "DHT bootstrap node port (IPv4)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-entry-point6".into(),
-            opt_type: OptionType::String,
-            description: "IPv6 DHT bootstrap node (hostname:port)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-entry-point-host6".into(),
-            opt_type: OptionType::String,
-            description: "IPv6 DHT bootstrap node hostname".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-entry-point-port6".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(0),
-            min: Some(0),
-            max: Some(65535),
-            description: "IPv6 DHT bootstrap node port".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-file-path6".into(),
-            opt_type: OptionType::Path,
-            description: "Path to IPv6 DHT routing table file".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-listen-addr".into(),
-            opt_type: OptionType::String,
-            description: "IPv4 DHT listen address".into(),
-            category: OptionCategory::BitTorrent,
-            hidden: true,
-            ..Default::default()
-        });
+        self.register_bt_network_options();
+        self.register_bt_dht_entry_points();
     }
 }

@@ -1,5 +1,6 @@
 use super::ConcurrentSegmentManager;
 use super::types::SegmentStatus;
+use std::time::Instant;
 
 impl ConcurrentSegmentManager {
     /// Restore segments represented by the control-file bitfield.
@@ -163,19 +164,24 @@ impl ConcurrentSegmentManager {
         {
             mirror.active_segments = mirror.active_segments.saturating_sub(1);
             mirror.consecutive_failures = 0;
+            mirror.disabled = false;
+            self.mirror_disabled_until[mirror_idx] = None;
         }
 
         Some(parent_complete)
     }
 
-    fn mark_mirror_failed(&mut self, mirror_idx: Option<usize>) {
+    fn mark_mirror_failed(&mut self, mirror_idx: Option<usize>, trip_circuit_breaker: bool) {
         if let Some(mi) = mirror_idx
             && let Some(mirror) = self.mirrors.get_mut(mi)
         {
             mirror.active_segments = mirror.active_segments.saturating_sub(1);
-            mirror.consecutive_failures += 1;
-            if mirror.consecutive_failures >= self.max_mirror_failures {
+            if trip_circuit_breaker {
+                mirror.consecutive_failures += 1;
+            }
+            if trip_circuit_breaker && mirror.consecutive_failures >= self.max_mirror_failures {
                 mirror.disabled = true;
+                self.mirror_disabled_until[mi] = Some(Instant::now() + self.mirror_cooldown);
             }
         }
     }
@@ -186,12 +192,20 @@ impl ConcurrentSegmentManager {
     /// if the segment has permanently failed (max retries exhausted) or no
     /// alternative mirror is available.
     pub fn fail_segment(&mut self, index: u32) -> Option<usize> {
+        self.fail_segment_with_circuit_breaker(index, true)
+    }
+
+    pub(super) fn fail_segment_with_circuit_breaker(
+        &mut self,
+        index: u32,
+        trip_circuit_breaker: bool,
+    ) -> Option<usize> {
         let (prev_mirror, new_retry) = {
             let seg = self.segments.get(index as usize)?;
             (seg.assigned_mirror, seg.retry_count + 1)
         };
 
-        self.mark_mirror_failed(prev_mirror);
+        self.mark_mirror_failed(prev_mirror, trip_circuit_breaker);
 
         if self.max_retries_per_segment != 0 && new_retry >= self.max_retries_per_segment {
             if let Some(seg) = self.segments.get_mut(index as usize) {
@@ -216,11 +230,19 @@ impl ConcurrentSegmentManager {
     /// replacement mirror. This mirrors aria2's behavior of aborting the
     /// current URI and creating the next request from the remaining URI pool.
     pub fn fail_segment_without_retry(&mut self, index: u32) -> Option<usize> {
+        self.fail_segment_without_retry_with_circuit_breaker(index, true)
+    }
+
+    pub(super) fn fail_segment_without_retry_with_circuit_breaker(
+        &mut self,
+        index: u32,
+        trip_circuit_breaker: bool,
+    ) -> Option<usize> {
         let prev_mirror = self
             .segments
             .get(index as usize)
             .and_then(|segment| segment.assigned_mirror);
-        self.mark_mirror_failed(prev_mirror);
+        self.mark_mirror_failed(prev_mirror, trip_circuit_breaker);
 
         let reassign = self.find_available_mirror_for_reassignment(prev_mirror.unwrap_or(0));
         if let Some(segment) = self.segments.get_mut(index as usize) {

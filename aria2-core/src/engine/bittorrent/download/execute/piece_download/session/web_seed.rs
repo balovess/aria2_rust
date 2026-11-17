@@ -1,12 +1,13 @@
 use std::collections::HashMap;
+use std::time::Duration;
 use std::time::Instant;
 
-use crate::engine::work_scheduler::{WorkId, WorkItem, WorkLease, WorkScheduler};
+use crate::engine::work_scheduler::{RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduler};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::PieceDownloadSession;
+use super::{PieceDownloadSession, bt_work_scheduler_error};
 
 pub(super) const MAX_WEB_SEED_PIECES_IN_FLIGHT: usize = 4;
 
@@ -33,6 +34,52 @@ pub(super) async fn wait_for_uri_generation(
 }
 
 impl PieceDownloadSession<'_> {
+    pub(super) async fn complete_web_seed_task(
+        &mut self,
+        piece_index: u32,
+        result: std::result::Result<Vec<u8>, String>,
+        lease: WorkLease<u32>,
+        web_seed_work_queue: &mut WorkScheduler<u32>,
+        piece_work_queue: &mut WorkScheduler<u32>,
+    ) -> Result<()> {
+        if self.complete_web_seed_piece(piece_index, result).await? {
+            web_seed_work_queue
+                .complete(lease)
+                .map_err(|error| bt_work_scheduler_error("complete a WebSeed piece", error))?;
+            piece_work_queue.complete_pending(WorkId::new(u64::from(piece_index)));
+            self.refresh_download_progress();
+        } else {
+            let retry_wait = Duration::from_secs(self.command.group.recover().options().retry_wait);
+            let piece_index = *lease.payload();
+            match web_seed_work_queue
+                .fail(lease, Some(Instant::now() + retry_wait))
+                .map_err(|error| bt_work_scheduler_error("record a failed WebSeed piece", error))?
+            {
+                RetryOutcome::Scheduled => {}
+                RetryOutcome::Exhausted(_) => {
+                    tracing::debug!(piece_index, "WebSeed piece exhausted its retry attempts");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn abort_web_seed_tasks(
+        &mut self,
+        tasks: &mut tokio::task::JoinSet<(u32, std::result::Result<Vec<u8>, String>)>,
+        active_work: &mut HashMap<u32, WorkLease<u32>>,
+        scheduler: &mut WorkScheduler<u32>,
+    ) -> Result<()> {
+        tasks.abort_all();
+        for (piece_index, lease) in active_work.drain() {
+            self.piece_picker.mark_reserved(piece_index, false);
+            scheduler.fail(lease, None).map_err(|error| {
+                bt_work_scheduler_error("discard a terminated WebSeed piece", error)
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn schedule_web_seed_pieces(
         &mut self,
         tasks: &mut tokio::task::JoinSet<(u32, std::result::Result<Vec<u8>, String>)>,

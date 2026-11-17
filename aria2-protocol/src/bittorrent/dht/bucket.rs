@@ -192,17 +192,20 @@ impl Bucket {
     /// Add a node while returning ownership when this full bucket cannot
     /// accept it, so the routing table can split the bucket or cache it.
     pub(super) fn try_add_node(&mut self, node: DhtNode) -> Result<(), DhtNode> {
-        self.notify_update();
-
         // Check if the node already exists.
         if let Some(pos) = self.nodes.iter().position(|n| n.id == node.id) {
+            if self.nodes[pos].verified && !node.verified {
+                return Ok(());
+            }
             // Update existing: remove old and add to tail (most recently seen).
+            self.notify_update();
             self.nodes.remove(pos);
             self.nodes.push(node);
             return Ok(());
         }
 
         if self.nodes.len() < K {
+            self.notify_update();
             self.nodes.push(node);
             return Ok(());
         }
@@ -212,6 +215,7 @@ impl Bucket {
             && front.is_bad()
             && node.is_good()
         {
+            self.notify_update();
             self.nodes.remove(0);
             self.nodes.push(node);
             return Ok(());
@@ -227,6 +231,16 @@ impl Bucket {
     ///
     /// Equivalent to C++ `DHTBucket::cacheNode()`.
     pub fn cache_node(&mut self, node: DhtNode) {
+        if self.nodes.iter().any(|existing| existing.id == node.id) {
+            return;
+        }
+        if let Some(position) = self
+            .cached_nodes
+            .iter()
+            .position(|cached| cached.id == node.id)
+        {
+            self.cached_nodes.remove(position);
+        }
         self.cached_nodes.insert(0, node);
         if self.cached_nodes.len() > CACHE_SIZE {
             self.cached_nodes.truncate(CACHE_SIZE);
@@ -263,6 +277,9 @@ impl Bucket {
 
     /// Replace a specific node with a candidate from this bucket.
     pub fn replace_node(&mut self, node_id: &[u8; 20], replacement: DhtNode) -> bool {
+        if replacement.id != *node_id && self.nodes.iter().any(|node| node.id == replacement.id) {
+            return false;
+        }
         if let Some(pos) = self.nodes.iter().position(|n| &n.id == node_id) {
             self.nodes.remove(pos);
             self.nodes.push(replacement);
@@ -418,22 +435,23 @@ impl Bucket {
     ///
     /// Equivalent to C++ `DHTBucket::getRandomNodeID()`.
     pub fn get_random_node_id(&self) -> [u8; 20] {
-        use rand::Rng;
+        use rand::RngExt;
         let mut id = [0u8; 20];
-        let mut rng = rand::thread_rng();
-
-        if self.prefix_length == 0 {
-            // Full range — generate completely random.
-            rng.fill(&mut id);
-        } else {
-            // Copy the fixed prefix from min_id, randomize the rest.
-            let last_byte_index = (self.prefix_length - 1) / 8;
-            rng.fill(&mut id);
-            // Overwrite the prefix portion.
-            id[..=last_byte_index].copy_from_slice(&self.min_id[..=last_byte_index]);
-        }
-
+        let mut rng = rand::rng();
+        rng.fill(&mut id);
+        self.apply_fixed_prefix(&mut id);
         id
+    }
+
+    fn apply_fixed_prefix(&self, id: &mut [u8; 20]) {
+        let full_bytes = self.prefix_length / 8;
+        id[..full_bytes].copy_from_slice(&self.min_id[..full_bytes]);
+
+        let remaining_bits = self.prefix_length % 8;
+        if remaining_bits > 0 {
+            let mask = u8::MAX << (8 - remaining_bits);
+            id[full_bytes] = (id[full_bytes] & !mask) | (self.min_id[full_bytes] & mask);
+        }
     }
 
     /// Mark a node as good (reset failure count and update last_seen).

@@ -1,84 +1,20 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use crate::engine::bittorrent::piece::PiecePicker;
 use crate::engine::bittorrent::piece::selector::BtPieceSelector;
-use crate::engine::work_scheduler::{RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduler};
+use crate::engine::work_scheduler::{WorkId, WorkItem, WorkScheduler};
 use crate::error::{Aria2Error, Result};
-use crate::request::request_group::{BtPeerSource, DownloadResultCode, HaltReason};
 use crate::util::rwlock_ext::RwLockRecover;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
+use super::lifecycle::DownloadHalt;
 use super::peer_dials::{PeerDialConfig, PeerDialQueue};
 use super::wait::{NoPeerWaitEvent, PieceDownloadWait, wait_for_incoming_peer};
 use super::web_seed::{MAX_WEB_SEED_PIECES_IN_FLIGHT, wait_for_uri_generation};
-use super::{PieceDownloadSession, PieceLoopAction};
+use super::work::{requeue_interrupted_piece_work, retry_bt_piece_work};
+use super::{PieceDownloadSession, PieceLoopAction, bt_work_scheduler_error};
 
-fn bt_work_scheduler_error(context: &str, error: impl std::fmt::Display) -> Aria2Error {
-    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-        "BitTorrent work scheduler could not {context}: {error}"
-    )))
-}
-
-fn retry_bt_piece_work(scheduler: &mut WorkScheduler<u32>, lease: WorkLease<u32>) -> Result<()> {
-    match scheduler
-        .fail(lease, Some(Instant::now()))
-        .map_err(|error| bt_work_scheduler_error("record a failed piece", error))?
-    {
-        RetryOutcome::Scheduled => Ok(()),
-        RetryOutcome::Exhausted(_) => Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "BitTorrent piece retry was rejected by the core scheduler".into(),
-        ))),
-    }
-}
-
-fn requeue_interrupted_piece_work(
-    scheduler: &mut WorkScheduler<u32>,
-    picker: &mut PiecePicker,
-    active_work: &mut HashMap<u32, WorkLease<u32>>,
-) -> Result<()> {
-    for (piece_index, lease) in active_work.drain() {
-        picker.mark_in_progress(piece_index, false);
-        scheduler
-            .requeue_unstarted(lease)
-            .map_err(|error| bt_work_scheduler_error("requeue an interrupted piece", error))?;
-    }
-    Ok(())
-}
-
-fn finish_web_seed_work(
-    scheduler: &mut WorkScheduler<u32>,
-    lease: WorkLease<u32>,
-    retry_wait: Duration,
-) -> Result<()> {
-    let piece_index = *lease.payload();
-    match scheduler
-        .fail(lease, Some(Instant::now() + retry_wait))
-        .map_err(|error| bt_work_scheduler_error("record a failed WebSeed piece", error))?
-    {
-        RetryOutcome::Scheduled => {}
-        RetryOutcome::Exhausted(_) => {
-            debug!(piece_index, "WebSeed piece exhausted its retry attempts");
-        }
-    }
-    Ok(())
-}
-
-fn abort_web_seed_workers(
-    tasks: &mut tokio::task::JoinSet<(u32, std::result::Result<Vec<u8>, String>)>,
-    active_work: &mut HashMap<u32, WorkLease<u32>>,
-    scheduler: &mut WorkScheduler<u32>,
-    picker: &mut PiecePicker,
-) -> Result<()> {
-    tasks.abort_all();
-    for (piece_index, lease) in active_work.drain() {
-        picker.mark_reserved(piece_index, false);
-        scheduler.fail(lease, None).map_err(|error| {
-            bt_work_scheduler_error("discard a terminated WebSeed piece", error)
-        })?;
-    }
-    Ok(())
-}
+mod peer_discovery;
 
 impl PieceDownloadSession<'_> {
     pub(super) async fn run_loop(mut self) -> Result<()> {
@@ -127,83 +63,25 @@ impl PieceDownloadSession<'_> {
                 .await;
             self.command.bt_runtime.set_connections(self.swarm.len());
 
-            let (halt_requested, stop_timeout_elapsed) = {
-                let group = self.command.group.recover();
-                let halt_requested = group.is_force_halt_requested() || group.is_halt_requested();
-                let stop_timeout_elapsed = !halt_requested
-                    && self.stop_timeout.should_halt(
-                        group.options().bt_stop_timeout,
-                        self.command.completed_bytes,
-                        Instant::now(),
-                    );
-                (halt_requested, stop_timeout_elapsed)
-            };
-            if stop_timeout_elapsed {
-                let group = self.command.group.recover();
-                let timeout_seconds = group.options().bt_stop_timeout.unwrap_or_default();
-                warn!(
-                    gid = group.gid().value(),
-                    timeout_seconds,
-                    "Stopping BitTorrent download after consecutive no-progress timeout"
-                );
-                group.request_force_halt(HaltReason::Timeout);
-                group.set_last_error(DownloadResultCode::TimeOut, "Download timed out");
-                continue;
-            };
-            if halt_requested {
-                piece_work_queue.cancel();
-                web_seed_work_queue.cancel();
-                web_seed_tasks.abort_all();
-                self.command
-                    .sync_checkpoint_payload(&mut self.writer)
-                    .await
-                    .map_err(|error| {
-                        Aria2Error::FileIo(format!(
-                            "Failed to sync halted BT output before checkpoint: {error}"
-                        ))
-                    })?;
-                self.writer.close().await.map_err(|error| {
-                    Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
-                })?;
-                if let Some(checkpoint) = self.command.checkpoint.as_mut() {
-                    let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
-                        &self.completed_bitfield,
-                    );
-                    checkpoint
-                        .save_with_in_flight_pieces(
-                            &bitfield,
-                            self.command.completed_bytes,
-                            &super::piece_storage::in_flight_snapshot(&self.in_flight_pieces),
+            match self.check_download_halt() {
+                DownloadHalt::Continue => {}
+                DownloadHalt::Timeout => continue,
+                DownloadHalt::Requested => {
+                    return self
+                        .finish_halted_download(
+                            &mut piece_work_queue,
+                            &mut web_seed_work_queue,
+                            &mut web_seed_tasks,
                         )
-                        .await
-                        .map_err(|error| {
-                            Aria2Error::FileIo(format!(
-                                "Failed to save halted BT checkpoint: {error}"
-                            ))
-                        })?;
-                    self.command
-                        .group
-                        .recover()
-                        .take_save_control_file_request();
+                        .await;
                 }
-                return Err(Aria2Error::DownloadFailed(
-                    "BitTorrent download halted".into(),
-                ));
             }
 
             // Tracker results use the same Swarm event stream even while there
             // is no connected peer or a piece batch is waiting on a response.
             // Admit them at the next coordinator turn before entering an idle
             // wait, so an empty swarm cannot strand discovered endpoints.
-            let tracker_peers = std::mem::take(&mut self.pending_tracker_peers);
-            if !tracker_peers.is_empty() {
-                self.queue_discovered_swarm_peers(
-                    &tracker_peers,
-                    BtPeerSource::Tracker,
-                    &mut peer_dials,
-                    &peer_dial_config,
-                );
-            }
+            self.admit_pending_tracker_peers(&mut peer_dials, &peer_dial_config);
 
             let current_uri_generation = self.command.group.recover().uri_generation();
             if current_uri_generation != observed_uri_generation {
@@ -222,27 +100,22 @@ impl PieceDownloadSession<'_> {
                                 format!("no active lease for piece {piece_index}"),
                             )
                         })?;
-                        if self.complete_web_seed_piece(piece_index, result).await? {
-                            web_seed_work_queue.complete(lease).map_err(|error| {
-                                bt_work_scheduler_error("complete a WebSeed piece", error)
-                            })?;
-                            piece_work_queue.complete_pending(WorkId::new(u64::from(piece_index)));
-                            self.refresh_download_progress();
-                        } else {
-                            let retry_wait = Duration::from_secs(
-                                self.command.group.recover().options().retry_wait,
-                            );
-                            finish_web_seed_work(&mut web_seed_work_queue, lease, retry_wait)?;
-                        }
+                        self.complete_web_seed_task(
+                            piece_index,
+                            result,
+                            lease,
+                            &mut web_seed_work_queue,
+                            &mut piece_work_queue,
+                        )
+                        .await?;
                     }
                     Err(error) => {
                         joined_web_seed_task = true;
                         warn!(%error, "WebSeed worker terminated unexpectedly");
-                        abort_web_seed_workers(
+                        self.abort_web_seed_tasks(
                             &mut web_seed_tasks,
                             &mut active_web_seed_work,
                             &mut web_seed_work_queue,
-                            &mut self.piece_picker,
                         )?;
                         break;
                     }
@@ -275,95 +148,8 @@ impl PieceDownloadSession<'_> {
                 continue;
             }
 
-            // Phase 14 - B1: Check if we should enter endgame mode
-            let endgame_candidates = self.piece_picker.endgame_candidates();
-            if !endgame_candidates.is_empty() && !self.endgame_state.is_endgame_active() {
-                self.endgame_state.enter_endgame();
-                info!(
-                    "[BT] Endgame mode activated: {}/{} pieces remaining",
-                    endgame_candidates.len(),
-                    self.num_pieces
-                );
-            } else if endgame_candidates.is_empty() && self.endgame_state.is_endgame_active() {
-                self.endgame_state.exit_endgame();
-            }
-
-            // G1: Periodic snub detection via extracted helper
-            self.check_and_mark_swarm_peers_snubbed();
-            {
-                let group = self.command.group.recover();
-                super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
-            }
-
-            // PEX Integration: Periodic PEX message sending (BEP 11)
-            super::super::super::pex::send_periodic_pex_to_swarm(
-                self.swarm,
-                self.last_pex_send,
-                self.command.peer_exchange_enabled(),
-            )
-            .await;
-
-            // PEX peers arrive as actor events during block reads or idle waits.
-            // Connect only to endpoints not already owned by this Swarm.
-            let all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
-                std::mem::take(&mut self.pending_pex_peers);
-            if !all_new_pex_peers.is_empty() {
-                info!(
-                    "[PEX] Drained {} inbound peers from connections, attempting to connect",
-                    all_new_pex_peers.len()
-                );
-                // Attempt to connect to PEX-discovered peers
-                self.queue_discovered_swarm_peers(
-                    &all_new_pex_peers,
-                    BtPeerSource::Pex,
-                    &mut peer_dials,
-                    &peer_dial_config,
-                );
-            }
-
-            // The tracker actor reads this live count when its announce
-            // deadline fires; no piece-loop timer or network I/O is needed.
-            self.command.update_tracker_peer_state(self.swarm.len());
-
-            // DHTGetPeersCommand counterpart. The lookup runs in a background
-            // task and publishes its result through an event slot, so DHT
-            // timeouts do not stall piece scheduling or halt detection.
-            self.command.dht_periodic_lookup.set_peer_limits(
-                self.command.bt_runtime.min_peers(),
-                self.command.bt_runtime.max_peers(),
-            );
-            let mut dht_peers = Vec::new();
-            super::super::super::check_periodic_dht_lookup(
-                &mut self.command.dht_periodic_lookup,
-                &self.command.dht_engines,
-                &self.meta.network_info_hash(),
-                self.command.listen_port,
-                self.swarm.len(),
-                &mut dht_peers,
-            )
-            .await;
-            dht_peers.retain(|peer| !self.command.is_peer_temporarily_rejected(&peer.ip));
-            if !dht_peers.is_empty() {
-                info!(
-                    discovered = dht_peers.len(),
-                    "[BT] Periodic DHT lookup found new peers"
-                );
-                self.queue_discovered_swarm_peers(
-                    &dht_peers,
-                    BtPeerSource::Dht,
-                    &mut peer_dials,
-                    &peer_dial_config,
-                );
-            }
-            if self
-                .command
-                .dht_periodic_lookup
-                .is_lookup_completion_pending()
-            {
-                self.command
-                    .dht_periodic_lookup
-                    .on_lookup_completed(self.command.tracked_peer_count());
-            }
+            self.update_peer_discovery(&mut peer_dials, &peer_dial_config)
+                .await;
 
             // With no connected peers, keep the torrent alive for tracker,
             // DHT, PEX, or incoming-peer discovery. The wait is driven by a
@@ -411,27 +197,22 @@ impl PieceDownloadSession<'_> {
                                 format!("no active lease for piece {piece_index}"),
                             )
                         })?;
-                        if self.complete_web_seed_piece(piece_index, result).await? {
-                            web_seed_work_queue.complete(lease).map_err(|error| {
-                                bt_work_scheduler_error("complete a WebSeed piece", error)
-                            })?;
-                            piece_work_queue.complete_pending(WorkId::new(u64::from(piece_index)));
-                            self.refresh_download_progress();
-                        } else {
-                            let retry_wait = Duration::from_secs(
-                                self.command.group.recover().options().retry_wait,
-                            );
-                            finish_web_seed_work(&mut web_seed_work_queue, lease, retry_wait)?;
-                        }
+                        self.complete_web_seed_task(
+                            piece_index,
+                            result,
+                            lease,
+                            &mut web_seed_work_queue,
+                            &mut piece_work_queue,
+                        )
+                        .await?;
                         continue;
                     }
                     NoPeerWaitEvent::WebSeed(Some(Err(error))) => {
                         warn!(%error, "WebSeed worker terminated unexpectedly");
-                        abort_web_seed_workers(
+                        self.abort_web_seed_tasks(
                             &mut web_seed_tasks,
                             &mut active_web_seed_work,
                             &mut web_seed_work_queue,
-                            &mut self.piece_picker,
                         )?;
                         continue;
                     }
@@ -529,34 +310,21 @@ impl PieceDownloadSession<'_> {
                                                 format!("no active lease for piece {piece_index}"),
                                             )
                                         })?;
-                                    if self.complete_web_seed_piece(piece_index, result).await? {
-                                        web_seed_work_queue.complete(lease).map_err(|error| {
-                                            bt_work_scheduler_error(
-                                                "complete a WebSeed piece",
-                                                error,
-                                            )
-                                        })?;
-                                        piece_work_queue
-                                            .complete_pending(WorkId::new(u64::from(piece_index)));
-                                        self.refresh_download_progress();
-                                    } else {
-                                        let retry_wait = Duration::from_secs(
-                                            self.command.group.recover().options().retry_wait,
-                                        );
-                                        finish_web_seed_work(
-                                            &mut web_seed_work_queue,
-                                            lease,
-                                            retry_wait,
-                                        )?;
-                                    }
+                                    self.complete_web_seed_task(
+                                        piece_index,
+                                        result,
+                                        lease,
+                                        &mut web_seed_work_queue,
+                                        &mut piece_work_queue,
+                                    )
+                                    .await?;
                                 }
                                 NoPeerWaitEvent::WebSeed(Some(Err(error))) => {
                                     warn!(%error, "WebSeed worker terminated unexpectedly");
-                                    abort_web_seed_workers(
+                                    self.abort_web_seed_tasks(
                                         &mut web_seed_tasks,
                                         &mut active_web_seed_work,
                                         &mut web_seed_work_queue,
-                                        &mut self.piece_picker,
                                     )?;
                                 }
                                 NoPeerWaitEvent::WebSeed(None) => {}
@@ -820,33 +588,6 @@ impl PieceDownloadSession<'_> {
                 self.refresh_download_progress();
             }
         }
-        tracing::info!("[BT] Finalizing writer...");
-        self.command
-            .sync_dirty_multi_file_payload()
-            .await
-            .map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to sync remaining BitTorrent files before completion: {error}"
-                ))
-            })?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|error| Aria2Error::FileIo(format!("Failed to flush BT output: {error}")))?;
-        self.writer
-            .close()
-            .await
-            .map_err(|error| Aria2Error::FileIo(format!("Failed to close BT output: {error}")))?;
-        if let Some(checkpoint) = self.command.checkpoint.take() {
-            checkpoint.remove().await?;
-        }
-        tracing::info!("[BT] Writer flushed and closed OK");
-        info!(
-            "BT download done: {} ({} bytes)",
-            self.command.output_path.display(),
-            self.command.completed_bytes
-        );
-
-        Ok(())
+        self.finalize_completed_download().await
     }
 }

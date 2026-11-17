@@ -9,6 +9,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::constants;
+use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -19,10 +20,11 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::uri::sftp_percent_decode;
-
 use aria2_protocol::sftp::connection::{HostKeyCheckingMode, SshError, SshOptions};
 use aria2_protocol::sftp::file_ops::FileOpError;
+use aria2_protocol::sftp::session::SftpSessionError;
+use aria2_protocol::sftp::transfer::SftpDownloadReadError;
+use aria2_protocol::sftp::uri::SftpUriError;
 
 /// Command that executes an SFTP file download from a remote server to local disk.
 ///
@@ -59,6 +61,8 @@ pub struct SftpDownloadCommand {
     pub(super) checkpoint: Option<ProgressCheckpoint>,
     /// Process-wide policy used to create the SSH TCP stream.
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    /// Shared resolver used when `async-dns` is enabled for this task.
+    pub(super) dns_cache: Option<Arc<tokio::sync::Mutex<DnsCache>>>,
 }
 
 /// Source-compatible SFTP URI fields before credential resolution.
@@ -66,14 +70,7 @@ pub struct SftpDownloadCommand {
 /// `aria2_original` parses URI userinfo separately from its auth resolution
 /// chain. Keeping that distinction allows the core `AuthConfigFactory` to
 /// apply the same URL, netrc, CLI, and anonymous-default precedence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ParsedSftpUri {
-    pub(super) host: String,
-    pub(super) port: u16,
-    pub(super) username: Option<String>,
-    pub(super) password: Option<String>,
-    pub(super) remote_path: String,
-}
+pub(super) use aria2_protocol::sftp::uri::SftpUri as ParsedSftpUri;
 
 impl SftpDownloadCommand {
     pub(super) fn validate_resume_offset(existing_length: u64, total_length: u64) -> Result<u64> {
@@ -137,13 +134,10 @@ impl SftpDownloadCommand {
         }
 
         info!(
-            "[SFTP-CMD] Created download command: {} -> {} ({}@{}:{}/{})",
-            uri,
-            path.display(),
-            username,
+            "[SFTP-CMD] Created download command for {}:{} -> {}",
             parsed.host,
             parsed.port,
-            parsed.remote_path
+            path.display(),
         );
 
         Ok(Self {
@@ -164,6 +158,7 @@ impl SftpDownloadCommand {
             global_limiter: None,
             checkpoint: None,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_cache: None,
         })
     }
 
@@ -207,11 +202,17 @@ impl SftpDownloadCommand {
             global_limiter: None,
             checkpoint: None,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_cache: None,
         })
     }
 
     pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
         self.outbound_network_policy = policy;
+    }
+
+    /// Use the engine's shared resolver when `async-dns` is enabled.
+    pub fn set_dns_cache(&mut self, dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) {
+        self.dns_cache = Some(dns_cache);
     }
 
     /// Parse an sftp:// URI into its component parts.
@@ -222,105 +223,13 @@ impl SftpDownloadCommand {
     /// - `sftp://user@host:port/path`
     /// - `sftp://user:password@host:port/path`
     pub(super) fn parse_uri(uri: &str) -> Result<ParsedSftpUri> {
-        if !uri.starts_with("sftp://") {
-            return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
+        aria2_protocol::sftp::uri::parse_uri(uri).map_err(|error| match error {
+            SftpUriError::UnsupportedScheme => Aria2Error::Fatal(FatalError::UnsupportedProtocol {
                 protocol: "sftp".into(),
-            }));
-        }
-
-        let without_scheme = uri.trim_start_matches("sftp://");
-
-        // `uri_split` keeps query and fragment out of `Request::getDir()` /
-        // `getFile()`. SFTP must therefore open only the path component.
-        let authority_end = without_scheme
-            .find(['/', '?', '#'])
-            .unwrap_or(without_scheme.len());
-        let authority = &without_scheme[..authority_end];
-        if authority.is_empty() {
-            return Err(Self::invalid_uri("SFTP URI has no host"));
-        }
-        let path_and_suffix = &without_scheme[authority_end..];
-        let path_end = path_and_suffix
-            .find(['?', '#'])
-            .unwrap_or(path_and_suffix.len());
-        let path = if path_and_suffix.starts_with('/') {
-            &path_and_suffix[..path_end]
-        } else {
-            "/"
-        };
-
-        // The original URI parser tracks the final '@' delimiter, allowing
-        // an unescaped '@' in the userinfo prefix while retaining the last
-        // segment as the host delimiter.
-        let (userinfo, host_port) = match authority.rfind('@') {
-            Some(index) => (&authority[..index], &authority[index + 1..]),
-            None => ("", authority),
-        };
-        if host_port.is_empty() {
-            return Err(Self::invalid_uri("SFTP URI has no host"));
-        }
-
-        let (username, password) = if userinfo.is_empty() {
-            (None, None)
-        } else if let Some((username, password)) = userinfo.split_once(':') {
-            (
-                Some(sftp_percent_decode(username)),
-                Some(sftp_percent_decode(password)),
-            )
-        } else {
-            (Some(sftp_percent_decode(userinfo)), None)
-        };
-        if username.as_deref().is_some_and(str::is_empty) {
-            return Err(Self::invalid_uri("SFTP URI has an empty username"));
-        }
-
-        // Split host from port. Bracketed IPv6 literals are handled without
-        // mistaking their internal colons for a port separator.
-        let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
-            let (host, suffix) = bracketed
-                .split_once(']')
-                .ok_or_else(|| Self::invalid_uri("Invalid bracketed SFTP host"))?;
-            if host.is_empty() {
-                return Err(Self::invalid_uri("SFTP URI has an empty IPv6 host"));
+            }),
+            SftpUriError::Invalid(message) => {
+                Aria2Error::Fatal(FatalError::Config(message.to_string()))
             }
-            let port = match suffix {
-                "" => constants::SFTP_DEFAULT_PORT,
-                value if value.starts_with(':') => Self::parse_port(&value[1..])?,
-                _ => return Err(Self::invalid_uri("Invalid SFTP host suffix")),
-            };
-            (host.to_string(), port)
-        } else {
-            match host_port.split_once(':') {
-                Some((host, port)) => {
-                    if host.is_empty() || port.contains(':') {
-                        return Err(Self::invalid_uri("Invalid SFTP host or port"));
-                    }
-                    (host.to_string(), Self::parse_port(port)?)
-                }
-                None => (host_port.to_string(), constants::SFTP_DEFAULT_PORT),
-            }
-        };
-
-        Ok(ParsedSftpUri {
-            host,
-            port,
-            username,
-            password,
-            remote_path: sftp_percent_decode(path),
-        })
-    }
-
-    fn parse_port(value: &str) -> Result<u16> {
-        if value.is_empty() {
-            return Ok(constants::SFTP_DEFAULT_PORT);
-        }
-        let port = value
-            .parse::<u16>()
-            .map_err(|_| Self::invalid_uri("Invalid SFTP port"))?;
-        Ok(if port == 0 {
-            constants::SFTP_DEFAULT_PORT
-        } else {
-            port
         })
     }
 
@@ -406,12 +315,34 @@ impl SftpDownloadCommand {
 
     /// Build SshOptions from the command's stored credentials.
     pub(super) fn build_ssh_options(&self) -> SshOptions {
+        let (connect_timeout, read_timeout, compression, keepalive_interval, preferred_ciphers) = {
+            let group = self.group();
+            let options = group.options();
+            (
+                options
+                    .sftp_connect_timeout
+                    .unwrap_or(constants::SFTP_CONNECT_TIMEOUT_SECS),
+                options
+                    .sftp_read_timeout
+                    .unwrap_or(constants::SFTP_READ_TIMEOUT_SECS),
+                options.sftp_compression,
+                options
+                    .sftp_keepalive_interval
+                    .unwrap_or(aria2_protocol::DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS),
+                options.sftp_preferred_ciphers.clone().unwrap_or_default(),
+            )
+        };
         let mut opts = SshOptions::new(&self.host, &self.username)
             .with_port(self.port)
             .with_timeouts(
-                Duration::from_secs(constants::SFTP_CONNECT_TIMEOUT_SECS),
-                Duration::from_secs(constants::SFTP_READ_TIMEOUT_SECS),
+                Duration::from_secs(connect_timeout),
+                Duration::from_secs(read_timeout),
             )
+            .with_compression(compression)
+            .with_keepalive_interval(
+                (keepalive_interval != 0).then(|| Duration::from_secs(keepalive_interval)),
+            )
+            .with_preferred_ciphers(preferred_ciphers)
             .with_host_key_mode(if self.host_key_fingerprint.is_some() {
                 HostKeyCheckingMode::Strict
             } else {
@@ -430,27 +361,36 @@ impl SftpDownloadCommand {
 
     /// Map an SshError to the appropriate Aria2Error for engine-level handling.
     pub(super) fn map_ssh_error(err: &SshError, host: &str, port: u16, _path: &str) -> Aria2Error {
+        if err.is_retryable() {
+            return Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: err.to_string(),
+            });
+        }
+
         match err {
             SshError::AuthFailed { .. } => Aria2Error::Fatal(FatalError::PermissionDenied {
                 path: format!("{}:{}", host, port),
             }),
-            SshError::ConnectTimeout { .. } | SshError::ConnectFailed { .. } => {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: err.to_string(),
-                })
-            }
-            SshError::Handshake { .. } | SshError::ConnectionLost { .. } => {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: err.to_string(),
-                })
-            }
             SshError::NoCredentials { .. } => Aria2Error::Fatal(FatalError::Config(format!(
                 "No SSH credentials provided for {}:{}",
                 host, port
             ))),
-            _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("SFTP error [{}:{}]: {}", host, port, err),
-            }),
+            _ => Aria2Error::Fatal(FatalError::Config(format!(
+                "SFTP connection to {}:{} failed: {}",
+                host, port, err
+            ))),
+        }
+    }
+
+    /// Retry SFTP session failures only when the protocol layer classifies
+    /// them as connectivity or timeout failures.
+    pub(super) fn map_session_error(err: &SftpSessionError) -> Aria2Error {
+        if err.is_network() {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("SFTP session init failed: {err}"),
+            })
+        } else {
+            Aria2Error::DownloadFailed(format!("SFTP session init failed: {err}"))
         }
     }
 
@@ -475,9 +415,22 @@ impl SftpDownloadCommand {
                     message: err.to_string(),
                 })
             }
-            _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("SFTP file op error: {}", err),
-            }),
+            _ => Aria2Error::DownloadFailed(format!("SFTP file op error: {err}")),
+        }
+    }
+
+    pub(super) fn map_download_read_error(
+        err: SftpDownloadReadError,
+        host: &str,
+        path: &str,
+    ) -> Aria2Error {
+        match err {
+            SftpDownloadReadError::Remote(error) => Self::map_file_op_error(&error, host, path),
+            SftpDownloadReadError::UnexpectedEof { offset, total_size } => {
+                Aria2Error::DownloadFailed(format!(
+                    "SFTP remote file ended before the advertised length: {offset} < {total_size}"
+                ))
+            }
         }
     }
 }

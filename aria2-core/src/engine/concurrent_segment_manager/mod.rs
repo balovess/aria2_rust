@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::constants;
@@ -31,6 +32,8 @@ pub struct ConcurrentSegmentManager {
     completed_bytes: u64,
     max_retries_per_segment: u32,
     max_mirror_failures: usize,
+    mirror_cooldown: Duration,
+    mirror_disabled_until: Vec<Option<Instant>>,
     /// Optional server statistics manager for intelligent mirror selection
     stat_man: Option<Arc<ServerStatMan>>,
     /// Optional URI selector for intelligent mirror selection
@@ -68,6 +71,7 @@ impl ConcurrentSegmentManager {
         }
 
         let mirrors = urls.iter().map(|_| MirrorState::new()).collect();
+        let mirror_disabled_until = vec![None; urls.len()];
 
         Self {
             total_size,
@@ -78,6 +82,8 @@ impl ConcurrentSegmentManager {
             completed_bytes: 0,
             max_retries_per_segment: constants::MAX_RETRIES_PER_SEGMENT,
             max_mirror_failures: constants::MAX_MIRROR_FAILURES as usize,
+            mirror_cooldown: Duration::from_secs(constants::MIRROR_COOLDOWN_SECS),
+            mirror_disabled_until,
             stat_man: None,
             uri_selector: None,
             next_segment_idx: AtomicU32::new(0),
@@ -140,6 +146,7 @@ impl ConcurrentSegmentManager {
         }
 
         let mirrors = urls.iter().map(|_| MirrorState::new()).collect();
+        let mirror_disabled_until = vec![None; urls.len()];
 
         Self {
             total_size,
@@ -150,6 +157,8 @@ impl ConcurrentSegmentManager {
             completed_bytes: 0,
             max_retries_per_segment: constants::MAX_RETRIES_PER_SEGMENT,
             max_mirror_failures: constants::MAX_MIRROR_FAILURES as usize,
+            mirror_cooldown: Duration::from_secs(constants::MIRROR_COOLDOWN_SECS),
+            mirror_disabled_until,
             stat_man: Some(stat_man),
             uri_selector: Some(uri_selector),
             next_segment_idx: AtomicU32::new(0),
@@ -411,6 +420,42 @@ impl ConcurrentSegmentManager {
         self.mirrors.iter().any(|m| m.is_available())
     }
 
+    /// Re-enable mirrors whose circuit-breaker cooldown has expired.
+    pub(crate) fn refresh_mirror_availability(&mut self) {
+        let now = Instant::now();
+        for (index, mirror) in self.mirrors.iter_mut().enumerate() {
+            if !mirror.disabled {
+                continue;
+            }
+            let cooldown_expired = self
+                .mirror_disabled_until
+                .get(index)
+                .and_then(|deadline| *deadline)
+                .is_none_or(|deadline| now >= deadline);
+            if cooldown_expired {
+                mirror.disabled = false;
+                mirror.consecutive_failures = 0;
+                self.mirror_disabled_until[index] = None;
+            }
+        }
+    }
+
+    /// Return the earliest remaining mirror circuit-breaker cooldown.
+    pub(crate) fn mirror_cooldown_remaining(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.mirrors
+            .iter()
+            .enumerate()
+            .filter(|(_, mirror)| mirror.disabled)
+            .filter_map(|(index, _)| {
+                self.mirror_disabled_until
+                    .get(index)
+                    .and_then(|deadline| *deadline)
+            })
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
+    }
+
     pub fn segment_retry_count(&self, seg_idx: u32) -> u32 {
         self.segments
             .iter()
@@ -474,5 +519,9 @@ impl ConcurrentSegmentManager {
 
     pub fn set_max_retries(&mut self, retries: u32) {
         self.max_retries_per_segment = retries;
+    }
+
+    pub(crate) fn set_mirror_cooldown(&mut self, cooldown: Duration) {
+        self.mirror_cooldown = cooldown.max(Duration::from_secs(1));
     }
 }

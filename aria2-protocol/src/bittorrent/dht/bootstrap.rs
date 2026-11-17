@@ -31,8 +31,10 @@ impl DhtBootstrap {
         addresses: impl IntoIterator<Item = SocketAddr>,
     ) -> Vec<DhtNode> {
         use rand::SeedableRng;
-
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = {
+            let mut seed_rng = rand::rng();
+            rand::rngs::StdRng::from_rng(&mut seed_rng)
+        };
         addresses
             .into_iter()
             .map(|addr| DhtNode::unverified(random_node_id(&mut rng), addr))
@@ -59,9 +61,11 @@ impl DhtBootstrap {
 
     async fn resolve_bootstrap_nodes_with_family(family: Option<bool>) -> Vec<DhtNode> {
         use rand::SeedableRng;
-        // Use StdRng instead of ThreadRng to satisfy Send requirement
-        // across async boundaries (ThreadRng is !Send due to Rc internals).
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        // StdRng is Send across the async DNS lookups below.
+        let mut rng = {
+            let mut seed_rng = rand::rng();
+            rand::rngs::StdRng::from_rng(&mut seed_rng)
+        };
         let mut nodes = Vec::new();
 
         for (host, port) in BOOTSTRAP_NODES {
@@ -130,10 +134,10 @@ impl DhtBootstrap {
     }
 }
 
-fn random_node_id(rng: &mut impl rand::Rng) -> [u8; 20] {
+fn random_node_id(rng: &mut impl rand::RngExt) -> [u8; 20] {
     let mut id = [0u8; 20];
     for byte in &mut id {
-        *byte = rng.r#gen();
+        *byte = rng.random();
     }
     id
 }

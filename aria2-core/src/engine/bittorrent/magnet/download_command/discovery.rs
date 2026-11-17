@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::DownloadOptions;
 use crate::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::bittorrent::tracker::url::{TrackerTransport, classify_tracker_url};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,13 +30,7 @@ pub(super) fn metadata_tracker_urls(
         .map(|url| url.trim().to_owned())
         .filter(|url| {
             !url.is_empty()
-                && matches!(
-                    reqwest::Url::parse(url)
-                        .ok()
-                        .as_ref()
-                        .map(reqwest::Url::scheme),
-                    Some("http" | "https" | "udp" | "ws" | "wss")
-                )
+                && classify_tracker_url(url).is_some()
                 && !excluded.iter().any(|excluded| excluded == url)
         })
         .fold(Vec::new(), |mut unique, url| {
@@ -97,16 +92,41 @@ impl MagnetDownloadCommand {
                 continue;
             }
 
+            let dht_options = self
+                .bt_registry
+                .as_ref()
+                .map(|registry| {
+                    registry
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .global_dht_options()
+                })
+                .unwrap_or_else(|| {
+                    Arc::new(crate::engine::bittorrent::dht::config::DhtEngineOptions::default())
+                });
             let config =
-                crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family(
-                    options,
+                crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family_with_dns_cache(
+                    &dht_options,
                     &self.outbound_network_policy,
+                    &self.dns_cache,
                     use_ipv6,
                 )
                 .await?;
+            let Some(config) = config else {
+                info!(
+                    ipv6 = use_ipv6,
+                    "Skipping DHT family without a compatible outbound source"
+                );
+                continue;
+            };
             match self
                 .dht_engines
-                .start_or_join(self.bt_registry.as_ref(), gid, config)
+                .start_or_join(
+                    self.bt_registry.as_ref(),
+                    gid,
+                    config,
+                    dht_options.protocol_peer_storage_config(),
+                )
                 .await
             {
                 Ok(()) => info!(ipv6 = use_ipv6, "Magnet: DHT family engine ready"),
@@ -219,10 +239,10 @@ impl MagnetDownloadCommand {
         let mut discovered_peers = Vec::new();
 
         for tracker_url in tracker_urls.into_iter().take(MAX_MAGNET_TRACKERS_TO_TRY) {
-            let tracker_scheme = reqwest::Url::parse(&tracker_url)
-                .ok()
-                .map(|url| url.scheme().to_owned());
-            if matches!(tracker_scheme.as_deref(), Some("ws" | "wss")) {
+            if matches!(
+                classify_tracker_url(&tracker_url),
+                Some(TrackerTransport::WebSocket)
+            ) {
                 match crate::engine::bittorrent::tracker::websocket::announce_with_policy(
                     &tracker_url,
                     crate::engine::bittorrent::tracker::websocket::AnnounceRequest {
@@ -234,6 +254,8 @@ impl MagnetDownloadCommand {
                         numwant: 50,
                         port: announce_port,
                         event: crate::engine::bittorrent::tracker::communication::AnnounceEvent::Started,
+                        request_timeout: max_tracker_timeout,
+                        connect_timeout,
                         options,
                     },
                     &self.outbound_network_policy,
@@ -242,17 +264,24 @@ impl MagnetDownloadCommand {
                 {
                     Ok(response) if !response.peers.is_empty() => {
                         info!(
-                            tracker = %tracker_url,
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
                             peers = response.peers.len(),
                             "WebSocket tracker announce returned peers"
                         );
                         append_unique_tracker_peers(&mut discovered_peers, response.peers);
                     }
                     Ok(_) => {
-                        warn!(tracker = %tracker_url, "WebSocket tracker returned no TCP peers");
+                        warn!(
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
+                            "WebSocket tracker returned no TCP peers"
+                        );
                     }
                     Err(error) => {
-                        warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
+                        warn!(
+                            tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
+                            %error,
+                            "WebSocket tracker announce failed"
+                        );
                     }
                 }
                 if discovered_peers.len() >= MAX_MAGNET_TRACKER_PEERS {
@@ -265,6 +294,7 @@ impl MagnetDownloadCommand {
             let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
             announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
             announcer.set_http_tls_config(tracker_tls.clone());
+            announcer.set_websocket_options(options);
             announcer.set_timeouts(max_tracker_timeout, connect_timeout);
             announcer.set_tcp_port(announce_port);
 
@@ -279,7 +309,10 @@ impl MagnetDownloadCommand {
                 .await;
 
             let Some(result) = result else {
-                warn!(tracker = %tracker_url, "Magnet tracker announce failed");
+                warn!(
+                    tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
+                    "Magnet tracker announce failed"
+                );
                 continue;
             };
 
@@ -289,7 +322,7 @@ impl MagnetDownloadCommand {
                 .filter_map(|(ip, port)| tracker_peer_socket_addr(ip, *port))
                 .collect();
             info!(
-                tracker = %tracker_url,
+                tracker = %aria2_protocol::http::redirect::url_origin_for_logging(&tracker_url),
                 peers = peers.len(),
                 "Magnet tracker announce returned peers"
             );

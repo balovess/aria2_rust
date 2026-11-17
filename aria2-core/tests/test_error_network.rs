@@ -215,7 +215,7 @@ async fn test_timeout_max_retries_exhausted() {
 /// Test DNS cache negative caching behavior
 #[test]
 fn test_dns_negative_cache_blocks_immediate_retry() {
-    let mut cache = DnsCache::with_ttl(300, 5); // 5 second negative TTL
+    let cache = DnsCache::with_ttl(300, 5); // 5 second negative TTL
 
     // Record a failed lookup
     cache.record_failure("nonexistent.invalid", 80);
@@ -235,7 +235,7 @@ fn test_dns_negative_cache_blocks_immediate_retry() {
 /// Test DNS cache expiration allows retry
 #[test]
 fn test_dns_negative_cache_expiration_allows_retry() {
-    let mut cache = DnsCache::with_ttl(300, 1); // 1 second negative TTL
+    let cache = DnsCache::with_ttl(300, 1); // 1 second negative TTL
 
     // Record a failed lookup
     cache.record_failure("expired.invalid", 80);
@@ -257,7 +257,7 @@ fn test_dns_negative_cache_expiration_allows_retry() {
 /// Test DNS resolution for invalid hostname
 #[tokio::test]
 async fn test_dns_resolution_invalid_hostname() {
-    let mut cache = DnsCache::with_ttl(300, 60);
+    let cache = DnsCache::with_ttl(300, 60);
 
     // Try to resolve an invalid hostname (using a truly invalid format)
     // Note: Some DNS resolvers may resolve .invalid TLD, so we use a clearly invalid format
@@ -289,7 +289,7 @@ async fn test_dns_resolution_invalid_hostname() {
 /// Test DNS IPv4 preference sorting
 #[tokio::test]
 async fn test_dns_ipv4_preference_on_resolution() {
-    let mut cache = DnsCache::new();
+    let cache = DnsCache::new();
     cache.set_ipv4_preference(true);
 
     // Resolve localhost (typically has both IPv4 and IPv6)

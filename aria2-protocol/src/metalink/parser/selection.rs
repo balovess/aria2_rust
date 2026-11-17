@@ -68,11 +68,15 @@ impl MetalinkDocument {
             .collect()
     }
 
+    /// Sum the sizes of files whose sizes are known.
+    ///
+    /// Returns `None` when no positive total is known or when the sum exceeds
+    /// `u64::MAX`.
     pub fn total_size(&self) -> Option<u64> {
         let mut total: u64 = 0;
         for f in &self.files {
             if let Some(size) = f.size {
-                total += size;
+                total = total.checked_add(size)?;
             }
         }
         if total > 0 || self.files.is_empty() {

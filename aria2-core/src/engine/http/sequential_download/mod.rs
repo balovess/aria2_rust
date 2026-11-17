@@ -37,6 +37,8 @@ pub struct GapDownloadResult {
 pub(crate) struct PreparedHttpResponse {
     pub response: reqwest::Response,
     pub effective_uri: String,
+    pub origin_auth_allowed: bool,
+    pub auth_factory: std::sync::Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>,
 }
 
 pub struct SequentialDownloader {
@@ -52,10 +54,17 @@ pub struct SequentialDownloader {
     /// When `Some`, tokens are acquired after the per-download limiter
     /// in `download_flow.rs` and `gap_download.rs`.
     pub(crate) global_limiter: Option<RateLimiter>,
+    pub(crate) origin_sensitive_headers_allowed: bool,
     pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     /// The first GET response, when filename metadata had to be read before
     /// collision resolution and resume inspection.
     pub(crate) prepared_response: Option<PreparedHttpResponse>,
+    /// Per-download auth cache shared by prepared metadata, sequential
+    /// requests, and retries.
+    pub(crate) auth_factory: Option<Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>>,
+    /// Authentication policy paired with a shared auth cache when a
+    /// concurrent transfer falls back to gap-based sequential requests.
+    pub(crate) auth_options: Option<crate::http::AuthResolveOptions>,
     /// Set once a response body started writing the output with a control
     /// file, so a retry resumes from that checkpoint instead of from where
     /// the first attempt started.
@@ -83,8 +92,11 @@ impl SequentialDownloader {
             group,
             progress,
             global_limiter,
+            origin_sensitive_headers_allowed: true,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             prepared_response: None,
+            auth_factory: None,
+            auth_options: None,
             checkpoint_written: false,
         }
     }
@@ -98,7 +110,23 @@ impl SequentialDownloader {
     }
 
     pub(crate) fn with_prepared_response(mut self, response: PreparedHttpResponse) -> Self {
+        self.auth_factory = Some(Arc::clone(&response.auth_factory));
         self.prepared_response = Some(response);
+        self
+    }
+
+    pub(crate) fn with_shared_auth_options(
+        mut self,
+        auth_factory: Arc<std::sync::Mutex<crate::http::auth::AuthConfigFactory>>,
+        auth_options: crate::http::AuthResolveOptions,
+    ) -> Self {
+        self.auth_factory = Some(auth_factory);
+        self.auth_options = Some(auth_options);
+        self
+    }
+
+    pub(crate) fn with_origin_sensitive_headers_allowed(mut self, allowed: bool) -> Self {
+        self.origin_sensitive_headers_allowed = allowed;
         self
     }
 
@@ -193,8 +221,8 @@ impl SequentialDownloader {
         let mut current = sorted[0];
 
         for &(offset, length) in sorted.iter().skip(1) {
-            let current_end = current.0 + current.1;
-            let next_end = offset + length;
+            let current_end = current.0.saturating_add(current.1);
+            let next_end = offset.saturating_add(length);
 
             if offset <= current_end {
                 current = (current.0, std::cmp::max(current_end, next_end) - current.0);
@@ -207,8 +235,20 @@ impl SequentialDownloader {
         merged
     }
 
+    fn normalize_completed_ranges(ranges: &[(u64, u64)], total_length: u64) -> Vec<(u64, u64)> {
+        let bounded_ranges: Vec<_> = ranges
+            .iter()
+            .filter_map(|&(offset, length)| {
+                let start = offset.min(total_length);
+                let end = offset.saturating_add(length).min(total_length);
+                (start < end).then_some((start, end - start))
+            })
+            .collect();
+        Self::merge_ranges(&bounded_ranges)
+    }
+
     pub fn find_all_gaps(completed_ranges: &[(u64, u64)], total_length: u64) -> Vec<(u64, u64)> {
-        let merged_ranges = Self::merge_ranges(completed_ranges);
+        let merged_ranges = Self::normalize_completed_ranges(completed_ranges, total_length);
         let mut gaps = Vec::new();
         if merged_ranges.is_empty() {
             if total_length > 0 {
@@ -219,10 +259,13 @@ impl SequentialDownloader {
 
         let mut current = 0;
         for &(offset, length) in &merged_ranges {
+            if current >= total_length {
+                break;
+            }
             if offset > current {
                 gaps.push((current, offset - current));
             }
-            current = std::cmp::max(current, offset + length);
+            current = offset + length;
         }
         if current < total_length {
             gaps.push((current, total_length - current));
@@ -444,224 +487,5 @@ impl SequentialDownloader {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use crate::engine::download_progress::ProgressUpdater;
-    use crate::engine::http::cookie_helper::CookieHelper;
-    use crate::http::HttpRequestPolicy;
-    use crate::http::cookie::CookieStorage;
-    use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
-    use crate::util::perf_monitor::AtomicMetrics;
-
-    use super::SequentialDownloader;
-
-    fn test_downloader(group: Arc<std::sync::RwLock<RequestGroup>>) -> SequentialDownloader {
-        let progress = Arc::new(AtomicProgress::new());
-        SequentialDownloader::new(
-            crate::http::client_pool::get_global_client(),
-            std::env::temp_dir().join("aria2-sequential-retry-test.bin"),
-            HttpRequestPolicy::default(),
-            CookieHelper::new(Arc::new(CookieStorage::new()), None),
-            ProgressUpdater::new(
-                None,
-                None,
-                Arc::clone(&progress),
-                Arc::new(AtomicMetrics::new()),
-                None,
-            ),
-            group,
-            progress,
-            None,
-        )
-    }
-
-    #[tokio::test]
-    async fn retry_wait_is_interruptible_when_removed() {
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(900),
-            vec!["http://example.com/file.bin".to_string()],
-            DownloadOptions::default(),
-        )));
-        group.write().unwrap().mark_removed();
-        let downloader = test_downloader(group);
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            downloader.wait_for_retry(Duration::from_secs(5)),
-        )
-        .await
-        .expect("removed retry wait should stop promptly");
-
-        assert!(matches!(
-            result,
-            Err(crate::error::Aria2Error::DownloadFailed(message))
-                if message == "Download cancelled by user"
-        ));
-    }
-
-    #[tokio::test]
-    async fn retry_wait_wakes_when_removed_after_wait_starts() {
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(901),
-            vec!["http://example.com/file.bin".to_string()],
-            DownloadOptions::default(),
-        )));
-        let group_for_wait = Arc::clone(&group);
-        let downloader = test_downloader(group);
-        let wait_task =
-            tokio::spawn(async move { downloader.wait_for_retry(Duration::from_secs(5)).await });
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        group_for_wait.write().unwrap().mark_removed();
-
-        let result = tokio::time::timeout(Duration::from_millis(100), wait_task)
-            .await
-            .expect("lifecycle notification should wake retry wait")
-            .expect("retry wait task should not panic");
-        assert!(matches!(
-            result,
-            Err(crate::error::Aria2Error::DownloadFailed(message))
-                if message == "Download cancelled by user"
-        ));
-    }
-
-    #[test]
-    fn test_merge_ranges_empty() {
-        let ranges = &[];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_merge_ranges_single() {
-        let ranges = &[(0, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 100)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_non_overlapping_sorted() {
-        let ranges = &[(0, 100), (200, 100), (400, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 100), (200, 100), (400, 100)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_non_overlapping_unsorted() {
-        let ranges = &[(200, 100), (0, 100), (400, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 100), (200, 100), (400, 100)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_overlapping_inner() {
-        let ranges = &[(0, 200), (50, 50)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 200)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_overlapping_inner_unsorted() {
-        let ranges = &[(50, 50), (0, 200)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 200)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_overlapping_partial() {
-        let ranges = &[(0, 100), (50, 150)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 200)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_overlapping_partial_unsorted() {
-        let ranges = &[(50, 150), (0, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 200)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_adjacent() {
-        let ranges = &[(0, 100), (100, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 200)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_adjacent_unsorted() {
-        let ranges = &[(100, 100), (0, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 200)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_duplicate() {
-        let ranges = &[(0, 100), (0, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 100)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_multiple_overlapping() {
-        let ranges = &[(0, 100), (50, 150), (200, 100), (180, 150)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 330)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_zero_length() {
-        let ranges = &[(0, 0), (100, 0), (200, 100)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 0), (100, 0), (200, 100)]);
-    }
-
-    #[test]
-    fn test_merge_ranges_complex() {
-        let ranges = &[(10, 5), (0, 20), (15, 25), (50, 10), (45, 20), (100, 50)];
-        let result = SequentialDownloader::merge_ranges(ranges);
-        assert_eq!(result, vec![(0, 40), (45, 20), (100, 50)]);
-    }
-
-    #[test]
-    fn test_find_all_gaps_empty_ranges() {
-        let ranges = &[];
-        let gaps = SequentialDownloader::find_all_gaps(ranges, 1000);
-        assert_eq!(gaps, vec![(0, 1000)]);
-    }
-
-    #[test]
-    fn test_find_all_gaps_no_gaps() {
-        let ranges = &[(0, 1000)];
-        let gaps = SequentialDownloader::find_all_gaps(ranges, 1000);
-        assert!(gaps.is_empty());
-    }
-
-    #[test]
-    fn test_find_all_gaps_single_gap() {
-        let ranges = &[(0, 500), (600, 400)];
-        let gaps = SequentialDownloader::find_all_gaps(ranges, 1000);
-        assert_eq!(gaps, vec![(500, 100)]);
-    }
-
-    #[test]
-    fn test_find_all_gaps_multiple_gaps() {
-        let ranges = &[(0, 100), (200, 100), (400, 200)];
-        let gaps = SequentialDownloader::find_all_gaps(ranges, 1000);
-        assert_eq!(gaps, vec![(100, 100), (300, 100), (600, 400)]);
-    }
-
-    #[test]
-    fn test_find_all_gaps_overlapping_ranges() {
-        let ranges = &[(0, 200), (100, 150), (300, 50)];
-        let gaps = SequentialDownloader::find_all_gaps(ranges, 500);
-        assert_eq!(gaps, vec![(250, 50), (350, 150)]);
-    }
-}
+mod tests;

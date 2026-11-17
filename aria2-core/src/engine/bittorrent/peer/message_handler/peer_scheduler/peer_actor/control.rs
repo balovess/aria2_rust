@@ -46,7 +46,10 @@ pub(crate) enum PeerCommand {
     HavePiece {
         piece_index: u32,
     },
-    SendPex(Vec<u8>),
+    SendPex {
+        remote_extension_id: u8,
+        payload: Vec<u8>,
+    },
     AnnounceAvailability,
     Shutdown,
 }

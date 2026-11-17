@@ -1,4 +1,4 @@
-use super::{DownloadOptions, FollowMode};
+use super::{DownloadOptions, FollowMode, HttpAdaptiveOptions};
 use std::collections::HashMap;
 
 #[test]
@@ -28,6 +28,70 @@ fn split_option_keeps_large_positive_values() {
     assert_eq!(
         DownloadOptions::from_option_strings(&values).split,
         Some(1_000_000)
+    );
+}
+
+#[test]
+fn http_user_agent_matches_explicit_header_precedence() {
+    let options = DownloadOptions {
+        header: vec![
+            "x-extra: value".to_string(),
+            "uSeR-aGeNt: header/1.0".to_string(),
+        ],
+        user_agent: Some("option/1.0".to_string()),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(options.http_user_agent(), Some("header/1.0"));
+
+    let options = DownloadOptions {
+        user_agent: Some("option/1.0".to_string()),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(options.http_user_agent(), Some("option/1.0"));
+    assert_eq!(DownloadOptions::default().http_user_agent(), None);
+}
+
+#[test]
+fn adaptive_http_options_parse_and_normalize_external_values() {
+    let values = HashMap::from([
+        ("http-adaptive-enabled".to_string(), "false".to_string()),
+        (
+            "http-adaptive-reduction-percent".to_string(),
+            "30".to_string(),
+        ),
+        (
+            "http-adaptive-recovery-successes-min".to_string(),
+            "40".to_string(),
+        ),
+        (
+            "http-adaptive-recovery-successes-max".to_string(),
+            "12".to_string(),
+        ),
+        (
+            "http-adaptive-start-interval-ms".to_string(),
+            "250".to_string(),
+        ),
+        ("http-adaptive-backoff-base".to_string(), "15".to_string()),
+        ("http-adaptive-backoff-max".to_string(), "10".to_string()),
+    ]);
+
+    let options = DownloadOptions::from_option_strings(&values).http_adaptive;
+    assert!(!options.enabled);
+    assert_eq!(options.reduction_percent, 30);
+    assert_eq!(options.recovery_successes_min, 40);
+    assert_eq!(options.recovery_successes_max, 40);
+    assert_eq!(options.start_interval_ms, 250);
+    assert_eq!(options.backoff_base_secs, 15);
+    assert_eq!(options.backoff_max_secs, 15);
+}
+
+#[test]
+fn adaptive_http_concurrency_defaults_to_disabled() {
+    assert!(!HttpAdaptiveOptions::default().enabled);
+    assert!(
+        !DownloadOptions::from_option_strings(&HashMap::new())
+            .http_adaptive
+            .enabled
     );
 }
 
@@ -67,6 +131,9 @@ fn memory_follow_mode_matches_metadata_content_types() {
 #[test]
 fn proxy_credentials_prefer_protocol_specific_values() {
     let options = DownloadOptions {
+        http_proxy: Some("http://url-user:url-pass@http-proxy.example:8080".to_string()),
+        https_proxy: Some("http://url-user:url-pass@https-proxy.example:8080".to_string()),
+        all_proxy: Some("http://url-user:url-pass@all-proxy.example:8080".to_string()),
         http_proxy_user: Some("http-user".to_string()),
         http_proxy_passwd: Some("http-pass".to_string()),
         https_proxy_user: Some("https-user".to_string()),
@@ -81,11 +148,32 @@ fn proxy_credentials_prefer_protocol_specific_values() {
     );
     assert_eq!(
         options.proxy_credentials_for_scheme("https"),
-        (Some("https-user".to_string()), Some("all-pass".to_string()))
+        (Some("https-user".to_string()), Some("url-pass".to_string()))
     );
     assert_eq!(
         options.proxy_credentials_for_scheme("all"),
         (Some("all-user".to_string()), Some("all-pass".to_string()))
+    );
+}
+
+#[test]
+fn protocol_credentials_do_not_cross_to_all_proxy_or_vice_versa() {
+    let options = DownloadOptions {
+        all_proxy: Some("http://all-url-user:all-url-pass@all-proxy.example:8080".into()),
+        all_proxy_user: Some("all-user".into()),
+        all_proxy_passwd: Some("all-pass".into()),
+        http_proxy_user: Some("http-user".into()),
+        http_proxy_passwd: Some("http-pass".into()),
+        ..DownloadOptions::default()
+    };
+
+    assert_eq!(
+        options.proxy_credentials_for_scheme("http"),
+        (Some("all-user".into()), Some("all-pass".into()))
+    );
+    assert_eq!(
+        options.proxy_credentials_for_scheme("all"),
+        (Some("all-user".into()), Some("all-pass".into()))
     );
 }
 
@@ -202,12 +290,12 @@ fn rpc_option_map_rejects_invalid_registered_values() {
 }
 
 #[test]
-fn continue_option_defaults_to_false_and_accepts_explicit_true() {
-    assert!(!DownloadOptions::from_option_strings(&HashMap::new()).continue_download);
+fn continue_option_defaults_to_true_and_accepts_explicit_false() {
+    assert!(DownloadOptions::from_option_strings(&HashMap::new()).continue_download);
 
     let mut values = HashMap::new();
-    values.insert("continue".to_string(), "true".to_string());
-    assert!(DownloadOptions::from_option_strings(&values).continue_download);
+    values.insert("continue".to_string(), "false".to_string());
+    assert!(!DownloadOptions::from_option_strings(&values).continue_download);
 }
 
 #[cfg(feature = "bittorrent")]

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::engine::bittorrent::peer::message_handler::types::{BLOCK_SIZE, ReceivedPieceBlock};
 use crate::error::{Aria2Error, Result};
@@ -7,13 +8,18 @@ use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 use super::PieceDownloadSession;
 
+pub(super) struct MultiFileWriteLimits {
+    pub(super) per_download: usize,
+    pub(super) process_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
+}
+
 pub(super) async fn stage_received_block(
     writer: &mut Box<dyn SeekableDiskWriter>,
     layout: Option<&crate::engine::bittorrent::torrent::file_layout::MultiFileLayout>,
     piece_lengths: &HashMap<u32, u32>,
     in_flight: &mut HashMap<u32, ControlFileInFlightPiece>,
     dirty_multi_file_indices: &mut HashSet<usize>,
-    max_open_files: usize,
+    write_limits: &MultiFileWriteLimits,
     block: ReceivedPieceBlock,
 ) -> Result<()> {
     let Some(&piece_length) = piece_lengths.get(&block.piece_index) else {
@@ -36,15 +42,25 @@ pub(super) async fn stage_received_block(
     let block_index = block.block_index;
     let offset = block.offset;
     if let Some(layout) = layout {
-        let touched_files =
+        let touched_files = if let Some(budget) = write_limits.process_budget.as_ref() {
+            crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files_with_budget(
+                layout,
+                piece_index,
+                offset,
+                &block.data,
+                budget,
+            )
+            .await?
+        } else {
             crate::engine::bittorrent::piece::downloader::write_piece_block_to_multi_files(
                 layout,
                 piece_index,
                 offset,
                 &block.data,
-                max_open_files,
+                write_limits.per_download,
             )
-            .await?;
+            .await?
+        };
         dirty_multi_file_indices.extend(touched_files);
     } else {
         let global_offset = u64::from(piece_index) * u64::from(piece_length) + u64::from(offset);
@@ -109,6 +125,11 @@ impl PieceDownloadSession<'_> {
             let offset = block_index as u32 * BLOCK_SIZE;
             let length = (piece_length - offset).min(BLOCK_SIZE) as usize;
             let bytes = if let Some(layout) = self.command.multi_file_layout.as_ref() {
+                let _open_file_reservation = if let Some(budget) = &self.command.open_file_budget {
+                    Some(budget.reserve_up_to(1).await)
+                } else {
+                    None
+                };
                 crate::engine::bittorrent::piece::downloader::read_piece_range_from_files(
                     layout,
                     piece_index,

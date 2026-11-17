@@ -91,6 +91,45 @@ fn test_request_custom_host_not_overridden() {
 }
 
 #[test]
+fn request_builder_respects_custom_headers_case_insensitively() {
+    let url = Url::parse("http://example.com/file").unwrap();
+    let request = HttpRequestBuilder::new(HttpMethod::Post, url)
+        .header("host", "custom-host.example")
+        .header("user-agent", "custom-agent")
+        .header("content-length", "7")
+        .body(b"payload".to_vec())
+        .build()
+        .unwrap();
+
+    for (name, expected) in [
+        ("host", "custom-host.example"),
+        ("user-agent", "custom-agent"),
+        ("content-length", "7"),
+    ] {
+        let matches = request
+            .headers
+            .iter()
+            .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "duplicate {name} header");
+        assert_eq!(matches[0].1, expected);
+    }
+}
+
+#[test]
+fn request_builder_rejects_injected_custom_header_values() {
+    let url = Url::parse("http://example.com/file").unwrap();
+    let result = HttpRequestBuilder::new(HttpMethod::Get, url)
+        .header("X-Test", "safe\r\nX-Injected: yes")
+        .build();
+
+    assert!(matches!(
+        result,
+        Err(crate::error::Aria2Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
 fn test_request_to_bytes_with_body() {
     let url = Url::parse("http://example.com/api").unwrap();
     let request = HttpRequestBuilder::new(HttpMethod::Post, url)

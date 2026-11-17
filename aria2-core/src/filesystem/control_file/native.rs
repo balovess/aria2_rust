@@ -286,7 +286,10 @@ pub(super) fn parse_native_control_file(path: &Path, data: &[u8]) -> Result<Opti
     let in_flight_count = usize::try_from(reader.u32("in-flight piece count")?).map_err(|_| {
         Aria2Error::FileIo("Native control file in-flight count is too large".to_string())
     })?;
-    let mut in_flight_pieces = Vec::with_capacity(in_flight_count);
+    // The count comes from the checkpoint. Do not reserve from it before the
+    // corresponding records have been validated; a truncated file can claim
+    // an enormous count while containing no records at all.
+    let mut in_flight_pieces = Vec::new();
     for _ in 0..in_flight_count {
         let index = reader.u32("in-flight piece index")?;
         if index as usize >= num_pieces {

@@ -2,7 +2,9 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use super::{FtpActiveDataListener, FtpConnection, FtpResponse};
+use super::{
+    FtpActiveDataListener, FtpConnection, FtpResponse, parse_epsv_response, parse_pasv_response,
+};
 
 impl FtpConnection {
     pub async fn pasv(&mut self) -> Result<(String, u16), String> {
@@ -13,7 +15,7 @@ impl FtpConnection {
             return Err(format!("PASV failed: {} {}", resp.code, resp.message));
         }
 
-        match Self::parse_pasv_response(&resp.message) {
+        match parse_pasv_response(&resp.message) {
             Some(addr) => {
                 debug!("PASV data channel: {}:{}", addr.0, addr.1);
                 Ok(addr)
@@ -27,7 +29,7 @@ impl FtpConnection {
         self.send_command("EPSV").await?;
         let resp = self.read_response().await?;
         if resp.code == 229 {
-            if let Some(port) = Self::parse_epsv_response(&resp.message) {
+            if let Some(port) = parse_epsv_response(&resp.message) {
                 debug!("EPSV port: {}", port);
                 return Ok(port);
             }
@@ -148,31 +150,6 @@ impl FtpConnection {
     /// Borrow the FTP control stream.
     pub fn control_stream(&mut self) -> &mut BufReader<TcpStream> {
         &mut self.stream
-    }
-
-    pub(crate) fn parse_pasv_response(message: &str) -> Option<(String, u16)> {
-        let start = message.find('(')?;
-        let end = message.find(')')?;
-        let inner = &message[start + 1..end];
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() != 6 {
-            return None;
-        }
-
-        let h1: u8 = parts[0].trim().parse().ok()?;
-        let h2: u8 = parts[1].trim().parse().ok()?;
-        let h3: u8 = parts[2].trim().parse().ok()?;
-        let h4: u8 = parts[3].trim().parse().ok()?;
-        let p1: u16 = parts[4].trim().parse().ok()?;
-        let p2: u16 = parts[5].trim().parse().ok()?;
-
-        Some((format!("{}.{}.{}.{}", h1, h2, h3, h4), p1 * 256 + p2))
-    }
-
-    pub(crate) fn parse_epsv_response(message: &str) -> Option<u16> {
-        let start = message.rfind('|')?;
-        let prev_pipe = message[..start].rfind('|')?;
-        message[prev_pipe + 1..start].parse::<u16>().ok()
     }
 }
 

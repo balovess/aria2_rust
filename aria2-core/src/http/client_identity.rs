@@ -4,6 +4,8 @@ use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadOptions;
 
 mod pkcs12;
+#[cfg(feature = "bittorrent")]
+mod websocket;
 
 #[cfg(test)]
 mod pkcs12_tests;

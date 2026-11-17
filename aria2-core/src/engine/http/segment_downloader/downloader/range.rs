@@ -3,10 +3,11 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use aria2_protocol::http::parse_unsatisfied_content_range_length;
+
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::http::auth::AuthConfigFactory;
 use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
 use crate::http::skip_response::MAX_REDIRECT_COUNT;
 use crate::http::{AuthScheme, HttpAuthChallenge};
@@ -14,6 +15,15 @@ use crate::http::{AuthScheme, HttpAuthChallenge};
 use super::{
     HttpSegmentDownloader, RangeProbeResult, classify_range_status, validate_content_range,
 };
+
+fn response_with_origin_scope(
+    response: reqwest::Response,
+    url: reqwest::Url,
+    scope: &crate::http::request_policy::RedirectOriginScope,
+) -> (reqwest::Response, reqwest::Url, bool) {
+    let allow_sensitive_headers = scope.allows_sensitive_headers(&url);
+    (response, url, allow_sensitive_headers)
+}
 
 impl HttpSegmentDownloader {
     /// Send a Range request through the same manual redirect seam as the
@@ -25,22 +35,16 @@ impl HttpSegmentDownloader {
         range_header: &str,
         cookie_header: Option<&str>,
         headers: &[(String, String)],
-    ) -> Result<(reqwest::Response, reqwest::Url)> {
+    ) -> Result<(reqwest::Response, reqwest::Url, bool)> {
         let mut current_url = reqwest::Url::parse(url).map_err(|error| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("invalid HTTP Range URL {url}: {error}"),
             })
         })?;
+        let mut origin_scope =
+            crate::http::request_policy::RedirectOriginScope::new(current_url.clone())
+                .with_sensitive_headers_allowed(self.origin_sensitive_headers_allowed);
         let mut redirect_count = 0u32;
-        let mut auth_factory = self.auth_options.as_ref().map(|_| {
-            let mut factory = AuthConfigFactory::new();
-            if let Some(path) = &self.netrc_path
-                && let Err(error) = factory.load_netrc_file(std::path::Path::new(path))
-            {
-                tracing::debug!(path, %error, "failed to load netrc for Range auth");
-            }
-            factory
-        });
 
         loop {
             self.request_policy.wait_before_request().await;
@@ -52,41 +56,64 @@ impl HttpSegmentDownloader {
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .or_else(|| (redirect_count == 0).then_some(cookie_header).flatten());
-            let authorization = self.auth_options.as_ref().and_then(|auth_options| {
-                auth_factory.as_mut().and_then(|factory| {
-                    factory.resolve_basic_authorization(&current_url, auth_options)
+            let allow_origin_auth = origin_scope.allows_sensitive_headers(&current_url);
+            let authorization = allow_origin_auth
+                .then(|| {
+                    self.auth_options.as_ref().and_then(|auth_options| {
+                        self.auth_factory
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .resolve_basic_authorization(&current_url, auth_options)
+                    })
                 })
-            });
-            let request = self.request_policy.apply_with_basic_auth(
+                .flatten();
+            let request = self.request_policy.apply_with_basic_auth_for_origin(
                 self.client
                     .get(current_url.as_str())
                     .header("Range", range_header),
                 request_cookie_header,
                 headers,
                 authorization.as_deref(),
+                allow_origin_auth,
             );
-            let response = request.send().await.map_err(|error| {
+            let mut response = request.send().await.map_err(|error| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                     message: format!("HTTP Range request failed: {error}"),
                 })
             })?;
 
-            let status_code = response.status().as_u16();
+            let mut status_code = response.status().as_u16();
             let authentication_used = authorization.is_some()
-                || self.request_policy.has_header("Authorization")
-                || headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
+                || (allow_origin_auth && self.request_policy.has_header("Authorization"))
+                || (allow_origin_auth
+                    && headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("Authorization")));
             if status_code == 401 || status_code == 407 {
+                if status_code == 401 && !allow_origin_auth {
+                    return Ok(response_with_origin_scope(
+                        response,
+                        current_url,
+                        &origin_scope,
+                    ));
+                }
                 let Some(auth_options) = &self.auth_options else {
-                    return Ok((response, current_url));
+                    return Ok(response_with_origin_scope(
+                        response,
+                        current_url,
+                        &origin_scope,
+                    ));
                 };
                 let is_proxy = status_code == 407;
                 if authentication_used
                     || (!is_proxy && !auth_options.http_auth_challenge)
                     || (is_proxy && auth_options.proxy_user.is_none())
                 {
-                    return Ok((response, current_url));
+                    return Ok(response_with_origin_scope(
+                        response,
+                        current_url,
+                        &origin_scope,
+                    ));
                 }
 
                 let header_name = if is_proxy {
@@ -104,7 +131,11 @@ impl HttpSegmentDownloader {
                     .and_then(AuthScheme::from_header)
                     .or_else(|| (!is_proxy).then_some(AuthScheme::Basic));
                 let Some(scheme) = scheme else {
-                    return Ok((response, current_url));
+                    return Ok(response_with_origin_scope(
+                        response,
+                        current_url,
+                        &origin_scope,
+                    ));
                 };
                 let challenge = HttpAuthChallenge {
                     scheme: scheme.clone(),
@@ -121,24 +152,31 @@ impl HttpSegmentDownloader {
                         None
                     },
                 };
-                let Some(factory) = auth_factory.as_mut() else {
-                    return Ok((response, current_url));
+                let result = {
+                    let mut auth_factory = self
+                        .auth_factory
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    auth_challenge_handler::handle_auth_challenge(
+                        &challenge,
+                        &mut auth_factory,
+                        &current_url,
+                        auth_options,
+                        crate::http::request::HttpMethod::Get,
+                        authentication_used,
+                        1,
+                    )
                 };
-                let result = auth_challenge_handler::handle_auth_challenge(
-                    &challenge,
-                    factory,
-                    &current_url,
-                    auth_options,
-                    crate::http::request::HttpMethod::Get,
-                    authentication_used,
-                    1,
-                );
                 let AuthChallengeResult::RetryWithAuth {
                     authorization_header,
                     is_proxy,
                 } = result
                 else {
-                    return Ok((response, current_url));
+                    return Ok(response_with_origin_scope(
+                        response,
+                        current_url,
+                        &origin_scope,
+                    ));
                 };
 
                 let header_name = if is_proxy {
@@ -154,13 +192,26 @@ impl HttpSegmentDownloader {
                     .as_deref()
                     .filter(|value| !value.is_empty())
                     .or_else(|| cookie_header.filter(|_| redirect_count == 0));
-                let retry_request = self.request_policy.apply(
-                    self.client
-                        .get(current_url.as_str())
-                        .header("Range", range_header),
-                    retry_cookie_header,
-                    &[(header_name.to_string(), authorization_header)],
-                );
+                let retry_request = if is_proxy {
+                    self.request_policy.apply_for_origin_with_proxy_auth(
+                        self.client
+                            .get(current_url.as_str())
+                            .header("Range", range_header),
+                        retry_cookie_header,
+                        &[],
+                        allow_origin_auth,
+                        Some(&authorization_header),
+                    )
+                } else {
+                    self.request_policy.apply_for_origin(
+                        self.client
+                            .get(current_url.as_str())
+                            .header("Range", range_header),
+                        retry_cookie_header,
+                        &[(header_name.to_string(), authorization_header)],
+                        allow_origin_auth,
+                    )
+                };
                 self.request_policy.wait_before_request().await;
                 let retry_response = retry_request.send().await.map_err(|error| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -170,13 +221,18 @@ impl HttpSegmentDownloader {
                 if let Some(helper) = &self.cookie_helper {
                     helper.extract_and_store_cookies(current_url.as_str(), &retry_response);
                 }
-                return Ok((retry_response, current_url));
+                status_code = retry_response.status().as_u16();
+                response = retry_response;
             }
             if !matches!(status_code, 300..=303 | 307 | 308) {
                 if let Some(helper) = &self.cookie_helper {
                     helper.extract_and_store_cookies(current_url.as_str(), &response);
                 }
-                return Ok((response, current_url));
+                return Ok(response_with_origin_scope(
+                    response,
+                    current_url,
+                    &origin_scope,
+                ));
             }
 
             if let Some(helper) = &self.cookie_helper {
@@ -200,11 +256,13 @@ impl HttpSegmentDownloader {
                         message: format!("HTTP {status_code} redirect without Location header"),
                     })
                 })?;
-            current_url = current_url.join(location).map_err(|error| {
+            let target_url = current_url.join(location).map_err(|error| {
                 Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
                     message: format!("failed to resolve redirect URL '{location}': {error}"),
                 })
             })?;
+            origin_scope.follow_redirect(&current_url, &target_url);
+            current_url = target_url;
             redirect_count += 1;
         }
     }
@@ -218,7 +276,7 @@ impl HttpSegmentDownloader {
         url: &str,
         cookie_header: Option<&str>,
     ) -> Result<RangeProbeResult> {
-        let (response, effective_url) = self
+        let (response, effective_url, origin_sensitive_headers_allowed) = self
             .send_range_request(url, "bytes=0-0", cookie_header, &[])
             .await?;
 
@@ -253,6 +311,7 @@ impl HttpSegmentDownloader {
         Ok(RangeProbeResult {
             supports_range,
             effective_url: effective_url.to_string(),
+            origin_sensitive_headers_allowed,
             total_length,
             version: Some(version),
         })
@@ -276,7 +335,7 @@ impl HttpSegmentDownloader {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
         debug!("HTTP Range request: {} ({})", range_header, url);
 
-        let (response, effective_url) = self
+        let (response, effective_url, _) = self
             .send_range_request(url, &range_header, cookie_header, headers)
             .await?;
 
@@ -356,8 +415,4 @@ impl HttpSegmentDownloader {
         // Freeze BytesMut to immutable Bytes (zero-cost conversion)
         Ok(data.freeze())
     }
-}
-
-fn parse_unsatisfied_content_range_length(value: &str) -> Option<u64> {
-    value.trim().strip_prefix("bytes */")?.trim().parse().ok()
 }

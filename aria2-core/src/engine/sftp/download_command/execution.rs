@@ -4,6 +4,7 @@
 //! inspection, chunked reads, and cleanup/finalize. Retry and command lifecycle
 //! behavior lives in `command.rs`.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,19 +13,47 @@ use tracing::{debug, error, info, warn};
 use crate::checksum::checksum::Checksum;
 use crate::constants;
 use crate::engine::work_commit::SequentialWorkCommitter;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use aria2_protocol::sftp::connection::{SshConnection, SshError};
-use aria2_protocol::sftp::file_ops::{OpenFlags, SftpFileOps};
+use aria2_protocol::sftp::connection::SshConnection;
+use aria2_protocol::sftp::file_ops::SftpFileOps;
 use aria2_protocol::sftp::session::SftpSession;
+use aria2_protocol::sftp::transfer::SftpDownloadReader;
 
 use super::types::SftpDownloadCommand;
 
+mod connection;
+
+use connection::{connect_sftp_host, connect_with_timeout};
+
+#[cfg(test)]
+mod tests;
+
 impl SftpDownloadCommand {
+    async fn await_with_lifecycle<T, F>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let notifier = self.group.recover().lifecycle_notifier();
+        tokio::pin!(future);
+        loop {
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            self.check_cancelled()?;
+
+            tokio::select! {
+                biased;
+                _ = &mut notified => self.check_cancelled()?,
+                result = &mut future => return result,
+            }
+        }
+    }
+
     pub(super) fn check_cancelled(&self) -> Result<()> {
         let group = self.group.recover();
         if group.is_removed() {
@@ -46,6 +75,7 @@ impl SftpDownloadCommand {
     /// the entire download lifecycle from connection establishment through data
     /// transfer to cleanup.
     pub(super) async fn execute_once(&mut self) -> Result<()> {
+        self.check_cancelled()?;
         let connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
         connection_guard.set(1);
         // -----------------------------------------------------------------
@@ -84,27 +114,35 @@ impl SftpDownloadCommand {
         // Phase 1: SSH Connection
         // -----------------------------------------------------------------
         let ssh_options = self.build_ssh_options();
-        let conn_result = match self
-            .outbound_network_policy
-            .connect_host(&self.host, self.port)
-            .await
-        {
-            Ok(stream) => SshConnection::connect_with_stream(ssh_options.clone(), stream).await,
-            Err(error) => Err(SshError::Handshake {
-                message: format!("SFTP TCP connection failed: {error}"),
-            }),
-        };
+        let connect_timeout = ssh_options.connect_timeout;
+        let host = self.host.as_str();
+        let port = self.port;
+        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
+        let dns_cache = self.dns_cache.clone();
+        let host_for_error = self.host.clone();
+        let remote_path_for_error = self.remote_path.clone();
+        let conn_result = self
+            .await_with_lifecycle(async move {
+                connect_with_timeout(host, port, connect_timeout, async move {
+                    let stream = connect_sftp_host(
+                        host,
+                        port,
+                        dns_cache.as_deref(),
+                        &outbound_network_policy,
+                    )
+                    .await?;
+                    SshConnection::connect_with_stream(ssh_options, stream).await
+                })
+                .await
+                .map_err(|error| {
+                    Self::map_ssh_error(&error, &host_for_error, port, &remote_path_for_error)
+                })
+            })
+            .await;
 
         let mut conn = match conn_result {
             Ok(c) => c,
-            Err(e) => {
-                return Err(Self::map_ssh_error(
-                    &e,
-                    &self.host,
-                    self.port,
-                    &self.remote_path,
-                ));
-            }
+            Err(error) => return Err(error),
         };
 
         info!(
@@ -115,18 +153,20 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 2: SFTP Session Initialization
         // -----------------------------------------------------------------
-        let session_result = SftpSession::open(&mut conn).await;
+        let session_result = self
+            .await_with_lifecycle(async {
+                SftpSession::open(&mut conn)
+                    .await
+                    .map_err(|error| Self::map_session_error(&error))
+            })
+            .await;
 
         let session: SftpSession = match session_result {
             Ok(s) => s,
-            Err(e) => {
+            Err(error) => {
                 // Attempt graceful disconnect before returning error
                 let _ = conn.disconnect().await;
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!("SFTP session init failed: {}", e),
-                    },
-                ));
+                return Err(error);
             }
         };
 
@@ -140,11 +180,18 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
         let ops = SftpFileOps::new(&session);
 
-        let file_attrs = match ops.stat(&self.remote_path).await {
+        let file_attrs = match self
+            .await_with_lifecycle(async {
+                ops.stat(&self.remote_path)
+                    .await
+                    .map_err(|error| Self::map_file_op_error(&error, &self.host, &self.remote_path))
+            })
+            .await
+        {
             Ok(attrs) => attrs,
-            Err(e) => {
+            Err(error) => {
                 let _ = conn.disconnect().await;
-                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                return Err(error);
             }
         };
 
@@ -256,11 +303,24 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
         // Phase 4: Open Remote File for Reading
         // -----------------------------------------------------------------
-        let mut remote_file = match ops.open(&self.remote_path, OpenFlags::readonly(), 0).await {
-            Ok(f) => f,
-            Err(e) => {
+        let mut remote_reader = match self
+            .await_with_lifecycle(async {
+                SftpDownloadReader::open(
+                    &ops,
+                    &self.remote_path,
+                    total_length,
+                    self.completed_bytes,
+                    constants::SFTP_DISK_WRITE_CHUNK_SIZE,
+                )
+                .await
+                .map_err(|error| Self::map_file_op_error(&error, &self.host, &self.remote_path))
+            })
+            .await
+        {
+            Ok(reader) => reader,
+            Err(error) => {
                 let _ = conn.disconnect().await;
-                return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
+                return Err(error);
             }
         };
 
@@ -306,8 +366,6 @@ impl SftpDownloadCommand {
         let start_time = Instant::now();
         let mut last_speed_update = Instant::now();
         let mut last_completed: u64 = 0;
-        let _buf = vec![0u8; constants::SFTP_DISK_WRITE_CHUNK_SIZE];
-
         info!("[SFTP-CMD] Starting transfer loop: {} bytes", total_length);
 
         loop {
@@ -326,69 +384,53 @@ impl SftpDownloadCommand {
                         "SFTP download halted"
                     }
                 };
-                let _ = remote_file.close().await;
+                let _ = remote_reader.close().await;
                 self.finalize_partial_writer(&mut writer).await;
                 self.flush_checkpoint().await;
                 let _ = conn.disconnect().await;
                 return Err(Aria2Error::DownloadFailed(halt_error.into()));
             }
 
-            let remaining = total_length.saturating_sub(self.completed_bytes);
-            if remaining == 0 {
+            if self.completed_bytes >= total_length {
                 break; // Download complete
             }
 
-            // Calculate how much to read this iteration
-            let to_read = (constants::SFTP_DISK_WRITE_CHUNK_SIZE as u64).min(remaining) as usize;
-
-            // Read chunk from remote file at current offset
-            let lifecycle_notify = self.group.recover().lifecycle_notifier();
-            let lifecycle_changed = lifecycle_notify.notified();
-            tokio::pin!(lifecycle_changed);
-            lifecycle_changed.as_mut().enable();
-            let data = tokio::select! {
-                data = remote_file.read_at(self.completed_bytes, to_read as u32) => match data {
-                Ok(data) if data.is_empty() => {
-                    debug!(
-                        "[SFTP-CMD] EOF at offset {} (expected {})",
-                        self.completed_bytes, total_length
-                    );
-                    let _ = remote_file.close().await;
-                    self.finalize_partial_writer(&mut writer).await;
-                    let _ = conn.disconnect().await;
-                    return Err(Aria2Error::DownloadFailed(format!(
-                        "SFTP remote file ended before the advertised length: {} < {}",
-                        self.completed_bytes, total_length
-                    )));
-                }
-                Ok(data) => data,
-                Err(e) => {
-                    error!(
-                        "[SFTP-CMD] Read error at offset {}: {}",
-                        self.completed_bytes, e
-                    );
-                    let _ = remote_file.close().await;
-                    self.finalize_partial_writer(&mut writer).await;
-                    let _ = conn.disconnect().await;
-                    return Err(Self::map_file_op_error(&e, &self.host, &self.remote_path));
-                }
-                },
-                _ = &mut lifecycle_changed => {
-                    if let Err(error) = self.check_cancelled() {
-                        // CLOSE would be queued behind the stalled READ on
-                        // the same SFTP session. Dropping the handle and SSH
-                        // connection cancels the outstanding request without
-                        // waiting for a protocol response.
-                        drop(remote_file);
-                        self.finalize_partial_writer(&mut writer).await;
-                        self.flush_checkpoint().await;
-                        let _ = conn.disconnect().await;
-                        return Err(error);
+            // Retain the in-flight SFTP request across non-terminal lifecycle
+            // notifications. Dropping a request/response future poisons its
+            // session because the eventual response could not be correlated
+            // safely with a later operation.
+            let read_result = self
+                .await_with_lifecycle(async {
+                    let result = remote_reader.read_next().await;
+                    if let Err(error) = &result {
+                        error!(
+                            offset = self.completed_bytes,
+                            %error,
+                            "SFTP read failed"
+                        );
                     }
-
-                    // Save-session and other non-terminal lifecycle updates
-                    // leave the remote read alive; retry the current offset.
-                    continue;
+                    Ok(result)
+                })
+                .await;
+            let data = match read_result {
+                Ok(Ok(Some(data))) => data,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    let _ = remote_reader.close().await;
+                    self.finalize_partial_writer(&mut writer).await;
+                    let _ = conn.disconnect().await;
+                    return Err(Self::map_download_read_error(
+                        error,
+                        &self.host,
+                        &self.remote_path,
+                    ));
+                }
+                Err(error) => {
+                    let _ = remote_reader.close().await;
+                    self.finalize_partial_writer(&mut writer).await;
+                    self.flush_checkpoint().await;
+                    let _ = conn.disconnect().await;
+                    return Err(error);
                 }
             };
             self.group.recover().record_network_activity();
@@ -406,7 +448,7 @@ impl SftpDownloadCommand {
             };
             if let Err(error) = write_result {
                 error!("[SFTP-CMD] Disk write error: {}", error);
-                let _ = remote_file.close().await;
+                let _ = remote_reader.close().await;
                 self.finalize_partial_writer(&mut writer).await;
                 let _ = conn.disconnect().await;
                 return Err(Aria2Error::Fatal(FatalError::Config(format!(
@@ -435,7 +477,7 @@ impl SftpDownloadCommand {
         // -----------------------------------------------------------------
 
         // Close remote file handle
-        if let Err(e) = remote_file.close().await {
+        if let Err(e) = remote_reader.close().await {
             warn!("[SFTP-CMD] Warning closing remote file: {}", e);
         }
 

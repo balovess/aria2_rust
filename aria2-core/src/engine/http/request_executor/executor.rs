@@ -5,10 +5,11 @@ use tokio::sync::mpsc;
 
 use crate::engine::http::cookie_helper::CookieHelper;
 use crate::engine::http::segment_downloader::HttpSegmentDownloader;
+use crate::http::auth::AuthConfigFactory;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
 use super::admission::{ExecutorState, RunningTask};
-use super::{HttpSegmentRequest, HttpSegmentRequestResult, MAX_SERVER_CONCURRENCY};
+use super::{HttpConnectionCounts, HttpSegmentRequest, HttpSegmentRequestResult};
 /// Dynamic executor for admitted HTTP Range requests.
 ///
 /// `total_limit` is the per-download `split` budget. Each authority also has
@@ -22,7 +23,8 @@ pub struct HttpSegmentRequestExecutor {
     pub(super) request_policy: HttpRequestPolicy,
     pub(super) cookie_helper: CookieHelper,
     pub(super) auth_options: AuthResolveOptions,
-    pub(super) netrc_path: Option<String>,
+    pub(super) auth_factory: Arc<std::sync::Mutex<AuthConfigFactory>>,
+    pub(super) origin_sensitive_headers_allowed: bool,
     pub(super) state: Arc<ExecutorState>,
     pub(super) total_limit: usize,
     pub(super) tasks: Vec<RunningTask>,
@@ -40,7 +42,7 @@ impl HttpSegmentRequestExecutor {
         netrc_path: Option<String>,
         total_limit: usize,
         authority_keys: &[String],
-        server_hard_limit: usize,
+        http1_connection_limit: usize,
     ) -> Self {
         Self::new_with_clients(
             client,
@@ -51,8 +53,19 @@ impl HttpSegmentRequestExecutor {
             netrc_path,
             total_limit,
             authority_keys,
-            server_hard_limit,
+            http1_connection_limit,
         )
+    }
+
+    pub fn set_origin_sensitive_headers_allowed(&mut self, allowed: bool) {
+        self.origin_sensitive_headers_allowed = allowed;
+    }
+
+    pub(crate) fn set_shared_auth_factory(
+        &mut self,
+        auth_factory: Arc<std::sync::Mutex<AuthConfigFactory>>,
+    ) {
+        self.auth_factory = auth_factory;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -65,13 +78,11 @@ impl HttpSegmentRequestExecutor {
         netrc_path: Option<String>,
         total_limit: usize,
         authority_keys: &[String],
-        server_hard_limit: usize,
+        http1_connection_limit: usize,
     ) -> Self {
         let total_limit = total_limit.max(1);
         let (result_tx, result_rx) = mpsc::channel(total_limit);
-        let session_limit = server_hard_limit
-            .clamp(1, MAX_SERVER_CONCURRENCY)
-            .min(range_clients.len().max(1));
+        let session_limit = range_clients.len().max(1);
         let clients = if range_clients.is_empty() {
             vec![client.clone()]
         } else {
@@ -80,9 +91,13 @@ impl HttpSegmentRequestExecutor {
         let state = Arc::new(ExecutorState::new(
             authority_keys,
             total_limit,
-            server_hard_limit,
+            http1_connection_limit,
             clients.len(),
         ));
+        let auth_factory = crate::engine::http::auth::factory_from_netrc(
+            netrc_path.as_deref(),
+            auth_options.no_netrc,
+        );
 
         Self {
             result_rx,
@@ -91,7 +106,8 @@ impl HttpSegmentRequestExecutor {
             request_policy,
             cookie_helper,
             auth_options,
-            netrc_path,
+            auth_factory: Arc::new(std::sync::Mutex::new(auth_factory)),
+            origin_sensitive_headers_allowed: true,
             state,
             total_limit,
             tasks: Vec::new(),
@@ -139,7 +155,8 @@ impl HttpSegmentRequestExecutor {
         let request_policy = self.request_policy.clone();
         let cookie_helper = self.cookie_helper.clone();
         let auth_options = self.auth_options.clone();
-        let netrc_path = self.netrc_path.clone();
+        let auth_factory = Arc::clone(&self.auth_factory);
+        let origin_sensitive_headers_allowed = self.origin_sensitive_headers_allowed;
         let result_tx = self.result_tx.clone();
         let authority_key = request.authority_key.clone();
         let task_id = self.next_task_id;
@@ -150,7 +167,8 @@ impl HttpSegmentRequestExecutor {
             let make_downloader = |client: &reqwest::Client| {
                 HttpSegmentDownloader::new_with_policy(client, request_policy.clone())
                     .with_cookie_helper(cookie_helper.clone())
-                    .with_auth_options(auth_options.clone(), netrc_path.clone())
+                    .with_shared_auth_options(auth_options.clone(), Arc::clone(&auth_factory))
+                    .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed)
             };
             let mut downloader = make_downloader(&client);
             // One successful one-byte Range response establishes this
@@ -350,6 +368,32 @@ impl HttpSegmentRequestExecutor {
             .authority(authority_key)
             .map(|authority| authority.in_flight.load(Ordering::Acquire))
             .unwrap_or(0)
+    }
+
+    /// Count active requests and H2 sessions currently carrying those
+    /// requests. Each request uses an independent HTTP/1.1 connection; H2
+    /// session activity is the number of client pool slots with active streams.
+    pub(crate) fn active_connection_counts(&self) -> HttpConnectionCounts {
+        let mut counts = HttpConnectionCounts::default();
+        for authority in self.state.authorities.iter() {
+            let authority = authority.value();
+            let in_flight = authority.in_flight.load(Ordering::Acquire);
+            match authority.protocol.load(Ordering::Acquire) {
+                1 => counts.http1_connections = counts.http1_connections.saturating_add(in_flight),
+                2 => {
+                    counts.http2_streams = counts.http2_streams.saturating_add(in_flight);
+                    counts.http2_sessions = counts.http2_sessions.saturating_add(
+                        authority
+                            .client_in_flight
+                            .iter()
+                            .filter(|in_flight| in_flight.load(Ordering::Acquire) > 0)
+                            .count(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        counts
     }
 
     pub fn finished_tasks(&self) -> Vec<(u64, u32)> {

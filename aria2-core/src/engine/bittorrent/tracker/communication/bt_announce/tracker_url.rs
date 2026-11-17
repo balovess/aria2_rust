@@ -1,40 +1,11 @@
-//! URL detection and encoding helpers for BitTorrent tracker URLs.
-//!
-//! Provides [`is_udp_tracker`] for protocol detection, and URL-encoding
-//! functions [`urlencode_infohash`] and [`urlencode_bytes`] required by
-//! the BitTorrent tracker announce URL specification.
+//! Public helpers retained by the BitTorrent announce state machine.
 
-// ======================================================================
-// URL Detection Helpers
-// ======================================================================
-
-/// Returns `true` if the URL uses the UDP tracker protocol (`udp://`).
+/// Returns whether `url` uses the UDP tracker transport.
 ///
-/// This is used by `TrackerAnnouncer` to route UDP URLs to the UDP client.
-///
-/// # C++ Reference
-///
-/// C++ aria2 routes UDP tracker announces through `DHTSetup` which creates
-/// `UdpTrackerRequest` objects for `udp://` URLs, while HTTP trackers
-/// use `HttpRequestCommand` → `HttpResponseCommand`.
+/// The protocol crate owns URL scheme parsing; this function remains as a
+/// compatibility entry point for users of the public core module.
 pub fn is_udp_tracker(url: &str) -> bool {
-    url.get(..6)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("udp://"))
+    aria2_protocol::bittorrent::tracker::url::is_udp_tracker_url(url)
 }
 
-// ======================================================================
-// URL Encoding Helpers
-// ======================================================================
-
-/// URL-encodes a 20-byte info hash or peer ID for use in tracker URLs.
-///
-/// Each byte is encoded as `%XX` where XX is the uppercase hex representation.
-/// This is required by the BitTorrent tracker protocol specification.
-pub fn urlencode_infohash(hash: &[u8; 20]) -> String {
-    hash.iter().map(|b| format!("%{:02X}", b)).collect()
-}
-
-/// URL-encodes an arbitrary byte slice for use in tracker URLs.
-pub(crate) fn urlencode_bytes(data: &[u8]) -> String {
-    data.iter().map(|b| format!("%{:02X}", b)).collect()
-}
+pub use aria2_protocol::bittorrent::tracker::http_tracker_protocol::urlencode_infohash;

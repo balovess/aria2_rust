@@ -9,7 +9,6 @@
 //! - This module provides an `https_only` option to enforce secure connections
 //! - All credentials are wrapped in `Secret<T>` for automatic memory zeroing
 
-use base64::Engine;
 use std::fmt;
 use url::Url;
 
@@ -103,18 +102,6 @@ impl BasicAuthProvider {
 
         self.build_authorization_header(challenge)
     }
-
-    /// Generates the Base64-encoded credential string.
-    ///
-    /// Creates "username:password" and encodes it using standard Base64.
-    fn encode_credentials(&self) -> String {
-        let creds = format!(
-            "{}:{}",
-            self.username.expose_secret(),
-            self.password.expose_secret()
-        );
-        base64::engine::general_purpose::STANDARD.encode(creds)
-    }
 }
 
 impl fmt::Debug for BasicAuthProvider {
@@ -144,14 +131,17 @@ impl AuthProvider for BasicAuthProvider {
     /// # Returns
     /// Complete Authorization header starting with "Basic "
     fn build_authorization_header(&self, _challenge: &AuthChallenge) -> Result<String> {
-        let encoded = self.encode_credentials();
-        Ok(format!("Basic {}", encoded))
+        Ok(aria2_protocol::http::auth::basic_authorization(
+            self.username.expose_secret(),
+            self.password.expose_secret(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     #[test]
     fn test_basic_auth_construction() {

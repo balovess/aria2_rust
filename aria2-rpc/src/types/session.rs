@@ -235,13 +235,13 @@ impl SessionInfo {
 /// lowercase hexadecimal characters. The identifier is generated once by
 /// [`SessionInfo::new`] when an RPC engine is constructed.
 pub fn generate_session_id() -> String {
-    use rand::RngCore;
+    use rand::Rng;
 
     const SESSION_ID_BYTES: usize = 20;
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
     let mut bytes = [0u8; SESSION_ID_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
 
     let mut session_id = String::with_capacity(SESSION_ID_BYTES * 2);
     for byte in bytes {

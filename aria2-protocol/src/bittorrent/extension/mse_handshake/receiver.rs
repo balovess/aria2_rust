@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 use super::{
     CRYPTO_BITFIELD_LENGTH, MAX_INITIAL_DATA_LENGTH, MAX_PAD_LENGTH, MseCryptoMethod, MseHandshake,
@@ -203,8 +203,8 @@ impl MseHandshake {
             return Err("Handshake not completed yet".to_string());
         }
         let keys = self.keys.as_ref().ok_or("Keys not derived yet")?;
-        let mut rng = rand::thread_rng();
-        let pad_d_length: u16 = rng.gen_range(0..=MAX_PAD_LENGTH as u16);
+        let mut rng = rand::rng();
+        let pad_d_length: u16 = rng.random_range(0..=MAX_PAD_LENGTH as u16);
         let mut encrypted =
             Vec::with_capacity(VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + pad_d_length as usize);
         encrypted.extend_from_slice(&[0u8; VC_LENGTH]);

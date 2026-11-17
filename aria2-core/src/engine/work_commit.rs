@@ -90,25 +90,10 @@ impl<'a> SequentialWorkCommitter<'a> {
 
 impl SequentialWorkCommitter<'_> {
     pub(crate) async fn commit_chunk(&mut self, output: &[u8]) -> Result<()> {
-        self.commit_chunk_with_progress(output, true).await
-    }
-
-    #[cfg(feature = "metalink")]
-    pub(crate) async fn commit_chunk_without_progress(&mut self, output: &[u8]) -> Result<()> {
-        self.commit_chunk_with_progress(output, false).await
-    }
-
-    async fn commit_chunk_with_progress(
-        &mut self,
-        output: &[u8],
-        update_progress: bool,
-    ) -> Result<()> {
         self.writer.write(output).await?;
         let committed_bytes = output.len() as u64;
         *self.completed_bytes = self.completed_bytes.saturating_add(committed_bytes);
-        if update_progress {
-            self.group.recover().update_progress(*self.completed_bytes);
-        }
+        self.group.recover().update_progress(*self.completed_bytes);
         if let Some(checkpoint) = self.checkpoint.as_mut() {
             let save_requested = self.group.recover().take_save_control_file_request();
             if checkpoint.needs_update(*self.completed_bytes, save_requested) {

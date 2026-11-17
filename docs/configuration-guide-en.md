@@ -130,7 +130,12 @@ aria2c --conf-path=aria2.conf --reset-config
 
 The following catalog covers all canonical names registered by the current `OptionRegistry`, but registered does not mean fully wired. Options explicitly marked `supported: false` are retained for old configuration compatibility; they produce a warning and do not change runtime behavior. For all other options, follow the current build's `aria2c --help` output and observed tests. Compatibility aliases are `max-retries` -> `max-tries`, `enable-lpd` -> `bt-enable-lpd`, `dht-message-path` -> `dht-file-path`, `server-stat-file` -> `server-stat-of`, and `max-downloads` -> `max-concurrent-downloads`.
 
-Options currently marked as unsupported compatibility entries are: `interface`, `multiple-interface`, `async-dns-server`, `dns-timeout`, `enable-async-dns6`, `event-poll`, `optimize-concurrent-downloads`, `optimize-concurrent-downloads-coeffA`, `optimize-concurrent-downloads-coeffB`, `rlimit-nofile`, `select-least-used-host`, `socket-recv-buffer-size`, `dscp`, and `max-http-pipelining`. These names may appear in compatible configuration files, but users should not rely on them to provide the corresponding feature.
+Options currently marked as unsupported compatibility entries are: `enable-async-dns6`, `event-poll`, `optimize-concurrent-downloads`, `optimize-concurrent-downloads-coeffA`, `optimize-concurrent-downloads-coeffB`, `rlimit-nofile`, `select-least-used-host`, `socket-recv-buffer-size`, `dscp`, and `max-http-pipelining`. These names may appear in compatible configuration files, but users should not rely on them to provide the corresponding feature.
+
+The SSH/SFTP options (`ssh-host-key-md` and the five `sftp-*` options below)
+are registered in every build, but are usable only when the `sftp` build
+feature is enabled. In builds without it, config-file entries are warned about
+and ignored; explicit CLI or per-task values are rejected.
 
 ### General: basic, session, UI, and logging
 
@@ -179,7 +184,12 @@ Options currently marked as unsupported compatibility entries are: `interface`, 
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS verification, CA, client certificate/key, and minimum TLS version |
 | `allow-overwrite`, `auto-file-renaming`, `continue`, `remote-time` | Overwrite, automatic renaming, resume, and remote timestamps |
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP connection, pipelining, compression, authentication, and response behavior |
-| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type`, `ssh-host-key-md` | FTP passive mode, connection reuse, transfer type, and SSH host-key digest |
+| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type` | FTP passive mode, connection reuse, and transfer type |
+| `ssh-host-key-md` | Expected SSH host-key fingerprint for SFTP |
+| `sftp-connect-timeout`, `sftp-read-timeout` | SFTP connection setup and protocol I/O timeouts in seconds (1..600; defaults 15 and 30) |
+| `sftp-compression` | Enable SSH compression for SFTP (default `false`) |
+| `sftp-keepalive-interval` | SSH keepalive interval in seconds (0..600; default 60; 0 disables keepalives) |
+| `sftp-preferred-ciphers` | Ordered comma-separated SSH cipher preference; empty uses library defaults |
 
 For HTTP downloads, `split` is the task-wide segment budget and has no fixed
 registry maximum. Its effective value is bounded by the payload,
@@ -190,8 +200,8 @@ preserved on resume. This implementation currently defaults `split` to `16`;
 original aria2 defaults to `5`.
 
 `max-connection-per-server` (`-x`) limits concurrent access to one server for
-one download. It remains restricted to `1..=16`. This implementation currently
-defaults to `16`; original aria2 defaults to `1`. For HTTP/1.1, `-x=1` permits
+one download. It remains restricted to `1..=16` and defaults to `1`, matching
+original aria2. For HTTP/1.1, `-x=1` permits
 only one active Range request even if `split` is larger. HTTP/2 applies this
 limit to independent client session pools while allowing multiplexed streams
 within a session.
@@ -234,6 +244,18 @@ They are copied into the task option snapshot and applied when the DHT engine st
 | `dht-bootstrap-timeout` | `60` | Background bootstrap deadline (seconds) |
 | `dht-max-concurrent-lookups` | `16` | Maximum concurrent DHT lookups |
 | `dht-persistence-max-age` | `86400` | Maximum accepted snapshot age (seconds) |
+
+#### DHT storage bounds
+
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `dht-max-peer-info-hashes` | `4096` | Maximum locally announced swarms per DHT engine |
+| `dht-max-peers-per-info-hash` | `50` | Maximum locally announced peers per swarm |
+| `dht-max-items` | `4096` | Maximum locally stored BEP 44 targets per DHT engine |
+
+These process options are available through config files, CLI, C API session
+options, and global RPC options. Runtime changes apply immediately; reducing a
+limit evicts the oldest stored entries.
 
 The persisted local node ID is reused. Snapshots older than
 `dht-persistence-max-age` are ignored on load and are not merged back during a

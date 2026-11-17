@@ -63,18 +63,14 @@ pub struct HttpTailReclaimState {
 /// | `num_stream_command >= num_concurrent`    | yes                     |
 /// | (none of the above)                       | → `true` (blocked)     |
 pub fn is_http_tail_blocked(state: &HttpTailReclaimState) -> bool {
-    if !is_http_protocol(&state.protocol)
-        || state.p2p_involved
-        || state.total_length <= 0
-        || state.pending_length <= 0
-        || state.has_missing_unused_piece
-        || state.num_concurrent_command <= 1
-        || state.num_stream_command <= 0
-        || state.num_stream_command >= state.num_concurrent_command
-    {
-        return false;
-    }
-    true
+    is_http_protocol(&state.protocol)
+        && !state.p2p_involved
+        && state.total_length > 0
+        && state.pending_length > 0
+        && !state.has_missing_unused_piece
+        && state.num_concurrent_command > 1
+        && state.num_stream_command > 0
+        && state.num_stream_command < state.num_concurrent_command
 }
 
 /// Returns `true` if the HTTP tail segment should be reclaimed.

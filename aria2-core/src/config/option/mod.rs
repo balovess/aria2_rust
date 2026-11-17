@@ -8,6 +8,7 @@
 //!
 //! Built-in option registrations are in [`option_definitions`](super::option_definitions).
 
+mod owner;
 mod registry;
 mod types;
 mod validator;

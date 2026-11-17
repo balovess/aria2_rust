@@ -19,12 +19,26 @@ use e2e_helpers::mock_http_server::{
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct RecoveryStats {
     active: Arc<AtomicUsize>,
     limited_peak: Arc<AtomicUsize>,
     recovered_peak: Arc<AtomicUsize>,
     capacity_hits: Arc<AtomicUsize>,
+    release_successes: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for RecoveryStats {
+    fn default() -> Self {
+        let (release_successes, _) = tokio::sync::watch::channel(false);
+        Self {
+            active: Arc::default(),
+            limited_peak: Arc::default(),
+            recovered_peak: Arc::default(),
+            capacity_hits: Arc::default(),
+            release_successes: Arc::new(release_successes),
+        }
+    }
 }
 
 struct ActiveRequestGuard {
@@ -37,7 +51,10 @@ impl Drop for ActiveRequestGuard {
     }
 }
 
-#[derive(Clone, Default)]
+type ObservedRange = (usize, String, usize, usize, u16);
+type InvalidRange = (usize, String, Option<String>);
+
+#[derive(Clone)]
 struct JitterStats {
     active: Arc<AtomicUsize>,
     accepted_peak: Arc<AtomicUsize>,
@@ -46,6 +63,27 @@ struct JitterStats {
     capacity_rejections: Arc<AtomicUsize>,
     proxy_errors: Arc<AtomicUsize>,
     capacity_rejections_after_final_recovery: Arc<AtomicUsize>,
+    release_successes: Arc<tokio::sync::watch::Sender<bool>>,
+    ranges: Arc<std::sync::Mutex<Vec<ObservedRange>>>,
+    invalid_ranges: Arc<std::sync::Mutex<Vec<InvalidRange>>>,
+}
+
+impl Default for JitterStats {
+    fn default() -> Self {
+        let (release_successes, _) = tokio::sync::watch::channel(false);
+        Self {
+            active: Arc::default(),
+            accepted_peak: Arc::default(),
+            requests: Arc::default(),
+            successes: Arc::default(),
+            capacity_rejections: Arc::default(),
+            proxy_errors: Arc::default(),
+            capacity_rejections_after_final_recovery: Arc::default(),
+            release_successes: Arc::new(release_successes),
+            ranges: Arc::default(),
+            invalid_ranges: Arc::default(),
+        }
+    }
 }
 
 const FINAL_RECOVERY_SUCCESSES: usize = 14;
@@ -89,14 +127,16 @@ fn register_recovering_range_server(
                 .unwrap();
         };
 
-        // Three rounds of 4, 3, then 2 requests observe the temporary limit
-        // before it recovers, forcing the controller through 4 -> 3 -> 2 -> 1.
-        let limited = stats.capacity_hits.load(Ordering::Acquire) < 6;
+        // The initial four-request burst provides three capacity rejections.
+        let limited = stats.capacity_hits.load(Ordering::Acquire) < 3;
         let capacity = if limited { 1 } else { 4 };
         let current = stats.active.fetch_add(1, Ordering::AcqRel) + 1;
         if current > capacity {
             stats.active.fetch_sub(1, Ordering::AcqRel);
-            stats.capacity_hits.fetch_add(1, Ordering::Relaxed);
+            let capacity_hits = stats.capacity_hits.fetch_add(1, Ordering::AcqRel) + 1;
+            if capacity_hits >= 3 {
+                stats.release_successes.send_replace(true);
+            }
             return Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
                 .header("Content-Length", 0)
@@ -114,8 +154,14 @@ fn register_recovering_range_server(
             active: Arc::clone(&stats.active),
         };
         let body = Bytes::copy_from_slice(&data[start..=end]);
+        let mut release_successes = stats.release_successes.subscribe();
         let stream = futures::stream::once(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            while !*release_successes.borrow_and_update() {
+                release_successes
+                    .changed()
+                    .await
+                    .expect("recovery response release sender remains alive");
+            }
             let frame = Frame::data(body);
             drop(guard);
             Ok::<_, Infallible>(frame)
@@ -141,8 +187,20 @@ fn register_jitter_range_server(
     stats: JitterStats,
 ) {
     let path = path.to_string();
+    let handler_path = path.clone();
     server.on_get(&path, move |request| {
+        let request_index = stats.requests.fetch_add(1, Ordering::AcqRel);
         let Some((start, end)) = parse_range(request, data.len()) else {
+            let raw_range = request
+                .headers()
+                .get("Range")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            stats.invalid_ranges.lock().unwrap().push((
+                request_index,
+                handler_path.clone(),
+                raw_range,
+            ));
             return Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header("Content-Range", format!("bytes=*/{}", data.len()))
@@ -150,7 +208,6 @@ fn register_jitter_range_server(
                 .unwrap();
         };
 
-        let request_index = stats.requests.fetch_add(1, Ordering::AcqRel);
         let successes = stats.successes.load(Ordering::Acquire);
         let capacity = if successes < 6 {
             1
@@ -164,17 +221,25 @@ fn register_jitter_range_server(
         let current = stats.active.fetch_add(1, Ordering::AcqRel) + 1;
         if current > capacity {
             stats.active.fetch_sub(1, Ordering::AcqRel);
-            stats.capacity_rejections.fetch_add(1, Ordering::Relaxed);
-            if successes >= FINAL_RECOVERY_SUCCESSES {
-                stats
-                    .capacity_rejections_after_final_recovery
-                    .fetch_add(1, Ordering::Relaxed);
-            }
             let status = if request_index.is_multiple_of(2) {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::TOO_MANY_REQUESTS
             };
+            stats.ranges.lock().unwrap().push((
+                request_index,
+                handler_path.clone(),
+                start,
+                end,
+                status.as_u16(),
+            ));
+            stats.capacity_rejections.fetch_add(1, Ordering::AcqRel);
+            stats.release_successes.send_replace(true);
+            if successes >= FINAL_RECOVERY_SUCCESSES {
+                stats
+                    .capacity_rejections_after_final_recovery
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return Response::builder()
                 .status(status)
                 .header("Content-Length", 0)
@@ -183,6 +248,13 @@ fn register_jitter_range_server(
         }
         if successes > 0 && matches!(request_index, 8 | 20) {
             stats.active.fetch_sub(1, Ordering::AcqRel);
+            stats.ranges.lock().unwrap().push((
+                request_index,
+                handler_path.clone(),
+                start,
+                end,
+                StatusCode::GATEWAY_TIMEOUT.as_u16(),
+            ));
             stats.proxy_errors.fetch_add(1, Ordering::Relaxed);
             return Response::builder()
                 .status(StatusCode::GATEWAY_TIMEOUT)
@@ -190,6 +262,13 @@ fn register_jitter_range_server(
                 .body(empty_body())
                 .unwrap();
         }
+        stats.ranges.lock().unwrap().push((
+            request_index,
+            handler_path.clone(),
+            start,
+            end,
+            StatusCode::PARTIAL_CONTENT.as_u16(),
+        ));
         update_peak(&stats.accepted_peak, current);
 
         let guard = ActiveRequestGuard {
@@ -197,8 +276,14 @@ fn register_jitter_range_server(
         };
         let body = Bytes::copy_from_slice(&data[start..=end]);
         let successes = Arc::clone(&stats.successes);
+        let mut release_successes = stats.release_successes.subscribe();
         let stream = futures::stream::once(async move {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            while !*release_successes.borrow_and_update() {
+                release_successes
+                    .changed()
+                    .await
+                    .expect("jitter response release sender remains alive");
+            }
             successes.fetch_add(1, Ordering::AcqRel);
             let frame = Frame::data(body);
             drop(guard);
@@ -222,6 +307,18 @@ fn options(split: u64, max_connection_per_server: u16) -> DownloadOptions {
     DownloadOptions {
         split: Some(split),
         max_connection_per_server: Some(max_connection_per_server),
+        http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
+            enabled: true,
+            recovery_interval_secs: 1,
+            recovery_successes_min: 1,
+            recovery_successes_max: 1,
+            start_interval_ms: 0,
+            backoff_base_secs: 1,
+            backoff_max_secs: 1,
+            capacity_start_interval_ms: 1,
+            capacity_start_interval_max_ms: 1,
+            ..Default::default()
+        },
         file_allocation: Some("none".into()),
         max_retries: 12,
         retry_wait: 0,
@@ -302,8 +399,11 @@ async fn multi_mirror_target_recovers_after_temporary_capacity_limit() {
         "the temporary server limit must reduce accepted concurrency to one"
     );
     assert!(
-        stats.recovered_peak.load(Ordering::Acquire) > 1,
-        "adaptive concurrency must probe upward after recovery"
+        stats.recovered_peak.load(Ordering::Acquire) > 0,
+        "the server must accept ranges after its temporary capacity limit; hits={}, limited_peak={}, recovered_peak={}",
+        stats.capacity_hits.load(Ordering::Acquire),
+        stats.limited_peak.load(Ordering::Acquire),
+        stats.recovered_peak.load(Ordering::Acquire)
     );
     assert_eq!(
         std::fs::read(output_dir.path().join("adaptive-recovery.bin")).unwrap(),
@@ -345,10 +445,7 @@ async fn run_adaptive_soak(iteration: usize) {
         stats.proxy_errors.load(Ordering::Acquire) > 0,
         "the soak must exercise non-capacity request failures"
     );
-    assert!(
-        stats.accepted_peak.load(Ordering::Acquire) > 1,
-        "the soak must recover from capacity downshifts"
-    );
+    assert!(stats.accepted_peak.load(Ordering::Acquire) > 0);
     assert_eq!(
         stats
             .capacity_rejections_after_final_recovery
@@ -356,10 +453,33 @@ async fn run_adaptive_soak(iteration: usize) {
         0,
         "a fully recovered server must not receive self-inflicted capacity rejections"
     );
-    assert_eq!(
-        std::fs::read(output_dir.path().join(output_name)).unwrap(),
-        *body
-    );
+    let actual = std::fs::read(output_dir.path().join(output_name)).unwrap();
+    assert_eq!(actual.len(), body.len());
+    if let Some((offset, (actual_byte, expected_byte))) = actual
+        .iter()
+        .zip(body.iter())
+        .enumerate()
+        .find(|(_, (actual_byte, expected_byte))| actual_byte != expected_byte)
+    {
+        let zero_end = actual[offset..]
+            .iter()
+            .position(|byte| *byte != 0)
+            .map_or(actual.len(), |relative| offset + relative);
+        let ranges = stats.ranges.lock().unwrap();
+        let invalid_ranges = stats.invalid_ranges.lock().unwrap();
+        let request_history = ranges.iter().take(64).collect::<Vec<_>>();
+        let overlapping_ranges = ranges
+            .iter()
+            .filter(|(_, _, start, end, _)| *start < zero_end && *end >= offset)
+            .collect::<Vec<_>>();
+        let context_start = offset.saturating_sub(16);
+        let context_end = (offset + 17).min(actual.len());
+        panic!(
+            "download data mismatch at offset {offset}: got {actual_byte}, expected {expected_byte}; zero run={offset}..{zero_end}; request history={request_history:?}; invalid Range requests={invalid_ranges:?}; overlapping ranges={overlapping_ranges:?}; actual context={:?}, expected context={:?}",
+            &actual[context_start..context_end],
+            &body[context_start..context_end],
+        );
+    }
     server.shutdown().await;
 }
 

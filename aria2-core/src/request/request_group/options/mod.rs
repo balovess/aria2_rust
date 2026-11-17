@@ -2,12 +2,16 @@ mod conversion;
 mod default;
 mod follow_mode;
 mod from_strings;
+mod http_adaptive;
+mod proxy;
 mod runtime;
 #[cfg(test)]
 mod tests;
 
 pub use conversion::option_value_to_string;
 pub use follow_mode::FollowMode;
+pub use http_adaptive::HttpAdaptiveOptions;
+pub(crate) use proxy::HttpProxyOptions;
 
 pub const DEFAULT_DISK_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -26,6 +30,8 @@ pub struct DownloadOptions {
     /// HTTP protocol selection: automatic negotiation, forced HTTP/1.1, or
     /// forced HTTP/2.
     pub http_version: crate::http::HttpVersion,
+    /// Adaptive HTTP Range behavior for this download.
+    pub http_adaptive: HttpAdaptiveOptions,
     pub max_download_limit: Option<u64>,
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,
@@ -40,7 +46,7 @@ pub struct DownloadOptions {
     /// Enable the asynchronous DNS cache for this task.
     pub async_dns: bool,
     /// Resume an existing output file when no control file is available.
-    /// This is the C++ `--continue` option and defaults to `false`.
+    /// This is the C++ `--continue` option; this implementation defaults to `true`.
     pub continue_download: bool,
     /// Allow replacing an existing output file. C++ default: `false`.
     pub allow_overwrite: bool,
@@ -431,6 +437,16 @@ pub struct DownloadOptions {
     pub ftp_passwd: Option<String>,
     /// SSH host-key fingerprint in aria2's `hashType=digest` format.
     pub ssh_host_key_md: Option<String>,
+    /// SFTP SSH connection timeout in seconds. `None` uses the protocol default.
+    pub sftp_connect_timeout: Option<u64>,
+    /// SFTP I/O read timeout in seconds. `None` uses the protocol default.
+    pub sftp_read_timeout: Option<u64>,
+    /// Whether to negotiate SSH transport compression for SFTP.
+    pub sftp_compression: bool,
+    /// SSH keepalive interval in seconds; zero disables keepalives.
+    pub sftp_keepalive_interval: Option<u64>,
+    /// Preferred SSH cipher names in preference order.
+    pub sftp_preferred_ciphers: Option<Vec<String>>,
     /// Whether to disable Netrc lookups. Maps to C++ `PREF_NO_NETRC`.
     pub no_netrc: bool,
     /// Path to the .netrc file for credential lookup.

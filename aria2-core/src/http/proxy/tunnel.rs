@@ -1,18 +1,13 @@
 //! HTTP CONNECT tunnel through a proxy for HTTPS downloads.
 
 use tokio::net::TcpStream;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::error::{Aria2Error, Result};
 use crate::network::OutboundNetworkPolicy;
 
-use super::auth::build_proxy_auth_header;
 use super::config::HttpProxyConfig;
-use super::io::{
-    MAX_AUTH_RETRIES, connect_to_proxy, connect_to_proxy_with_policy, read_proxy_response,
-    write_all_timeout,
-};
-use super::response::ProxyResponse;
+use super::io::{connect_to_proxy, connect_to_proxy_with_policy};
 
 /// HTTP CONNECT tunnel through a proxy for HTTPS downloads.
 ///
@@ -64,89 +59,66 @@ impl HttpProxyTunnel {
 
     async fn finish_connect(&self, mut stream: TcpStream) -> Result<TcpStream> {
         let target = self.config.target_host_port();
-        let mut auth_nc = 1u32;
-
-        // Initial CONNECT request (no auth)
-        let request = self.build_connect_request(None);
-        debug!("Sending CONNECT request to proxy for {}", target);
-        write_all_timeout(&mut stream, request.as_bytes(), self.config.write_timeout).await?;
-
-        loop {
-            let head = read_proxy_response(&mut stream, self.config.read_timeout).await?;
-            let proxy_resp = ProxyResponse::from_head(head);
-
-            match proxy_resp {
-                ProxyResponse::Connected(head) => {
-                    info!("CONNECT tunnel established to {} via proxy", target);
-                    debug!("Proxy response: {:?}", head);
-                    return Ok(stream);
-                }
-                ProxyResponse::AuthRequired { response } => {
-                    let (username, password) = self.get_credentials()?;
-
-                    if auth_nc > MAX_AUTH_RETRIES {
-                        return Err(Aria2Error::Network(
-                            "Proxy authentication failed after max retries".to_string(),
-                        ));
-                    }
-
-                    // Build Proxy-Authorization header for the CONNECT method
-                    let auth_value = build_proxy_auth_header(
-                        &response, &username, &password, "CONNECT", &target, auth_nc,
-                    )
-                    .ok_or_else(|| {
-                        Aria2Error::Network(
-                            "Proxy requires auth but no supported scheme found".to_string(),
-                        )
-                    })?;
-
-                    auth_nc += 1;
-                    warn!(
-                        "Proxy returned 407, retrying CONNECT with authentication (attempt {})",
-                        auth_nc
-                    );
-
-                    // Re-send CONNECT with Proxy-Authorization
-                    let request = self.build_connect_request(Some(&auth_value));
-                    write_all_timeout(&mut stream, request.as_bytes(), self.config.write_timeout)
-                        .await?;
-                }
-                ProxyResponse::Error {
-                    status_code,
-                    reason,
-                } => {
-                    return Err(Aria2Error::Network(format!(
-                        "Proxy returned error {} {} for CONNECT to {}",
-                        status_code, reason, target
-                    )));
-                }
-            }
-        }
+        let options = aria2_protocol::http::connect::HttpConnectOptions {
+            target_host: &self.config.target_host,
+            target_port: self.config.target_port,
+            user_agent: "",
+            username: self.config.proxy_username.as_deref(),
+            password: self.config.proxy_password.as_deref(),
+            preemptive_basic_auth: false,
+            write_timeout: self.config.write_timeout,
+            read_timeout: self.config.read_timeout,
+        };
+        let retry_policy = aria2_protocol::http::connect::HttpConnectRetryPolicy {
+            max_auth_retries: super::io::MAX_AUTH_RETRIES,
+            prefer_digest: true,
+            fallback_to_basic: true,
+            proxy_connection_keep_alive: true,
+        };
+        aria2_protocol::http::connect::establish_connect_tunnel_with_retry_policy(
+            &mut stream,
+            &options,
+            &retry_policy,
+        )
+        .await
+        .map_err(|error| map_connect_error(error, &self.config))?;
+        info!("CONNECT tunnel established to {} via proxy", target);
+        Ok(stream)
     }
+}
 
-    /// Build the CONNECT request string.
-    pub(crate) fn build_connect_request(&self, proxy_auth: Option<&str>) -> String {
-        let target = self.config.target_host_port();
-        let mut req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", target, target);
+fn map_connect_error(
+    error: aria2_protocol::http::connect::HttpConnectError,
+    config: &HttpProxyConfig,
+) -> Aria2Error {
+    use aria2_protocol::http::connect::HttpConnectError;
 
-        if let Some(auth) = proxy_auth {
-            req.push_str(&format!("Proxy-Authorization: {}\r\n", auth));
+    match error {
+        HttpConnectError::Timeout => Aria2Error::Network("Timeout during proxy CONNECT".into()),
+        HttpConnectError::InvalidRequestField(field) => {
+            Aria2Error::InvalidArgument(format!("invalid HTTP CONNECT request field: {field}"))
         }
-
-        // Proxy-Connection: keep-alive is standard for CONNECT tunnels
-        req.push_str("Proxy-Connection: keep-alive\r\n");
-        req.push_str("\r\n");
-        req
-    }
-
-    /// Extract credentials or return an error.
-    pub(crate) fn get_credentials(&self) -> Result<(String, String)> {
-        match (&self.config.proxy_username, &self.config.proxy_password) {
-            (Some(u), Some(p)) => Ok((u.clone(), p.clone())),
-            (Some(u), None) => Ok((u.clone(), String::new())),
-            _ => Err(Aria2Error::Network(
-                "Proxy requires authentication but no credentials provided".to_string(),
-            )),
+        HttpConnectError::Io(error) => {
+            Aria2Error::Network(format!("Error communicating with proxy: {error}"))
         }
+        HttpConnectError::InvalidResponse(message) => {
+            Aria2Error::Parse(format!("Error parsing proxy response: {message}"))
+        }
+        HttpConnectError::CredentialsRequired => {
+            Aria2Error::Network("Proxy requires authentication but no credentials provided".into())
+        }
+        HttpConnectError::UnsupportedAuthentication(_) => {
+            Aria2Error::Network("Proxy requires auth but no supported scheme found".into())
+        }
+        HttpConnectError::AuthenticationFailed => {
+            Aria2Error::Network("Proxy authentication failed after max retries".into())
+        }
+        HttpConnectError::Rejected {
+            status_code,
+            reason_phrase,
+        } => Aria2Error::Network(format!(
+            "Proxy returned error {status_code} {reason_phrase} for CONNECT to {}",
+            config.target_host_port()
+        )),
     }
 }

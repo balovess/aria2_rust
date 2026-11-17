@@ -24,6 +24,8 @@ bindings/python/tests/__pycache__/
 *.bak
 *.bin
 !docs/
+aria2-core/.aria2.lock
+aria2-core/.*.part.aria2
 AGENTS.md
 docs/compatibility-status.md
 docs/MIGRATION.md

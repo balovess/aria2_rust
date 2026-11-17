@@ -12,17 +12,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::warn;
 
+#[cfg(test)]
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::retry_policy::RetryPolicy;
 use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
 use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::filesystem::disk_writer::DiskWriter;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::MetalinkDownloadCommand;
 
+#[cfg(test)]
 fn classify_metalink_http_status(status_code: u16) -> Aria2Error {
     if status_code == 404 {
         Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
@@ -87,44 +88,11 @@ impl Command for MetalinkDownloadCommand {
 }
 
 impl MetalinkDownloadCommand {
-    async fn complete_checkpoint(&mut self) {
-        if let Some(checkpoint) = self.checkpoint.take() {
-            checkpoint.complete().await;
-        }
-    }
-
-    async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
-        match writer.finalize().await {
-            Ok(_) => self.flush_checkpoint().await,
-            Err(error) => warn!(
-                %error,
-                "Metalink output was not durably finalized; retaining the previous checkpoint"
-            ),
-        }
-    }
-
-    async fn flush_checkpoint(&mut self) {
-        if let Some(checkpoint) = self.checkpoint.as_mut() {
-            let _ = self.group.recover().take_save_control_file_request();
-            checkpoint.update(self.completed_bytes, true).await;
-        }
-    }
-
     async fn discard_checkpoint(&mut self, output_path: &Path) {
-        if let Some(checkpoint) = self.checkpoint.take() {
-            checkpoint.discard(output_path).await;
-        } else if let Err(error) = tokio::fs::remove_file(output_path).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            warn!(
-                path = %output_path.display(),
-                %error,
-                "Failed to remove invalid Metalink output"
-            );
-        }
+        super::transport::discard_stage(output_path).await;
     }
 
-    fn lifecycle_error(&self) -> Option<Aria2Error> {
+    pub(super) fn lifecycle_error(&self) -> Option<Aria2Error> {
         let group = self.group.recover();
         if group.is_removed() {
             Some(Aria2Error::DownloadFailed(
@@ -202,6 +170,7 @@ impl MetalinkDownloadCommand {
         output_path: &Path,
         url: &str,
         expected_size: Option<u64>,
+        source_index: usize,
     ) -> Result<PayloadDownload> {
         let options = self.group.recover().options_arc();
         let retry_policy =
@@ -211,19 +180,10 @@ impl MetalinkDownloadCommand {
             output_path: output_path.to_path_buf(),
             url: url.to_owned(),
             expected_size,
+            source_index,
             retry_policy,
         };
         run_single_work_item(&mut work).await
-    }
-
-    async fn wait_for_lifecycle_change(&self) {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if self.lifecycle_error().is_none() {
-            notified.await;
-        }
     }
 }
 
@@ -232,6 +192,7 @@ struct MetalinkPayloadWork<'a> {
     output_path: PathBuf,
     url: String,
     expected_size: Option<u64>,
+    source_index: usize,
     retry_policy: RetryPolicy,
 }
 
@@ -245,7 +206,12 @@ impl SingleWorkAdapter for MetalinkPayloadWork<'_> {
 
     async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
         self.command
-            .download_payload_url(&self.output_path, &self.url, self.expected_size)
+            .download_payload_url(
+                &self.output_path,
+                &self.url,
+                self.expected_size,
+                self.source_index,
+            )
             .await
             .map_err(|error| self.command.record_not_found_error(error))
     }

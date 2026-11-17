@@ -157,24 +157,7 @@ impl MagnetLink {
     }
 
     pub fn url_decode(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                let hex: String = chars.by_ref().take(2).collect();
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                } else {
-                    result.push(c);
-                    result.push_str(&hex);
-                }
-            } else if c == '+' {
-                result.push(' ');
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        crate::uri::percent_decode(s)
     }
 
     pub fn info_hash_hex(&self) -> String {
@@ -195,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_parse_magnet_with_hex_hash() {
-        let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu+22.04&tr=udp://tracker.example.com:1337/announce";
+        let magnet = "magnet:?xt=urn:btih:3b245e04703a1ec5c91cef3f2295ee88ab63c50d&dn=Ubuntu%2022.04&tr=udp://tracker.example.com:1337/announce";
         let ml = MagnetLink::parse(magnet).unwrap();
         assert_eq!(
             ml.info_hash_hex(),
@@ -217,6 +200,7 @@ mod tests {
     #[test]
     fn test_parse_invalid_not_magnet() {
         assert!(MagnetLink::parse("http://example.com").is_err());
+        assert!(MagnetLink::parse("magnet?xt=urn:btih:abc123").is_err());
     }
 
     #[test]
@@ -229,7 +213,19 @@ mod tests {
         assert_eq!(MagnetLink::url_decode("Hello%20World"), "Hello World");
         assert_eq!(
             MagnetLink::url_decode("name+with+spaces"),
-            "name with spaces"
+            "name+with+spaces"
+        );
+        assert_eq!(MagnetLink::url_decode("%E2%9C%93"), "✓");
+    }
+
+    #[test]
+    fn parse_preserves_plus_in_tracker_query_values() {
+        let magnet = "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&tr=https%3A%2F%2Ftracker.example%2Fannounce%3Ftoken%3Da%2Bb";
+        let parsed = MagnetLink::parse(magnet).unwrap();
+
+        assert_eq!(
+            parsed.trackers,
+            ["https://tracker.example/announce?token=a+b"]
         );
     }
 

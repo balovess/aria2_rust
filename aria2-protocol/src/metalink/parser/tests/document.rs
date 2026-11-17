@@ -75,6 +75,22 @@ fn test_parse_v4_metalink() {
 }
 
 #[test]
+fn test_parse_xml_character_references() {
+    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="a&amp;b.bin">
+    <identity>x&amp;y</identity>
+    <url>https://example.com/file?a=1&amp;b=2</url>
+  </file>
+</metalink>"#;
+
+    let document = MetalinkDocument::parse(data, None).unwrap();
+    let file = &document.files[0];
+    assert_eq!(file.name, "a&b.bin");
+    assert_eq!(file.identity.as_deref(), Some("x&y"));
+    assert_eq!(file.urls[0].url, "https://example.com/file?a=1&b=2");
+}
+
+#[test]
 fn test_url_sorting() {
     let data = make_v3_metalink();
     let doc = MetalinkDocument::parse(&data, None).unwrap();
@@ -128,6 +144,51 @@ fn test_single_file_accessor() {
     let doc = MetalinkDocument::parse(&data, None).unwrap();
     assert!(doc.single_file().is_some());
     assert_eq!(doc.single_file().unwrap().name, "test.iso");
+}
+
+#[test]
+fn document_total_size_returns_none_when_known_sizes_overflow() {
+    let document = MetalinkDocument {
+        version: MetalinkVersion::V4,
+        files: vec![
+            MetalinkFile {
+                size: Some(u64::MAX),
+                ..MetalinkFile::new("large.bin")
+            },
+            MetalinkFile {
+                size: Some(1),
+                ..MetalinkFile::new("overflow.bin")
+            },
+        ],
+        generator: None,
+        origin: None,
+        published: None,
+        base_uri: None,
+    };
+
+    assert_eq!(document.total_size(), None);
+}
+
+#[test]
+fn document_total_size_sums_known_sizes_and_keeps_empty_behavior() {
+    let mut document = MetalinkDocument {
+        version: MetalinkVersion::V4,
+        files: vec![
+            MetalinkFile {
+                size: Some(5),
+                ..MetalinkFile::new("known.bin")
+            },
+            MetalinkFile::new("unknown.bin"),
+        ],
+        generator: None,
+        origin: None,
+        published: None,
+        base_uri: None,
+    };
+
+    assert_eq!(document.total_size(), Some(5));
+    document.files.clear();
+    assert_eq!(document.total_size(), Some(0));
 }
 
 #[test]
@@ -347,6 +408,7 @@ fn test_v4_url_auto_detects_resource_type() {
 <url priority="1">http://example.com/test.bin</url>
 <url priority="2">https://example.com/test.bin</url>
 <url priority="3">ftp://example.com/test.bin</url>
+<url priority="4">sftp://example.com/test.bin</url>
   </file>
 </metalink>"#
         .as_bytes()
@@ -355,4 +417,6 @@ fn test_v4_url_auto_detects_resource_type() {
     assert_eq!(doc.files[0].urls[0].resource_type, ResourceType::Http);
     assert_eq!(doc.files[0].urls[1].resource_type, ResourceType::Https);
     assert_eq!(doc.files[0].urls[2].resource_type, ResourceType::Ftp);
+    assert_eq!(doc.files[0].urls[3].resource_type, ResourceType::Ftp);
+    assert_eq!(doc.files[0].urls[3].url, "sftp://example.com/test.bin");
 }

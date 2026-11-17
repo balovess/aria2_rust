@@ -90,7 +90,7 @@ pub(super) fn create_lpd_socket_with_config(
 
         let bind_addr = SocketAddrV4::new(multicast_ip, port);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         let raw_bind_addr = libc::sockaddr_in {
             sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
             sin_family: libc::AF_INET as _,
@@ -100,7 +100,7 @@ pub(super) fn create_lpd_socket_with_config(
             },
             sin_zero: [0; 8],
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         let raw_bind_addr = libc::sockaddr_in {
             sin_family: libc::AF_INET as _,
             sin_port: port.to_be(),

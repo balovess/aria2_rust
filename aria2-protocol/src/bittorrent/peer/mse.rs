@@ -119,18 +119,12 @@ pub async fn connect_with_stream(
             &remote_handshake[..8]
         )
     })?;
-    if remote_hs.info_hash != *info_hash {
-        let Some(info_hash_v2) = info_hash_v2 else {
-            return Err("info_hash mismatch".to_string());
-        };
-        let v2_truncated: [u8; 20] = info_hash_v2[..20]
-            .try_into()
-            .expect("SHA-256 hash is 32 bytes");
-        if remote_hs.info_hash != v2_truncated || !remote_hs.supports_bep52() {
-            return Err(
-                "hybrid handshake info_hash mismatch or missing BEP 52 capability".to_string(),
-            );
-        }
+    if !remote_hs.matches_info_hash(info_hash, info_hash_v2) {
+        return Err(if info_hash_v2.is_some() {
+            "hybrid handshake info_hash mismatch or missing BEP 52 capability".to_string()
+        } else {
+            "info_hash mismatch".to_string()
+        });
     }
     Ok(PeerConnection::from_stream_with_mse(
         stream,

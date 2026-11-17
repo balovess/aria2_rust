@@ -101,13 +101,10 @@ impl super::RequestGroupMan {
             // state when the download restarts.
             group.recover().drop_piece_storage();
 
-            // ── Configure request group ────────────────────────────────
-            // C++: `configureRequestGroup(groupToAdd)` — sets URI selector
-            // based on the "uri-selector" option (feedback/inorder/adaptive).
-            // In Rust, URI selection is handled differently (the selector
-            // is embedded in the download command logic rather than stored
-            // on the group), but we still need to validate the configuration.
-            // No-op for now: URI selector logic lives in mirror_coordinator.
+            // URI selector configuration is projected into the concrete
+            // selector when the HTTP multi-mirror pipeline is assembled.
+            // RequestGroupMan owns task scheduling and does not need a
+            // selector instance.
 
             // Transition: set status Active, move to active DashMap.
             // Keep the status check and transition under one write lock. A

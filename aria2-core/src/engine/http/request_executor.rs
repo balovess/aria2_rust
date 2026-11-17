@@ -16,8 +16,6 @@ use crate::error::Result;
 #[cfg(test)]
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
-const MAX_SERVER_CONCURRENCY: usize = 16;
-
 mod admission;
 mod executor;
 #[cfg(test)]
@@ -30,6 +28,14 @@ use admission::AdmissionLease;
 #[cfg(test)]
 use admission::{ExecutorState, RunningTask};
 pub use executor::HttpSegmentRequestExecutor;
+
+/// Live HTTP activity grouped by transport protocol.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HttpConnectionCounts {
+    pub http1_connections: usize,
+    pub http2_sessions: usize,
+    pub http2_streams: usize,
+}
 
 /// One HTTP byte-range request admitted for execution.
 pub struct HttpSegmentRequest {

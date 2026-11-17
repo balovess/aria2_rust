@@ -63,6 +63,26 @@ fn test_generate_from_bytes_no_filter() {
     assert_eq!(commands.len(), 2);
 }
 
+#[cfg(feature = "metalink")]
+#[test]
+fn generate_from_bytes_resolves_relative_urls_with_option_base_uri() {
+    let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>payload.bin</url></file></metalink>"#;
+    let options = DownloadOptions {
+        metalink_base_uri: Some("https://cdn.example/base/".to_string()),
+        ..DownloadOptions::default()
+    };
+
+    let commands = MetalinkToRequestGroup::new()
+        .generate_from_bytes(data, &options)
+        .expect("option base URI should resolve relative command URLs");
+
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        commands[0].group.read().unwrap().uris(),
+        ["https://cdn.example/base/payload.bin".into()]
+    );
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[test]
 fn generate_from_bytes_groups_named_shared_torrent_metaurl_files() {
@@ -206,6 +226,31 @@ fn metaurl_only_torrent_entry_is_not_dropped() {
     assert_eq!(
         info.torrent_metaurls[0].url,
         "https://example.test/payload.torrent"
+    );
+}
+
+#[cfg(all(feature = "metalink", not(feature = "bittorrent")))]
+#[test]
+fn bittorrent_url_resource_is_removed_without_its_adapter() {
+    let document = MetalinkDocument::parse(
+        br#"<metalink xmlns="http://www.metalinker.org/"><files><file name="payload.bin"><resources><url type="bittorrent" preference="90">https://torrent.test/payload.torrent</url><url type="http" preference="80">https://mirror.test/payload.bin</url></resources></file></files></metalink>"#,
+        None,
+    )
+    .expect("Metalink v3 should parse");
+    let converter = MetalinkToRequestGroup::new();
+    let files = converter
+        .prepare_files(&document, &DownloadOptions::default())
+        .expect("Metalink file should normalize");
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0]
+            .1
+            .urls
+            .iter()
+            .map(|url| url.url.as_str())
+            .collect::<Vec<_>>(),
+        ["https://mirror.test/payload.bin"]
     );
 }
 

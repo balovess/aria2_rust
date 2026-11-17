@@ -178,8 +178,15 @@ async fn websocket_failure_from_response(response: &'static str) -> TrackerFailu
             .await
             .expect("complete WebSocket handshake");
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
+        let response = match serde_json::from_str::<serde_json::Value>(response) {
+            Ok(mut response) if response.is_object() => {
+                response["info_hash"] = serde_json::Value::String("\0".repeat(20));
+                response.to_string()
+            }
+            _ => response.to_owned(),
+        };
         websocket
-            .send(Message::Text(response.to_string()))
+            .send(Message::Text(response.into()))
             .await
             .expect("send tracker response");
     });
@@ -265,7 +272,10 @@ async fn websocket_announce_timeout_reaches_live_tracker_snapshot() {
 #[tokio::test]
 async fn websocket_rejection_and_malformed_response_are_distinguished() {
     assert_eq!(
-        websocket_failure_from_response(r#"{"failure reason":"unknown torrent"}"#).await,
+        websocket_failure_from_response(
+            r#"{"action":"announce","failure reason":"unknown torrent"}"#,
+        )
+        .await,
         TrackerFailureKind::TrackerRejected
     );
     assert_eq!(
@@ -351,10 +361,14 @@ async fn concurrent_tracker_failures_remain_attached_to_their_urls() {
             .await
             .expect("complete rejecting tracker handshake");
         assert!(matches!(websocket.next().await, Some(Ok(Message::Text(_)))));
+        let rejection = serde_json::json!({
+            "action": "announce",
+            "info_hash": "\0".repeat(20),
+            "failure reason": "not authorized",
+        })
+        .to_string();
         websocket
-            .send(Message::Text(
-                r#"{"failure reason":"not authorized"}"#.to_string(),
-            ))
+            .send(Message::Text(rejection.into()))
             .await
             .expect("send tracker rejection");
     });

@@ -219,6 +219,7 @@ impl ConcurrentSegmentManager {
     /// * `Some(new_mirror_idx)` - Segment reassigned to a new mirror
     /// * `None` - Segment permanently failed or no alternative mirror
     pub fn report_segment_failed(&mut self, seg_idx: u32, error_code: u16) -> Option<usize> {
+        let capacity_limited = matches!(error_code, 429 | 503);
         // Get the mirror index before failing
         let mirror_idx = self
             .segments
@@ -226,7 +227,7 @@ impl ConcurrentSegmentManager {
             .and_then(|s| s.assigned_mirror);
 
         // Fail the segment (this handles reassignment logic)
-        let reassign = self.fail_segment(seg_idx);
+        let reassign = self.fail_segment_with_circuit_breaker(seg_idx, !capacity_limited);
 
         // Update server stats if available
         if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
@@ -240,11 +241,10 @@ impl ConcurrentSegmentManager {
             // Check if mirror should be disabled
             if let Some(stat) = stat_man.find_stat_by_protocol(&host, &protocol)
                 && !stat.is_available()
+                && !capacity_limited
             {
                 // Mirror is in cooldown, disable it temporarily
-                if let Some(m) = self.mirrors.get_mut(idx) {
-                    m.disabled = true;
-                }
+                self.disable_mirror(idx);
             }
         }
 
@@ -258,11 +258,13 @@ impl ConcurrentSegmentManager {
         seg_idx: u32,
         error_code: u16,
     ) -> Option<usize> {
+        let capacity_limited = matches!(error_code, 429 | 503);
         let mirror_idx = self
             .segments
             .get(seg_idx as usize)
             .and_then(|segment| segment.assigned_mirror);
-        let reassign = self.fail_segment_without_retry(seg_idx);
+        let reassign =
+            self.fail_segment_without_retry_with_circuit_breaker(seg_idx, !capacity_limited);
 
         if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
             && let Some(url) = self.mirror_urls.get(idx)
@@ -272,9 +274,9 @@ impl ConcurrentSegmentManager {
             stat_man.mark_failure_with_protocol(&host, &protocol, error_code);
             if let Some(stat) = stat_man.find_stat_by_protocol(&host, &protocol)
                 && !stat.is_available()
-                && let Some(mirror) = self.mirrors.get_mut(idx)
+                && !capacity_limited
             {
-                mirror.disabled = true;
+                self.disable_mirror(idx);
             }
         }
 
@@ -297,6 +299,14 @@ impl ConcurrentSegmentManager {
     /// Check if the manager is using intelligent mirror selection.
     pub fn has_intelligent_selection(&self) -> bool {
         self.uri_selector.is_some() && self.stat_man.is_some()
+    }
+
+    fn disable_mirror(&mut self, mirror_idx: usize) {
+        let deadline = std::time::Instant::now() + self.mirror_cooldown;
+        if let Some(mirror) = self.mirrors.get_mut(mirror_idx) {
+            mirror.disabled = true;
+            self.mirror_disabled_until[mirror_idx] = Some(deadline);
+        }
     }
 }
 

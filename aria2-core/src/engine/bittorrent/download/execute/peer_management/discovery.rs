@@ -265,16 +265,43 @@ impl BtDownloadCommand {
                     continue;
                 }
 
+                let dht_options = self
+                    .bt_registry
+                    .as_ref()
+                    .map(|registry| {
+                        registry
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .global_dht_options()
+                    })
+                    .unwrap_or_else(|| {
+                        Arc::new(
+                            crate::engine::bittorrent::dht::config::DhtEngineOptions::default(),
+                        )
+                    });
                 let dht_config =
-                    crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family(
-                        &options,
+                    crate::engine::bittorrent::dht::config::build_dht_engine_config_for_family_with_dns_cache(
+                        &dht_options,
                         &self.outbound_network_policy,
+                        &self.dns_cache,
                         use_ipv6,
                     )
                     .await?;
+                let Some(dht_config) = dht_config else {
+                    tracing::info!(
+                        ipv6 = use_ipv6,
+                        "Skipping DHT family without a compatible outbound source"
+                    );
+                    continue;
+                };
                 match self
                     .dht_engines
-                    .start_or_join(self.bt_registry.as_ref(), gid, dht_config)
+                    .start_or_join(
+                        self.bt_registry.as_ref(),
+                        gid,
+                        dht_config,
+                        dht_options.protocol_peer_storage_config(),
+                    )
                     .await
                 {
                     Ok(()) => tracing::info!(ipv6 = use_ipv6, "[BT] DHT family engine ready"),

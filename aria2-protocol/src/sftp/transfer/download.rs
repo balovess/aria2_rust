@@ -9,9 +9,9 @@ use tracing::{debug, info, warn};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use super::super::file_ops::OpenFlags;
+use super::super::file_ops::FileOpError;
 use super::types::{TransferError, TransferOptions, TransferProgress};
-use super::{PROGRESS_REPORT_INTERVAL, SftpTransfer};
+use super::{PROGRESS_REPORT_INTERVAL, SftpDownloadReadError, SftpDownloadReader, SftpTransfer};
 impl<'a> SftpTransfer<'a> {
     /// Download a remote file to a local path with full progress tracking.
     ///
@@ -115,14 +115,8 @@ impl<'a> SftpTransfer<'a> {
             total_size.saturating_sub(start_offset)
         );
 
-        // Step 3: Open remote file for reading
-        let mut remote_file = self
-            .ops
-            .open(remote_path, OpenFlags::readonly(), 0)
-            .await
-            .map_err(|error| TransferError::remote("open for reading", remote_path, error))?;
-
-        // Step 4: Prepare local file (create or seek for resume)
+        // Step 3: Prepare the local destination before acquiring a remote
+        // handle, so local setup failures cannot orphan an SFTP file handle.
         let mut local_file = if start_offset > 0 && local_path.exists() {
             // Resume mode: open existing file and seek to offset
             match tokio::fs::OpenOptions::new()
@@ -145,9 +139,9 @@ impl<'a> SftpTransfer<'a> {
 
         // Seek to resume position if applicable
         if start_offset > 0 {
-            if let Err(e) = local_file.set_len(start_offset).await {
-                warn!("[SFTP] Could not set file length for resume: {}", e);
-            }
+            local_file.set_len(start_offset).await.map_err(|error| {
+                TransferError::local("truncate resume destination", local_path, error)
+            })?;
             if let Err(e) = local_file
                 .seek(std::io::SeekFrom::Start(start_offset))
                 .await
@@ -161,6 +155,17 @@ impl<'a> SftpTransfer<'a> {
             info!("[SFTP] Resuming from offset {}", start_offset);
         }
 
+        // Step 4: Open the remote file after local setup has succeeded.
+        let mut remote_reader = SftpDownloadReader::open(
+            &self.ops,
+            remote_path,
+            total_size,
+            start_offset,
+            options.effective_buffer_size(),
+        )
+        .await
+        .map_err(|error| TransferError::remote("open for reading", remote_path, error))?;
+
         // Step 5: Main transfer loop
         let mut transferred = start_offset;
         let start_time = std::time::Instant::now();
@@ -168,38 +173,43 @@ impl<'a> SftpTransfer<'a> {
 
         loop {
             if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                let _ = remote_file.close().await;
+                let _ = remote_reader.close().await;
                 return Err(TransferError::Cancelled);
             }
 
-            let remaining = total_size.saturating_sub(transferred);
-            if remaining == 0 {
-                break; // Transfer complete
-            }
-
-            // Calculate how much to read this iteration
-            let to_read = (options.buffer_size as u64).min(remaining) as usize;
-
-            // Read chunk from remote file at current offset
-            let data = match remote_file.read_at(transferred, to_read as u32).await {
-                Ok(data) if data.is_empty() => {
-                    debug!("[SFTP] EOF reached at offset {}", transferred);
-                    break; // Server returned empty data (EOF)
-                }
-                Ok(data) => data,
+            let data = match remote_reader.read_next().await {
+                Ok(Some(data)) => data,
+                Ok(None) => break,
                 Err(error) => {
+                    if let Err(close_error) = remote_reader.close().await {
+                        warn!("[SFTP] Error closing remote file after read failure: {close_error}");
+                    }
+                    let offset = remote_reader.offset();
+                    let source = match error {
+                        SftpDownloadReadError::Remote(source) => source,
+                        SftpDownloadReadError::UnexpectedEof { offset, total_size } => {
+                            FileOpError::Other {
+                                message: format!(
+                                    "unexpected EOF at offset {offset}; expected {total_size} bytes"
+                                ),
+                            }
+                        }
+                    };
                     return Err(TransferError::remote(
-                        format!("read at offset={transferred}, remaining={remaining}"),
+                        format!("read at offset={offset}"),
                         remote_path,
-                        error,
+                        source,
                     ));
                 }
             };
 
-            let n = data.len();
-
             // Write chunk to local file
             if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut local_file, &data).await {
+                if let Err(close_error) = remote_reader.close().await {
+                    warn!(
+                        "[SFTP] Error closing remote file after local write failure: {close_error}"
+                    );
+                }
                 return Err(TransferError::local(
                     format!("write at offset {transferred}"),
                     local_path,
@@ -207,7 +217,7 @@ impl<'a> SftpTransfer<'a> {
                 ));
             }
 
-            transferred += n as u64;
+            transferred = remote_reader.offset();
 
             // Progress reporting (throttled to avoid excessive logging/callbacks)
             if transferred.saturating_sub(last_report) >= PROGRESS_REPORT_INTERVAL {
@@ -234,7 +244,7 @@ impl<'a> SftpTransfer<'a> {
         }
 
         // Step 6: Cleanup
-        if let Err(e) = remote_file.close().await {
+        if let Err(e) = remote_reader.close().await {
             warn!("[SFTP] Error closing remote file handle: {}", e);
         }
         let local_file = local_file.into_std().await;

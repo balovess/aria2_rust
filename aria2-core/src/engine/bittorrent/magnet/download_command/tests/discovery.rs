@@ -171,6 +171,7 @@ async fn public_magnet_hands_its_dht_engine_to_the_payload_command() {
             Some(&registry),
             gid,
             aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default(),
         )
         .await
         .expect("magnet should start and register its shared DHT engine");
@@ -252,4 +253,38 @@ async fn public_magnet_prefers_an_existing_global_dht_engine_at_handoff() {
     );
 
     global_engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn handed_off_bt_success_shuts_down_and_persists_owned_dht_engine() {
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+        .expect("temporary magnet output directory should be created in the workspace");
+    let dht_path = temp_dir.path().join("dht.dat");
+    let engine = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+        aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+            dht_file_path: Some(dht_path.clone()),
+            ..aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local()
+        },
+    )
+    .await
+    .expect("local DHT engine should start");
+    let torrent = build_test_torrent();
+    let mut bt_command = crate::engine::bittorrent::download::command::BtDownloadCommand::new(
+        GroupId::new(91_004),
+        &torrent,
+        &DownloadOptions::default(),
+        Some(temp_dir.path().to_str().expect("UTF-8 test directory")),
+    )
+    .expect("zero-length torrent command should construct");
+    bt_command.dht_engines.insert(Arc::clone(&engine));
+
+    MagnetDownloadCommand::execute_handed_off_bt_command(&mut bt_command)
+        .await
+        .expect("zero-length nested download should complete");
+
+    assert_eq!(
+        engine.stats().await.state,
+        aria2_protocol::bittorrent::dht::engine::DhtEngineState::ShuttingDown
+    );
+    assert!(dht_path.is_file(), "owned DHT state should be persisted");
 }

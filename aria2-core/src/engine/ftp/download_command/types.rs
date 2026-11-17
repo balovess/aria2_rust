@@ -9,15 +9,15 @@ use std::{
     time::Duration,
 };
 
-use tracing::info;
-use url::Url;
-
 use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
 use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
+use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
+use tracing::info;
 
 use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
+use crate::ftp::connection_pool::{ControlSessionIdentity, ControlSessionKey, FtpConnectionPool};
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
 use crate::network::OutboundNetworkPolicy;
@@ -27,8 +27,6 @@ use crate::error::{Aria2Error, FatalError, Result};
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
-
-use crate::ftp::connection::percent_decode as urlencoding_decode;
 
 /// FTP download command that handles the complete download lifecycle
 pub struct FtpDownloadCommand {
@@ -61,10 +59,21 @@ pub struct FtpDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for this download.
     pub(super) global_limiter: Option<RateLimiter>,
+    /// Process-wide pool for authenticated FTP control sessions.
+    pub(super) connection_pool: Option<Arc<FtpConnectionPool>>,
     /// File allocation strategy selected by the request options.
     pub(super) file_allocation: String,
     pub(super) secure_falloc: bool,
     pub(super) checkpoint: Option<ProgressCheckpoint>,
+}
+
+pub(super) struct FtpDownloadTarget {
+    pub(super) host: String,
+    pub(super) port: u16,
+    pub(super) username: String,
+    pub(super) password: String,
+    pub(super) remote_path: String,
+    pub(super) secure: bool,
 }
 
 impl FtpDownloadCommand {
@@ -114,10 +123,9 @@ impl FtpDownloadCommand {
             group.recover().mark_in_memory_download();
         }
 
-        let (host, port, username, password, remote_path) = Self::parse_uri(&uri)?;
-        let is_ftps = Self::is_ftps_uri(&uri);
-        let ftps_implicit = is_ftps && port == 990;
-        let ftps_config = is_ftps.then(|| Self::ftps_config(&options));
+        let target = Self::parse_uri(&uri)?;
+        let ftps_implicit = target.secure && target.port == 990;
+        let ftps_config = target.secure.then(|| Self::ftps_config(&options));
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -126,7 +134,7 @@ impl FtpDownloadCommand {
 
         let filename = output_name
             .map(|n| n.to_string())
-            .or_else(|| Self::extract_filename(&remote_path))
+            .or_else(|| Self::extract_filename(&target.remote_path))
             .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
@@ -141,12 +149,10 @@ impl FtpDownloadCommand {
         };
 
         info!(
-            "FtpDownloadCommand created (shared group): {} -> {} ({}:{}/{}) [resume_offset={}]",
-            uri,
+            "FtpDownloadCommand created (shared group): {} -> {}:{} [resume_offset={}]",
             path.display(),
-            host,
-            port,
-            remote_path,
+            target.host,
+            target.port,
             resume_offset
         );
 
@@ -155,11 +161,11 @@ impl FtpDownloadCommand {
             output_path: path,
             started: false,
             completed_bytes: 0,
-            host,
-            port,
-            remote_path,
-            username,
-            password,
+            host: target.host,
+            port: target.port,
+            remote_path: target.remote_path,
+            username: target.username,
+            password: target.password,
             ftps_config,
             ftps_implicit,
             resume_offset,
@@ -178,6 +184,7 @@ impl FtpDownloadCommand {
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             dns_cache: None,
             global_limiter: None,
+            connection_pool: None,
             file_allocation: options
                 .file_allocation
                 .clone()
@@ -234,35 +241,33 @@ impl FtpDownloadCommand {
             return Ok(None);
         };
 
-        let proxy_url = Url::parse(proxy_uri).map_err(|error| {
+        let proxy_url = ProxyUrl::parse(proxy_uri).map_err(|error| {
             Aria2Error::Fatal(FatalError::Config(format!(
-                "Invalid FTP proxy URL '{}': {}",
-                proxy_uri, error
+                "Invalid FTP proxy URL: {error}"
             )))
         })?;
-        if !proxy_url.scheme().eq_ignore_ascii_case("http") {
+        if proxy_url.protocol != ProxyProtocol::Http {
+            let scheme = match proxy_url.protocol {
+                ProxyProtocol::Socks4 => "socks4",
+                ProxyProtocol::Socks5 => "socks5",
+                ProxyProtocol::Http => "http",
+                ProxyProtocol::Https => "https",
+            };
             return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                "Unsupported FTP proxy scheme '{}'; expected http",
-                proxy_url.scheme()
+                "Unsupported FTP proxy scheme '{scheme}'; expected http"
             ))));
         }
-        let proxy_host = proxy_url.host_str().ok_or_else(|| {
-            Aria2Error::Fatal(FatalError::Config("FTP proxy URL has no host".to_string()))
-        })?;
         let (username, password) = options.proxy_credentials_for_scheme("ftp");
-        let embedded_username =
-            (!proxy_url.username().is_empty()).then(|| proxy_url.username().to_string());
-        let embedded_password = proxy_url.password().map(str::to_string);
-        let proxy_username = username.or(embedded_username).unwrap_or_default();
-        let proxy_password = password.or(embedded_password).unwrap_or_default();
+        let proxy_username = username.unwrap_or_default();
+        let proxy_password = password.unwrap_or_default();
 
         let explicit_method = ProxyMethod::parse(&options.proxy_method);
         let method = explicit_method.unwrap_or_default();
 
         Ok(Some((
             FtpProxyConfig {
-                proxy_host: proxy_host.to_string(),
-                proxy_port: proxy_url.port().unwrap_or(8080),
+                proxy_host: proxy_url.host,
+                proxy_port: proxy_url.port,
                 proxy_username,
                 proxy_password,
                 ftp_username: self.username.clone(),
@@ -275,11 +280,6 @@ impl FtpDownloadCommand {
             },
             method,
         )))
-    }
-
-    fn is_ftps_uri(uri: &str) -> bool {
-        uri.get(..7)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftps://"))
     }
 
     fn ftps_config(options: &DownloadOptions) -> FtpsConfig {
@@ -304,65 +304,26 @@ impl FtpDownloadCommand {
         }
     }
 
-    pub(super) fn parse_uri(uri: &str) -> Result<(String, u16, String, String, String)> {
-        let scheme_len = if uri
-            .get(..6)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ftp://"))
-        {
-            6
-        } else if Self::is_ftps_uri(uri) {
-            7
-        } else {
-            return Err(Aria2Error::Fatal(FatalError::UnsupportedProtocol {
+    pub(super) fn parse_uri(uri: &str) -> Result<FtpDownloadTarget> {
+        let parsed = aria2_protocol::ftp::uri::parse_uri(uri).ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::UnsupportedProtocol {
                 protocol: "ftp".into(),
-            }));
-        };
-
-        let without_scheme = &uri[scheme_len..];
-
-        let (auth_host_port, path) = match without_scheme.find('/') {
-            Some(idx) => (&without_scheme[..idx], &without_scheme[idx..]),
-            None => (without_scheme, "/"),
-        };
-
-        let (auth, host_port) = match auth_host_port.rfind('@') {
-            Some(idx) => (&auth_host_port[..idx], &auth_host_port[idx + 1..]),
-            None => ("", auth_host_port),
-        };
-
-        let (username, password) = if auth.is_empty() {
-            (
-                constants::FTP_DEFAULT_USER.to_string(),
-                constants::FTP_DEFAULT_PASSWORD.to_string(),
-            )
-        } else if let Some(colon_pos) = auth.find(':') {
-            (
-                auth[..colon_pos].to_string(),
-                auth[colon_pos + 1..].to_string(),
-            )
-        } else {
-            (auth.to_string(), String::new())
-        };
-
-        let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
-            let (host, suffix) = bracketed
-                .split_once(']')
-                .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("Invalid FTP host".into())))?;
-            let port = suffix
-                .strip_prefix(':')
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(constants::FTP_DEFAULT_PORT);
-            (host.to_string(), port)
-        } else {
-            match host_port.rsplit_once(':') {
-                Some((host, port)) if port.parse::<u16>().is_ok() => {
-                    (host.to_string(), port.parse().unwrap())
-                }
-                _ => (host_port.to_string(), constants::FTP_DEFAULT_PORT),
-            }
-        };
-
-        Ok((host, port, username, password, urlencoding_decode(path)))
+            })
+        })?;
+        let username = parsed
+            .username
+            .unwrap_or_else(|| constants::FTP_DEFAULT_USER.to_string());
+        let password = parsed
+            .password
+            .unwrap_or_else(|| constants::FTP_DEFAULT_PASSWORD.to_string());
+        Ok(FtpDownloadTarget {
+            host: parsed.host,
+            port: parsed.port,
+            username,
+            password,
+            remote_path: parsed.remote_path,
+            secure: parsed.secure,
+        })
     }
 
     /// Extract filename from remote path
@@ -385,5 +346,22 @@ impl FtpDownloadCommand {
     /// tokens from this limiter in addition to the per-download limiter.
     pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
         self.global_limiter = Some(limiter);
+    }
+
+    pub fn set_connection_pool(&mut self, pool: Arc<FtpConnectionPool>) {
+        self.connection_pool = Some(pool);
+    }
+
+    pub(super) fn control_session_key(&self, proxy: Option<&FtpProxyConfig>) -> ControlSessionKey {
+        ControlSessionKey::new(ControlSessionIdentity {
+            host: &self.host,
+            port: self.port,
+            username: &self.username,
+            password: &self.password,
+            proxy,
+            tls: self.ftps_config.as_ref(),
+            implicit_tls: self.ftps_implicit,
+            outbound_sources: self.outbound_network_policy.addresses(),
+        })
     }
 }

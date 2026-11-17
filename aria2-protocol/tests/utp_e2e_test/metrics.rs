@@ -87,6 +87,7 @@ fn test_ledbat_loss_handling() {
 
     // Build up window
     controller.on_data_sent(1400);
+    controller.on_data_sent(1400);
     controller.on_ack_received(50_000, 1400);
 
     let window_before = controller.get_window_size();

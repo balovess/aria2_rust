@@ -314,6 +314,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn malformed_digest_proxy_challenge_preserves_proxy_status() {
+        let mut factory = AuthConfigFactory::new();
+        let challenge = HttpAuthChallenge {
+            scheme: AuthScheme::Digest,
+            realm: "ProxyRealm".to_string(),
+            is_proxy: true,
+            digest_challenge: None,
+        };
+
+        let result = handle_auth_challenge(
+            &challenge,
+            &mut factory,
+            &make_url("http://example.test/resource"),
+            &default_auth_opts(),
+            HttpMethod::Get,
+            false,
+            1,
+        );
+
+        match result {
+            AuthChallengeResult::NoCredentials { status_code, .. } => {
+                assert_eq!(status_code, 407);
+            }
+            other => panic!("Expected proxy authentication failure, got {other:?}"),
+        }
+    }
+
     // --- Unsupported Scheme Tests ---
 
     #[test]

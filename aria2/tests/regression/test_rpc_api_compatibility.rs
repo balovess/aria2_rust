@@ -44,6 +44,7 @@ async fn add_uri_task(engine: &RpcEngine) -> JsonRpcResponse {
         .await
 }
 
+#[cfg(feature = "bittorrent")]
 fn valid_torrent() -> String {
     base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -51,6 +52,7 @@ fn valid_torrent() -> String {
     )
 }
 
+#[cfg(feature = "bittorrent")]
 fn multi_file_torrent() -> String {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
     use std::collections::BTreeMap;
@@ -143,7 +145,7 @@ async fn regression_add_uri_rejects_single_uri_parameter() {
     );
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32602);
+    assert_error_code(&resp, 1);
     assert_eq!(engine.task_count().await, 0);
 }
 
@@ -158,7 +160,7 @@ async fn regression_add_uri_rejects_non_dictionary_options() {
     );
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32602);
+    assert_error_code(&resp, 1);
     assert_eq!(engine.task_count().await, 0);
 }
 
@@ -177,6 +179,7 @@ async fn regression_add_uri_rejects_negative_position() {
 }
 
 /// Test: aria2.addTorrent validates base64 torrent data.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_add_torrent_validates_bencode() {
     let engine = core_engine();
@@ -188,6 +191,7 @@ async fn regression_add_torrent_validates_bencode() {
 }
 
 /// Test: aria2.addTorrent rejects invalid bencode.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_add_torrent_rejects_invalid() {
     let engine = core_engine();
@@ -198,7 +202,7 @@ async fn regression_add_torrent_rejects_invalid() {
     let req = make_request("aria2.addTorrent", serde_json::json!([invalid_data]));
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32602); // InvalidParams
+    assert_error_code(&resp, 1); // aria2 execution error
 }
 
 /// Test: `addTorrent` rejects a present URI parameter with the wrong type
@@ -214,7 +218,7 @@ async fn regression_add_torrent_rejects_invalid_uri_parameter() {
     );
     let resp = engine.handle_request(&req).await;
 
-    assert_error_code(&resp, -32602);
+    assert_error_code(&resp, 1);
     assert_eq!(engine.task_count().await, 0);
 }
 
@@ -784,8 +788,8 @@ async fn regression_change_global_option_is_atomic_on_tracker_validation_error()
     let req = make_request(
         "aria2.changeGlobalOption",
         serde_json::json!([{
-            "max-concurrent-downloads": 0,
-            "bt-tracker-source": ""
+            "max-concurrent-downloads": 3,
+            "bt-tracker-source-timeout": 0
         }]),
     );
     assert_error_code(&engine.handle_request(&req).await, 1);
@@ -910,6 +914,7 @@ async fn regression_change_option_accepts_max_connection_per_server() {
 // =========================================================================
 
 /// Test: aria2.getPeers returns array for torrent download.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_get_peers_returns_array() {
     let engine = core_engine();
@@ -960,6 +965,7 @@ async fn regression_get_uris_format() {
 }
 
 /// Test: aria2.getUris follows the original first-FileEntry behavior.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
     let engine = core_engine();
@@ -1002,6 +1008,7 @@ async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
 
 /// Test: changeUri follows aria2's fileIndex contract even for an unselected
 /// file entry in a multi-file task.
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn regression_change_uri_allows_unselected_file_entry() {
     let engine = core_engine();
@@ -1024,7 +1031,7 @@ async fn regression_change_uri_allows_unselected_file_entry() {
         ))
         .await;
     assert_success(&change_resp);
-    assert_eq!(change_resp.result.unwrap(), serde_json::json!(["0", "1"]));
+    assert_eq!(change_resp.result.unwrap(), serde_json::json!([0, 1]));
 }
 
 /// Test: aria2.getFiles returns array with file info.
@@ -1308,8 +1315,8 @@ async fn regression_change_uri_modifies_list() {
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
-    // changeUri returns [delCount, addCount] as aria2 wire strings.
-    assert_eq!(resp.result.unwrap(), serde_json::json!(["1", "1"]));
+    // aria2 returns [delCount, addCount] as JSON numbers.
+    assert_eq!(resp.result.unwrap(), serde_json::json!([1, 1]));
 }
 
 /// Test: aria2.changeUri inserts new URIs at the optional zero-based position.
@@ -1339,7 +1346,7 @@ async fn regression_change_uri_honors_position() {
     );
     let change_resp = engine.handle_request(&change_req).await;
     assert_success(&change_resp);
-    assert_eq!(change_resp.result.unwrap(), serde_json::json!(["0", "2"]));
+    assert_eq!(change_resp.result.unwrap(), serde_json::json!([0, 2]));
 
     let uris_req = make_request("aria2.getUris", serde_json::json!([gid]));
     let uris_resp = engine.handle_request(&uris_req).await;
@@ -1701,9 +1708,9 @@ async fn regression_remove_download_files_cleans_stopped_child_tree() {
 // System Discovery Methods (2 methods)
 // =========================================================================
 
-/// Test: system.listMethods matches aria2's feature-specific method order.
+/// Test: system.listMethods exposes a stable method surface across build tiers.
 #[tokio::test]
-async fn regression_list_methods_returns_feature_specific_methods() {
+async fn regression_list_methods_returns_stable_methods() {
     let engine = core_engine();
 
     let req = make_request("system.listMethods", serde_json::json!([]));
@@ -1712,7 +1719,6 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     assert_success(&resp);
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
     let mut expected = vec!["aria2.addUri"];
-    #[cfg(feature = "bittorrent")]
     expected.extend([
         "aria2.addTorrent",
         "aria2.getPeers",
@@ -1777,6 +1783,39 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     assert!(methods.contains(&"aria2.getVersion".to_string()));
     assert!(methods.contains(&"system.listMethods".to_string()));
     assert!(methods.contains(&"system.listNotifications".to_string()));
+}
+
+/// Build tiers retain discoverable BitTorrent RPC methods and fail explicitly
+/// when the engine was compiled without BitTorrent support.
+#[cfg(not(feature = "bittorrent"))]
+#[tokio::test]
+async fn regression_bittorrent_methods_are_unsupported_without_feature() {
+    let engine = core_engine();
+    let requests = [
+        ("aria2.addTorrent", serde_json::json!(["", []])),
+        ("aria2.getPeers", serde_json::json!(["0000000000000000"])),
+        (
+            "aria2.getPeerStats",
+            serde_json::json!(["0000000000000000"]),
+        ),
+        (
+            "aria2.getPeerDetails",
+            serde_json::json!(["0000000000000000"]),
+        ),
+        ("aria2.getTrackers", serde_json::json!(["0000000000000000"])),
+        ("aria2.getDhtStatus", serde_json::json!([])),
+        ("aria2.saveDhtState", serde_json::json!([])),
+        ("aria2.evictDhtNodes", serde_json::json!([])),
+    ];
+
+    for (method, params) in requests {
+        let response = engine.handle_request(&make_request(method, params)).await;
+        assert_error_code(&response, 1);
+        assert!(
+            response.error.unwrap().message.contains("BitTorrent"),
+            "{method} should report the unavailable feature"
+        );
+    }
 }
 
 /// Test: system.listNotifications matches aria2's feature-specific order.
@@ -1844,10 +1883,10 @@ async fn regression_error_codes_jsonrpc_spec() {
     let resp = engine.handle_request(&req).await;
     assert_error_code(&resp, 1);
 
-    // Invalid params: -32602
+    // Missing method parameter: aria2 execution error code 1
     let req = make_request("aria2.addUri", serde_json::json!([])); // Missing URI
     let resp = engine.handle_request(&req).await;
-    assert_error_code(&resp, -32602);
+    assert_error_code(&resp, 1);
 }
 
 /// Test: Unknown method returns RpcExecution error (code 1).

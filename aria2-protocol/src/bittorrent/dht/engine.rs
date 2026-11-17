@@ -65,6 +65,8 @@ pub struct DhtEngineConfig {
     pub node_contact_interval: Duration,
     /// Maximum concurrent lookup tasks.
     pub max_concurrent_lookups: usize,
+    /// Maximum BEP 44 items retained by this address-family engine.
+    pub max_stored_items: usize,
     /// Whether to bootstrap into the public DHT network when the engine starts.
     ///
     /// Bootstrapping resolves public entry-point hostnames and performs network
@@ -101,6 +103,7 @@ impl Default for DhtEngineConfig {
             token_rotation_interval: Duration::from_secs(600), // 10 min
             node_contact_interval: Duration::from_secs(900),   // 15 min
             max_concurrent_lookups: 16,
+            max_stored_items: super::store::DEFAULT_MAX_ITEMS,
             bootstrap_on_start: true,
             bootstrap_timeout: Duration::from_secs(60),
             cleanup_interval: Duration::from_secs(300),

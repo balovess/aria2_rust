@@ -27,6 +27,7 @@ pub(crate) mod progress_checkpoint;
 pub(crate) mod protocol_adapter;
 pub mod resume_data;
 pub mod retry_policy;
+pub mod runtime_option_updates;
 #[cfg(feature = "sftp")]
 pub mod sftp;
 pub mod task_spawner;

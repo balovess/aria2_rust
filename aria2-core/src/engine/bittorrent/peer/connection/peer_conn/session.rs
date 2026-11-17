@@ -146,7 +146,8 @@ impl BtPeerConn {
             .and_then(|resource| resource.get_extension_message_id(name))
     }
 
-    /// Record an extension ID assigned by this peer during BEP 10 negotiation.
+    /// Record an extension ID supplied by engine peer state or tests.
+    #[cfg(test)]
     pub(crate) fn register_peer_extension(&mut self, name: &str, id: u8) {
         if let Some(resource) = &mut self.session_resource {
             resource.add_extension(name, id);

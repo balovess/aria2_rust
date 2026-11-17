@@ -1,4 +1,5 @@
-use criterion::{criterion_group, Criterion, BenchmarkId, black_box};
+use criterion::{criterion_group, Criterion, BenchmarkId};
+use std::hint::black_box;
 use aria2_core::config::{ConfigManager, OptionRegistry, OptionValue, OptionType, OptionCategory, OptionDef};
 use aria2_core::config::parser::ConfigParser;
 use aria2_core::config::uri_list::UriListFile;

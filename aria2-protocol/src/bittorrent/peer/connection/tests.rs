@@ -29,7 +29,7 @@ async fn connect_for_test(
 #[test]
 fn test_peer_addr_compact_roundtrip() {
     let addr = PeerAddr::new("192.168.1.100", 6881);
-    let compact = addr.to_compact();
+    let compact = addr.to_compact_v4().expect("valid IPv4 peer address");
     let parsed = PeerAddr::from_compact(&compact).unwrap();
     assert_eq!(parsed.ip, addr.ip);
     assert_eq!(parsed.port, addr.port);
@@ -139,6 +139,83 @@ async fn test_read_message_preserves_partial_frame_after_cancellation() {
         connection.read_message().await.unwrap(),
         Some(BtMessage::Choke)
     );
+}
+
+#[tokio::test]
+async fn read_message_updates_remote_choke_and_interest_state() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut remote = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut connection = PeerConnection::from_stream_with_peer(stream, [0u8; 20], false, false);
+
+    assert!(connection.state().peer_choking());
+    assert!(!connection.state().peer_interested());
+
+    for (message, is_choking, is_interested) in [
+        (BtMessage::Unchoke, false, false),
+        (BtMessage::Interested, false, true),
+        (BtMessage::Choke, true, true),
+        (BtMessage::NotInterested, true, false),
+    ] {
+        remote
+            .write_all(&crate::bittorrent::message::serializer::serialize(&message))
+            .await
+            .unwrap();
+        assert_eq!(connection.read_message().await.unwrap(), Some(message));
+        assert_eq!(connection.state().peer_choking(), is_choking);
+        assert_eq!(connection.state().peer_interested(), is_interested);
+    }
+}
+
+#[tokio::test]
+async fn piece_and_reject_responses_retire_the_matching_outgoing_request() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut remote = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut connection = PeerConnection::from_stream_with_peer(stream, [0u8; 20], false, false);
+
+    let piece_request = PieceBlockRequest::new(4, 16 * 1024, 16 * 1024);
+    connection
+        .send_request(piece_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(connection.state().pending_request_count(), 1);
+    let piece = BtMessage::Piece {
+        index: piece_request.index,
+        begin: piece_request.begin,
+        data: bytes::Bytes::from(vec![0x5a; piece_request.length as usize]),
+    };
+    remote
+        .write_all(&crate::bittorrent::message::serializer::serialize(&piece))
+        .await
+        .unwrap();
+    assert_eq!(connection.read_message().await.unwrap(), Some(piece));
+    assert_eq!(connection.state().pending_request_count(), 0);
+
+    let rejected_request = PieceBlockRequest::new(7, 0, 8 * 1024);
+    connection
+        .send_request(rejected_request.clone())
+        .await
+        .unwrap();
+    let rejected = BtMessage::Reject {
+        index: rejected_request.index,
+        offset: rejected_request.begin,
+        length: rejected_request.length,
+    };
+    remote
+        .write_all(&crate::bittorrent::message::serializer::serialize(
+            &rejected,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(connection.read_message().await.unwrap(), Some(rejected));
+    assert_eq!(connection.state().pending_request_count(), 0);
 }
 
 #[tokio::test]

@@ -210,10 +210,7 @@ impl BtSeedManager {
 
     pub(super) fn finish_peer_connection_attempt(
         &mut self,
-        result: std::result::Result<
-            crate::error::Result<PeerConnectionResult>,
-            tokio::task::JoinError,
-        >,
+        result: std::result::Result<PeerConnectionResult, tokio::task::JoinError>,
     ) {
         let Some(attempt) = self.pending_peer_connection.take() else {
             return;
@@ -224,12 +221,7 @@ impl BtSeedManager {
             .map(|peer| ((peer.ip.to_string(), peer.port), peer))
             .collect::<HashMap<_, _>>();
         let connection_result = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                warn!(%error, "Seeding peer connection batch failed");
-                self.return_checked_out(checked_out.into_values());
-                return;
-            }
+            Ok(result) => result,
             Err(error) => {
                 warn!(%error, "Seeding peer connection task failed");
                 self.return_checked_out(checked_out.into_values());
@@ -247,10 +239,14 @@ impl BtSeedManager {
             .peer_discovery
             .as_ref()
             .map(|discovery| discovery.dht_engines.clone());
-        let pex_enabled = self
+        let pex_allowed = self
             .peer_discovery
             .as_ref()
-            .is_some_and(|discovery| discovery.enable_peer_exchange);
+            .is_some_and(|discovery| discovery.peer_exchange_allowed);
+        let pex_option = self
+            .peer_discovery
+            .as_ref()
+            .map(|discovery| discovery.peer_exchange_option());
 
         for mut connection in connection_result.connections {
             let Some(endpoint) = connection.remote_endpoint() else {
@@ -274,7 +270,10 @@ impl BtSeedManager {
                 .copied()
                 .unwrap_or(BtPeerSource::Unknown);
             connection.set_source(source);
-            connection.set_pex_enabled(pex_enabled);
+            connection.set_pex_enabled(pex_allowed);
+            if let Some(pex_option) = &pex_option {
+                connection.set_peer_exchange_option(Arc::clone(pex_option));
+            }
             connection.configure_upload_with_auto_unchoke(
                 &self.config,
                 self.torrent_upload_limiter.clone(),

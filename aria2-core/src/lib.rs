@@ -14,14 +14,14 @@
 //! | Auth: Basic (RFC 7617) | ✅ | Base64 credential encoding, HTTPS-only enforcement |
 //! | Auth: Digest (RFC 7616) | ✅ | MD5/SHA256/SHA512 HA1→HA2→Response chain, nonce/qop/stale |
 //! | LPD (BEP 14) | ✅ | UDP multicast peer discovery on 239.192.152.143:6771 |
-//! | MSE (BEP 10) | ✅ | X25519 DH key exchange, RC4 encryption, plaintext fallback |
+//! | BitTorrent MSE | ✅ | 768-bit finite-field DH, RC4 encryption, plaintext fallback |
 //! | Stream Filters | ✅ | Composable GZip/BZip2/Chunked decoder pipeline |
 //! | Post-Download Hooks | ✅ | Move/Rename/Touch/Exec hook chain with env injection |
 //! | BT Progress Persistence | ✅ | Atomic .aria2 file save/load, C++ format compatible |
 //!
 //! ## Module Overview
 //!
-//! - **[`config`]** — Configuration system with ~95 core options, multi-source
+//! - **[`config`]** — Typed configuration and option registry, multi-source
 //!   merging (defaults → env → file → CLI), `ConfigManager` runtime manager,
 //!   NetRC authentication parser, and URI list file parser.
 //!
@@ -199,7 +199,7 @@ pub mod validation;
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
 #[cfg(feature = "bittorrent")]
-pub use engine::bittorrent::peer::message_validation::{
+pub use aria2_protocol::bittorrent::peer::message_validation::{
     BtMessageValidationError, BtMessageValidator, MAX_BLOCK_LENGTH,
 };
 #[cfg(feature = "bittorrent")]

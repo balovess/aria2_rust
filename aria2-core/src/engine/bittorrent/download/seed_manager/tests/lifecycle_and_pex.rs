@@ -113,7 +113,7 @@ async fn seeding_actor_sends_periodic_pex_with_recently_dropped_peers() {
         total_size: 16,
         utp_transport: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
-        enable_peer_exchange: true,
+        peer_exchange_allowed: true,
     };
     let manager = BtSeedManager::new_with_swarm(
         [0x74; 20],

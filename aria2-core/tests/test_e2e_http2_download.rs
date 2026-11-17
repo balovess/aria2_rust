@@ -154,7 +154,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
                                 peak.fetch_max(active_count, Ordering::AcqRel);
                             }
                             // Keep responses in flight long enough to observe actual H2 multiplexing.
-                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            tokio::time::sleep(Duration::from_millis(400)).await;
                             active_payload_streams.fetch_sub(1, Ordering::AcqRel);
                             if let Some(active) = per_connection_active.get(connection_index) {
                                 active.fetch_sub(1, Ordering::AcqRel);
@@ -209,6 +209,11 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
     let options = DownloadOptions {
         split: Some(16),
         max_connection_per_server: Some(4),
+        max_http2_sessions_per_server: Some(1),
+        http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
+            start_interval_ms: 0,
+            ..Default::default()
+        },
         http_version: HttpVersion::Http2,
         use_head: true,
         check_certificate: false,
@@ -254,10 +259,13 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
     );
     let output = std::fs::read(dir.path().join(output_name)).unwrap();
     assert_eq!(output.as_slice(), data.as_slice());
+    let payload_connections = per_connection_peak
+        .iter()
+        .filter(|peak| peak.load(Ordering::Relaxed) > 0)
+        .count();
     assert_eq!(
-        accepted_connections.load(Ordering::Relaxed),
-        4,
-        "the accepted H2 server should keep the initial four-session ceiling"
+        payload_connections, 1,
+        "all payload Ranges should use the configured single HTTP/2 session"
     );
     assert!(payload_requests.load(Ordering::Relaxed) >= 4);
     assert_eq!(
@@ -267,7 +275,14 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
     );
     assert!(
         peak_payload_streams.load(Ordering::Relaxed) >= 4,
-        "the H2 controller should start with four fixed streams on one connection"
+        "the H2 controller should start with four fixed streams on one connection; peak={}, payload_requests={}, h2_payload_requests={}, per_connection_peaks={:?}",
+        peak_payload_streams.load(Ordering::Relaxed),
+        payload_requests.load(Ordering::Relaxed),
+        h2_payload_requests.load(Ordering::Relaxed),
+        per_connection_peak
+            .iter()
+            .map(|peak| peak.load(Ordering::Relaxed))
+            .collect::<Vec<_>>(),
     );
     assert!(
         per_connection_peak

@@ -326,23 +326,6 @@ impl App {
             self.print_banner(output_to_stderr);
         }
 
-        // Apply engine-level options from config (CLI/file/env) BEFORE tasks
-        // are added. Zero is the explicit unlimited value, so it must also
-        // override the manager's default of five.
-        if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await
-            && let Ok(max) = u32::try_from(max)
-        {
-            self.request_man.set_max_concurrent(max);
-            info!(
-                "Max concurrent downloads set to {} (from config)",
-                if max == 0 {
-                    "unlimited".to_string()
-                } else {
-                    max.to_string()
-                }
-            );
-        }
-
         // Initialize engine (must be before session restore)
         self.initialize_engine().await;
 

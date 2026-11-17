@@ -510,12 +510,13 @@ fn test_download_options_to_map_all_fields() {
         private_key: Some("/tmp/client.key".to_string()),
         min_tls_version: Some("TLSv1.3".to_string()),
         // Metalink
-        metalink_version: None,
-        metalink_language: None,
-        metalink_os: None,
-        metalink_location: None,
-        metalink_preferred_protocol: None,
-        select_file: None,
+        metalink_version: Some("4.0".to_string()),
+        metalink_language: Some("en".to_string()),
+        metalink_os: Some("linux".to_string()),
+        metalink_location: Some("us,jp".to_string()),
+        metalink_preferred_protocol: Some("https".to_string()),
+        select_file: Some("2-3".to_string()),
+        metalink_base_uri: Some("https://example.test/metalink/".to_string()),
         bt_remove_unselected_file: true,
         piece_length: Some(1024 * 1024),
         metalink_enable_unique_protocol: false,
@@ -634,6 +635,16 @@ fn test_download_options_to_map_all_fields() {
 
     // Connection and authentication options
     assert_eq!(map.get("piece-length").unwrap(), "1048576");
+    assert_eq!(map.get("metalink-version").unwrap(), "4.0");
+    assert_eq!(map.get("metalink-language").unwrap(), "en");
+    assert_eq!(map.get("metalink-os").unwrap(), "linux");
+    assert_eq!(map.get("metalink-location").unwrap(), "us,jp");
+    assert_eq!(map.get("metalink-preferred-protocol").unwrap(), "https");
+    assert_eq!(
+        map.get("metalink-base-uri").unwrap(),
+        "https://example.test/metalink/"
+    );
+    assert_eq!(map.get("select-file").unwrap(), "2-3");
     assert_eq!(map.get("metalink-enable-unique-protocol").unwrap(), "false");
     assert_eq!(map.get("timeout").unwrap(), "90");
     assert_eq!(map.get("connect-timeout").unwrap(), "30");
@@ -675,7 +686,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("no-proxy").unwrap(), "localhost,127.0.0.1");
 
     // HTTP headers
-    assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
+    assert_eq!(map.get("header").unwrap(), "X-Custom: foo\nX-Other: bar");
     assert_eq!(map.get("user-agent").unwrap(), "test-client/1.0");
     assert_eq!(map.get("referer").unwrap(), "http://example.com");
     assert_eq!(map.get("enable-http-keep-alive").unwrap(), "false");
@@ -727,6 +738,19 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(restored.listen_port.as_deref(), Some("6881-6999"));
     assert_eq!(restored.dht_listen_port.as_deref(), Some("6881-6999"));
     assert!(!restored.metalink_enable_unique_protocol);
+    assert_eq!(restored.metalink_version.as_deref(), Some("4.0"));
+    assert_eq!(restored.metalink_language.as_deref(), Some("en"));
+    assert_eq!(restored.metalink_os.as_deref(), Some("linux"));
+    assert_eq!(restored.metalink_location.as_deref(), Some("us,jp"));
+    assert_eq!(
+        restored.metalink_preferred_protocol.as_deref(),
+        Some("https")
+    );
+    assert_eq!(
+        restored.metalink_base_uri.as_deref(),
+        Some("https://example.test/metalink/")
+    );
+    assert_eq!(restored.select_file.as_deref(), Some("2-3"));
     assert_eq!(restored.piece_length, Some(1024 * 1024));
     assert_eq!(restored.follow_torrent, Some(FollowMode::Memory));
     assert_eq!(restored.follow_metalink, Some(FollowMode::Disabled));
@@ -756,10 +780,62 @@ fn test_download_options_to_map_defaults_excluded() {
     // enable_dht and enable_public_trackers default to true -> NOT saved
     assert!(!map.contains_key("enable-dht"));
     assert!(!map.contains_key("enable-public-trackers"));
+    assert!(!map.contains_key("bt-piece-selection-strategy"));
+    assert!(!map.contains_key("bt-endgame-threshold"));
 
     // The omitted wire value must still restore aria2's typed default.
     let restored = DownloadOptions::from_option_strings(&map);
     assert_eq!(restored.seed_ratio, Some(1.0));
+}
+
+#[test]
+fn session_preserves_disabled_endgame_threshold() {
+    let options = DownloadOptions {
+        bt_endgame_threshold: 0,
+        ..DownloadOptions::default()
+    };
+    let serialized = download_options_to_map(&options);
+
+    assert_eq!(
+        serialized.get("bt-endgame-threshold").map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        DownloadOptions::from_option_strings(&serialized).bt_endgame_threshold,
+        0
+    );
+}
+
+#[test]
+fn sftp_timeouts_round_trip_through_session_options() {
+    let options = DownloadOptions {
+        sftp_connect_timeout: Some(41),
+        sftp_read_timeout: Some(73),
+        sftp_compression: true,
+        sftp_keepalive_interval: Some(0),
+        sftp_preferred_ciphers: Some(vec!["aes256-gcm@openssh.com".to_string()]),
+        ..DownloadOptions::default()
+    };
+
+    let serialized = download_options_to_map(&options);
+    assert_eq!(
+        serialized.get("sftp-connect-timeout").map(String::as_str),
+        Some("41")
+    );
+    assert_eq!(
+        serialized.get("sftp-read-timeout").map(String::as_str),
+        Some("73")
+    );
+
+    let restored = DownloadOptions::from_option_strings(&serialized);
+    assert_eq!(restored.sftp_connect_timeout, Some(41));
+    assert_eq!(restored.sftp_read_timeout, Some(73));
+    assert!(restored.sftp_compression);
+    assert_eq!(restored.sftp_keepalive_interval, Some(0));
+    assert_eq!(
+        restored.sftp_preferred_ciphers.as_deref(),
+        Some(["aes256-gcm@openssh.com".to_string()].as_slice())
+    );
 }
 
 #[test]
@@ -771,6 +847,10 @@ fn test_download_options_to_map_preserves_disabled_default_true_options() {
         bt_save_metadata: false,
         enable_http_pipelining: false,
         use_head: false,
+        http_adaptive: crate::request::request_group::HttpAdaptiveOptions {
+            enabled: false,
+            ..Default::default()
+        },
         ..DownloadOptions::default()
     };
     let map = download_options_to_map(&opts);
@@ -793,6 +873,36 @@ fn test_download_options_to_map_preserves_disabled_default_true_options() {
     assert!(!restored.bt_save_metadata);
     assert!(!restored.enable_http_pipelining);
     assert!(!restored.use_head);
+    assert!(!restored.http_adaptive.enabled);
+}
+
+#[test]
+fn test_download_options_to_map_roundtrips_http_adaptive_setting() {
+    let opts = DownloadOptions {
+        http_adaptive: crate::request::request_group::HttpAdaptiveOptions {
+            enabled: true,
+            ..Default::default()
+        },
+        ..DownloadOptions::default()
+    };
+    let map = download_options_to_map(&opts);
+
+    assert_eq!(map.get("http-adaptive-enabled"), Some(&"true".to_string()));
+    let restored = DownloadOptions::from_option_strings(&map);
+    assert!(restored.http_adaptive.enabled);
+}
+
+#[test]
+fn test_download_options_to_map_preserves_disabled_continue_option() {
+    let opts = DownloadOptions {
+        continue_download: false,
+        ..DownloadOptions::default()
+    };
+    let map = download_options_to_map(&opts);
+
+    assert_eq!(map.get("continue"), Some(&"false".to_string()));
+    let restored = DownloadOptions::from_option_strings(&map);
+    assert!(!restored.continue_download);
 }
 
 #[test]

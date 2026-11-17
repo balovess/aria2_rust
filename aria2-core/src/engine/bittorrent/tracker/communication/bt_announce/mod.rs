@@ -8,20 +8,19 @@
 //! The [`BtAnnounce`] state machine supplies lifecycle state for HTTP,
 //! WebSocket, and UDP tracker URLs.
 //! `TrackerAnnouncer` routes `udp://` URLs to the policy-bound UDP client.
-//! The helper [`is_udp_tracker`] detects UDP URLs.
+//! Tracker URL transport classification is provided by `aria2-protocol`.
 
 #![allow(clippy::empty_line_after_doc_comments)]
 
 mod tracker_url;
+mod udp;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use tracker_url::urlencode_bytes;
 pub use tracker_url::{is_udp_tracker, urlencode_infohash};
 
-use super::announce_list::AnnounceList;
-use super::types::AnnounceEvent;
+use super::{AnnounceEvent, AnnounceList};
 
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -257,56 +256,26 @@ impl BtAnnounce {
         key: Option<&[u8]>,
     ) -> Option<String> {
         let base_url = self.announce_list.get_announce()?;
-        let separator = if base_url.contains('?') { "&" } else { "?" };
-
-        // Use last 8 bytes of peer ID as key if not explicitly provided
-        let key_bytes = key.unwrap_or(&peer_id[12..20]);
-
-        let numwant = self.numwant();
-
-        let mut url = format!(
-            "{}{}info_hash={}&peer_id={}&uploaded={}&downloaded={}&left={}&compact=1&key={}&numwant={}&no_peer_id=1",
-            base_url,
-            separator,
-            urlencode_infohash(info_hash),
-            urlencode_infohash(peer_id),
-            uploaded,
-            downloaded,
-            left,
-            urlencode_bytes(key_bytes),
-            numwant,
-        );
-
-        if self.tcp_port != 0 {
-            url.push_str(&format!("&port={}", self.tcp_port));
-        }
-
         let event_str = self.announce_list.get_event_string();
-        if !event_str.is_empty() {
-            url.push_str("&event=");
-            url.push_str(event_str);
-        }
-
-        if !self.tracker_id.is_empty() {
-            url.push_str("&trackerid=");
-            url.push_str(&urlencode_bytes(self.tracker_id.as_bytes()));
-        }
-
-        // C++: if(PREF_BT_FORCE_ENCRYPTION || PREF_BT_REQUIRE_CRYPTO)
-        //   append "&requirecrypto=1", else append "&supportcrypto=1"
-        if self.force_encryption {
-            url.push_str("&requirecrypto=1");
-        } else {
-            url.push_str("&supportcrypto=1");
-        }
-
-        // C++: if(PREF_BT_EXTERNAL_IP is set) append "&ip=<addr>"
-        if let Some(ref ip) = self.external_ip {
-            url.push_str("&ip=");
-            url.push_str(ip);
-        }
-
-        Some(url)
+        Some(
+            aria2_protocol::bittorrent::tracker::http_tracker_protocol::build_announce_url(
+                &aria2_protocol::bittorrent::tracker::http_tracker_protocol::HttpAnnounceRequest {
+                    base_url,
+                    info_hash,
+                    peer_id,
+                    uploaded,
+                    downloaded,
+                    left,
+                    key,
+                    num_want: self.numwant(),
+                    port: self.tcp_port,
+                    event: Some(event_str),
+                    tracker_id: Some(&self.tracker_id),
+                    require_crypto: self.force_encryption,
+                    external_ip: self.external_ip.as_deref(),
+                },
+            ),
+        )
     }
 
     pub fn numwant(&self) -> u32 {
@@ -444,7 +413,7 @@ impl BtAnnounce {
         // response. Append it after the configured tiers; never replace the
         // torrent/user/public tiers that were already discovered.
         if !response.announce_list.is_empty() {
-            let added = self.announce_list.append_tiers(&response.announce_list);
+            let added = self.append_tracker_tiers(&response.announce_list);
             if !added.is_empty() {
                 debug!(
                     "[BT] Added {} tracker(s) from tracker response",
@@ -536,83 +505,6 @@ impl BtAnnounce {
     /// external address to other peers.
     pub fn set_external_ip(&mut self, ip: Option<String>) {
         self.external_ip = ip;
-    }
-
-    // ==================================================================
-    // UDP Tracker Integration
-    // ==================================================================
-
-    /// Returns `true` if the current tracker URL is a UDP tracker.
-    ///
-    /// Call this after `adjust_announce_list()` to determine whether
-    /// to route the announce through the UDP client or HTTP path.
-    ///
-    /// # C++ Reference
-    ///
-    /// C++ aria2 dispatches to `UdpTrackerRequest` based on the URL scheme
-    /// during `BtAnnounce::announce()`.
-    pub fn is_current_tracker_udp(&self) -> bool {
-        self.announce_list
-            .get_announce()
-            .map(is_udp_tracker)
-            .unwrap_or(false)
-    }
-
-    /// Convert the current announce event to a UDP tracker event.
-    ///
-    /// Maps the tracker state machine event to the appropriate UDP protocol
-    /// event for use with `UdpTrackerClient::announce()`.
-    ///
-    /// # C++ Reference
-    ///
-    /// C++ `UdpTrackerRequest` uses the same event values:
-    /// - 0 = none, 1 = completed, 2 = started, 3 = stopped
-    pub fn current_udp_event(
-        &self,
-    ) -> aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent {
-        use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
-        match self.announce_list.get_event() {
-            AnnounceEvent::Started | AnnounceEvent::StartedAfterCompletion => UdpEvent::Started,
-            AnnounceEvent::Completed => UdpEvent::Completed,
-            AnnounceEvent::Stopped => UdpEvent::Stopped,
-            // Downloading, Seeding, Halted are periodic announces with no event
-            AnnounceEvent::Downloading | AnnounceEvent::Seeding | AnnounceEvent::Halted => {
-                UdpEvent::None
-            }
-        }
-    }
-
-    /// Process a UDP tracker announce response and update internal state.
-    ///
-    /// This is the UDP equivalent of `process_announce_response()`. It
-    /// updates the interval, seeder/leecher counts, and announces success.
-    ///
-    /// Returns peer addresses on success.
-    pub fn process_udp_announce_response(
-        &mut self,
-        response: &aria2_protocol::bittorrent::tracker::udp_tracker_protocol::AnnounceResponse,
-    ) -> Vec<(String, u16)> {
-        // Update interval from response
-        // C++ sets both minInterval_ and interval_ to the reply interval directly
-        if response.interval > 0 {
-            let new_interval = Duration::from_secs(response.interval as u64);
-            self.interval = new_interval;
-            self.min_interval = new_interval;
-            debug!("[BT] UDP tracker interval: {}s", response.interval);
-        }
-
-        // Update complete/incomplete counts
-        self.complete = Some(response.seeders as i64);
-        self.incomplete = Some(response.leechers as i64);
-        debug!(
-            "[BT] UDP tracker stats: seeders={}, leechers={}",
-            response.seeders, response.leechers
-        );
-
-        // Mark announce success (resets in-flight counter, updates timing)
-        self.announce_success();
-
-        response.peers.clone()
     }
 
     /// Get the current announce interval.

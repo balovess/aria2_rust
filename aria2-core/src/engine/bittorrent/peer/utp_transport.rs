@@ -1,8 +1,8 @@
 //! Process-owned uTP socket actor.
 //!
-//! One actor owns the UDP socket and all uTP protocol state for a bound local
-//! endpoint. Peer actors use bounded commands and per-connection receive
-//! queues; they never lock or poll `UtpSocket` themselves.
+//! One actor owns and asynchronously drives the protocol library's `UtpSocket`
+//! for a bound local endpoint. Peer actors use bounded commands and
+//! per-connection receive queues; they never lock or poll `UtpSocket` themselves.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocket};
+use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocket, UtpSocketOptions};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -42,6 +42,37 @@ pub(crate) struct UtpConnectionHandle {
     state_rx: watch::Receiver<ConnectionState>,
     close_requested: Arc<AtomicBool>,
     close_notify: Arc<Notify>,
+}
+
+#[cfg(test)]
+pub(crate) fn incoming_connection_for_test(
+    endpoint: SocketAddr,
+) -> (
+    IncomingUtpConnection,
+    Arc<AtomicBool>,
+    mpsc::Sender<Vec<u8>>,
+) {
+    let (command_tx, _command_rx) = mpsc::channel(1);
+    let (receive_tx, receive_rx) = mpsc::channel(1);
+    let (_state_tx, state_rx) = watch::channel(ConnectionState::Established);
+    let close_requested = Arc::new(AtomicBool::new(false));
+    let connection = UtpConnectionHandle {
+        id: 1,
+        command_tx,
+        receive_rx,
+        state_rx,
+        close_requested: Arc::clone(&close_requested),
+        close_notify: Arc::new(Notify::new()),
+    };
+
+    (
+        IncomingUtpConnection {
+            connection,
+            endpoint,
+        },
+        close_requested,
+        receive_tx,
+    )
 }
 
 enum Command {
@@ -78,10 +109,12 @@ struct ActorConnection {
 impl UtpTransportActor {
     pub(crate) fn bind(
         address: SocketAddr,
+        options: UtpSocketOptions,
         incoming_tx: mpsc::Sender<IncomingUtpConnection>,
         shutdown: CancellationToken,
     ) -> std::io::Result<Self> {
-        let socket = UtpSocket::bind_addr(address).map_err(std::io::Error::other)?;
+        let socket =
+            UtpSocket::bind_addr_with_options(address, options).map_err(std::io::Error::other)?;
         let readiness = socket.readiness_socket().map_err(std::io::Error::other)?;
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let close_notify = Arc::new(Notify::new());
@@ -102,6 +135,10 @@ impl UtpTransportActor {
 
     pub(crate) fn handle(&self) -> UtpTransportHandle {
         self.handle.clone()
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.is_finished()
     }
 
     pub(crate) async fn join(self) -> Result<(), JoinError> {
@@ -526,46 +563,4 @@ fn publish_connection_state(socket: &UtpSocket, connections: &mut HashMap<u16, A
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn dropping_connection_requests_close_without_bounded_queue_capacity() {
-        let (command_tx, mut command_rx) = mpsc::channel(1);
-        let (reply, _response) = oneshot::channel();
-        command_tx
-            .try_send(Command::Send {
-                id: 7,
-                bytes: vec![1],
-                reply,
-            })
-            .unwrap();
-        let (_receive_tx, receive_rx) = mpsc::channel(1);
-        let (_state_tx, state_rx) = watch::channel(ConnectionState::Established);
-        let close_requested = Arc::new(AtomicBool::new(false));
-        let close_notify = Arc::new(Notify::new());
-        let handle = UtpConnectionHandle {
-            id: 7,
-            command_tx,
-            receive_rx,
-            state_rx,
-            close_requested: Arc::clone(&close_requested),
-            close_notify: Arc::clone(&close_notify),
-        };
-
-        drop(handle);
-
-        assert!(close_requested.load(Ordering::Acquire));
-        assert!(matches!(
-            command_rx.try_recv(),
-            Ok(Command::Send { id: 7, .. })
-        ));
-        assert!(matches!(
-            command_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Disconnected)
-        ));
-        tokio::time::timeout(Duration::from_millis(50), close_notify.notified())
-            .await
-            .expect("drop close notification must not depend on command-queue capacity");
-    }
-}
+mod tests;

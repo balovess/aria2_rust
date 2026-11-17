@@ -2,10 +2,8 @@
 
 use std::net::SocketAddr;
 
-mod parsing;
 mod proxy_get;
 mod proxy_tunnel;
-mod response;
 
 /// FTP data connection mode used by the connection pool and download options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -25,13 +23,6 @@ pub enum FtpMode {
 pub(crate) fn active_data_bind_addr(local_addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(local_addr.ip(), 0)
 }
-
-// Re-export parsing helpers used by the download engine.
-pub(crate) use parsing::{
-    cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
-    parse_pwd_response, percent_decode, split_decoded_remote_path,
-};
-pub(crate) use response::read_response_impl;
 
 // Re-export proxy tunnel types
 pub use proxy_tunnel::{FtpProxyTunnel, FtpProxyTunnelConfig, FtpProxyTunnelResult};

@@ -1,0 +1,178 @@
+use super::*;
+
+#[test]
+fn c_api_dispatches_bittorrent_listener_runtime_options() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+    let (command_tx, mut command_rx) = crate::engine::engine_command::channel();
+    session.command_tx = command_tx;
+
+    let (timeout_entry, timeout_name, timeout_value) =
+        kv("bt-incoming-peer-handshake-timeout", "42");
+    let (utp_entry, utp_name, utp_value) = kv("bt-utp-max-connections", "73");
+    let (utp_connect_entry, utp_connect_name, utp_connect_value) =
+        kv("bt-utp-connect-timeout", "14");
+    let (utp_idle_entry, utp_idle_name, utp_idle_value) = kv("bt-utp-idle-timeout", "46");
+    let (utp_keepalive_entry, utp_keepalive_name, utp_keepalive_value) =
+        kv("bt-utp-keepalive-interval", "19");
+    let (file_limit_entry, file_limit_name, file_limit_value) = kv("bt-max-open-files", "17");
+    let (dht_limit_entry, dht_limit_name, dht_limit_value) = kv("dht-max-peer-info-hashes", "128");
+    let (dht_items_entry, dht_items_name, dht_items_value) = kv("dht-max-items", "512");
+    let (piece_strategy_entry, piece_strategy_name, piece_strategy_value) =
+        kv("bt-piece-selection-strategy", "sequential");
+    let (endgame_threshold_entry, endgame_threshold_name, endgame_threshold_value) =
+        kv("bt-endgame-threshold", "0");
+    let entries = [
+        timeout_entry,
+        utp_entry,
+        utp_connect_entry,
+        utp_idle_entry,
+        utp_keepalive_entry,
+        file_limit_entry,
+        dht_limit_entry,
+        dht_items_entry,
+        piece_strategy_entry,
+        endgame_threshold_entry,
+    ];
+    let result =
+        unsafe { aria2_rust_change_global_option(&mut session, entries.as_ptr(), entries.len()) };
+
+    assert_eq!(result, 0);
+    assert_eq!(
+        session.runtime.block_on(
+            session
+                .config
+                .get_global_i64("bt-incoming-peer-handshake-timeout")
+        ),
+        Some(42)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("bt-utp-max-connections")),
+        Some(73)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("bt-utp-connect-timeout")),
+        Some(14)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("bt-utp-idle-timeout")),
+        Some(46)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("bt-utp-keepalive-interval")),
+        Some(19)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-peer-info-hashes")),
+        Some(128)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-items")),
+        Some(512)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_str("bt-piece-selection-strategy")),
+        Some("sequential".to_string())
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("bt-endgame-threshold")),
+        Some(0)
+    );
+    assert!(matches!(
+        command_rx.try_recv(),
+        Ok(
+            crate::engine::engine_command::EngineCommand::SetIncomingPeerHandshakeTimeout {
+                seconds: 42
+            }
+        )
+    ));
+    assert!(matches!(
+        command_rx.try_recv(),
+        Ok(crate::engine::engine_command::EngineCommand::SetBtMaxOpenFiles { max: 17 })
+    ));
+    let expected_utp_options = aria2_protocol::bittorrent::utp::UtpSocketOptions::default()
+        .with_max_connections(73)
+        .with_connect_timeout(std::time::Duration::from_secs(14))
+        .with_idle_timeout(std::time::Duration::from_secs(46))
+        .with_keepalive_interval(std::time::Duration::from_secs(19));
+    let mut dht_update_seen = false;
+    let mut dht_items_update_seen = false;
+    let mut utp_update_seen = false;
+    while let Ok(command) = command_rx.try_recv() {
+        match command {
+            crate::engine::engine_command::EngineCommand::SetDhtPeerStorageConfig { config } => {
+                assert_eq!(config.max_info_hashes, 128);
+                assert_eq!(
+                    config.max_peers_per_info_hash,
+                    aria2_protocol::bittorrent::dht::DhtPeerStorageConfig::default()
+                        .max_peers_per_info_hash
+                );
+                dht_update_seen = true;
+            }
+            crate::engine::engine_command::EngineCommand::SetDhtItemStoreLimit { max_items } => {
+                assert_eq!(max_items, 512);
+                dht_items_update_seen = true;
+            }
+            crate::engine::engine_command::EngineCommand::SetUtpSocketOptions { options } => {
+                assert_eq!(options, expected_utp_options);
+                utp_update_seen = true;
+            }
+            _ => panic!("unexpected runtime command while checking BT updates"),
+        }
+    }
+    assert!(
+        dht_update_seen,
+        "DHT storage update command was not dispatched"
+    );
+    assert!(
+        dht_items_update_seen,
+        "DHT item-store limit update command was not dispatched"
+    );
+    assert!(utp_update_seen, "uTP update command was not dispatched");
+    assert!(matches!(
+        command_rx.try_recv(),
+        Err(crate::engine::engine_command::EngineCommandTryRecvError::Empty)
+    ));
+
+    drop((
+        timeout_name,
+        timeout_value,
+        utp_name,
+        utp_value,
+        utp_connect_name,
+        utp_connect_value,
+        utp_idle_name,
+        utp_idle_value,
+        utp_keepalive_name,
+        utp_keepalive_value,
+        file_limit_name,
+        file_limit_value,
+        dht_limit_name,
+        dht_limit_value,
+        dht_items_name,
+        dht_items_value,
+        piece_strategy_name,
+        piece_strategy_value,
+        endgame_threshold_name,
+        endgame_threshold_value,
+    ));
+    session.finalize();
+}

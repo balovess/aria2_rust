@@ -99,7 +99,7 @@ fn sha1_hex(data: &[u8]) -> String {
     use sha1::Digest;
     let mut h = sha1::Sha1::new();
     h.update(data);
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 #[tokio::test]

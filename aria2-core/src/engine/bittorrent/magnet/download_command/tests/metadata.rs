@@ -18,8 +18,11 @@ fn normalize_bep9_info_metadata_builds_a_complete_torrent() {
     ))
     .expect("test magnet should parse");
 
-    let normalized = MagnetDownloadCommand::normalize_magnet_metadata(&magnet, &info_bytes)
-        .expect("BEP 9 info metadata should be wrapped");
+    let normalized = aria2_protocol::bittorrent::torrent::metainfo::normalize_magnet_metadata(
+        &info_bytes,
+        &magnet.trackers,
+    )
+    .expect("BEP 9 info metadata should be wrapped");
     let parsed = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&normalized)
         .expect("normalized metadata should parse as a torrent");
 
@@ -36,8 +39,11 @@ fn normalize_magnet_metadata_keeps_complete_torrent_bytes() {
     )
     .expect("test magnet should parse");
 
-    let normalized = MagnetDownloadCommand::normalize_magnet_metadata(&magnet, &torrent)
-        .expect("complete torrent metadata should remain valid");
+    let normalized = aria2_protocol::bittorrent::torrent::metainfo::normalize_magnet_metadata(
+        &torrent,
+        &magnet.trackers,
+    )
+    .expect("complete torrent metadata should remain valid");
     assert_eq!(normalized, torrent);
 }
 
@@ -52,8 +58,9 @@ fn magnet_web_seeds_are_added_without_changing_info_hash() {
         ))
         .expect("web-seed magnet should parse");
 
-    let merged = MagnetDownloadCommand::merge_magnet_web_seeds(&magnet, &torrent)
-        .expect("web seeds should be merged into torrent metadata");
+    let merged =
+        aria2_protocol::bittorrent::torrent::metainfo::merge_magnet_web_seeds(&torrent, &magnet.ws)
+            .expect("web seeds should be merged into torrent metadata");
     let merged_meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&merged)
         .expect("merged torrent should parse");
 

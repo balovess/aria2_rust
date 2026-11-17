@@ -152,15 +152,6 @@ impl ProgressCheckpoint {
             .min(existing_length)
     }
 
-    #[cfg(feature = "metalink")]
-    pub(crate) async fn stored_total_length(output_path: &Path) -> Option<u64> {
-        ControlFile::load(&ControlFile::control_path_for(output_path))
-            .await
-            .ok()
-            .flatten()
-            .map(|control_file| control_file.total_length())
-    }
-
     /// Whether an update would advance the saved length.
     pub(crate) fn needs_update(&self, completed_length: u64, force: bool) -> bool {
         let Some(control_file) = self.control_file.as_ref() else {
@@ -207,7 +198,7 @@ impl ProgressCheckpoint {
     /// terminal validation failure, such as a size or checksum mismatch.
     /// Cancellation paths deliberately save progress so a paused or removed
     /// download remains resumable.
-    #[cfg(feature = "metalink")]
+    #[cfg(all(feature = "metalink", test))]
     pub(crate) async fn discard(self, output_path: &Path) {
         if let Err(error) = tokio::fs::remove_file(&self.path).await
             && error.kind() != std::io::ErrorKind::NotFound

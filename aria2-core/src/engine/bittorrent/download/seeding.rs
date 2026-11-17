@@ -63,12 +63,15 @@ impl BtDownloadCommand {
         swarm.set_local_metadata(std::sync::Arc::clone(&self.local_metadata));
         let file_provider: std::sync::Arc<
             dyn crate::engine::bittorrent::peer::upload_session::PieceDataProvider,
-        > = std::sync::Arc::new(FileBackedPieceProvider::new(
-            self.output_path.clone(),
-            piece_length,
-            num_pieces,
-            self.multi_file_layout.clone(),
-        ));
+        > = std::sync::Arc::new(
+            FileBackedPieceProvider::new(
+                self.output_path.clone(),
+                piece_length,
+                num_pieces,
+                self.multi_file_layout.clone(),
+            )
+            .with_open_file_budget(self.open_file_budget.clone()),
+        );
 
         let group_options = { self.group.recover().options().clone() };
         let upload_limit = group_options.max_upload_limit;
@@ -153,7 +156,7 @@ impl BtDownloadCommand {
             total_size,
             utp_transport: self.utp_transport.clone(),
             outbound_network_policy: std::sync::Arc::clone(&self.outbound_network_policy),
-            enable_peer_exchange: group_options.enable_peer_exchange && !self.is_private,
+            peer_exchange_allowed: !self.is_private,
         };
 
         let upload_rate = swarm.upload_rate();

@@ -48,10 +48,15 @@ impl DownloadEngine {
             .server_stat_save_interval
             .map(|interval| std::time::Instant::now() + interval);
 
+        let ftp_connection_pool = Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(
+            crate::constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
+        ));
+
         let ctx = super::super::engine_loop::EngineLoopContext {
             group_man,
             dns_cache: Arc::clone(&self.dns_cache),
             outbound_network_policy: Arc::clone(&self.outbound_network_policy),
+            ftp_connection_pool: Arc::clone(&ftp_connection_pool),
             auto_save: self.auto_save.take(),
             auto_save_dirty_signal: self.auto_save_dirty_signal.take(),
             // Share the engine's bus so listeners registered before the loop are reached.
@@ -80,12 +85,16 @@ impl DownloadEngine {
             bt_listener: Arc::clone(&self.bt_listener),
             #[cfg(feature = "bittorrent")]
             lpd_manager: Arc::clone(&self.lpd_manager),
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: Arc::clone(&self.open_file_budget),
         };
 
         #[cfg(feature = "bittorrent")]
         self.public_tracker_catalog.start_catalog_update();
 
         super::super::engine_loop::run_engine_loop(ctx, engine_cmd_rx, shutdown_rx).await;
+
+        ftp_connection_pool.clear().await;
 
         #[cfg(feature = "bittorrent")]
         self.bt_listener.shutdown().await;
@@ -98,7 +107,7 @@ impl DownloadEngine {
             .bt_registry
             .write()
             .ok()
-            .map(|mut registry| registry.take_global_dht_engines())
+            .map(|mut registry| registry.take_all_dht_engines())
             .unwrap_or_default();
         #[cfg(feature = "bittorrent")]
         for engine in engines {

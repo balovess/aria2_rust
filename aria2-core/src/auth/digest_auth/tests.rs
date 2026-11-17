@@ -191,6 +191,28 @@ fn test_www_authenticate_header_parsing() {
 }
 
 #[test]
+fn test_www_authenticate_parser_handles_quoted_commas_case_and_legacy_fields() {
+    let challenge = parse_www_authenticate(
+        r#"dIgEsT realm="files, private", nonce="abc", qop="auth, custom", algorithm=unknown"#,
+    )
+    .unwrap();
+
+    assert_eq!(challenge.realm, "files, private");
+    assert_eq!(challenge.nonce.as_deref(), Some("abc"));
+    assert_eq!(challenge.qop.as_deref(), Some("auth, custom"));
+    assert_eq!(
+        challenge.scheme,
+        AuthScheme::Digest {
+            algorithm: DigestAlgorithm::Md5
+        }
+    );
+
+    let nonce_less = parse_www_authenticate("Digest realm=legacy").unwrap();
+    assert_eq!(nonce_less.realm, "legacy");
+    assert!(nonce_less.nonce.is_none());
+}
+
+#[test]
 fn test_multi_realm_challenge() {
     // Test parsing different realms
     let header1 = r#"Digest realm="Realm1", nonce="abc""#;

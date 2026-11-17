@@ -13,6 +13,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[tokio::test]
+async fn app_configuration_uses_binary_identity_and_protocol_peer_id_prefix() {
+    let app = App::new();
+    let config = app.config.read().await;
+
+    assert_eq!(
+        config.get_global_str("user-agent").await.as_deref(),
+        Some(crate::identity::DEFAULT_USER_AGENT)
+    );
+    #[cfg(feature = "bittorrent")]
+    {
+        assert_eq!(
+            config.get_global_str("peer-agent").await.as_deref(),
+            Some(crate::identity::DEFAULT_PEER_AGENT)
+        );
+        assert_eq!(
+            config.get_global_str("peer-id-prefix").await.as_deref(),
+            Some(aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX)
+        );
+    }
+}
+
 #[test]
 fn redirected_stdout_keeps_plain_console_progress_enabled() {
     assert!(
@@ -114,6 +136,7 @@ async fn test_cli_metalink_options_reach_download_options() {
         "--metalink-os=linux",
         "--metalink-location=us,jp",
         "--metalink-preferred-protocol=https",
+        "--metalink-base-uri=https://example.test/meta/",
         "--select-file=2",
         "https://example.test/metadata",
     ])
@@ -137,7 +160,113 @@ async fn test_cli_metalink_options_reach_download_options() {
         options.metalink_preferred_protocol.as_deref(),
         Some("https")
     );
+    assert_eq!(
+        options.metalink_base_uri.as_deref(),
+        Some("https://example.test/meta/")
+    );
     assert_eq!(options.select_file.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn test_cli_ftp_proxy_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--all-proxy=socks5://global-proxy.invalid:1080",
+        "--ftp-proxy=http://proxy.example:3128",
+        "--ftp-proxy-user=proxy-user",
+        "--ftp-proxy-passwd=proxy-password",
+        "--proxy-method=tunnel",
+        "--user-agent=task-agent/1.0",
+        "--ftp-user=download-user",
+        "ftp://example.test/file.bin",
+    ])
+    .expect("FTP proxy CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(
+        options.ftp_proxy.as_deref(),
+        Some("http://proxy.example:3128")
+    );
+    assert_eq!(
+        options.all_proxy.as_deref(),
+        Some("socks5://global-proxy.invalid:1080")
+    );
+    assert_eq!(options.ftp_proxy_user.as_deref(), Some("proxy-user"));
+    assert_eq!(options.ftp_proxy_passwd.as_deref(), Some("proxy-password"));
+    assert_eq!(options.proxy_method, "tunnel");
+    assert_eq!(options.user_agent.as_deref(), Some("task-agent/1.0"));
+    assert_eq!(options.ftp_user.as_deref(), Some("download-user"));
+}
+
+#[tokio::test]
+async fn test_cli_ftp_reuse_connection_reaches_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--ftp-reuse-connection=false",
+        "ftp://example.test/file.bin",
+    ])
+    .expect("FTP connection reuse CLI option should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("FTP connection reuse option should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert!(!options.ftp_reuse_connection);
+}
+
+#[tokio::test]
+async fn test_cli_http_auth_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--http-user=download-user",
+        "--http-passwd=download-password",
+        "--http-auth-challenge=true",
+        "--no-netrc=true",
+        "--header=Authorization: Bearer cli",
+        "http://example.test/file.bin",
+    ])
+    .expect("HTTP auth CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("HTTP auth options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.http_user.as_deref(), Some("download-user"));
+    assert_eq!(options.http_passwd.as_deref(), Some("download-password"));
+    assert!(options.http_auth_challenge);
+    assert!(options.no_netrc);
+    assert_eq!(options.header, ["Authorization: Bearer cli"]);
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_cli_empty_tracker_sources_remain_an_empty_list() {
+    let cli =
+        CliArgs::try_parse_from(["aria2", "--bt-tracker-source=", "http://example.test/file"])
+            .expect("empty tracker source list should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("empty tracker source list should load");
+
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_option("bt-tracker-source")
+            .await,
+        Some(OptionValue::List(Vec::new()))
+    );
 }
 
 #[cfg(feature = "bittorrent")]
@@ -148,7 +277,18 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--bt-keep-alive-interval=31",
         "--bt-timeout=181",
         "--bt-request-timeout=61",
+        "--bt-piece-selection-strategy=sequential",
+        "--bt-endgame-threshold=0",
         "--peer-connection-timeout=16",
+        "--bt-incoming-peer-handshake-timeout=45",
+        "--bt-utp-max-connections=73",
+        "--bt-utp-connect-timeout=14",
+        "--bt-utp-idle-timeout=46",
+        "--bt-utp-keepalive-interval=19",
+        "--enable-utp=true",
+        "--utp-listen-port=6882",
+        "--bt-tracker-source-timeout=47",
+        "--bt-tracker-source-concurrency=2",
         "--bt-peer-blocklist=blocked-peers.txt",
         "--enable-dht6=true",
         "--dht-listen-addr=127.0.0.1",
@@ -159,6 +299,9 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
         "--dht-entry-point-host6=::1",
         "--dht-entry-point-port6=6882",
         "--dht-file-path6=dht6.dat",
+        "--dht-max-peer-info-hashes=1200",
+        "--dht-max-peers-per-info-hash=37",
+        "--dht-max-items=512",
     ])
     .expect("BitTorrent timeout and DHT CLI options should parse");
 
@@ -171,7 +314,47 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.bt_keep_alive_interval, 31);
     assert_eq!(options.bt_timeout, 181);
     assert_eq!(options.bt_request_timeout, 61);
+    assert_eq!(options.bt_piece_selection_strategy, "sequential");
+    assert_eq!(options.bt_endgame_threshold, 0);
     assert_eq!(options.peer_connection_timeout, 16);
+    assert!(options.enable_utp);
+    assert_eq!(options.utp_listen_port, Some(6882));
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("bt-incoming-peer-handshake-timeout")
+            .await,
+        Some(45)
+    );
+    for (name, expected) in [
+        ("bt-utp-max-connections", 73),
+        ("bt-utp-connect-timeout", 14),
+        ("bt-utp-idle-timeout", 46),
+        ("bt-utp-keepalive-interval", 19),
+    ] {
+        assert_eq!(
+            app.config.read().await.get_global_i64(name).await,
+            Some(expected),
+            "CLI must pass {name} into process configuration"
+        );
+    }
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("bt-tracker-source-timeout")
+            .await,
+        Some(47)
+    );
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("bt-tracker-source-concurrency")
+            .await,
+        Some(2)
+    );
     assert_eq!(
         options.bt_peer_blocklist.as_deref(),
         Some("blocked-peers.txt")
@@ -185,6 +368,143 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.dht_entry_point_host6.as_deref(), Some("::1"));
     assert_eq!(options.dht_entry_point_port6, Some(6882));
     assert_eq!(options.dht_file_path6.as_deref(), Some("dht6.dat"));
+    for (name, expected) in [
+        ("dht-max-peer-info-hashes", 1200),
+        ("dht-max-peers-per-info-hash", 37),
+        ("dht-max-items", 512),
+    ] {
+        assert_eq!(
+            app.config.read().await.get_global_i64(name).await,
+            Some(expected),
+            "CLI must pass {name} into process configuration"
+        );
+    }
+}
+
+#[cfg(feature = "sftp")]
+#[tokio::test]
+async fn test_cli_sftp_connection_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--ssh-host-key-md=sha-1=cli-fingerprint",
+        "--sftp-connect-timeout=41",
+        "--sftp-read-timeout=73",
+        "--sftp-compression=true",
+        "--sftp-keepalive-interval=0",
+        "--sftp-preferred-ciphers=aes256-gcm@openssh.com,chacha20-poly1305@openssh.com",
+    ])
+    .expect("SFTP timeout options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(
+        options.ssh_host_key_md.as_deref(),
+        Some("sha-1=cli-fingerprint")
+    );
+    assert_eq!(options.sftp_connect_timeout, Some(41));
+    assert_eq!(options.sftp_read_timeout, Some(73));
+    assert!(options.sftp_compression);
+    assert_eq!(options.sftp_keepalive_interval, Some(0));
+    assert_eq!(options.sftp_preferred_ciphers.as_ref().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_cli_connect_timeout_reaches_download_options() {
+    let cli = CliArgs::try_parse_from(["aria2", "--connect-timeout=41"])
+        .expect("HTTP connect timeout should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.connect_timeout, Some(41));
+}
+
+#[tokio::test]
+async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
+    let cli = CliArgs::try_parse_from(["aria2"])
+        .expect("CLI without an adaptive HTTP concurrency switch should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert!(!options.http_adaptive.enabled);
+
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--http-adaptive-enabled=true",
+        "--http-adaptive-reduction-percent=33",
+        "--http-adaptive-recovery-interval=17",
+        "--http-adaptive-recovery-successes-min=40",
+        "--http-adaptive-recovery-successes-max=20",
+        "--http-adaptive-start-interval-ms=250",
+        "--http-adaptive-backoff-base=30",
+        "--http-adaptive-backoff-max=10",
+        "--http-adaptive-capacity-start-interval-ms=2500",
+        "--http-adaptive-capacity-start-interval-max-ms=1500",
+        "--http-adaptive-rate-recovery-successes=128",
+        "--http-adaptive-rate-min-interval-ms=25",
+        "--http-adaptive-backoff-reset-after=70",
+    ])
+    .expect("adaptive HTTP concurrency override should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI override should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert!(options.http_adaptive.enabled);
+    assert_eq!(options.http_adaptive.reduction_percent, 33);
+    assert_eq!(options.http_adaptive.recovery_interval_secs, 17);
+    assert_eq!(options.http_adaptive.recovery_successes_min, 40);
+    assert_eq!(options.http_adaptive.recovery_successes_max, 40);
+    assert_eq!(options.http_adaptive.start_interval_ms, 250);
+    assert_eq!(options.http_adaptive.backoff_base_secs, 30);
+    assert_eq!(options.http_adaptive.backoff_max_secs, 30);
+    assert_eq!(options.http_adaptive.capacity_start_interval_ms, 2500);
+    assert_eq!(options.http_adaptive.capacity_start_interval_max_ms, 2500);
+    assert_eq!(options.http_adaptive.rate_recovery_successes, 128);
+    assert_eq!(options.http_adaptive.rate_min_interval_ms, 25);
+    assert_eq!(options.http_adaptive.backoff_reset_after_secs, 70);
+}
+
+#[tokio::test]
+async fn test_cli_continue_defaults_to_true_and_accepts_explicit_false() {
+    let cli = CliArgs::try_parse_from(["aria2"]).expect("default CLI options should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("default CLI options should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(options.continue_download);
+
+    let cli = CliArgs::try_parse_from(["aria2", "--continue=false"])
+        .expect("explicit continue=false should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("explicit continue=false should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(!options.continue_download);
+
+    let cli =
+        CliArgs::try_parse_from(["aria2", "--no-continue"]).expect("--no-continue should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("--no-continue should load");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(!options.continue_download);
 }
 
 #[cfg(feature = "bittorrent")]
@@ -431,6 +751,44 @@ async fn test_load_cli_args_rejects_invalid_split() {
     assert!(error.contains("--split"), "unexpected error: {error}");
 }
 
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn dht_max_concurrent_lookups_cli_value_reaches_global_config() {
+    let cli = CliArgs::try_parse_from(["aria2", "--dht-max-concurrent-lookups=32"])
+        .expect("clap should parse the DHT concurrency value");
+    let mut app = App::new();
+
+    app.load_cli_args(cli)
+        .await
+        .expect("the registry should accept the configured DHT concurrency");
+
+    assert_eq!(
+        app.config
+            .read()
+            .await
+            .get_global_i64("dht-max-concurrent-lookups")
+            .await,
+        Some(32)
+    );
+}
+
+#[cfg(all(feature = "bittorrent", target_pointer_width = "64"))]
+#[tokio::test]
+async fn dht_max_concurrent_lookups_cli_rejects_integer_conversion_overflow() {
+    let argument = format!("--dht-max-concurrent-lookups={}", usize::MAX);
+    let cli = CliArgs::try_parse_from(["aria2", argument.as_str()])
+        .expect("clap should parse usize::MAX on a 64-bit target");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("usize values outside i64 must not be cast and wrapped");
+
+    assert!(error.contains("--dht-max-concurrent-lookups"));
+    assert!(error.contains("out of range"), "unexpected error: {error}");
+}
+
 #[tokio::test]
 async fn test_load_cli_args_accepts_min_http_range_size() {
     let cli = CliArgs::try_parse_from(["aria2", "--min-http-range-size=32K"])
@@ -549,6 +907,33 @@ async fn test_server_stat_configuration_reaches_engine_owner() {
 }
 
 #[tokio::test]
+async fn test_process_scheduler_and_rate_limits_reach_core_engine() {
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option("max-concurrent-downloads", OptionValue::Int(3))
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-overall-download-limit", OptionValue::Int(1024))
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-overall-upload-limit", OptionValue::Int(2048))
+            .await
+            .unwrap();
+    }
+
+    app.initialize_engine().await;
+
+    assert_eq!(app.request_man.max_concurrent(), 3);
+    assert_eq!(app.request_man.global_download_limit(), Some(1024));
+    assert_eq!(app.request_man.global_upload_limit(), Some(2048));
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
 async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
     let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=head=512K,tail"])
         .expect("clap should parse the original piece-priority syntax");
@@ -562,6 +947,7 @@ async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
     assert_eq!(options.bt_prioritize_piece, "head=512K,tail");
 }
 
+#[cfg(feature = "bittorrent")]
 #[tokio::test]
 async fn test_load_cli_args_rejects_legacy_piece_priority_mode() {
     let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=rarest"])
@@ -871,7 +1257,6 @@ async fn test_original_cli_options_reach_config_registry() {
         "--certificate=client.pem",
         "--private-key=client.key",
         "--min-tls-version=TLSv1.2",
-        "--ssh-host-key-md=sha-1=deadbeef",
         "--metalink-enable-unique-protocol=false",
         "--pause-metadata",
         "--show-console-readout=false",
@@ -888,10 +1273,6 @@ async fn test_original_cli_options_reach_config_registry() {
     assert_eq!(
         app.get_opt_str("certificate").await.as_deref(),
         Some("client.pem")
-    );
-    assert_eq!(
-        app.get_opt_str("ssh-host-key-md").await.as_deref(),
-        Some("sha-1=deadbeef")
     );
     assert_eq!(
         app.get_opt_bool("metalink-enable-unique-protocol").await,
@@ -1150,6 +1531,36 @@ async fn test_torrent_and_metalink_file_options_enter_input_detection() {
         app.detected_inputs[1].input_type,
         aria2_core::validation::protocol_detector::InputType::MetalinkFile
     );
+}
+
+#[cfg(feature = "metalink")]
+#[tokio::test]
+async fn metalink_expansion_advances_the_shared_gid_allocator_for_every_group() {
+    let metalink = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+      <file name="first.bin"><url>https://mirror.example/first.bin</url></file>
+      <file name="second.bin"><url>https://mirror.example/second.bin</url></file>
+    </metalink>"#;
+    let mut app = App::new();
+    app.detected_inputs = vec![aria2_core::validation::protocol_detector::DetectedInput {
+        input_type: aria2_core::validation::protocol_detector::InputType::MetalinkFile,
+        raw: "input.meta4".to_string(),
+        file_data: Some(metalink.to_vec()),
+        options: HashMap::new(),
+    }];
+    app.initialize_engine().await;
+
+    let gids = app
+        .add_downloads()
+        .await
+        .expect("Metalink resource groups should be submitted");
+    assert_eq!(gids.len(), 2);
+
+    let next_gid = app.request_man.next_available_gid().value();
+    assert!(
+        !gids.contains(&next_gid),
+        "the next regular allocation must not collide with Metalink groups: {gids:?}"
+    );
+    assert_eq!(next_gid, gids[1] + 1);
 }
 
 #[tokio::test]

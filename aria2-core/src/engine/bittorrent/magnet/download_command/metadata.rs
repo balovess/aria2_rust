@@ -113,63 +113,6 @@ impl MagnetDownloadCommand {
         Ok(())
     }
 
-    /// Convert BEP 9's raw `info` dictionary into the complete metainfo
-    /// document consumed by the torrent parser and saved-metadata path.
-    ///
-    /// `ut_metadata` transfers only the bencoded `info` dictionary.  Exact
-    /// sources and previously saved metadata already contain a torrent root,
-    /// so those inputs are kept unchanged.
-    pub(super) fn normalize_magnet_metadata(
-        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
-        metadata: &[u8],
-    ) -> std::result::Result<Vec<u8>, String> {
-        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
-        use std::collections::BTreeMap;
-
-        let (value, consumed) = BencodeValue::decode(metadata)?;
-        if consumed != metadata.len() {
-            return Err("BEP 9 metadata contains trailing bytes".to_string());
-        }
-
-        let BencodeValue::Dict(info_dict) = value else {
-            return Err("BEP 9 metadata is not a dictionary".to_string());
-        };
-
-        // Keep complete .torrent documents from xs and the saved-metadata
-        // path idempotent. A BEP 9 info dictionary is itself also a dict, so
-        // the presence of the root-level `info` key is the discriminator.
-        if info_dict
-            .get(b"info".as_slice())
-            .is_some_and(|value| matches!(value, BencodeValue::Dict(_)))
-        {
-            return Ok(metadata.to_vec());
-        }
-
-        let announce = magnet
-            .trackers
-            .first()
-            .map_or_else(Vec::new, |url| url.as_bytes().to_vec());
-        let announce_list = (!magnet.trackers.is_empty()).then(|| {
-            BencodeValue::List(
-                magnet
-                    .trackers
-                    .iter()
-                    .map(|url| {
-                        BencodeValue::List(vec![BencodeValue::Bytes(url.as_bytes().to_vec())])
-                    })
-                    .collect(),
-            )
-        });
-
-        let mut root = BTreeMap::new();
-        root.insert(b"announce".to_vec(), BencodeValue::Bytes(announce));
-        if let Some(announce_list) = announce_list {
-            root.insert(b"announce-list".to_vec(), announce_list);
-        }
-        root.insert(b"info".to_vec(), BencodeValue::Dict(info_dict));
-        Ok(BencodeValue::Dict(root).encode())
-    }
-
     /// Fetch torrent metadata from BEP 9's `xs` exact-source parameter.
     ///
     /// An exact source is a complete `.torrent` file, so it is a cheaper and
@@ -177,59 +120,6 @@ impl MagnetDownloadCommand {
     /// metadata-capable peer. HTTP(S) sources use the same proxy, TLS, and
     /// authentication options as ordinary HTTP downloads. Local `file://`
     /// sources are also accepted and still go through the info-hash check.
-    pub(super) fn merge_magnet_web_seeds(
-        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
-        torrent_bytes: &[u8],
-    ) -> std::result::Result<Vec<u8>, String> {
-        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
-
-        if magnet.ws.is_empty() {
-            return Ok(torrent_bytes.to_vec());
-        }
-
-        let (mut root, consumed) = BencodeValue::decode(torrent_bytes)?;
-        if consumed != torrent_bytes.len() {
-            return Err("Torrent metadata contains trailing bytes".to_string());
-        }
-        let dict = match &mut root {
-            BencodeValue::Dict(dict) => dict,
-            _ => return Err("Torrent metadata root is not a dictionary".to_string()),
-        };
-
-        let mut web_seeds = Vec::new();
-        if let Some(existing) = dict.remove(b"url-list".as_slice()) {
-            match existing {
-                BencodeValue::Bytes(url) => web_seeds.push(url),
-                BencodeValue::List(urls) => {
-                    web_seeds.extend(urls.into_iter().filter_map(|url| match url {
-                        BencodeValue::Bytes(url) => Some(url),
-                        _ => None,
-                    }));
-                }
-                _ => {}
-            }
-        }
-        for url in &magnet.ws {
-            let url = url.as_bytes().to_vec();
-            if !web_seeds.iter().any(|existing| existing == &url) {
-                web_seeds.push(url);
-            }
-        }
-
-        if web_seeds.len() == 1 {
-            dict.insert(
-                b"url-list".to_vec(),
-                BencodeValue::Bytes(web_seeds[0].clone()),
-            );
-        } else {
-            dict.insert(
-                b"url-list".to_vec(),
-                BencodeValue::List(web_seeds.into_iter().map(BencodeValue::Bytes).collect()),
-            );
-        }
-        Ok(root.encode())
-    }
-
     pub(super) fn save_metadata_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<bool> {
         let mut file = match std::fs::OpenOptions::new()
             .write(true)

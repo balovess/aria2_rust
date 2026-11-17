@@ -95,6 +95,8 @@ fn test_parse_content_range() {
     assert_eq!(manager.parse_content_range("bits 0-99/1000"), None);
     assert_eq!(manager.parse_content_range("bytes 0-499"), None); // Missing /total
     assert_eq!(manager.parse_content_range("bytes abc-def/1000"), None);
+    assert_eq!(manager.parse_content_range("bytes 10-9/1000"), None);
+    assert_eq!(manager.parse_content_range("bytes 0-1000/1000"), None);
 }
 
 #[test]

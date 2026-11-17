@@ -1,7 +1,14 @@
+//! Connection-level peer state and a lightweight standalone choking helper.
+//!
+//! [`PeerConnection`](super::connection::PeerConnection) owns this state for a
+//! protocol session. The core download engine uses its own configurable choke
+//! policy; [`ChokeAlgorithm`] is only a fixed-default convenience for callers
+//! that build on the lower-level protocol API directly.
+
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::bittorrent::message::types::PieceBlockRequest;
+use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerChokingState {
@@ -126,6 +133,29 @@ impl PeerState {
         self.last_message_time = Instant::now();
     }
 
+    pub(crate) fn record_received_message(&mut self, message: &BtMessage) {
+        self.mark_message_received();
+        match message {
+            BtMessage::Choke => self.set_peer_choking(true),
+            BtMessage::Unchoke => self.set_peer_choking(false),
+            BtMessage::Interested => self.set_peer_interested(true),
+            BtMessage::NotInterested => self.set_peer_interested(false),
+            BtMessage::Piece { index, begin, data } => {
+                if let Ok(length) = u32::try_from(data.len()) {
+                    self.remove_request(&PieceBlockRequest::new(*index, *begin, length));
+                }
+            }
+            BtMessage::Reject {
+                index,
+                offset,
+                length,
+            } => {
+                self.remove_request(&PieceBlockRequest::new(*index, *offset, *length));
+            }
+            _ => {}
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.am_interested || self.peer_interested
     }
@@ -165,11 +195,18 @@ impl PeerState {
     }
 }
 
+/// A lightweight standalone choking policy for low-level protocol consumers.
+///
+/// This helper uses a fixed default of four unchoked leecher slots and is not
+/// used by the aria2 download engine, whose policy is configured through the
+/// engine's BitTorrent options.
 pub struct ChokeAlgorithm;
 
 impl ChokeAlgorithm {
     const MAX_UNCHOKED_LEECHERS: usize = 4;
 
+    /// Rank peers by their current download speed and return the selected
+    /// indices after applying the helper's fixed slot limit.
     pub fn evaluate_choke(peers: &mut [&mut PeerState], is_seeder: bool) -> Vec<usize> {
         let mut unchoke_indices: Vec<usize> = (0..peers.len()).collect();
 
@@ -235,9 +272,9 @@ impl ChokeAlgorithm {
             return None;
         }
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let candidate = rng.gen_range(0..choked_interested.len());
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let candidate = rng.random_range(0..choked_interested.len());
         Some(choked_interested[candidate])
     }
 }

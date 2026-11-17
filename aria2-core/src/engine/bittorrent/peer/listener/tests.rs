@@ -1,4 +1,203 @@
 use super::*;
+use tokio::net::TcpListener;
+
+#[cfg(test)]
+mod process_lifecycle;
+#[cfg(test)]
+mod route_lifecycle;
+
+#[test]
+fn zero_incoming_handshake_timeout_keeps_one_second_minimum() {
+    let manager = BtPeerListenerManager::new();
+    manager.set_incoming_handshake_timeout(std::time::Duration::ZERO);
+
+    assert_eq!(
+        manager
+            .incoming_handshake_timeout_nanos
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1_000_000_000
+    );
+}
+
+#[tokio::test]
+async fn configured_incoming_handshake_timeout_is_applied_by_shared_listener() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let manager = BtPeerListenerManager::new();
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_millis(250));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [91; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 91,
+            max_peers: 1,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(b"x").await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        stream.read(&mut byte),
+    )
+    .await
+    .expect("subsecond configured timeout should close the incomplete peer");
+    assert_eq!(read.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn runtime_handshake_timeout_update_is_applied_to_utp_listener() {
+    let manager = BtPeerListenerManager::new();
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(5));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let _route = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [94; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 94,
+            max_peers: 1,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+    let _transport = manager
+        .register_utp_transport("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_millis(150));
+
+    let endpoint = "127.0.0.1:6882".parse().unwrap();
+    let (incoming, close_requested, _receive_tx) =
+        super::super::utp_transport::incoming_connection_for_test(endpoint);
+    manager.utp_incoming_tx.send(incoming).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(800), async {
+        while !close_requested.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("configured timeout should close an incomplete incoming uTP handshake");
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn shared_listener_rejects_tcp_handshakes_when_global_slots_are_full() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut manager = BtPeerListenerManager::new();
+    manager.incoming_handshake_slots = Arc::new(tokio::sync::Semaphore::new(1));
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(5));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [92; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 92,
+            max_peers: 2,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let mut first = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    first.write_all(b"x").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut second = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    second.write_all(b"x").await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        second.read(&mut byte),
+    )
+    .await
+    .expect("over-capacity incoming peer should be closed promptly");
+    assert!(matches!(read, Err(_) | Ok(0)));
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), first.read(&mut byte),)
+            .await
+            .is_err()
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn tcp_and_utp_listeners_share_the_handshake_slot_limit() {
+    use tokio::io::AsyncWriteExt;
+
+    let mut manager = BtPeerListenerManager::new();
+    manager.incoming_handshake_slots = Arc::new(tokio::sync::Semaphore::new(1));
+    manager.set_incoming_handshake_timeout(std::time::Duration::from_secs(5));
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [93; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 93,
+            max_peers: 2,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+    let _utp_transport = manager
+        .register_utp_transport("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    tcp.write_all(b"x").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let endpoint = "127.0.0.1:6881".parse().unwrap();
+    let (incoming, close_requested, _receive_tx) =
+        super::super::utp_transport::incoming_connection_for_test(endpoint);
+    manager.utp_incoming_tx.send(incoming).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        while !close_requested.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("uTP peer should be dropped while the TCP handshake holds the only slot");
+
+    manager.shutdown().await;
+}
 
 #[tokio::test]
 async fn shared_manager_routes_two_torrents_on_one_socket() {
@@ -73,6 +272,43 @@ async fn shared_manager_routes_two_torrents_on_one_socket() {
 
     drop(route_a);
     drop(route_b);
+}
+
+#[tokio::test]
+async fn route_dht_capabilities_update_after_registration() {
+    use aria2_protocol::bittorrent::message::handshake::Handshake;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let manager = BtPeerListenerManager::new();
+    let info_hash = [31; 20];
+    let (port, mut incoming_peers, route) = manager
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash,
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 31,
+            max_peers: 1,
+            peer_storage: Arc::new(Mutex::new(DefaultPeerStorage::new())),
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    route.set_dht_capabilities(true, false);
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream
+        .write_all(&Handshake::new(&info_hash, &[2; 20]).to_bytes())
+        .await
+        .unwrap();
+    let mut response = [0u8; 68];
+    stream.read_exact(&mut response).await.unwrap();
+    assert!(Handshake::parse(&response).unwrap().supports_dht());
+    incoming_peers.recv().await.unwrap();
 }
 
 #[tokio::test]
@@ -353,93 +589,4 @@ async fn shutdown_releases_the_shared_listener_socket() {
             .kind(),
         std::io::ErrorKind::NotConnected
     );
-}
-
-#[tokio::test]
-async fn shutdown_closes_an_inbound_peer_blocked_by_route_backpressure() {
-    use aria2_protocol::bittorrent::message::handshake::Handshake;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let manager = BtPeerListenerManager::new();
-    let info_hash = [47u8; 20];
-    let peer_storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
-    let (port, mut incoming_peers, _route) = manager
-        .register(BtPeerRouteConfig {
-            bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            ports: vec![0],
-            info_hash,
-            info_hash_v2: None,
-            local_peer_id: [1; 20],
-            caretaker_id: 1,
-            // Zero means unlimited admission; the internal mailbox stays
-            // bounded at one so the second peer blocks in route delivery.
-            max_peers: 0,
-            peer_storage: Arc::clone(&peer_storage),
-            crypto_policy: Default::default(),
-            dht_enabled: false,
-        })
-        .await
-        .unwrap();
-
-    async fn connect_and_finish_handshake(
-        port: u16,
-        hash: [u8; 20],
-        peer_id: [u8; 20],
-    ) -> tokio::net::TcpStream {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .unwrap();
-        stream
-            .write_all(&Handshake::new(&hash, &peer_id).to_bytes())
-            .await
-            .unwrap();
-        let mut response = [0u8; 68];
-        stream.read_exact(&mut response).await.unwrap();
-        assert_eq!(Handshake::parse(&response).unwrap().info_hash, hash);
-        stream
-    }
-
-    // The first completed handshake fills the route mailbox. The second
-    // completes its wire handshake but remains blocked while delivering its
-    // IncomingPeer, proving that shutdown also owns per-connection tasks.
-    let _queued_peer = connect_and_finish_handshake(port, info_hash, [2; 20]).await;
-    let mut blocked_peer = connect_and_finish_handshake(port, info_hash, [3; 20]).await;
-
-    manager.shutdown().await;
-
-    let mut byte = [0u8; 1];
-    let read = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
-        blocked_peer.read(&mut byte),
-    )
-    .await
-    .expect("shutdown must cancel a route-delivery task blocked by backpressure")
-    .unwrap();
-    assert_eq!(read, 0, "the pending inbound peer socket must be closed");
-    assert!(incoming_peers.try_recv().is_ok());
-    assert_eq!(
-        peer_storage.lock().unwrap().used_peers().len(),
-        1,
-        "shutdown must return the peer whose route delivery was cancelled"
-    );
-}
-
-#[tokio::test]
-async fn shutdown_waits_for_process_utp_transport_to_release_udp_port() {
-    let manager = BtPeerListenerManager::new();
-    let reservation = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let address = reservation.local_addr().unwrap();
-    drop(reservation);
-
-    let _transport = manager
-        .register_utp_transport(address)
-        .await
-        .expect("process uTP transport should bind");
-
-    manager.shutdown().await;
-
-    let rebound = tokio::net::UdpSocket::bind(address)
-        .await
-        .expect("shutdown must wait for the process uTP actor to release its socket");
-    drop(rebound);
 }

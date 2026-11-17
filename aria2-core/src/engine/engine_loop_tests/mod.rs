@@ -8,6 +8,7 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
         group_man: Arc::new(RequestGroupMan::new()),
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         auto_save: None,
         auto_save_dirty_signal: None,
         event_hooks: Arc::new(DownloadEventHooks::new()),
@@ -33,6 +34,8 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
         ),
         #[cfg(feature = "bittorrent")]
         lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
+        #[cfg(feature = "bittorrent")]
+        open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(100),
     }
 }
 

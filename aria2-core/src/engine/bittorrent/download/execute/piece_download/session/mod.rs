@@ -7,7 +7,7 @@ use crate::engine::bittorrent::download::web_seed::WebSeedManager;
 use crate::engine::bittorrent::peer::message_handler::PeerSwarm;
 use crate::engine::bittorrent::piece::selector::BtPieceSelector;
 use crate::engine::bittorrent::piece::{PeerBitfieldTracker, PieceManager, PiecePicker};
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 use crate::engine::bittorrent::download::execute::incoming::PeerActorAdmissionContext;
@@ -29,6 +29,7 @@ mod progress;
 mod run;
 mod wait;
 mod web_seed;
+mod work;
 
 pub(super) struct PieceDownloadSession<'a> {
     pub(super) command: &'a mut BtDownloadCommand,
@@ -68,6 +69,12 @@ pub(super) struct PieceDownloadSession<'a> {
 pub(super) enum PieceLoopAction {
     RefreshProgress,
     Retry,
+}
+
+pub(super) fn bt_work_scheduler_error(context: &str, error: impl std::fmt::Display) -> Aria2Error {
+    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+        "BitTorrent work scheduler could not {context}: {error}"
+    )))
 }
 
 impl PieceDownloadSession<'_> {

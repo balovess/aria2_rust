@@ -4,121 +4,13 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::http::header_processor::HttpHeaderProcessor;
 use crate::http::request::basic_auth;
 
-use super::auth;
-use super::connect::HttpProxyTunnel;
 use super::*;
-
-fn test_config() -> HttpProxyTunnelConfig {
-    HttpProxyTunnelConfig {
-        proxy_host: "proxy.example.com".to_string(),
-        proxy_port: 8080,
-        username: None,
-        password: None,
-        target_host: "target.example.com".to_string(),
-        target_port: 443,
-        connect_timeout: Duration::from_secs(5),
-        read_timeout: Duration::from_secs(5),
-        write_timeout: Duration::from_secs(5),
-        user_agent: crate::constants::USER_AGENT.to_string(),
-    }
-}
-
-#[test]
-fn test_connect_request_without_auth() {
-    let config = test_config();
-    let request = HttpProxyTunnel::build_connect_request(&config, None);
-    assert!(request.starts_with("CONNECT target.example.com:443 HTTP/1.1\r\n"));
-    assert!(request.contains(&format!("User-Agent: {}\r\n", crate::constants::USER_AGENT)));
-    assert!(request.contains("Host: target.example.com:443\r\n"));
-    assert!(!request.contains("Proxy-Authorization"));
-    assert!(request.ends_with("\r\n\r\n"));
-}
-
-#[test]
-fn test_connect_request_with_basic_auth() {
-    let config = test_config();
-    let auth = basic_auth("user", "pass");
-    let request = HttpProxyTunnel::build_connect_request(&config, Some(&auth));
-    assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
-}
-
-#[test]
-fn test_connect_request_format() {
-    let config = test_config();
-    let request = HttpProxyTunnel::build_connect_request(&config, None);
-    let lines: Vec<&str> = request.trim_end().split("\r\n").collect();
-    assert!(lines[0].starts_with("CONNECT "));
-    assert!(lines[0].ends_with(" HTTP/1.1"));
-}
 
 #[test]
 fn test_basic_auth_header() {
     assert_eq!(basic_auth("user", "pass"), "Basic dXNlcjpwYXNz");
-}
-
-#[test]
-fn test_digest_auth_header() {
-    let challenge = r#"Digest realm="test@ex.com", nonce="abc", qop="auth", algorithm=MD5"#;
-    let header = auth::build_digest_auth_header("user", "pass", challenge, "t:443");
-    assert!(header.starts_with("Digest"));
-    assert!(header.contains("username=\"user\""));
-    assert!(header.contains("realm=\"test@ex.com\""));
-    assert!(header.contains("response=\""));
-}
-
-#[test]
-fn test_digest_auth_fallback_on_bad_challenge() {
-    let header = auth::build_digest_auth_header("u", "p", "NotDigest", "t:443");
-    assert!(header.starts_with("Basic "));
-}
-
-#[test]
-fn test_preemptive_auth_with_credentials() {
-    let config = HttpProxyTunnelConfig {
-        username: Some("u".into()),
-        password: Some("p".into()),
-        ..test_config()
-    };
-    assert!(auth::maybe_preemptive_basic_auth(&config).is_some());
-}
-
-#[test]
-fn test_preemptive_auth_without_credentials() {
-    assert!(auth::maybe_preemptive_basic_auth(&test_config()).is_none());
-}
-
-#[test]
-fn test_preemptive_auth_empty_username() {
-    let config = HttpProxyTunnelConfig {
-        username: Some(String::new()),
-        password: Some("p".into()),
-        ..test_config()
-    };
-    assert!(auth::maybe_preemptive_basic_auth(&config).is_none());
-}
-
-#[test]
-fn test_parse_200_response() {
-    let raw = b"HTTP/1.1 200 Connection Established\r\n\r\n";
-    let mut proc = HttpHeaderProcessor::new();
-    proc.feed(raw);
-    assert_eq!(proc.get_result().unwrap().status_code, 200);
-}
-
-#[test]
-fn test_parse_407_response() {
-    let raw = b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\n\r\n";
-    let mut proc = HttpHeaderProcessor::new();
-    proc.feed(raw);
-    let head = proc.get_result().unwrap();
-    assert_eq!(head.status_code, 407);
-    assert_eq!(
-        head.header("proxy-authenticate"),
-        Some("Basic realm=\"proxy\"")
-    );
 }
 
 #[test]
@@ -127,12 +19,6 @@ fn test_config_default() {
     assert_eq!(config.proxy_port, 8080);
     assert_eq!(config.target_port, 80);
     assert!(config.username.is_none());
-}
-
-#[test]
-fn test_md5_hex_known_values() {
-    assert_eq!(auth::md5_hex(""), "d41d8cd98f00b204e9800998ecf8427e");
-    assert_eq!(auth::md5_hex("hello"), "5d41402abc4b2a76b9719d911017c592");
 }
 
 #[test]
@@ -310,21 +196,20 @@ async fn test_tunnel_1xx_then_200() {
         let (mut sock, _) = listener.accept().await.unwrap();
         let mut buf = vec![0u8; 4096];
         let _ = AsyncReadExt::read(&mut sock, &mut buf).await;
-        // Send both responses; the client's read_proxy_response must
-        // handle them even if they arrive in the same TCP segment.
-        AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 100 Continue\r\n\r\n")
-            .await
-            .unwrap();
-        AsyncWriteExt::write_all(&mut sock, b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        // The final response and the first tunneled bytes may share a packet.
+        AsyncWriteExt::write_all(
+            &mut sock,
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 Connection Established\r\n\r\n220 FTP ready\r\n",
+        )
             .await
             .unwrap();
     });
-    let result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel).await;
-    assert!(
-        result.is_ok(),
-        "Expected success after 1xx skip, got: {:?}",
-        result
-    );
+    let mut result = establish_http_proxy_tunnel(&config, HttpProxyType::Tunnel)
+        .await
+        .expect("success after skipping 1xx response");
+    let mut greeting = [0; 15];
+    result.stream.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(&greeting, b"220 FTP ready\r\n");
     server.await.unwrap();
 }
 

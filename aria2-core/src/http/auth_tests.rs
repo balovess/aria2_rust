@@ -1,4 +1,4 @@
-use super::auth::netrc::NetrcError;
+use super::auth::netrc::{NetrcError, NetrcParser};
 use super::auth::*;
 use url::Url;
 
@@ -19,6 +19,51 @@ fn test_auth_config_auth_text() {
 fn test_auth_config_display() {
     let ac = AuthConfig::new("u".into(), "p".into()).unwrap();
     assert_eq!(format!("{}", ac), "u:p");
+}
+
+#[test]
+fn credential_debug_output_redacts_secrets() {
+    let secret = "debug-secret-marker";
+    let auth = AuthConfig::new("debug-user-marker".into(), secret.into()).unwrap();
+    let basic = BasicCred::new(
+        "debug-user-marker".into(),
+        secret.into(),
+        "example.test".into(),
+        80,
+        "/".into(),
+        true,
+    );
+    let options = AuthResolveOptions {
+        http_user: Some("debug-user-marker".into()),
+        http_passwd: Some(secret.into()),
+        ..AuthResolveOptions::default()
+    };
+    let netrc_entry = NetrcEntry {
+        host: "example.test".into(),
+        login: "debug-user-marker".into(),
+        password: secret.into(),
+    };
+    let netrc_store = NetrcStore::from_entries(vec![netrc_entry.clone()]);
+    let netrc_parser = NetrcParser::parse(&format!(
+        "machine example.test login debug-user-marker password {secret}"
+    ))
+    .unwrap();
+    let mut factory = AuthConfigFactory::new();
+    factory.update_basic_cred(basic.clone());
+    factory.set_netrc(netrc_store.clone());
+
+    for formatted in [
+        format!("{auth:?}"),
+        format!("{basic:?}"),
+        format!("{options:?}"),
+        format!("{netrc_entry:?}"),
+        format!("{netrc_store:?}"),
+        format!("{netrc_parser:?}"),
+        format!("{factory:?}"),
+    ] {
+        assert!(!formatted.contains(secret), "{formatted}");
+        assert!(!formatted.contains("debug-user-marker"), "{formatted}");
+    }
 }
 
 #[test]
@@ -170,6 +215,17 @@ fn test_erase_confidential_proxy_auth() {
     let safe = erase_confidential_info(raw);
     assert!(safe.contains("Proxy-Authorization: <snip>"));
     assert!(safe.contains("Set-Cookie: <snip>"));
+}
+
+#[test]
+fn confidential_header_redaction_handles_unicode_and_optional_whitespace() {
+    let raw = "💩💩💩💩\r\nAuthorization:\tsecret\r\nCookie:session=secret\r\n";
+    let safe = erase_confidential_info(raw);
+
+    assert!(safe.contains("💩💩💩💩"));
+    assert!(safe.contains("Authorization: <snip>"));
+    assert!(safe.contains("Cookie: <snip>"));
+    assert!(!safe.contains("secret"));
 }
 
 // ---------------------------------------------------------------------------

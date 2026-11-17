@@ -5,19 +5,28 @@ pub(super) fn write_u32(w: &mut impl Write, v: u32) -> io::Result<()> {
     w.write_all(&v.to_be_bytes())
 }
 
+pub(super) fn checked_u32_length(length: usize, field: &str) -> io::Result<u32> {
+    u32::try_from(length).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("SFTP {field} exceeds the u32 wire limit"),
+        )
+    })
+}
+
 pub(super) fn write_u64(w: &mut impl Write, v: u64) -> io::Result<()> {
     w.write_all(&v.to_be_bytes())
 }
 
 /// Write a UTF-8 string as `[length:u32][bytes]` (SFTP string format).
 pub(super) fn write_string(w: &mut impl Write, s: &str) -> io::Result<()> {
-    write_u32(w, s.len() as u32)?;
+    write_u32(w, checked_u32_length(s.len(), "string length")?)?;
     w.write_all(s.as_bytes())
 }
 
 /// Write raw bytes as `[length:u32][data]` (SFTP string/buffer format).
 pub(super) fn write_string_raw(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
-    write_u32(w, data.len() as u32)?;
+    write_u32(w, checked_u32_length(data.len(), "string length")?)?;
     w.write_all(data)
 }
 
@@ -41,17 +50,22 @@ pub(super) fn read_u64(r: &mut impl Read) -> io::Result<u64> {
 
 /// Read a UTF-8 string in `[length:u32][bytes]` format.
 pub(super) fn read_string(r: &mut impl Read) -> io::Result<String> {
-    let len = read_u32(r)? as usize;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
+    let buf = read_raw(r)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Read raw bytes in `[length:u32][data]` format.
 pub(super) fn read_raw(r: &mut impl Read) -> io::Result<Vec<u8>> {
     let len = read_u32(r)? as usize;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
+    let mut buf = Vec::new();
+    let mut field = r.take(len as u64);
+    let read = field.read_to_end(&mut buf)?;
+    if read != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "incomplete SFTP string",
+        ));
+    }
     Ok(buf)
 }
 

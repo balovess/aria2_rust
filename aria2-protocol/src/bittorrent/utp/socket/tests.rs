@@ -1,22 +1,93 @@
 use super::*;
+mod lifecycle;
 use std::net::{IpAddr, Ipv4Addr};
 
 fn test_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
 }
 
+#[test]
+fn connection_id_search_wraps_and_finds_the_only_free_id() {
+    assert_eq!(
+        find_available_connection_id(u16::MAX, |connection_id| connection_id != 0),
+        Some(0)
+    );
+}
+
+#[test]
+fn connection_id_search_reports_full_id_space() {
+    assert_eq!(find_available_connection_id(123, |_| true), None);
+}
+
+#[tokio::test]
+async fn incoming_connection_id_collision_does_not_replace_active_connection() {
+    let options = UtpSocketOptions::default().with_max_connections(4);
+    let mut server = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let readiness = server.readiness_socket().unwrap();
+    let first_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let second_peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local_connection_id = 101;
+    let syn = UtpPacket::syn(local_connection_id - 1, 7, 0, 65_536).to_bytes();
+
+    first_peer.send_to(&syn, server.local_addr()).await.unwrap();
+    poll_recv_after_readable(&mut server, &readiness).await;
+    let mut buffer = [0; 2048];
+    let (length, _) =
+        tokio::time::timeout(Duration::from_secs(2), first_peer.recv_from(&mut buffer))
+            .await
+            .expect("the first peer should receive SYN-ACK")
+            .unwrap();
+    assert_eq!(
+        UtpPacket::from_bytes(&buffer[..length])
+            .unwrap()
+            .packet_type()
+            .unwrap(),
+        PacketType::StAck
+    );
+    assert_eq!(server.connection_count(), 1);
+
+    second_peer
+        .send_to(&syn, server.local_addr())
+        .await
+        .unwrap();
+    poll_recv_after_readable(&mut server, &readiness).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            second_peer.recv_from(&mut buffer)
+        )
+        .await
+        .is_err(),
+        "the colliding peer must not receive a reply that could disturb another session"
+    );
+    assert_eq!(server.connection_count(), 1);
+    assert_eq!(
+        server
+            .connection_stats(local_connection_id)
+            .unwrap()
+            .remote_addr,
+        Some(first_peer.local_addr().unwrap())
+    );
+}
+
 async fn poll_recv_after_readable(socket: &mut UtpSocket, readiness: &tokio::net::UdpSocket) {
+    wait_for_udp_packet(&socket.socket, readiness).await;
+    socket.poll_recv().unwrap();
+}
+
+async fn wait_for_udp_packet(socket: &UdpSocket, readiness: &tokio::net::UdpSocket) {
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut probe = [0; MAX_UDP_RECV_BUFFER];
         loop {
             readiness.readable().await.unwrap();
             match readiness.try_io(tokio::io::Interest::READABLE, || {
-                socket.socket.peek_from(&mut probe)
+                socket.peek_from(&mut probe)
             }) {
-                Ok(_) => {
-                    socket.poll_recv().unwrap();
-                    return;
-                }
+                Ok(_) => return,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     // The socket clone may still report readiness after the
                     // protocol socket consumed the previous datagram.
@@ -38,6 +109,134 @@ fn test_socket_bind() {
     assert!(socket.local_addr().port() > 0);
     assert!(!socket.is_closed());
     assert_eq!(socket.connection_count(), 0);
+}
+
+#[test]
+fn socket_options_configure_connection_limit_and_timers() {
+    let options = UtpSocketOptions::default()
+        .with_max_connections(1)
+        .with_connect_timeout(Duration::from_secs(3))
+        .with_idle_timeout(Duration::from_secs(4))
+        .with_keepalive_interval(Duration::from_secs(5));
+    let mut socket = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let remote = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let remote_addr = remote.local_addr().unwrap();
+
+    assert_eq!(
+        socket.timers.default_connect_timeout(),
+        Duration::from_secs(3)
+    );
+    assert_eq!(socket.timers.default_idle_timeout(), Duration::from_secs(4));
+    assert_eq!(
+        socket.timers.default_keepalive_interval(),
+        Duration::from_secs(5)
+    );
+    assert!(socket.connect(remote_addr).is_ok());
+    assert!(matches!(
+        socket.connect(remote_addr),
+        Err(UtpSocketError::MaxConnectionsReached)
+    ));
+}
+
+#[tokio::test]
+async fn keepalive_sends_do_not_extend_established_idle_deadline() {
+    let options = UtpSocketOptions::default()
+        .with_idle_timeout(Duration::from_millis(80))
+        .with_keepalive_interval(Duration::from_millis(10));
+    let mut client = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
+    let readiness = client.readiness_socket().unwrap();
+
+    let mut wire_buffer = [0; 2048];
+    let (syn_len, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
+    peer.send_to(
+        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    poll_recv_after_readable(&mut client, &readiness).await;
+    assert_eq!(
+        client.connection_state(conn_id).unwrap(),
+        ConnectionState::Established
+    );
+
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client.process_timers().unwrap();
+    }
+    assert!(matches!(
+        client.connection_state(conn_id),
+        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
+    ));
+}
+
+#[tokio::test]
+async fn valid_peer_packet_refreshes_established_idle_deadline() {
+    let options = UtpSocketOptions::default()
+        .with_idle_timeout(Duration::from_millis(120))
+        .with_keepalive_interval(Duration::from_secs(5));
+    let mut client = UtpSocket::bind_addr_with_options(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        options,
+    )
+    .unwrap();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
+    let readiness = client.readiness_socket().unwrap();
+
+    let mut wire_buffer = [0; 2048];
+    let (syn_len, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
+    peer.send_to(
+        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    poll_recv_after_readable(&mut client, &readiness).await;
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    peer.send_to(
+        &UtpPacket::ack(syn.connection_id, syn.seq_nr, 71, 65_536).to_bytes(),
+        client.local_addr(),
+    )
+    .await
+    .unwrap();
+    poll_recv_after_readable(&mut client, &readiness).await;
+
+    // This is past the original deadline but before the refreshed deadline.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    client.process_timers().unwrap();
+    assert_eq!(
+        client.connection_state(conn_id).unwrap(),
+        ConnectionState::Established
+    );
+
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    client.process_timers().unwrap();
+    assert!(matches!(
+        client.connection_state(conn_id),
+        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
+    ));
 }
 
 #[test]
@@ -118,10 +317,7 @@ async fn recv_preserves_unread_payload_across_small_buffers() {
 
     let server_conn_id = server.connection_ids()[0];
     assert_eq!(server.send(server_conn_id, b"abcdef").unwrap(), 6);
-    tokio::time::timeout(Duration::from_secs(3), client_readiness.readable())
-        .await
-        .expect("client should become readable for the data")
-        .unwrap();
+    wait_for_udp_packet(&client.socket, &client_readiness).await;
 
     let mut first_half = [0; 3];
     assert_eq!(client.recv(client_conn_id, &mut first_half).unwrap(), 3);
@@ -130,280 +326,6 @@ async fn recv_preserves_unread_payload_across_small_buffers() {
     let mut second_half = [0; 3];
     assert_eq!(client.recv(client_conn_id, &mut second_half).unwrap(), 3);
     assert_eq!(&second_half, b"def");
-}
-
-#[tokio::test]
-async fn retransmit_timer_sends_only_its_packet_and_preserves_backoff() {
-    let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
-    let client_readiness = client.readiness_socket().unwrap();
-
-    let mut wire_buffer = [0; 2048];
-    let (length, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let syn = UtpPacket::from_bytes(&wire_buffer[..length]).unwrap();
-    peer.send_to(
-        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
-        client.local_addr(),
-    )
-    .await
-    .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-    assert_eq!(
-        client.connection_state(conn_id).unwrap(),
-        ConnectionState::Established
-    );
-
-    assert_eq!(client.send(conn_id, &vec![0x5a; 2800]).unwrap(), 2800);
-    let (first_len, _) = peer.recv_from(&mut wire_buffer).await.unwrap();
-    let first = UtpPacket::from_bytes(&wire_buffer[..first_len]).unwrap();
-    let (second_len, _) = peer.recv_from(&mut wire_buffer).await.unwrap();
-    let second = UtpPacket::from_bytes(&wire_buffer[..second_len]).unwrap();
-    assert_ne!(first.seq_nr, second.seq_nr);
-
-    client
-        .timers
-        .set_timer(conn_id, TimerType::Retransmit(first.seq_nr), Duration::ZERO);
-    client.process_timers().unwrap();
-
-    let (retry_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let retry = UtpPacket::from_bytes(&wire_buffer[..retry_len]).unwrap();
-    assert_eq!(retry.seq_nr, first.seq_nr);
-    assert_eq!(retry.payload, first.payload);
-    assert_eq!(
-        client.timers.retransmit_count(conn_id, first.seq_nr),
-        Some(1)
-    );
-
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), peer.recv_from(&mut wire_buffer))
-            .await
-            .is_err()
-    );
-    assert!(
-        client
-            .timers
-            .has_timer(conn_id, TimerType::Retransmit(second.seq_nr))
-    );
-
-    peer.send_to(
-        &UtpPacket::ack(syn.connection_id, first.seq_nr, 71, 65_536).to_bytes(),
-        client.local_addr(),
-    )
-    .await
-    .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-    assert!(
-        !client
-            .timers
-            .has_timer(conn_id, TimerType::Retransmit(first.seq_nr))
-    );
-    assert!(
-        client
-            .timers
-            .has_timer(conn_id, TimerType::Retransmit(second.seq_nr))
-    );
-}
-
-#[tokio::test]
-async fn close_connection_retransmits_fin_until_acknowledged() {
-    let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
-    let client_readiness = client.readiness_socket().unwrap();
-
-    let mut wire_buffer = [0; 2048];
-    let (syn_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
-    peer.send_to(
-        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
-        client.local_addr(),
-    )
-    .await
-    .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-    assert_eq!(
-        client.connection_state(conn_id).unwrap(),
-        ConnectionState::Established
-    );
-
-    client.close_connection(conn_id).unwrap();
-    let (fin_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let fin = UtpPacket::from_bytes(&wire_buffer[..fin_len]).unwrap();
-    assert_eq!(fin.packet_type().unwrap(), PacketType::StFin);
-    assert_eq!(
-        client.connection_state(conn_id).unwrap(),
-        ConnectionState::FinWait
-    );
-
-    let retry_delay = client
-        .next_timer_delay()
-        .expect("unacknowledged FIN must retain a retransmission deadline");
-    tokio::time::sleep(retry_delay + Duration::from_millis(10)).await;
-    client.process_timers().unwrap();
-
-    let (retry_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let retry = UtpPacket::from_bytes(&wire_buffer[..retry_len]).unwrap();
-    assert_eq!(retry.packet_type().unwrap(), PacketType::StFin);
-    assert_eq!(retry.connection_id, fin.connection_id);
-    assert_eq!(retry.seq_nr, fin.seq_nr);
-
-    peer.send_to(
-        &UtpPacket::ack(syn.connection_id, fin.seq_nr, 71, 65_536).to_bytes(),
-        client.local_addr(),
-    )
-    .await
-    .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-    assert!(matches!(
-        client.connection_state(conn_id),
-        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
-    ));
-}
-
-#[tokio::test]
-async fn received_fin_is_acknowledged_again_and_retired_after_idle_deadline() {
-    let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
-    client.set_idle_timeout(Duration::from_millis(40));
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
-    let client_readiness = client.readiness_socket().unwrap();
-
-    let mut wire_buffer = [0; 2048];
-    let (syn_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
-    peer.send_to(
-        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
-        client.local_addr(),
-    )
-    .await
-    .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-
-    let fin = UtpPacket::fin(syn.connection_id, 71, syn.seq_nr, 65_536);
-    peer.send_to(&fin.to_bytes(), client.local_addr())
-        .await
-        .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-    let (ack_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let ack = UtpPacket::from_bytes(&wire_buffer[..ack_len]).unwrap();
-    assert_eq!(ack.packet_type().unwrap(), PacketType::StAck);
-    assert_eq!(ack.ack_nr, fin.seq_nr);
-    assert_eq!(
-        client.connection_state(conn_id).unwrap(),
-        ConnectionState::Closing
-    );
-
-    peer.send_to(&fin.to_bytes(), client.local_addr())
-        .await
-        .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-    let (duplicate_ack_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let duplicate_ack = UtpPacket::from_bytes(&wire_buffer[..duplicate_ack_len]).unwrap();
-    assert_eq!(duplicate_ack.packet_type().unwrap(), PacketType::StAck);
-    assert_eq!(duplicate_ack.ack_nr, fin.seq_nr);
-
-    let idle_deadline = client
-        .next_timer_delay()
-        .expect("closing connection must have a bounded retirement deadline");
-    tokio::time::sleep(idle_deadline + Duration::from_millis(5)).await;
-    client.process_timers().unwrap();
-    assert!(matches!(
-        client.connection_state(conn_id),
-        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
-    ));
-}
-
-#[tokio::test]
-async fn unacknowledged_fin_retires_connection_after_retry_budget() {
-    let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
-    client.set_idle_timeout(Duration::from_secs(60));
-    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let conn_id = client.connect(peer.local_addr().unwrap()).unwrap();
-    let client_readiness = client.readiness_socket().unwrap();
-
-    let mut wire_buffer = [0; 2048];
-    let (syn_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let syn = UtpPacket::from_bytes(&wire_buffer[..syn_len]).unwrap();
-    peer.send_to(
-        &UtpPacket::syn_ack(syn.connection_id, 70, syn.seq_nr, 65_536).to_bytes(),
-        client.local_addr(),
-    )
-    .await
-    .unwrap();
-    poll_recv_after_readable(&mut client, &client_readiness).await;
-
-    client.close_connection(conn_id).unwrap();
-    let (fin_len, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-            .await
-            .unwrap()
-            .unwrap();
-    let fin = UtpPacket::from_bytes(&wire_buffer[..fin_len]).unwrap();
-    assert_eq!(fin.packet_type().unwrap(), PacketType::StFin);
-
-    for _ in 0..5 {
-        let retry_delay = client
-            .next_timer_delay()
-            .expect("unacknowledged FIN must keep a retry deadline");
-        tokio::time::sleep(retry_delay + Duration::from_millis(5)).await;
-        client.process_timers().unwrap();
-
-        let (retry_len, _) =
-            tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut wire_buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        let retry = UtpPacket::from_bytes(&wire_buffer[..retry_len]).unwrap();
-        assert_eq!(retry.packet_type().unwrap(), PacketType::StFin);
-        assert_eq!(retry.seq_nr, fin.seq_nr);
-    }
-
-    let final_deadline = client
-        .next_timer_delay()
-        .expect("retry budget should end at a final bounded deadline");
-    tokio::time::sleep(final_deadline + Duration::from_millis(5)).await;
-    client.process_timers().unwrap();
-    assert!(matches!(
-        client.connection_state(conn_id),
-        Err(UtpSocketError::ConnectionNotFound(id)) if id == conn_id
-    ));
 }
 
 #[test]

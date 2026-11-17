@@ -7,7 +7,7 @@ use crate::engine::http::concurrent_download::{ConcurrentDownloadResult, Concurr
 use crate::engine::http::segment_downloader::HttpSegmentDownloader;
 use crate::engine::http::sequential_download::SequentialDownloader;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::engine::work_runner::{SingleWorkAdapter, run_single_work_item};
+use crate::engine::work_runner::run_single_work_item;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::file_allocation;
 use crate::filesystem::file_allocation_man;
@@ -16,10 +16,7 @@ use crate::http::response_processor::determine_filename_from_response;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
-
-/// How long a rate-limited (429/503) range probe keeps backing off before
-/// the download fails.
-const CAPACITY_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+use super::range_probe_work::HttpRangeProbeWork;
 
 impl DownloadCommand {
     pub(super) async fn execute_attempt(&mut self, uri: &str) -> Result<()> {
@@ -59,11 +56,21 @@ impl DownloadCommand {
             .as_ref()
             .or(head_resp.as_ref())
             .map(|prepared| &prepared.response);
+        if let Some(response) = response_for_metadata {
+            self.group
+                .recover()
+                .observe_http_version(response.version() == reqwest::Version::HTTP_2);
+        }
         let mut effective_uri = prepared_get
             .as_ref()
             .or(head_resp.as_ref())
             .map(|prepared| prepared.effective_uri.clone())
             .unwrap_or_else(|| uri.to_owned());
+        let mut origin_sensitive_headers_allowed = prepared_get
+            .as_ref()
+            .or(head_resp.as_ref())
+            .map(|prepared| prepared.origin_auth_allowed)
+            .unwrap_or(true);
 
         // An explicit output name is authoritative. For an inferred HTTP
         // name, the first successful response is the metadata seam at which
@@ -145,6 +152,10 @@ impl DownloadCommand {
 
         let mut supports_range = false;
         let mut probed_http_version = None;
+        let mut range_auth_factory = prepared_get
+            .as_ref()
+            .or(head_resp.as_ref())
+            .map(|prepared| Arc::clone(&prepared.auth_factory));
         let metadata_allows_probe = response_for_metadata
             .map(|response| response.status().is_success())
             .unwrap_or(known_total_length > 0);
@@ -174,8 +185,13 @@ impl DownloadCommand {
             };
             let prober =
                 HttpSegmentDownloader::new_with_policy(&self.client, self.request_policy.clone())
-                    .with_cookie_helper(cookie_helper)
-                    .with_auth_options(auth_options, options.netrc_path.clone());
+                    .with_cookie_helper(cookie_helper);
+            let prober = if let Some(auth_factory) = &range_auth_factory {
+                prober.with_shared_auth_options(auth_options, Arc::clone(auth_factory))
+            } else {
+                prober.with_auth_options(auth_options, options.netrc_path.clone())
+            }
+            .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
             let probe_retry_policy =
                 RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
             let probe = {
@@ -185,10 +201,13 @@ impl DownloadCommand {
                     uri: &effective_uri,
                     cookie_header: cookie_header.as_deref(),
                     retry_policy: probe_retry_policy,
+                    adaptive_options: options.http_adaptive,
                 };
                 run_single_work_item(&mut work).await?
             };
+            range_auth_factory = Some(prober.shared_auth_factory());
             supports_range = probe.supports_range;
+            origin_sensitive_headers_allowed &= probe.origin_sensitive_headers_allowed;
             if probe.total_length > 0 {
                 total_length = probe.total_length;
             }
@@ -206,6 +225,11 @@ impl DownloadCommand {
                 "HTTP range capability probe completed"
             );
             probed_http_version = probe.version;
+            if let Some(version) = probe.version {
+                self.group
+                    .recover()
+                    .observe_http_version(version == reqwest::Version::HTTP_2);
+            }
         }
 
         let original_path = self.output_path.clone();
@@ -272,7 +296,11 @@ impl DownloadCommand {
         // ranges still need fetching.
         let was_paused = self.group.recover().is_paused_flag();
 
-        if resume_state.is_complete && !was_paused && !self.check_integrity {
+        if resume_state.is_complete
+            && !was_paused
+            && !self.check_integrity
+            && !options.allow_overwrite
+        {
             info!(
                 "File already exists completely, skipping download: {} ({} bytes)",
                 self.output_path.display(),
@@ -312,97 +340,62 @@ impl DownloadCommand {
         self.update_tail_reclaim_progress();
 
         let download_result: Result<()> = async {
-            // --check-integrity: when the download context carries piece
-            // hashes (e.g. Metalink), verify the existing file chunk-by-chunk
-            // before allocating/downloading (mirrors C++ CheckIntegrityMan +
-            // CheckIntegrityCommand). No-op when there is nothing to validate.
-            if self.check_integrity && total_length > 0 {
-                use crate::checksum::check_integrity::{
-                    man as ci_man, IntegrityTrailingGarbageAction,
-                };
-                IntegrityTrailingGarbageAction::single_file(
-                    self.output_path.clone(),
+            if self
+                .verify_existing_integrity(total_length, &mut resume_state)
+                .await?
+            {
+                return Ok(());
+            }
+
+            let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+            let min_split_size = self.group.recover().effective_min_split_size();
+            let split = crate::engine::http::concurrent_download::effective_segment_count(
+                total_length,
+                requested_split,
+                min_split_size,
+            );
+
+            // File allocation can make a new output file look complete even
+            // though no response bytes have been written. Persist an empty
+            // sequential checkpoint before allocation so a pause during the
+            // first request cannot later mistake the preallocated file for a
+            // completed download.
+            if total_length > 0
+                && !resume_state.should_resume
+                && !self.should_use_concurrent(total_length, supports_range, split)
+            {
+                let control_path = crate::filesystem::control_file::ControlFile::
+                    control_path_for(&self.output_path);
+                if let Err(error) = crate::filesystem::durability::remove_file(&control_path).await
+                {
+                    warn!(
+                        path = %control_path.display(),
+                        %error,
+                        "Failed to remove stale HTTP control file before allocation"
+                    );
+                }
+                match crate::filesystem::control_file::ControlFile::open_or_create(
+                    &control_path,
                     total_length,
+                    1,
                 )
-                .apply()
-                .await?;
-                use crate::checksum::message_digest::HashType;
-                // Extract owned data first so the RwLock guard is dropped
-                // before any await (guard is not Send).
-                let piece_info = self
-                    .group
-                    .recover()
-                    .get_download_context()
-                    .map(|ctx| {
-                        (
-                            ctx.get_piece_hashes()
-                                .iter()
-                                .map(|hash| hash.to_string())
-                                .collect(),
-                            ctx.get_piece_length() as u64,
-                            ctx.get_piece_hash_type().to_string(),
-                        )
-                    });
-                if let Some((hashes, piece_len, hash_type)) = piece_info {
-                    let algo = if hash_type.is_empty() {
-                        // Empty piece-hash metadata is the legacy SHA-1
-                        // default used by BitTorrent-style contexts.
-                        HashType::Sha1
-                    } else {
-                        HashType::from_str(&hash_type).ok_or_else(|| {
-                            Aria2Error::Parse(format!(
-                                "unknown piece hash algorithm: {hash_type}"
-                            ))
-                        })?
-                    };
-                    if let Some(task) = ci_man::file_task(
-                        &self.output_path,
-                        piece_len.max(1),
-                        total_length,
-                        hashes,
-                        algo,
-                    )? {
-                        let gid = self.group.recover().gid().value();
-                        info!(gid, "Checking integrity of existing data against piece hashes");
-                        let outcome = ci_man::enqueue_with_outcome_for_group(
-                            &ci_man::shared(),
-                            Arc::clone(&self.group),
-                            task,
-                        )
-                        .await?;
-                        let ok = outcome.verified;
-                        if !ok {
+                .await
+                {
+                    Ok(mut control_file) => {
+                        control_file.record_completed_prefix(0);
+                        if let Err(error) = control_file.save().await {
                             warn!(
-                                gid,
-                                "Integrity check failed; discarding resume state and re-downloading"
+                                path = %control_path.display(),
+                                %error,
+                                "Failed to save initial HTTP control file before allocation"
                             );
-                            // C++ StreamCheckIntegrityEntry::onDownloadIncomplete()
-                            // sends the request back through allocation/download rather
-                            // than terminating the request. Do not reuse offsets derived
-                            // from data that failed validation.
-                            resume_state.should_resume = false;
-                            resume_state.start_offset = 0;
-                            resume_state.is_complete = false;
-                        } else {
-                            info!(gid, "Integrity check passed");
-                            // A successful pre-download integrity check proves
-                            // the complete existing file is already usable. Do
-                            // not issue a range request at EOF or reallocate it.
-                            if resume_state.existing_length >= total_length {
-                                self.completed_bytes = total_length;
-                                resume_state.start_offset = total_length;
-                                resume_state.is_complete = true;
-                                {
-                                    let mut group = self.group.recover_mut();
-                                    group.set_completed_length(total_length);
-                                    group.complete()?;
-                                }
-                                self.completed = true;
-                                self.release_output_path().await;
-                                return Ok(());
-                            }
                         }
                     }
+                    Err(error) => warn!(
+                        path = %control_path.display(),
+                        %error,
+                        "Failed to create initial HTTP control file before allocation"
+                    ),
                 }
             }
 
@@ -427,15 +420,6 @@ impl DownloadCommand {
                     .await?;
                 }
             }
-
-            let options = self.group.recover().options_arc();
-            let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
-            let min_split_size = self.group.recover().effective_min_split_size();
-            let split = crate::engine::http::concurrent_download::effective_segment_count(
-                total_length,
-                requested_split,
-                min_split_size,
-            );
 
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();
@@ -470,6 +454,8 @@ impl DownloadCommand {
                     proxy_user,
                     proxy_passwd,
                 };
+                let fallback_auth_factory = range_auth_factory.clone();
+                let fallback_auth_options = auth_options.clone();
                 let progress_arc = Arc::clone(&self.progress);
                 let mut concurrent_downloader = ConcurrentDownloader::new(
                     Arc::clone(&self.client),
@@ -486,7 +472,12 @@ impl DownloadCommand {
                     self.global_limiter.clone(),
                 )
                 .with_range_clients(Arc::clone(&self.range_clients))
+                .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed)
                 .with_initial_http_version(&effective_uri, probed_http_version);
+                if let Some(auth_factory) = range_auth_factory.as_ref() {
+                    concurrent_downloader =
+                        concurrent_downloader.with_shared_auth_factory(Arc::clone(auth_factory));
+                }
                 match concurrent_downloader.execute_with_retry(
                     uri,
                     &effective_uri,
@@ -513,7 +504,14 @@ impl DownloadCommand {
                         )
                         .with_outbound_network_policy(Arc::clone(
                             &self.outbound_network_policy,
-                        ));
+                        ))
+                        .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
+                        if let Some(auth_factory) = fallback_auth_factory {
+                            sequential_downloader = sequential_downloader.with_shared_auth_options(
+                                auth_factory,
+                                fallback_auth_options,
+                            );
+                        }
                         let result = sequential_downloader.execute_with_gaps_with_retry(
                             uri,
                             total_length,
@@ -538,7 +536,8 @@ impl DownloadCommand {
                 Arc::clone(&self.progress),
                 self.global_limiter.clone(),
             )
-            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
+            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy))
+            .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
             if let Some(prepared) = prepared_get.take() {
                 sequential_downloader = sequential_downloader.with_prepared_response(prepared);
             }
@@ -560,79 +559,5 @@ impl DownloadCommand {
         self.group
             .recover()
             .set_resolved_output_path(self.output_path.to_string_lossy());
-    }
-}
-
-struct HttpRangeProbeWork<'a> {
-    command: &'a mut DownloadCommand,
-    prober: &'a HttpSegmentDownloader,
-    uri: &'a str,
-    cookie_header: Option<&'a str>,
-    retry_policy: RetryPolicy,
-}
-
-#[async_trait::async_trait]
-impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
-    type Output = crate::engine::http::segment_downloader::RangeProbeResult;
-
-    fn max_attempts(&self) -> u32 {
-        self.retry_policy.max_tries()
-    }
-
-    async fn execute_attempt(&mut self, _attempt: u32) -> Result<Self::Output> {
-        // A rate-limited server (429/503, often without Retry-After) is
-        // waited out with a backoff that does not spend the probe's retries;
-        // with retry_wait 0 they would all be used up at once.
-        let started = std::time::Instant::now();
-        let mut capacity_waits = 0u32;
-        loop {
-            match self
-                .prober
-                .probe_range_metadata(self.uri, self.cookie_header)
-                .await
-            {
-                Err(error)
-                    if crate::engine::http::concurrent_download::is_capacity_limited_error(
-                        &error,
-                    ) && started.elapsed() < CAPACITY_PROBE_LIMIT =>
-                {
-                    capacity_waits = capacity_waits.saturating_add(1);
-                    let wait =
-                        crate::engine::http::adaptive_concurrency::capacity_backoff(capacity_waits);
-                    debug!(
-                        waits = capacity_waits,
-                        wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
-                        error = %error,
-                        "HTTP Range capability probe rate-limited; backing off"
-                    );
-                    self.command.wait_for_retry(wait).await?;
-                }
-                result => return result,
-            }
-        }
-    }
-
-    fn retry_wait(&self, attempt: u32, error: &Aria2Error) -> Option<std::time::Duration> {
-        if !self
-            .retry_policy
-            .should_retry(attempt.saturating_sub(1), error)
-        {
-            return None;
-        }
-        let wait = self.retry_policy.compute_wait(attempt).unwrap_or_default();
-        debug!(
-            attempt,
-            wait_ms = wait.as_millis() as u64,
-            error = %error,
-            "Retrying transient HTTP Range capability probe"
-        );
-        Some(wait)
-    }
-
-    async fn wait_for_retry(&mut self, wait: std::time::Duration) -> Result<()> {
-        if wait.is_zero() {
-            return Ok(());
-        }
-        self.command.wait_for_retry(wait).await
     }
 }

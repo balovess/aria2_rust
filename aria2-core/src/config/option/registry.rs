@@ -17,6 +17,7 @@ impl OptionRegistry {
         };
         reg.register_general_options();
         reg.register_http_ftp_options();
+        reg.register_sftp_options();
         #[cfg(feature = "bittorrent")]
         reg.register_bt_options();
         reg.register_rpc_options();
@@ -198,276 +199,6 @@ impl OptionRegistry {
             _ => name,
         }
     }
-
-    /// Return the explicit production owner for a canonical built-in option.
-    ///
-    /// This list is deliberately exhaustive rather than derived from
-    /// [`OptionCategory`]. Adding a built-in option without adding it here
-    /// makes registry construction fail immediately.
-    pub fn owner_for_name(name: &str) -> Option<OptionOwner> {
-        let name = Self::canonical_name(name);
-        match name {
-            // Per-download HTTP/FTP and shared download settings.
-            "all-proxy"
-            | "http-proxy"
-            | "https-proxy"
-            | "ftp-proxy"
-            | "no-proxy"
-            | "all-proxy-user"
-            | "all-proxy-passwd"
-            | "http-proxy-user"
-            | "http-proxy-passwd"
-            | "https-proxy-user"
-            | "https-proxy-passwd"
-            | "ftp-proxy-user"
-            | "ftp-proxy-passwd"
-            | "proxy-method"
-            | "user-agent"
-            | "referer"
-            | "header"
-            | "load-cookies"
-            | "save-cookies"
-            | "connect-timeout"
-            | "timeout"
-            | "max-tries"
-            | "retry-wait"
-            | "split"
-            | "min-split-size"
-            | "min-http-range-size"
-            | "max-connection-per-server"
-            | "max-http2-sessions-per-server"
-            | "max-http2-streams-per-session"
-            | "http-version"
-            | "check-certificate"
-            | "ca-certificate"
-            | "allow-overwrite"
-            | "auto-file-renaming"
-            | "continue"
-            | "remote-time"
-            | "enable-http-keep-alive"
-            | "enable-http-pipelining"
-            | "http-accept-gzip"
-            | "http-auth-challenge"
-            | "http-no-cache"
-            | "content-disposition-default-utf8"
-            | "use-head"
-            | "no-want-digest-header"
-            | "http-user"
-            | "http-passwd"
-            | "certificate"
-            | "private-key"
-            | "min-tls-version"
-            | "max-http-pipelining"
-            | "ftp-user"
-            | "ftp-passwd"
-            | "ftp-pasv"
-            | "ftp-reuse-connection"
-            | "ftp-type"
-            | "ssh-host-key-md"
-            | "dir"
-            | "out"
-            | "allow-piece-length-change"
-            | "always-resume"
-            | "check-integrity"
-            | "conditional-get"
-            | "disable-ipv6"
-            | "hash-check-only"
-            | "parameterized-uri"
-            | "pause"
-            | "remove-control-file"
-            | "reuse-uri"
-            | "save-not-found"
-            | "force-sequential"
-            | "no-netrc"
-            | "realtime-chunk-checksum"
-            | "lowest-speed-limit"
-            | "max-file-not-found"
-            | "no-file-allocation-limit"
-            | "uri-selector"
-            | "stream-piece-selector"
-            | "checksum"
-            | "file-allocation"
-            | "secure-falloc"
-            | "mmap-threshold"
-            | "enable-mmap"
-            | "max-mmap-limit"
-            | "max-download-limit"
-            | "max-upload-limit"
-            | "piece-length"
-            | "disk-cache"
-            | "max-resume-failure-tries"
-            | "show-files"
-            | "metalink-version"
-            | "metalink-language"
-            | "metalink-os"
-            | "metalink-location"
-            | "metalink-preferred-protocol"
-            | "metalink-enable-unique-protocol"
-            | "metalink-base-uri"
-            | "follow-metalink"
-            | "seed-time"
-            | "seed-ratio"
-            | "bt-max-peers"
-            | "bt-max-upload-slots"
-            | "bt-optimistic-unchoke-interval"
-            | "bt-snubbed-timeout"
-            | "bt-request-peer-speed-limit"
-            | "bt-max-open-files"
-            | "bt-seed-unverified"
-            | "bt-save-metadata"
-            | "bt-force-encryption"
-            | "bt-min-crypto-level"
-            | "bt-detach-seed-only"
-            | "bt-enable-lpd"
-            | "bt-enable-web-seed"
-            | "enable-dht"
-            | "dht-listen-port"
-            | "dht-entry-point"
-            | "dht-file-path"
-            | "enable-peer-exchange"
-            | "follow-torrent"
-            | "on-bt-download-complete"
-            | "on-bt-download-error"
-            | "bt-prioritize-piece"
-            | "bt-enable-hook-after-hash-check"
-            | "bt-exclude-tracker"
-            | "bt-external-ip"
-            | "bt-hash-check-seed"
-            | "bt-load-saved-metadata"
-            | "bt-metadata-only"
-            | "bt-remove-unselected-file"
-            | "bt-require-crypto"
-            | "bt-stop-timeout"
-            | "bt-tracker"
-            | "bt-tracker-source"
-            | "bt-tracker-update-interval"
-            | "enable-public-trackers"
-            | "bt-tracker-connect-timeout"
-            | "bt-tracker-interval"
-            | "bt-tracker-timeout"
-            | "bt-tracker-stopped-timeout"
-            | "dht-message-timeout"
-            | "dht-refresh-check-interval"
-            | "dht-token-rotation-interval"
-            | "dht-node-contact-interval"
-            | "dht-cleanup-interval"
-            | "dht-save-interval"
-            | "dht-bootstrap-timeout"
-            | "dht-max-concurrent-lookups"
-            | "dht-persistence-max-age"
-            | "enable-dht6"
-            | "dht-listen-addr6"
-            | "peer-id-prefix"
-            | "peer-agent"
-            | "select-file"
-            | "index-out"
-            | "bt-peer-blocklist"
-            | "enable-utp"
-            | "utp-listen-port"
-            | "bt-keep-alive-interval"
-            | "bt-timeout"
-            | "bt-request-timeout"
-            | "peer-connection-timeout"
-            | "pause-metadata"
-            | "dht-entry-point-host"
-            | "dht-entry-point-port"
-            | "dht-entry-point6"
-            | "dht-entry-point-host6"
-            | "dht-entry-point-port6"
-            | "dht-file-path6"
-            | "dht-listen-addr"
-            | "listen-port" => Some(OptionOwner::DownloadTask),
-
-            // Process-wide scheduler, resolver, socket, persistence, and
-            // statistics settings.
-            "async-dns-server"
-            | "dns-timeout"
-            | "event-poll"
-            | "interface"
-            | "multiple-interface"
-            | "server-stat-timeout"
-            | "server-stat-if"
-            | "server-stat-of"
-            | "max-concurrent-downloads"
-            | "max-overall-download-limit"
-            | "max-overall-upload-limit"
-            | "stop"
-            | "force-save"
-            | "save-server-stat-interval"
-            | "socket-recv-buffer-size"
-            | "dscp"
-            | "optimize-concurrent-downloads"
-            | "optimize-concurrent-downloads-coeffA"
-            | "optimize-concurrent-downloads-coeffB"
-            | "rlimit-nofile"
-            | "select-least-used-host"
-            | "stop-with-process"
-            | "log-max-size"
-            | "log-max-files"
-            | "lpd-listen-port"
-            | "bt-lpd-interface" => Some(OptionOwner::ProcessEngine),
-
-            "async-dns" | "enable-async-dns6" | "startup-idle-time" => {
-                Some(OptionOwner::DownloadTask)
-            }
-
-            // CLI, session, terminal, and process lifecycle settings.
-            "conf-path"
-            | "no-conf"
-            | "update-check"
-            | "update-check-interval-days"
-            | "input-file"
-            | "save-session"
-            | "save-session-interval"
-            | "auto-save-interval"
-            | "daemon"
-            | "pid-file"
-            | "gid"
-            | "netrc-path"
-            | "deferred-input"
-            | "max-download-result"
-            | "on-download-start"
-            | "on-download-stop"
-            | "on-download-pause"
-            | "on-download-complete"
-            | "on-download-error"
-            | "torrent-file"
-            | "metalink-file"
-            | "enable-color"
-            | "quiet"
-            | "dry-run"
-            | "download-result"
-            | "human-readable"
-            | "keep-unfinished-download-result"
-            | "truncate-console-readout"
-            | "show-console-readout"
-            | "stderr"
-            | "log"
-            | "log-level"
-            | "console-log-level"
-            | "log-backup-count"
-            | "summary-interval" => Some(OptionOwner::Application),
-
-            // RPC listener and authentication settings.
-            "enable-rpc"
-            | "rpc-listen-all"
-            | "rpc-listen-port"
-            | "rpc-listen-address"
-            | "rpc-secret"
-            | "rpc-user"
-            | "rpc-passwd"
-            | "rpc-allow-origin"
-            | "rpc-cors-domain"
-            | "rpc-secure"
-            | "rpc-certificate"
-            | "rpc-private-key"
-            | "rpc-allow-origin-all"
-            | "rpc-max-request-size"
-            | "rpc-save-upload-metadata" => Some(OptionOwner::RpcServer),
-
-            _ => None,
-        }
-    }
 }
 
 fn rpc_value_to_string(value: &serde_json::Value) -> Result<String, String> {
@@ -538,6 +269,23 @@ mod tests {
             ("startup-idle-time", OptionOwner::DownloadTask),
             ("async-dns-server", OptionOwner::ProcessEngine),
             ("dns-timeout", OptionOwner::ProcessEngine),
+            ("bt-max-open-files", OptionOwner::ProcessEngine),
+            ("dht-max-peer-info-hashes", OptionOwner::ProcessEngine),
+            ("dht-max-peers-per-info-hash", OptionOwner::ProcessEngine),
+            ("dht-max-items", OptionOwner::ProcessEngine),
+            (
+                "bt-incoming-peer-handshake-timeout",
+                OptionOwner::ProcessEngine,
+            ),
+            ("bt-utp-max-connections", OptionOwner::ProcessEngine),
+            ("bt-utp-connect-timeout", OptionOwner::ProcessEngine),
+            ("bt-utp-idle-timeout", OptionOwner::ProcessEngine),
+            ("bt-utp-keepalive-interval", OptionOwner::ProcessEngine),
+            ("bt-tracker-source", OptionOwner::ProcessEngine),
+            ("bt-tracker-update-interval", OptionOwner::ProcessEngine),
+            ("bt-tracker-source-concurrency", OptionOwner::ProcessEngine),
+            ("enable-public-trackers", OptionOwner::ProcessEngine),
+            ("bt-tracker-source-timeout", OptionOwner::ProcessEngine),
         ];
 
         for (name, expected_owner) in cases {
@@ -547,14 +295,23 @@ mod tests {
                 "option '{}' must have the owner of its real execution seam",
                 name
             );
+            let registry = OptionRegistry::new();
+            #[cfg(feature = "bittorrent")]
             assert_eq!(
-                OptionRegistry::new()
-                    .get(name)
-                    .map(|definition| definition.owner()),
+                registry.get(name).map(|definition| definition.owner()),
                 Some(expected_owner),
                 "registered option '{}' must preserve its execution owner",
                 name
             );
+            #[cfg(not(feature = "bittorrent"))]
+            if let Some(definition) = registry.get(name) {
+                assert_eq!(
+                    Some(definition.owner()),
+                    Some(expected_owner),
+                    "registered option '{}' must preserve its execution owner",
+                    name
+                );
+            }
         }
     }
 
@@ -581,11 +338,23 @@ mod tests {
                 serde_json::json!(604800),
             );
             options.insert(
+                "bt-tracker-source-concurrency".to_string(),
+                serde_json::json!(2),
+            );
+            options.insert(
                 "enable-public-trackers".to_string(),
                 serde_json::json!(true),
             );
             options.insert("enable-utp".to_string(), serde_json::json!(true));
             options.insert("utp-listen-port".to_string(), serde_json::json!(6882));
+            options.insert(
+                "dht-max-peer-info-hashes".to_string(),
+                serde_json::json!(1200),
+            );
+            options.insert(
+                "dht-max-peers-per-info-hash".to_string(),
+                serde_json::json!(37),
+            );
         }
 
         let projected = registry.project_defined_global_options_for_rpc(&options);
@@ -606,8 +375,20 @@ mod tests {
                 Some(&serde_json::json!(604800))
             );
             assert_eq!(
+                projected.get("bt-tracker-source-concurrency"),
+                Some(&serde_json::json!(2))
+            );
+            assert_eq!(
                 projected.get("enable-public-trackers"),
                 Some(&serde_json::json!(true))
+            );
+            assert_eq!(
+                projected.get("dht-max-peer-info-hashes"),
+                Some(&serde_json::json!(1200))
+            );
+            assert_eq!(
+                projected.get("dht-max-peers-per-info-hash"),
+                Some(&serde_json::json!(37))
             );
         }
     }

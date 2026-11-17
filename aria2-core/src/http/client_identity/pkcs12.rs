@@ -1,6 +1,16 @@
 use crate::error::{Aria2Error, Result};
 
 pub(super) fn load_empty_password_identity(certificate: &str) -> Result<reqwest::Identity> {
+    let pem = load_empty_password_identity_pem(certificate)?;
+    reqwest::Identity::from_pem(&pem).map_err(|error| {
+        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+            "Invalid empty-password PKCS#12 client identity: {}",
+            error
+        )))
+    })
+}
+
+pub(super) fn load_empty_password_identity_pem(certificate: &str) -> Result<Vec<u8>> {
     let archive = std::fs::read(certificate).map_err(|error| {
         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
             "Failed to read client certificate '{}': {}",
@@ -93,12 +103,7 @@ pub(super) fn load_empty_password_identity(certificate: &str) -> Result<reqwest:
         identity.extend_from_slice(&pem_block("CERTIFICATE", &certificate));
     }
     identity.extend_from_slice(&pem_block("PRIVATE KEY", &key));
-    reqwest::Identity::from_pem(&identity).map_err(|error| {
-        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-            "Invalid empty-password PKCS#12 client identity: {}",
-            error
-        )))
-    })
+    Ok(identity)
 }
 
 pub(super) fn pkcs12_oid(arcs: &[u64]) -> yasna::models::ObjectIdentifier {
@@ -330,39 +335,40 @@ pub(super) fn decrypt_pkcs12_aes_gcm(
 
     let (message, tag) = ciphertext.split_at_checked(ciphertext.len().checked_sub(tag_len)?)?;
     use aes_gcm::aead::consts::U12;
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use aes_gcm::aead::{AeadInOut, KeyInit};
+    let nonce = aes_gcm::Nonce::try_from(nonce.as_slice()).ok()?;
     if key_len == 16 && tag_len == 12 {
         let cipher =
             aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12, U12>::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::aead::generic_array::GenericArray::<u8, U12>::from_slice(tag);
+        let tag = aes_gcm::Tag::<U12>::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     } else if key_len == 32 && tag_len == 12 {
         let cipher =
             aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12, U12>::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::aead::generic_array::GenericArray::<u8, U12>::from_slice(tag);
+        let tag = aes_gcm::Tag::<U12>::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     } else if key_len == 16 {
         let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::Tag::from_slice(tag);
+        let tag = aes_gcm::Tag::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     } else {
         let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).ok()?;
-        let tag = aes_gcm::Tag::from_slice(tag);
+        let tag = aes_gcm::Tag::try_from(tag).ok()?;
         let mut plaintext = message.to_vec();
         cipher
-            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .decrypt_inout_detached(&nonce, &[], plaintext.as_mut_slice().into(), &tag)
             .ok()?;
         Some(plaintext)
     }

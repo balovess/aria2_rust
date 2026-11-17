@@ -32,7 +32,7 @@ fn payload(size: usize) -> Vec<u8> {
 fn metalink(name: &str, url: &str, data: &[u8]) -> Vec<u8> {
     use sha2::Digest;
 
-    let digest = format!("{:x}", sha2::Sha256::digest(data));
+    let digest = hex::encode(sha2::Sha256::digest(data));
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <metalink xmlns="urn:ietf:params:xml:ns:metalink">
@@ -304,8 +304,10 @@ async fn metalink_stream_pause_resume_persists_rust_checkpoint() {
     );
     assert!(group.recover().status().is_paused());
 
-    let output = directory.path().join("metalink-pause.bin");
-    let control = ControlFile::control_path_for(&output);
+    let stage = directory
+        .path()
+        .join(".metalink-pause.bin.metalink-700-0.part");
+    let control = ControlFile::control_path_for(&stage);
     let saved = ControlFile::load(&control)
         .await
         .unwrap()
@@ -314,13 +316,14 @@ async fn metalink_stream_pause_resume_persists_rust_checkpoint() {
     assert!(saved.completed_length() < data.len() as u64);
 
     let mut resumed = MetalinkDownloadCommand::new(
-        GroupId::new(701),
+        GroupId::new(700),
         &document,
         &options,
         directory.path().to_str(),
     )
     .unwrap();
     resumed.execute().await.unwrap();
+    let output = directory.path().join("metalink-pause.bin");
     assert_eq!(tokio::fs::read(&output).await.unwrap(), data);
     assert!(
         !control.exists(),
@@ -341,7 +344,7 @@ async fn metalink_stream_pause_resume_persists_rust_checkpoint() {
 }
 
 #[tokio::test]
-async fn metalink_stream_remove_preserves_partial_output_and_checkpoint() {
+async fn metalink_stream_remove_discards_unpublished_staging() {
     let server = MockHttpServer::start().await.unwrap();
     let data = payload(2 * 1024 * 1024);
     install_slow_range_route(&server, "/metalink-remove.bin", &data);
@@ -377,11 +380,14 @@ async fn metalink_stream_remove_preserves_partial_output_and_checkpoint() {
     assert!(group.recover().is_removed());
 
     let output = directory.path().join("metalink-remove.bin");
-    let control = ControlFile::control_path_for(&output);
-    assert!(output.metadata().unwrap().len() > 0);
+    let stage = directory
+        .path()
+        .join(".metalink-remove.bin.metalink-702-0.part");
+    let control = ControlFile::control_path_for(&stage);
+    assert!(!output.exists(), "removed payload must not be published");
     assert!(
-        control.exists(),
-        "remove must preserve the Rust checkpoint for explicit recovery"
+        !stage.exists() && !control.exists(),
+        "removal must discard the incomplete Metalink staging file and checkpoint"
     );
 }
 
@@ -437,8 +443,10 @@ async fn metalink_engine_force_halt_preserves_resume_state() {
         group_handle.recover().get_halt_reason(),
         aria2_core::request::request_group::HaltReason::ShutdownSignal
     );
-    let output = directory.path().join("metalink-force-halt.bin");
-    let control = ControlFile::control_path_for(&output);
+    let stage = directory
+        .path()
+        .join(".metalink-force-halt.bin.metalink-703-0.part");
+    let control = ControlFile::control_path_for(&stage);
     let saved = ControlFile::load(&control)
         .await
         .unwrap()

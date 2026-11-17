@@ -1,9 +1,9 @@
 // Protocol defaults
 pub const USER_AGENT: &str = aria2_protocol::identity::DEFAULT_USER_AGENT;
-pub const FTP_DEFAULT_PORT: u16 = 21;
+pub const FTP_DEFAULT_PORT: u16 = aria2_protocol::ftp::DEFAULT_PORT;
 pub const FTP_DEFAULT_USER: &str = "anonymous";
 pub const FTP_DEFAULT_PASSWORD: &str = "aria2@";
-pub const SFTP_DEFAULT_PORT: u16 = 22;
+pub const SFTP_DEFAULT_PORT: u16 = aria2_protocol::DEFAULT_SFTP_PORT;
 
 // HTTP defaults
 pub const HTTP_DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -100,12 +100,16 @@ pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
 pub const DEFAULT_SECURE_FALLOC: bool = false;
 pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
-/// Hard per-download, per-authority ceiling for physical HTTP TCP connections.
-/// The adaptive scheduler changes active Range request/stream concurrency,
-/// while HTTP/2 may multiplex several Range requests over one TCP session.
-pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
+/// Default HTTP/1.1 per-download, per-authority connection ceiling.
+///
+/// This is a user-directed difference from aria2's default of 1.
+pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 10;
+/// Maximum accepted HTTP/1.1 per-download, per-authority connection ceiling.
+pub const MAX_CONNECTION_PER_SERVER: usize = 16;
 /// Default count of independent HTTP/2 client pools for concurrent Range traffic.
 pub const DEFAULT_HTTP2_SESSIONS_PER_SERVER: usize = 4;
+/// Maximum configured HTTP/2 sessions per server for one download.
+pub const MAX_HTTP2_SESSIONS_PER_SERVER: usize = 16;
 /// Default simultaneous HTTP/2 Range streams allowed on each physical session.
 pub const DEFAULT_HTTP2_STREAMS_PER_SESSION: usize = 4;
 /// Default durable HTTP parent piece length.
@@ -155,15 +159,15 @@ pub const FTP_POOL_DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 pub const FTP_POOL_DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
 
 // SFTP defaults
-pub const SFTP_CONNECT_TIMEOUT_SECS: u64 = 15;
-pub const SFTP_READ_TIMEOUT_SECS: u64 = 30;
+pub const SFTP_CONNECT_TIMEOUT_SECS: u64 = aria2_protocol::DEFAULT_SFTP_CONNECT_TIMEOUT_SECS;
+pub const SFTP_READ_TIMEOUT_SECS: u64 = aria2_protocol::DEFAULT_SFTP_READ_TIMEOUT_SECS;
 pub const SFTP_COMMAND_TIMEOUT_SECS: u64 = 300;
 pub const SFTP_DISK_WRITE_CHUNK_SIZE: usize = 64 * 1024;
 pub const SFTP_SPEED_UPDATE_INTERVAL_MS: u64 = 500;
 
 // LPD defaults
-pub const LPD_MULTICAST_ADDRESS: &str = "239.192.152.143";
-pub const LPD_PORT: u16 = 6771;
+pub const LPD_MULTICAST_ADDRESS: &str = aria2_protocol::DEFAULT_LPD_MULTICAST_ADDRESS;
+pub const LPD_PORT: u16 = aria2_protocol::DEFAULT_LPD_PORT;
 pub const LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 300;
 pub const LPD_RECEIVE_BUFFER_SIZE: usize = 1024;
 pub const LPD_DEFAULT_RECEIVE_TIMEOUT_MS: u64 = 2000;

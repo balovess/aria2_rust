@@ -305,6 +305,7 @@ pub(super) struct BootstrapRefreshTask {
     ctx: DhtTaskContext,
     timeout: Duration,
     bootstrap_nodes: Vec<DhtNode>,
+    max_concurrent_pings: usize,
 }
 
 impl BootstrapRefreshTask {
@@ -312,11 +313,13 @@ impl BootstrapRefreshTask {
         ctx: DhtTaskContext,
         timeout: Duration,
         bootstrap_nodes: Vec<DhtNode>,
+        max_concurrent_pings: usize,
     ) -> Self {
         Self {
             ctx,
             timeout,
             bootstrap_nodes,
+            max_concurrent_pings: max_concurrent_pings.clamp(1, DEFAULT_NUM_CONCURRENT),
         }
     }
 }
@@ -328,6 +331,7 @@ impl DhtTask for BootstrapRefreshTask {
 
         let ctx = self.ctx;
         let bootstrap_nodes = self.bootstrap_nodes;
+        let max_concurrent_pings = self.max_concurrent_pings;
         let refresh = async move {
             futures::stream::iter(bootstrap_nodes.into_iter().map(|node| {
                 let ctx = ctx.clone();
@@ -337,7 +341,7 @@ impl DhtTask for BootstrapRefreshTask {
                         .await;
                 }
             }))
-            .buffer_unordered(DEFAULT_NUM_CONCURRENT)
+            .buffer_unordered(max_concurrent_pings)
             .for_each(|_| async {})
             .await;
 
@@ -373,5 +377,29 @@ mod tests {
         );
         assert_eq!(ctx.self_id(), &[0u8; 20]);
         assert_eq!(ctx.query_timeout(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn bootstrap_refresh_respects_configured_concurrency_with_safety_cap() {
+        let context = || {
+            DhtTaskContext::new(
+                [0u8; 20],
+                Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
+                DhtSocket::new_test(),
+                Arc::new(TransactionTracker::new()),
+                Duration::from_secs(10),
+            )
+        };
+
+        for (configured, expected) in [(0, 1), (2, 2), (128, DEFAULT_NUM_CONCURRENT)] {
+            let task = BootstrapRefreshTask::new(
+                context(),
+                Duration::from_secs(1),
+                Vec::new(),
+                configured,
+            );
+
+            assert_eq!(task.max_concurrent_pings, expected);
+        }
     }
 }

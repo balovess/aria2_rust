@@ -1,7 +1,7 @@
 //! Protocol message senders, message reading, and connection state queries for
 //! [`BtPeerConn`].
 
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, RecoverableError, Result};
 use aria2_protocol::bittorrent::message::types::BtMessage;
 
 use super::{BtPeerConn, InnerConnection};
@@ -16,10 +16,7 @@ impl BtPeerConn {
                     })
                 })
             }
-            InnerConnection::Utp(connection) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                connection.send_message(&serialize(message)).await
-            }
+            InnerConnection::Utp(connection) => connection.send_bt_message(message).await,
         }
     }
 
@@ -31,10 +28,8 @@ impl BtPeerConn {
     ///
     /// Also updates `last_keepalive_sent`.
     pub async fn send_keepalive(&mut self) -> Result<()> {
-        use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
-        let data = serialize(&BtMessage::KeepAlive);
-        self.write_raw(&data).await?;
+        self.send_bt_message(&BtMessage::KeepAlive).await?;
         self.last_keepalive_sent = std::time::Instant::now();
         Ok(())
     }
@@ -63,7 +58,6 @@ impl BtPeerConn {
         metadata_size: Option<u32>,
     ) -> Result<()> {
         use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
-        use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
 
         let mut handshake = ExtensionHandshake::new();
@@ -74,10 +68,10 @@ impl BtPeerConn {
         if let Some(metadata_size) = metadata_size {
             handshake.with_metadata_size(metadata_size);
         }
-        self.write_raw(&serialize(&BtMessage::Extended {
+        self.send_bt_message(&BtMessage::Extended {
             ext_id: 0,
             payload: handshake.to_bytes(),
-        }))
+        })
         .await
     }
 
@@ -90,12 +84,7 @@ impl BtPeerConn {
             InnerConnection::Tcp(c) => c.send_unchoke().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                let msg = BtMessage::Unchoke;
-                c.send_message(&serialize(&msg)).await
-            }
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::Unchoke).await,
         }
     }
 
@@ -104,12 +93,7 @@ impl BtPeerConn {
             InnerConnection::Tcp(c) => c.send_choke().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                let msg = BtMessage::Choke;
-                c.send_message(&serialize(&msg)).await
-            }
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::Choke).await,
         }
     }
 
@@ -118,12 +102,7 @@ impl BtPeerConn {
             InnerConnection::Tcp(c) => c.send_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                let msg = BtMessage::Interested;
-                c.send_message(&serialize(&msg)).await
-            }
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::Interested).await,
         };
         result?;
         self.stats.am_interested = true;
@@ -135,12 +114,7 @@ impl BtPeerConn {
             InnerConnection::Tcp(c) => c.send_not_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                let msg = BtMessage::NotInterested;
-                c.send_message(&serialize(&msg)).await
-            }
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::NotInterested).await,
         };
         result?;
         self.stats.am_interested = false;
@@ -158,11 +132,7 @@ impl BtPeerConn {
                         message: e,
                     })
                 }),
-            InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                c.send_message(&serialize(&BtMessage::Port { port })).await
-            }
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::Port { port }).await,
         }
     }
 
@@ -171,12 +141,7 @@ impl BtPeerConn {
             InnerConnection::Tcp(c) => c.send_have(piece_index).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                let msg = BtMessage::Have { piece_index };
-                c.send_message(&serialize(&msg)).await
-            }
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::Have { piece_index }).await,
         }
     }
 
@@ -202,12 +167,8 @@ impl BtPeerConn {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::{BtMessage, PieceBlockRequest};
-                let msg = BtMessage::Request {
-                    request: PieceBlockRequest::new(req.index, req.begin, req.length),
-                };
-                c.send_message(&serialize(&msg)).await
+                c.send_bt_message(&BtMessage::Request { request: req })
+                    .await
             }
         }
     }
@@ -221,12 +182,10 @@ impl BtPeerConn {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::{BtMessage, PieceBlockRequest};
-                let msg = BtMessage::Cancel {
-                    request: PieceBlockRequest::new(req.index, req.begin, req.length),
-                };
-                c.send_message(&serialize(&msg)).await
+                c.send_bt_message(&BtMessage::Cancel {
+                    request: req.clone(),
+                })
+                .await
             }
         }
     }
@@ -237,10 +196,8 @@ impl BtPeerConn {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
             InnerConnection::Utp(c) => {
-                use aria2_protocol::bittorrent::message::serializer::serialize;
-                use aria2_protocol::bittorrent::message::types::BtMessage;
-                let msg = BtMessage::Bitfield { data: bitfield };
-                c.send_message(&serialize(&msg)).await
+                c.send_bt_message(&BtMessage::Bitfield { data: bitfield })
+                    .await
             }
         }
     }
@@ -248,28 +205,24 @@ impl BtPeerConn {
     /// Send a HaveAll message (BEP 6 Fast Extension).
     /// Indicates that the sender has all pieces.
     pub async fn send_have_all(&mut self) -> Result<()> {
-        use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
-        let msg = BtMessage::HaveAll;
         match &mut self.inner {
-            InnerConnection::Tcp(c) => c.send_message(&msg).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_message(&BtMessage::HaveAll).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => c.send_message(&serialize(&msg)).await,
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::HaveAll).await,
         }
     }
 
     /// Send a HaveNone message (BEP 6 Fast Extension).
     /// Indicates that the sender has no pieces.
     pub async fn send_have_none(&mut self) -> Result<()> {
-        use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
-        let msg = BtMessage::HaveNone;
         match &mut self.inner {
-            InnerConnection::Tcp(c) => c.send_message(&msg).await.map_err(|e| {
+            InnerConnection::Tcp(c) => c.send_message(&BtMessage::HaveNone).await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
-            InnerConnection::Utp(c) => c.send_message(&serialize(&msg)).await,
+            InnerConnection::Utp(c) => c.send_bt_message(&BtMessage::HaveNone).await,
         }
     }
 
@@ -295,15 +248,7 @@ impl BtPeerConn {
                         message: e,
                     })
                 }),
-                InnerConnection::Utp(c) => {
-                    let msg_bytes = c.recv_message().await?;
-                    if let Some(bytes) = msg_bytes {
-                        use aria2_protocol::bittorrent::message::factory::parse_message;
-                        parse_message(&bytes).map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
-                    } else {
-                        Ok(None)
-                    }
-                }
+                InnerConnection::Utp(c) => c.recv_bt_message().await,
             }
         })
         .await
@@ -320,28 +265,16 @@ impl BtPeerConn {
         };
         let result = result.and_then(|message| {
             if let Some(message_ref) = message.as_ref() {
-                if matches!(
-                    message_ref,
-                    BtMessage::AllowedFast { .. }
-                        | BtMessage::Reject { .. }
-                        | BtMessage::HaveAll
-                        | BtMessage::HaveNone
-                ) && !self.remote_supports_fast_extension()
+                if let Err(error) =
+                    aria2_protocol::bittorrent::peer::message_validation::validate_message_capabilities(
+                        message_ref,
+                        self.remote_supports_fast_extension(),
+                        self.remote_supports_extended_messaging(),
+                    )
                 {
                     return Err(Aria2Error::Recoverable(
                         RecoverableError::TemporaryNetworkFailure {
-                            message: "peer sent a Fast Extension message without negotiating Fast Extension"
-                                .to_owned(),
-                        },
-                    ));
-                }
-                if matches!(message_ref, BtMessage::Extended { .. })
-                    && !self.remote_supports_extended_messaging()
-                {
-                    return Err(Aria2Error::Recoverable(
-                        RecoverableError::TemporaryNetworkFailure {
-                            message: "peer sent an extended message without negotiating extended messaging"
-                                .to_owned(),
+                            message: error.to_string(),
                         },
                     ));
                 }
@@ -354,11 +287,7 @@ impl BtPeerConn {
                 } else {
                     Ok(())
                 };
-                validation.map_err(|error| {
-                    Aria2Error::Fatal(FatalError::Config(format!(
-                        "invalid BitTorrent peer message: {error}"
-                    )))
-                })?;
+                validation.map_err(invalid_peer_message_error)?;
             }
 
             if let Some(aria2_protocol::bittorrent::message::types::BtMessage::Extended {
@@ -370,6 +299,9 @@ impl BtPeerConn {
                         payload,
                     )
             {
+                if let Some(resource) = self.session_resource.as_mut() {
+                    resource.apply_extension_handshake(&handshake);
+                }
                 if let Some(port) = handshake.port() {
                     self.remote_listen_port = Some(port);
                     self.incoming = false;
@@ -384,12 +316,6 @@ impl BtPeerConn {
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
                         Some(client.to_owned());
-                }
-                if let Some(id) = handshake.ut_metadata_id() {
-                    self.register_peer_extension("ut_metadata", id);
-                }
-                if let Some(id) = handshake.ut_pex_id() {
-                    self.register_peer_extension("ut_pex", id);
                 }
             }
             Ok(message)
@@ -443,6 +369,12 @@ impl BtPeerConn {
     }
 }
 
+fn invalid_peer_message_error(error: impl std::fmt::Display) -> Aria2Error {
+    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+        message: format!("invalid BitTorrent peer message: {error}"),
+    })
+}
+
 #[async_trait::async_trait]
 impl crate::engine::bittorrent::peer::upload_session::BtUploadTransport for BtPeerConn {
     fn supports_fast_extension(&self) -> bool {
@@ -478,5 +410,26 @@ impl crate::engine::bittorrent::peer::upload_session::BtUploadTransport for BtPe
             self.record_outbound_activity();
         }
         result.map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod validation_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_peer_geometry_is_a_recoverable_network_failure() {
+        let error = invalid_peer_message_error(
+            aria2_protocol::bittorrent::peer::message_validation::BtMessageValidationError::IndexOutOfRange {
+                index: 2,
+                num_pieces: 1,
+            },
+        );
+
+        assert!(matches!(
+            error,
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message })
+                if message.contains("invalid BitTorrent peer message")
+        ));
     }
 }

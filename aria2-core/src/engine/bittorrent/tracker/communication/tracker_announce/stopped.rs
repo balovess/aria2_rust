@@ -42,6 +42,7 @@ impl TrackerAnnouncer {
             {
                 Ok(result) => result,
                 Err(_) => {
+                    self.cancel_pending_announce();
                     warn!(
                         "[BT] Stopped announce timed out after {:?}",
                         self.stopped_timeout
@@ -52,7 +53,7 @@ impl TrackerAnnouncer {
             if let Some(result) = result {
                 info!(
                     "[BT] Sent stopped event to {} ({} peers in response)",
-                    result.tracker_url,
+                    aria2_protocol::http::redirect::url_origin_for_logging(&result.tracker_url),
                     result.peers.len()
                 );
                 sent_successfully = true;
@@ -81,7 +82,9 @@ impl TrackerAnnouncer {
         {
             info!(
                 "[BT] Sent completed event to {} ({:?} seeders, {:?} leechers)",
-                result.tracker_url, result.seeders, result.leechers
+                aria2_protocol::http::redirect::url_origin_for_logging(&result.tracker_url),
+                result.seeders,
+                result.leechers
             );
         }
     }

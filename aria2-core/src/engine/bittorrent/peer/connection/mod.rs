@@ -1,16 +1,10 @@
-//! BitTorrent peer connection abstraction with send buffering, session resources,
-//! and keep-alive management.
+//! Core-owned BitTorrent peer connection state and transport adapter.
 //!
-//! Mirrors the C++ aria2 architecture of `Peer` + `PeerSessionResource` +
-//! `PeerConnection` + `SocketBuffer`:
-//!
-//! - An internal send buffer that batches small messages into larger TCP
-//!   writes (C++ `SocketBuffer`).
-//! - [`PeerSessionResource`] — per-session state allocated when a peer becomes
-//!   active and released on disconnect (C++ `PeerSessionResource`).
-//! - [`BtPeerConn`] — the public connection type that composes the above with
-//!   keep-alive management, bitfield delegation, and the existing inner
-//!   connection variants.
+//! [`BtPeerConn`] composes the protocol transport with engine-owned peer
+//! identity, statistics, upload policy state, and session lifecycle. The
+//! `PeerActor` owns it while the connection is active and is the only runtime
+//! reader/writer. Wire parsing, handshake, and message validation are provided
+//! by `aria2-protocol`.
 //!
 //! # Keep-alive
 //!

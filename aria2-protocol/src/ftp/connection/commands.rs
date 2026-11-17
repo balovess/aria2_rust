@@ -6,7 +6,7 @@ use super::FtpConnection;
 
 impl FtpConnection {
     pub async fn login(&mut self) -> Result<(), String> {
-        debug!("Sending USER command: {}", self.options.username);
+        debug!("Sending USER command");
         self.send_command(&format!("USER {}", self.options.username))
             .await?;
         let resp = self.read_response().await?;
@@ -129,13 +129,27 @@ impl FtpConnection {
 
         self.send_command("ABOR").await?;
         let resp = self.read_response().await?;
-        if resp.code == 226 || resp.code == 225 {
-            debug!("Transfer successfully aborted: {}", resp.message);
-            Ok(())
-        } else {
-            warn!("ABOR response unusual: {} {}", resp.code, resp.message);
-            Ok(())
+        match resp.code {
+            225 | 226 => {
+                debug!("Transfer successfully aborted: {}", resp.message);
+            }
+            426 => {
+                let completion = self.read_response().await?;
+                if completion.code == 226 {
+                    debug!(
+                        "Transfer aborted and control connection synchronized: {}",
+                        completion.message
+                    );
+                } else {
+                    warn!(
+                        "ABOR completion response unusual after 426: {} {}",
+                        completion.code, completion.message
+                    );
+                }
+            }
+            _ => warn!("ABOR response unusual: {} {}", resp.code, resp.message),
         }
+        Ok(())
     }
 
     /// Send TYPE A command for ASCII mode transfer.
@@ -235,5 +249,75 @@ mod tests {
             .expect("keepalive should observe the closed test server");
         assert!(result.is_err());
         server.await.expect("FTP test server should finish");
+    }
+
+    #[tokio::test]
+    async fn abor_consumes_426_and_226_before_the_next_command() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind FTP control listener");
+        let address = listener
+            .local_addr()
+            .expect("read control listener address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept FTP control connection");
+            let mut reader = BufReader::new(stream);
+            let mut telnet_abort = [0; 2];
+            tokio::io::AsyncReadExt::read_exact(reader.get_mut(), &mut telnet_abort)
+                .await
+                .expect("read Telnet IP and DM");
+            assert_eq!(telnet_abort, [0xff, 0xf4]);
+
+            let mut command = String::new();
+            reader
+                .read_line(&mut command)
+                .await
+                .expect("read ABOR command");
+            assert_eq!(command, "ABOR\r\n");
+            reader
+                .get_mut()
+                .write_all(b"426 Transfer aborted\r\n226 Abort successful\r\n")
+                .await
+                .expect("write ABOR completion sequence");
+
+            command.clear();
+            reader
+                .read_line(&mut command)
+                .await
+                .expect("read command after ABOR");
+            assert_eq!(command, "NOOP\r\n");
+            reader
+                .get_mut()
+                .write_all(b"200 NOOP ok\r\n")
+                .await
+                .expect("write NOOP response");
+        });
+
+        let stream = TcpStream::connect(address)
+            .await
+            .expect("connect FTP control stream");
+        let mut connection = FtpConnection {
+            stream: BufReader::new(stream),
+            options: FtpOptions::default(),
+            host: "localhost".to_string(),
+            port: address.port(),
+        };
+
+        timeout(Duration::from_secs(2), connection.abor())
+            .await
+            .expect("ABOR should finish")
+            .expect("ABOR response sequence should be accepted");
+        timeout(Duration::from_secs(1), connection.noop())
+            .await
+            .expect("NOOP should finish")
+            .expect("NOOP should read its own response");
+        timeout(Duration::from_secs(1), server)
+            .await
+            .expect("FTP test server should finish")
+            .expect("FTP test server task should succeed");
     }
 }

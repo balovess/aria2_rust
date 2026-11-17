@@ -72,17 +72,18 @@ pub(super) fn create(
     for key in &server_keys {
         adaptive.insert(
             key.clone(),
-            HttpAdaptiveConcurrency::new(
+            HttpAdaptiveConcurrency::new_with_settings(
                 split,
                 max_conn,
                 session_limit,
                 options.http2_streams_per_session(),
                 retry_wait,
+                options.http_adaptive,
             ),
         );
     }
     let range_size_limits = vec![initial_range_size_limit; uris.len()];
-    let executor = HttpSegmentRequestExecutor::new_with_clients(
+    let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
         dl.range_clients.as_slice(),
         dl.request_policy.clone(),
@@ -93,6 +94,8 @@ pub(super) fn create(
         &server_keys,
         max_conn,
     );
+    executor.set_shared_auth_factory(Arc::clone(&dl.auth_factory));
+    executor.set_origin_sensitive_headers_allowed(dl.origin_sensitive_headers_allowed);
     if let Some((known_authority, version)) = &dl.initial_http_protocol {
         executor.set_protocol(known_authority, *version);
     }

@@ -4,6 +4,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use aria2_protocol::bittorrent::dht::DhtPeerStorageConfig;
 use aria2_protocol::bittorrent::dht::engine::DhtEngine;
 
 #[derive(Clone, Default)]
@@ -38,15 +39,19 @@ impl DhtEngineSet {
         registry: Option<&Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>>,
         gid: u64,
         config: aria2_protocol::bittorrent::dht::engine::DhtEngineConfig,
+        peer_storage_config: DhtPeerStorageConfig,
     ) -> io::Result<()> {
         let engine = match registry {
             Some(registry) => {
-                crate::engine::bittorrent::registry::BtRegistry::get_or_start_global_dht_engine(
-                    registry, gid, config,
+                crate::engine::bittorrent::registry::BtRegistry::get_or_start_global_dht_engine_with_storage_config(
+                    registry,
+                    gid,
+                    config,
+                    peer_storage_config,
                 )
                 .await?
             }
-            None => DhtEngine::start(config).await?,
+            None => DhtEngine::start_with_peer_storage_config(config, peer_storage_config).await?,
         };
         self.insert(engine);
         Ok(())

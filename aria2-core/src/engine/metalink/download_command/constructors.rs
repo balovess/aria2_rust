@@ -5,9 +5,7 @@ use tracing::info;
 
 use aria2_protocol::metalink::parser::UrlEntry;
 
-use super::{
-    FileDownloadInfo, MetalinkDownloadCommand, MetalinkFileInfo, build_http_client_with_source,
-};
+use super::{FileDownloadInfo, MetalinkDownloadCommand, MetalinkFileInfo};
 use crate::download::{DownloadContext, file_entry::FileEntry};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
@@ -32,6 +30,7 @@ impl MetalinkDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
+        super::validate_http_client_options(options)?;
         let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
@@ -74,10 +73,22 @@ impl MetalinkDownloadCommand {
             .iter()
             .map(|u| u.url.clone())
             .collect();
+        let file_info = FileDownloadInfo {
+            expected_size: file.size,
+            hash_entry: file.strongest_hash().cloned(),
+            sorted_urls: file.get_sorted_urls().into_iter().cloned().collect(),
+            pieces: file.pieces.clone(),
+            torrent_metaurls: file
+                .meta_urls
+                .iter()
+                .filter(|metaurl| {
+                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                })
+                .cloned()
+                .collect(),
+        };
         let group = RequestGroup::new(gid, urls, options.clone());
         group.set_output_name(file.name.clone());
-
-        let client = build_http_client_with_source(options, None)?;
 
         if doc.files.len() > 1 {
             info!(
@@ -99,15 +110,14 @@ impl MetalinkDownloadCommand {
 
         Ok(Self {
             group: Arc::new(std::sync::RwLock::new(group)),
-            client,
             output_path: path,
             started: false,
             completed: false,
             completed_bytes: 0,
-            metalink_data: metalink_bytes.to_vec(),
-            file_info: None,
+            progress_offset: 0,
+            file_info: Some(file_info),
             grouped_file_infos: Vec::new(),
-            checkpoint: None,
+            protocol_runtime: None,
             global_limiter: None,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
@@ -118,6 +128,8 @@ impl MetalinkDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 
@@ -160,6 +172,7 @@ impl MetalinkDownloadCommand {
         base_uri: Option<&str>,
         gid_start: u64,
     ) -> Result<Vec<MetalinkFileInfo>> {
+        super::validate_http_client_options(options)?;
         let doc =
             aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, base_uri)
                 .map_err(|e| {
@@ -176,8 +189,6 @@ impl MetalinkDownloadCommand {
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
-
-        let client = build_http_client_with_source(options, None)?;
 
         let mut commands = Vec::with_capacity(doc.files.len());
 
@@ -235,15 +246,14 @@ impl MetalinkDownloadCommand {
             commands.push(MetalinkFileInfo {
                 command: Self {
                     group: Arc::new(std::sync::RwLock::new(group)),
-                    client: client.clone(),
                     output_path: path,
                     started: false,
                     completed: false,
                     completed_bytes: 0,
-                    metalink_data: Vec::new(),
+                    progress_offset: 0,
                     file_info: Some(file_info),
                     grouped_file_infos: Vec::new(),
-                    checkpoint: None,
+                    protocol_runtime: None,
                     global_limiter: None,
                     outbound_network_policy: Arc::new(
                         crate::network::OutboundNetworkPolicy::direct(),
@@ -256,6 +266,8 @@ impl MetalinkDownloadCommand {
                     bt_listener: None,
                     #[cfg(feature = "bittorrent")]
                     lpd_manager: None,
+                    #[cfg(feature = "bittorrent")]
+                    open_file_budget: None,
                 },
                 file_index: i,
             });
@@ -283,12 +295,11 @@ impl MetalinkDownloadCommand {
         output_dir: Option<&str>,
         gid_start: u64,
     ) -> Result<Vec<MetalinkFileInfo>> {
+        super::validate_http_client_options(options)?;
         let dir = output_dir
             .map(|d| d.to_string())
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
-
-        let client = build_http_client_with_source(options, None)?;
 
         let torrent_metaurls: Vec<_> = file
             .meta_urls
@@ -350,15 +361,14 @@ impl MetalinkDownloadCommand {
         Ok(vec![MetalinkFileInfo {
             command: Self {
                 group: Arc::new(std::sync::RwLock::new(group)),
-                client,
                 output_path: path,
                 started: false,
                 completed: false,
                 completed_bytes: 0,
-                metalink_data: Vec::new(),
+                progress_offset: 0,
                 file_info: Some(file_info),
                 grouped_file_infos: Vec::new(),
-                checkpoint: None,
+                protocol_runtime: None,
                 global_limiter: None,
                 outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
                 #[cfg(feature = "bittorrent")]
@@ -369,6 +379,8 @@ impl MetalinkDownloadCommand {
                 bt_listener: None,
                 #[cfg(feature = "bittorrent")]
                 lpd_manager: None,
+                #[cfg(feature = "bittorrent")]
+                open_file_budget: None,
             },
             file_index: 0,
         }])
@@ -386,6 +398,7 @@ impl MetalinkDownloadCommand {
         output_dir: Option<&str>,
         gid: u64,
     ) -> Result<Self> {
+        super::validate_http_client_options(options)?;
         if files.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "Metalink group contains no files".to_string(),
@@ -396,7 +409,6 @@ impl MetalinkDownloadCommand {
             .map(str::to_owned)
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
-        let client = build_http_client_with_source(options, None)?;
         let mut entries = Vec::with_capacity(files.len());
         let mut grouped_file_infos = Vec::with_capacity(files.len());
         let mut offset = 0u64;
@@ -470,15 +482,14 @@ impl MetalinkDownloadCommand {
 
         Ok(Self {
             group: Arc::new(std::sync::RwLock::new(group)),
-            client,
             output_path,
             started: false,
             completed: false,
             completed_bytes: 0,
-            metalink_data: Vec::new(),
+            progress_offset: 0,
             file_info: None,
             grouped_file_infos,
-            checkpoint: None,
+            protocol_runtime: None,
             global_limiter: None,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
@@ -489,6 +500,8 @@ impl MetalinkDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 
@@ -518,6 +531,20 @@ impl MetalinkDownloadCommand {
         // silently lost at execution time.
         crate::engine::metalink::to_request_group::MetalinkToRequestGroup::new()
             .normalize_file_for_runtime(&mut file, options);
+        Self::new_with_group_file(group, &file, options, policy)
+    }
+
+    /// Create a manager-owned command from a file parsed during initial
+    /// Metalink expansion. The file is already normalized by the shared
+    /// selection pass; restored groups use `new_with_group_source` instead.
+    #[cfg(feature = "metalink")]
+    pub(crate) fn new_with_group_file(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        file: &aria2_protocol::metalink::parser::MetalinkFile,
+        options: &DownloadOptions,
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        super::validate_http_client_options(options)?;
         let dir = options.dir.as_deref().unwrap_or(".");
         let output_name = group
             .recover()
@@ -539,18 +566,14 @@ impl MetalinkDownloadCommand {
         };
         Ok(Self {
             group,
-            client: super::build_http_client_with_source(
-                options,
-                policy.addresses().into_iter().next(),
-            )?,
             output_path: path,
             started: false,
             completed: false,
             completed_bytes: 0,
-            metalink_data: Vec::new(),
+            progress_offset: 0,
             file_info: Some(file_info),
             grouped_file_infos: Vec::new(),
-            checkpoint: None,
+            protocol_runtime: None,
             global_limiter: None,
             outbound_network_policy: Arc::new(policy.clone()),
             #[cfg(feature = "bittorrent")]
@@ -561,6 +584,8 @@ impl MetalinkDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 }

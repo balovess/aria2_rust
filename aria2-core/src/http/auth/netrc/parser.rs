@@ -1,6 +1,6 @@
 //! Netrc file parser: `NetrcParser` struct and its state-machine implementation.
 
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use tracing::debug;
 
@@ -17,12 +17,22 @@ use super::types::{NetrcEntry, ParseState};
 /// Parses the netrc content using a state-machine approach identical to the
 /// C++ `Netrc::parse()`. Stores entries in order and provides lookup methods
 /// that fall back to the `default` entry.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NetrcParser {
     /// Machine-specific entries, in file order.
     entries: Vec<NetrcEntry>,
     /// The optional `default` entry (matches any host).
     default_entry: Option<NetrcEntry>,
+}
+
+impl fmt::Debug for NetrcParser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetrcParser")
+            .field("entry_count", &self.entries.len())
+            .field("has_default_entry", &self.default_entry.is_some())
+            .finish()
+    }
 }
 
 impl NetrcParser {

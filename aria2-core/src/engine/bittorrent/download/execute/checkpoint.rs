@@ -107,8 +107,15 @@ impl BtDownloadCommand {
         &mut self,
         piece_index: u32,
         piece_data: &bytes::Bytes,
-        max_open_files: usize,
     ) -> Result<()> {
+        // The engine-injected budget is global and is the source of truth for
+        // active downloads. Keep the option snapshot only for direct callers
+        // that do not have an engine budget.
+        let per_download_limit = if self.open_file_budget.is_some() {
+            usize::MAX
+        } else {
+            self.group.recover().options().bt_max_open_files
+        };
         let layout = self
             .multi_file_layout
             .as_ref()
@@ -118,14 +125,24 @@ impl BtDownloadCommand {
                     "Multi-file piece write requested without a multi-file layout".into(),
                 )
             })?;
-        let touched_files = crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit_tracked(
-            layout,
-            piece_index,
-            piece_data,
-            layout.piece_length(),
-            max_open_files,
-        )
-        .await?;
+        let touched_files = if let Some(budget) = &self.open_file_budget {
+            crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_budget_tracked(
+                layout,
+                piece_index,
+                piece_data,
+                budget,
+            )
+            .await?
+        } else {
+            crate::engine::bittorrent::piece::downloader::write_piece_to_multi_files_coalesced_with_limit_tracked(
+                layout,
+                piece_index,
+                piece_data,
+                layout.piece_length(),
+                per_download_limit,
+            )
+            .await?
+        };
         self.dirty_multi_file_indices.extend(touched_files);
         Ok(())
     }
@@ -562,7 +579,7 @@ mod tests {
         command.multi_file_layout = Some(layout);
 
         command
-            .write_multi_file_piece_and_track(0, &bytes::Bytes::from_static(b"ABCDEFGH"), 2)
+            .write_multi_file_piece_and_track(0, &bytes::Bytes::from_static(b"ABCDEFGH"))
             .await
             .expect("piece should be written and tracked");
 

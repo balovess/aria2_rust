@@ -13,10 +13,7 @@ pub(crate) struct SftpCommandAdapter;
 #[async_trait]
 impl ProtocolCommandAdapter for SftpCommandAdapter {
     fn supports(&self, request: &ProtocolCommandRequest) -> bool {
-        request
-            .first_uri
-            .to_ascii_lowercase()
-            .starts_with("sftp://")
+        crate::engine::protocol_adapter::is_sftp_uri(&request.first_uri)
     }
 
     async fn create(
@@ -32,6 +29,9 @@ impl ProtocolCommandAdapter for SftpCommandAdapter {
             request.options.out.as_deref(),
         )?;
         command.set_outbound_network_policy(Arc::clone(&services.outbound_network_policy));
+        if request.options.async_dns {
+            command.set_dns_cache(Arc::clone(&services.dns_cache));
+        }
         if let Some(limiter) = services.global_limiter.clone() {
             command.set_global_limiter(limiter);
         }

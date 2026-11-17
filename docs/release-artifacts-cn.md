@@ -10,12 +10,12 @@ English: [`release-artifacts-en.md`](release-artifacts-en.md)
 
 | 后缀 | 内容 | 适合用户 |
 | --- | --- | --- |
-| `-minimal` | 不含 TUI 的基础构建 | 服务器、脚本、低依赖部署 |
+| `-minimal` | HTTP/FTP + RPC，不含 BitTorrent 和 TUI | 服务器、脚本、低依赖部署 |
 | `-standard` | HTTP/FTP + BitTorrent + RPC，不含 TUI | 常规下载和远程控制 |
 | `-tui` | 包含本地 TUI、RPC TUI 和多语言资源 | 交互式终端用户 |
 | `-full` | standard + Metalink + SFTP + TUI | 需要完整协议支持的用户 |
 
-`-minimal` 构建只启用 HTTP/FTP，不包含 BitTorrent、TUI 及 TUI 的额外依赖。`-standard` 是默认功能档位；`-tui` 在 standard 基础上增加 TUI；`-full` 再增加 Metalink 和 SFTP。
+`-minimal` 构建启用 HTTP/FTP，同时保留 JSON-RPC/XML-RPC/WebSocket 服务；它不包含 BitTorrent、TUI 及 TUI 的额外依赖。RPC 在 `-standard` 中也可用；Cargo 的 `rpc` feature 是档位标记，不是源码裁剪开关。`-standard` 增加 BitTorrent；`-tui` 增加本地 TUI 及其依赖；`-full` 再增加 Metalink 和 SFTP。
 
 ## 当前平台
 

@@ -33,9 +33,12 @@ impl UtpSocket {
                 let (is_timeout, remote_addr, packet_to_send) = {
                     let conn = self.connections.get_mut(&conn_id);
                     if let Some(conn) = conn {
-                        let is_timeout = conn.check_timeout(self.idle_timeout);
+                        let is_timeout = conn.check_timeout(self.options.idle_timeout());
                         let remote_addr = conn.remote_addr();
-                        let packet = conn.retransmit_packet(seq_nr, true);
+                        let packet = conn.retransmit_packet(
+                            seq_nr,
+                            super::super::connection::RetransmitEvent::Timeout,
+                        );
                         (is_timeout, remote_addr, packet)
                     } else {
                         return Ok(());
@@ -65,7 +68,7 @@ impl UtpSocket {
                         let is_established = conn.is_established();
                         let state_packet = conn.state_packet();
                         let remote_addr = conn.remote_addr();
-                        let keepalive_interval = self.keepalive_interval;
+                        let keepalive_interval = self.options.keepalive_interval();
                         (
                             is_established,
                             state_packet,

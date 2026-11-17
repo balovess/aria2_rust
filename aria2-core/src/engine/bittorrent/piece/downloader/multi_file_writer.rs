@@ -1,9 +1,12 @@
 use crate::engine::bittorrent::torrent::file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::open_file_budget::OpenFileBudget;
 use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 use std::collections::{HashMap, hash_map::Entry};
+#[cfg(test)]
 use std::ops::Range;
+use std::sync::Arc;
 
 // ======================================================================
 // Multi-File Writer
@@ -25,33 +28,39 @@ struct CoalescedWrite {
 /// the resulting sparse region is correct on disk.
 const COALESCE_GAP: u64 = 4096;
 
+#[cfg(test)]
 fn coalesced_file_batches(file_indices: &[usize], max_open_files: usize) -> Vec<Range<usize>> {
     let max_open_files = max_open_files.max(1);
     let mut batches = Vec::new();
     let mut start = 0;
 
     while start < file_indices.len() {
-        let mut end = start;
-        let mut unique_files = 0usize;
-        let mut previous_file = None;
-
-        while end < file_indices.len() {
-            let file_idx = file_indices[end];
-            if previous_file != Some(file_idx) {
-                if unique_files == max_open_files {
-                    break;
-                }
-                unique_files += 1;
-                previous_file = Some(file_idx);
-            }
-            end += 1;
-        }
+        let end = file_batch_end(file_indices, start, max_open_files);
 
         batches.push(start..end);
         start = end;
     }
 
     batches
+}
+
+fn file_batch_end(file_indices: &[usize], start: usize, max_open_files: usize) -> usize {
+    let mut end = start;
+    let mut unique_files = 0usize;
+    let mut previous_file = None;
+
+    while end < file_indices.len() {
+        let file_idx = file_indices[end];
+        if previous_file != Some(file_idx) {
+            if unique_files == max_open_files {
+                break;
+            }
+            unique_files += 1;
+            previous_file = Some(file_idx);
+        }
+        end += 1;
+    }
+    end
 }
 
 /// Writes a completed piece's data across multiple files in a multi-file torrent.
@@ -200,6 +209,7 @@ pub async fn write_piece_to_multi_files_coalesced_with_limit(
         0,
         piece_data,
         max_open_files,
+        None,
     )
     .await
     .map(|_| ())
@@ -221,6 +231,7 @@ pub(crate) async fn write_piece_to_multi_files_coalesced_with_limit_tracked(
         0,
         piece_data,
         max_open_files,
+        None,
     )
     .await
 }
@@ -239,6 +250,42 @@ pub(crate) async fn write_piece_block_to_multi_files(
         block_offset,
         block_data,
         max_open_files,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn write_piece_to_multi_files_coalesced_with_budget_tracked(
+    layout: &MultiFileLayout,
+    piece_idx: u32,
+    piece_data: &bytes::Bytes,
+    budget: &Arc<OpenFileBudget>,
+) -> Result<Vec<usize>> {
+    write_piece_range_to_multi_files_coalesced_with_limit(
+        layout,
+        piece_idx,
+        0,
+        piece_data,
+        usize::MAX,
+        Some(budget),
+    )
+    .await
+}
+
+pub(crate) async fn write_piece_block_to_multi_files_with_budget(
+    layout: &MultiFileLayout,
+    piece_idx: u32,
+    block_offset: u32,
+    block_data: &bytes::Bytes,
+    budget: &Arc<OpenFileBudget>,
+) -> Result<Vec<usize>> {
+    write_piece_range_to_multi_files_coalesced_with_limit(
+        layout,
+        piece_idx,
+        block_offset,
+        block_data,
+        usize::MAX,
+        Some(budget),
     )
     .await
 }
@@ -249,6 +296,7 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
     start_offset: u32,
     piece_data: &bytes::Bytes,
     max_open_files: usize,
+    budget: Option<&Arc<OpenFileBudget>>,
 ) -> Result<Vec<usize>> {
     // ------------------------------------------------------------------
     // Phase 1: Collect all raw write operations
@@ -342,10 +390,25 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
             touched_file_indices.push(file_index);
         }
     }
-    for batch in coalesced_file_batches(&file_indices, max_open_files) {
+    let mut batch_start = 0;
+    let mut processed_unique_files = 0;
+    while batch_start < coalesced.len() {
+        let batch_request = max_open_files
+            .max(1)
+            .min(touched_file_indices.len() - processed_unique_files);
+        let reservation = if let Some(budget) = budget {
+            Some(budget.reserve_up_to(batch_request).await)
+        } else {
+            None
+        };
+        let batch_limit = reservation
+            .as_ref()
+            .map_or(batch_request, |reservation| reservation.permits());
+        let batch_end = file_batch_end(&file_indices, batch_start, batch_limit);
+        let batch = batch_start..batch_end;
         let mut file_writers: HashMap<usize, PositionedDiskWriter> = HashMap::new();
 
-        for cw in &coalesced[batch] {
+        for cw in &coalesced[batch.clone()] {
             let file_path = layout
                 .file_absolute_path(cw.file_idx)
                 .ok_or_else(|| {
@@ -376,6 +439,13 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
                 Aria2Error::Fatal(FatalError::Config(format!("flush failed: {error}")))
             })?;
         }
+        drop(reservation);
+        processed_unique_files += file_indices[batch.clone()]
+            .windows(2)
+            .filter(|pair| pair[0] != pair[1])
+            .count()
+            + 1;
+        batch_start = batch_end;
     }
 
     Ok(touched_file_indices)
@@ -383,7 +453,53 @@ async fn write_piece_range_to_multi_files_coalesced_with_limit(
 
 #[cfg(test)]
 mod tests {
-    use super::coalesced_file_batches;
+    use super::{coalesced_file_batches, write_piece_to_multi_files_coalesced_with_budget_tracked};
+    use crate::engine::bittorrent::torrent::file_layout::MultiFileLayout;
+    use crate::filesystem::open_file_budget::OpenFileBudget;
+
+    #[tokio::test]
+    async fn process_budget_splits_a_piece_across_more_files_than_the_limit() {
+        use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
+
+        let info = InfoDict {
+            name: "budgeted".to_string(),
+            piece_length: 9,
+            pieces: vec![[0; 20]],
+            length: None,
+            files: Some(
+                ["a", "b", "c"]
+                    .into_iter()
+                    .map(|name| FileEntry {
+                        length: 3,
+                        path: vec![name.to_string()],
+                    })
+                    .collect(),
+            ),
+            private: None,
+            meta_version: None,
+            v2_files: None,
+            pieces_root: None,
+        };
+        let output = tempfile::tempdir().expect("temporary output directory");
+        let layout = MultiFileLayout::from_info_dict(&info, output.path()).unwrap();
+        layout.create_directories().unwrap();
+        let budget = OpenFileBudget::new(1);
+        let payload = bytes::Bytes::from_static(b"abcdefghi");
+
+        let touched =
+            write_piece_to_multi_files_coalesced_with_budget_tracked(&layout, 0, &payload, &budget)
+                .await
+                .expect("budgeted multi-file piece write");
+
+        assert_eq!(touched, vec![0, 1, 2]);
+        for (index, expected) in [b"abc".as_slice(), b"def".as_slice(), b"ghi".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let path = layout.file_absolute_path(index).unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn max_open_files_splits_coalesced_writes_by_unique_file() {

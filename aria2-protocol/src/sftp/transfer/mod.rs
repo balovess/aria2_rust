@@ -7,22 +7,25 @@
 //! ## Transfer Architecture
 //!
 //! ```text
-//! TransferOptions  ->  SftpTransfer  ->  [Chunked Read Loop]  ->  Local File
-//!       |                  |                    |
-//!   buffer_size      file_ops             read_at(offset, buf)
-//!   resume_offset                         write(chunk)
-//!   progress_cb                            update_progress()
+//! SftpFileOps  ->  SftpDownloadReader  ->  caller-owned output
+//!                      |                      |
+//!             bounded READ/offset       DiskWriter or local file
+//!             size/EOF validation       progress/checkpoint policy
+//!
+//! `SftpTransfer` is the standalone local-file client built on this reader.
 //! ```
 
 use super::file_ops::SftpFileOps;
 use super::session::SftpSession;
 
 mod download;
+mod download_reader;
 #[cfg(test)]
 mod tests;
 mod types;
 mod upload;
 
+pub use download_reader::{SftpDownloadReadError, SftpDownloadReader};
 pub use types::{ProgressCallback, TransferError, TransferOptions, TransferProgress};
 const TRANSFER_BUF_SIZE: usize = 64 * 1024;
 /// Minimum allowed buffer size (1 KB)

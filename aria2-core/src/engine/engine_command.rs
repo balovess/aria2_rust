@@ -461,9 +461,41 @@ pub enum EngineCommand {
     #[cfg(feature = "bittorrent")]
     SetPublicTrackerUpdateInterval { seconds: u64 },
 
+    /// Change the complete-request timeout for public tracker source downloads.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackerSourceTimeout { seconds: u64 },
+
+    /// Change the process-wide limit for concurrent public tracker source fetches.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackerSourceConcurrency { max_concurrent_sources: usize },
+
     /// Enable or disable the process-wide public tracker catalog.
     #[cfg(feature = "bittorrent")]
     SetPublicTrackersEnabled { enabled: bool },
+
+    /// Change the process-wide timeout applied to reads in incoming BT peer handshakes.
+    #[cfg(feature = "bittorrent")]
+    SetIncomingPeerHandshakeTimeout { seconds: u64 },
+
+    /// Change uTP options for transport endpoints created after this command.
+    #[cfg(feature = "bittorrent")]
+    SetUtpSocketOptions {
+        options: aria2_protocol::bittorrent::utp::UtpSocketOptions,
+    },
+
+    /// Change the process-wide cap for open files used by multi-file downloads.
+    #[cfg(feature = "bittorrent")]
+    SetBtMaxOpenFiles { max: usize },
+
+    /// Change process-wide limits for locally announced DHT peers.
+    #[cfg(feature = "bittorrent")]
+    SetDhtPeerStorageConfig {
+        config: aria2_protocol::bittorrent::dht::DhtPeerStorageConfig,
+    },
+
+    /// Change the process-wide cap for stored BEP 44 items.
+    #[cfg(feature = "bittorrent")]
+    SetDhtItemStoreLimit { max_items: usize },
 }
 
 impl EngineCommand {
@@ -505,7 +537,14 @@ impl EngineCommand {
                 self,
                 Self::SetPublicTrackerSources { .. }
                     | Self::SetPublicTrackerUpdateInterval { .. }
+                    | Self::SetPublicTrackerSourceTimeout { .. }
+                    | Self::SetPublicTrackerSourceConcurrency { .. }
                     | Self::SetPublicTrackersEnabled { .. }
+                    | Self::SetIncomingPeerHandshakeTimeout { .. }
+                    | Self::SetUtpSocketOptions { .. }
+                    | Self::SetBtMaxOpenFiles { .. }
+                    | Self::SetDhtPeerStorageConfig { .. }
+                    | Self::SetDhtItemStoreLimit { .. }
             );
         common
     }
@@ -535,148 +574,4 @@ pub enum TaskResult {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::request::request_group::{DownloadOptions, GroupId};
-
-    fn add_command(gid: u64) -> EngineCommand {
-        EngineCommand::AddDownload {
-            group: Arc::new(std::sync::RwLock::new(RequestGroup::new(
-                GroupId::new(gid),
-                vec![format!("http://example.com/{gid}.bin")],
-                DownloadOptions::default(),
-            ))),
-        }
-    }
-
-    #[test]
-    fn control_commands_are_drained_before_normal_commands() {
-        let (sender, mut receiver) = channel();
-        sender.send(add_command(1)).unwrap();
-        sender
-            .send(EngineCommand::Pause {
-                gid: GroupId::new(1),
-            })
-            .unwrap();
-
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(EngineCommand::Pause { .. })
-        ));
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(EngineCommand::AddDownload { .. })
-        ));
-    }
-
-    #[test]
-    fn duplicate_gid_controls_are_coalesced_until_dequeue() {
-        let (sender, mut receiver) = channel();
-        let pause = || EngineCommand::Pause {
-            gid: GroupId::new(7),
-        };
-
-        sender.send(pause()).unwrap();
-        sender.send(pause()).unwrap();
-
-        let snapshot = sender.snapshot();
-        assert_eq!(snapshot.depth, 1);
-        assert_eq!(snapshot.max_depth, 1);
-        assert_eq!(snapshot.wakeups, 1);
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(EngineCommand::Pause { .. })
-        ));
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(EngineCommandTryRecvError::Empty)
-        ));
-
-        // Once the first command has been dequeued, a later state edge is
-        // accepted again rather than being suppressed forever.
-        sender.send(pause()).unwrap();
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(EngineCommand::Pause { .. })
-        ));
-    }
-
-    #[test]
-    fn concurrent_duplicate_controls_have_one_committed_queue_entry() {
-        let (sender, mut receiver) = channel();
-        let mut producers = Vec::new();
-        for _ in 0..32 {
-            let sender = sender.clone();
-            producers.push(std::thread::spawn(move || {
-                sender
-                    .send(EngineCommand::Pause {
-                        gid: GroupId::new(8),
-                    })
-                    .unwrap();
-            }));
-        }
-        for producer in producers {
-            producer.join().unwrap();
-        }
-
-        assert_eq!(sender.snapshot().depth, 1);
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(EngineCommand::Pause { .. })
-        ));
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(EngineCommandTryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn full_normal_queue_rejects_without_growing_metrics() {
-        let (sender, mut receiver) = channel();
-        for gid in 1..=ENGINE_COMMAND_CAPACITY as u64 {
-            sender.send(add_command(gid)).unwrap();
-        }
-
-        let before = sender.snapshot();
-        assert_eq!(before.depth, ENGINE_COMMAND_CAPACITY);
-        assert_eq!(before.max_depth, ENGINE_COMMAND_CAPACITY);
-        assert_eq!(before.wakeups, 1);
-        assert_eq!(
-            sender.send(add_command(ENGINE_COMMAND_CAPACITY as u64 + 1)),
-            Err(EngineCommandSendError::Full)
-        );
-        assert_eq!(sender.snapshot().depth, ENGINE_COMMAND_CAPACITY);
-        assert_eq!(sender.snapshot().max_depth, ENGINE_COMMAND_CAPACITY);
-        assert_eq!(sender.snapshot().wakeups, 1);
-
-        // A full normal queue must not block shutdown/control traffic.
-        sender
-            .send(EngineCommand::ForceHaltAll {
-                reason: HaltReason::ShutdownSignal,
-            })
-            .unwrap();
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(EngineCommand::ForceHaltAll { .. })
-        ));
-    }
-
-    #[test]
-    fn closed_queue_rejects_and_receiver_reports_closed() {
-        let (sender, receiver) = channel();
-        drop(receiver);
-
-        assert_eq!(
-            sender.send(EngineCommand::PauseAll),
-            Err(EngineCommandSendError::Closed)
-        );
-        assert_eq!(sender.snapshot(), EngineCommandQueueSnapshot::default());
-
-        let (sender, mut receiver) = channel();
-        drop(sender);
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(EngineCommandTryRecvError::Closed)
-        ));
-    }
-}
+mod tests;

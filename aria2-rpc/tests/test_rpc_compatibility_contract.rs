@@ -104,8 +104,11 @@ async fn json_error_contract_is_fixed() {
     );
 
     let invalid_params = call(&engine, "aria2.addUri", json!([]), "invalid").await;
-    assert_eq!(error_code(&invalid_params, "invalid params"), -32602);
-    assert_eq!(invalid_params["error"]["message"], "param[0] not found");
+    assert_eq!(error_code(&invalid_params, "invalid params"), 1);
+    assert_eq!(
+        invalid_params["error"]["message"],
+        "The parameter at 0 is required but missing."
+    );
 
     let recursive = call(
         &engine,
@@ -220,7 +223,7 @@ async fn standard_method_results_keep_aria2_wire_types() {
         "uri",
     )
     .await;
-    assert_eq!(result(&change_uri, "changeUri"), &json!(["1", "1"]));
+    assert_eq!(result(&change_uri, "changeUri"), &json!([1, 1]));
 
     let change_position = call(
         &engine,

@@ -62,7 +62,7 @@ impl PieceStatMan {
             .map(|index| u32::try_from(index).expect("piece count exceeds u32::MAX"))
             .collect();
         if random_shuffle {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             order.shuffle(&mut rng);
             trace!(
                 piece_num,

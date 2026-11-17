@@ -23,6 +23,7 @@ mod tests;
 pub(crate) struct RangeProbeResult {
     pub(crate) supports_range: bool,
     pub(crate) effective_url: String,
+    pub(crate) origin_sensitive_headers_allowed: bool,
     pub(crate) total_length: u64,
     pub(crate) version: Option<reqwest::Version>,
 }
@@ -63,19 +64,12 @@ pub(crate) fn parse_retry_after(
         .to_str()
         .ok()?
         .trim();
-    let delay = match value.parse::<u64>() {
-        Ok(seconds) => std::time::Duration::from_secs(seconds),
-        Err(_) => {
-            let at = crate::http::cookie::parsing::parse_http_date(value)?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-            let now = i64::try_from(now).ok()?;
-            std::time::Duration::from_secs(u64::try_from(at.saturating_sub(now)).unwrap_or(0))
-        }
-    };
-    Some(delay.min(MAX_RETRY_AFTER))
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let now = i64::try_from(now).ok()?;
+    aria2_protocol::http::parse_retry_after(value, now).map(|delay| delay.min(MAX_RETRY_AFTER))
 }
 
 pub struct HttpSegmentDownloader {
@@ -83,7 +77,8 @@ pub struct HttpSegmentDownloader {
     request_policy: HttpRequestPolicy,
     cookie_helper: Option<CookieHelper>,
     auth_options: Option<AuthResolveOptions>,
-    netrc_path: Option<String>,
+    auth_factory: std::sync::Arc<std::sync::Mutex<AuthConfigFactory>>,
+    origin_sensitive_headers_allowed: bool,
     last_peer_addr: std::sync::Mutex<Option<std::net::SocketAddr>>,
     last_http_version: std::sync::Mutex<Option<reqwest::Version>>,
 }
@@ -156,7 +151,8 @@ impl HttpSegmentDownloader {
             request_policy,
             cookie_helper: None,
             auth_options: None,
-            netrc_path: None,
+            auth_factory: std::sync::Arc::new(std::sync::Mutex::new(AuthConfigFactory::new())),
+            origin_sensitive_headers_allowed: true,
             last_peer_addr: std::sync::Mutex::new(None),
             last_http_version: std::sync::Mutex::new(None),
         }
@@ -176,8 +172,33 @@ impl HttpSegmentDownloader {
         auth_options: AuthResolveOptions,
         netrc_path: Option<String>,
     ) -> Self {
+        let auth_factory = crate::engine::http::auth::factory_from_netrc(
+            netrc_path.as_deref(),
+            auth_options.no_netrc,
+        );
         self.auth_options = Some(auth_options);
-        self.netrc_path = netrc_path;
+        self.auth_factory = std::sync::Arc::new(std::sync::Mutex::new(auth_factory));
+        self
+    }
+
+    pub(crate) fn with_shared_auth_options(
+        mut self,
+        auth_options: AuthResolveOptions,
+        auth_factory: std::sync::Arc<std::sync::Mutex<AuthConfigFactory>>,
+    ) -> Self {
+        self.auth_options = Some(auth_options);
+        self.auth_factory = auth_factory;
+        self
+    }
+
+    pub(crate) fn shared_auth_factory(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<AuthConfigFactory>> {
+        std::sync::Arc::clone(&self.auth_factory)
+    }
+
+    pub(crate) fn with_origin_sensitive_headers_allowed(mut self, allowed: bool) -> Self {
+        self.origin_sensitive_headers_allowed = allowed;
         self
     }
 
@@ -190,12 +211,11 @@ impl HttpSegmentDownloader {
     ) -> Result<bool> {
         self.request_policy.wait_before_request().await;
         let authorization = self.auth_options.as_ref().and_then(|auth_options| {
-            let mut auth_factory = AuthConfigFactory::new();
-            if let Some(path) = &self.netrc_path {
-                let _ = auth_factory.load_netrc_file(std::path::Path::new(path));
-            }
             let url = reqwest::Url::parse(url).ok()?;
-            auth_factory.resolve_basic_authorization(&url, auth_options)
+            self.auth_factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .resolve_basic_authorization(&url, auth_options)
         });
         let req = self.request_policy.apply_with_basic_auth(
             self.client.head(url),

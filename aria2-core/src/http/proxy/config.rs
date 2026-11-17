@@ -9,7 +9,7 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::error::{Aria2Error, Result};
-use crate::http::socks_connector::ProxyUrl;
+use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 
 /// The type of proxy being used.
 ///
@@ -128,16 +128,16 @@ impl HttpProxyConfig {
     /// - `socks4://[userid@]host:port` -> SOCKS4 proxy
     /// - `socks5://[user:pass@]host:port` -> SOCKS5 proxy
     ///
-    /// Uses the existing [ProxyUrl] parser from the socks_connector module.
+    /// Uses the protocol crate's shared [ProxyUrl] parser.
     pub fn from_proxy_url(proxy_url: &str, target_host: String, target_port: u16) -> Result<Self> {
         let parsed = ProxyUrl::parse(proxy_url)
-            .map_err(|e| Aria2Error::Parse(format!("Invalid proxy URL '{}': {}", proxy_url, e)))?;
+            .map_err(|e| Aria2Error::Parse(format!("Invalid proxy URL: {e}")))?;
 
         let proxy_type = match parsed.protocol {
-            crate::http::socks_connector::ProxyProtocol::Http => ProxyType::Http,
-            crate::http::socks_connector::ProxyProtocol::Https => ProxyType::Https,
-            crate::http::socks_connector::ProxyProtocol::Socks4 => ProxyType::Socks4,
-            crate::http::socks_connector::ProxyProtocol::Socks5 => ProxyType::Socks5,
+            ProxyProtocol::Http => ProxyType::Http,
+            ProxyProtocol::Https => ProxyType::Https,
+            ProxyProtocol::Socks4 => ProxyType::Socks4,
+            ProxyProtocol::Socks5 => ProxyType::Socks5,
         };
 
         let mut config = Self::with_type(

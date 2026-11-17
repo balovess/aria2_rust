@@ -4,14 +4,22 @@ pub mod control_io;
 
 mod commands;
 mod data;
+mod parsing;
+mod session;
 mod types;
 
+pub use parsing::{
+    cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
+    parse_pwd_response, parse_size_response, percent_decode, split_decoded_remote_path,
+    split_remote_path,
+};
+pub use session::{FtpControlResponse, FtpControlSession, FtpControlSessionError};
 pub use types::{FtpActiveDataListener, FtpConnection, FtpOptions, FtpResponse, FtpResponseClass};
 
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
-use self::control_io::{FtpControlReadError, FtpControlWriteError, read_control_line};
+use self::control_io::{FtpControlReadError, FtpControlWriteError};
 
 impl FtpConnection {
     /// Establish a control connection and consume the server welcome response.
@@ -54,7 +62,7 @@ impl FtpConnection {
     }
 
     async fn send_command(&mut self, command: &str) -> Result<(), String> {
-        debug!("FTP command: {}", command.trim());
+        debug!("FTP command: {}", control_io::command_for_log(command));
         control_io::write_control_command(&mut self.stream, command)
             .await
             .map_err(|error| match error {
@@ -73,67 +81,83 @@ impl FtpConnection {
 
     /// Read one FTP response, including multiline responses.
     pub async fn read_response(&mut self) -> Result<FtpResponse, String> {
-        let mut line = String::new();
-        let mut code: Option<u16> = None;
-        let mut message = String::new();
-        let mut is_multiline = false;
-
-        loop {
-            line.clear();
-            let bytes_read =
-                read_control_line(&mut self.stream, &mut line, self.options.read_timeout)
-                    .await
-                    .map_err(|error| match error {
-                        FtpControlReadError::Timeout => "FTP read timeout".to_string(),
-                        FtpControlReadError::Io(error) => {
-                            format!("Failed to read FTP response: {}", error)
-                        }
-                    })?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            let trimmed = line.trim_end();
-            if trimmed.len() < 4 {
-                continue;
-            }
-
-            let response_code: u16 = trimmed[..3].parse().unwrap_or(0);
-
-            if code.is_none() {
-                code = Some(response_code);
-            }
-
-            let separator = trimmed.as_bytes()[3];
-            if separator == b'-' && !is_multiline {
-                is_multiline = true;
-                message.push_str(&trimmed[4..]);
-                message.push('\n');
-            } else if separator == b' '
-                || (is_multiline && trimmed.starts_with(&format!("{:3} ", code.unwrap_or(0))))
-            {
-                message.push_str(&trimmed[4..]);
-                break;
-            } else if is_multiline {
-                message.push_str(&trimmed[4..]);
-                message.push('\n');
-            }
-        }
-
-        let code_val = code.unwrap_or(0);
-        debug!("FTP response: {} {}", code_val, message.trim());
+        let response = session::read_response(&mut self.stream, self.options.read_timeout)
+            .await
+            .map_err(standalone_response_error)?;
         Ok(FtpResponse {
-            code: code_val,
-            message,
+            code: response.code,
+            message: response.message,
         })
+    }
+}
+
+fn standalone_response_error(error: FtpControlSessionError) -> String {
+    match error {
+        FtpControlSessionError::ReadTimeout(_)
+        | FtpControlSessionError::Read(FtpControlReadError::Timeout) => {
+            "FTP read timeout".to_string()
+        }
+        FtpControlSessionError::Read(FtpControlReadError::Io(error)) => {
+            format!("Failed to read FTP response: {error}")
+        }
+        FtpControlSessionError::ResponseTooLarge(bytes) => {
+            format!("Max FTP recv buffer reached. length={bytes}")
+        }
+        error => error.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
     use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn standalone_connection_rejects_response_over_the_size_limit() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut response = b"220 ".to_vec();
+            response.extend(std::iter::repeat_n(b'x', control_io::MAX_RESPONSE_BYTES));
+            response.extend_from_slice(b"\r\n");
+            stream.write_all(&response).await.unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut connection = FtpConnection {
+            stream: tokio::io::BufReader::new(stream),
+            options: FtpOptions::default(),
+            host: "localhost".to_string(),
+            port: address.port(),
+        };
+
+        let error = connection.read_response().await.unwrap_err();
+        assert!(error.starts_with("Max FTP recv buffer reached. length="));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn standalone_connection_rejects_malformed_response_instead_of_returning_code_zero() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"bad response\r\n").await.unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut connection = FtpConnection {
+            stream: tokio::io::BufReader::new(stream),
+            options: FtpOptions::default(),
+            host: "localhost".to_string(),
+            port: address.port(),
+        };
+
+        let error = connection.read_response().await.unwrap_err();
+        assert_eq!(error, "bad response");
+        server.await.unwrap();
+    }
 
     #[test]
     fn test_ftp_response_checks() {
@@ -215,7 +239,7 @@ mod tests {
     #[test]
     fn test_parse_pasv() {
         let msg = "Entering Passive Mode (192,168,1,1,195,123)";
-        let result = FtpConnection::parse_pasv_response(msg);
+        let result = parse_pasv_response(msg);
         assert!(result.is_some());
         let (host, port) = result.unwrap();
         assert_eq!(host, "192.168.1.1");
@@ -225,41 +249,41 @@ mod tests {
     #[test]
     fn test_parse_pasv_various_formats() {
         let msg1 = "227 Entering Passive Mode (192,168,1,100,200,10)";
-        let result1 = FtpConnection::parse_pasv_response(msg1);
+        let result1 = parse_pasv_response(msg1);
         assert_eq!(result1, Some(("192.168.1.100".to_string(), 200 * 256 + 10)));
 
         let msg2 = "(10,0,0,1,0,21)";
-        let result2 = FtpConnection::parse_pasv_response(msg2);
+        let result2 = parse_pasv_response(msg2);
         assert_eq!(result2, Some(("10.0.0.1".to_string(), 21)));
 
         let msg3 = "192,168,1,1,195,123";
-        let result3 = FtpConnection::parse_pasv_response(msg3);
+        let result3 = parse_pasv_response(msg3);
         assert!(result3.is_none());
 
         let msg4 = "(192,168,1,1,195)";
-        let result4 = FtpConnection::parse_pasv_response(msg4);
+        let result4 = parse_pasv_response(msg4);
         assert!(result4.is_none());
     }
 
     #[test]
     fn test_parse_epsv() {
         let msg = "Entering Extended Passive Mode (|||50001|)";
-        let result = FtpConnection::parse_epsv_response(msg);
+        let result = parse_epsv_response(msg);
         assert_eq!(result, Some(50001));
     }
 
     #[test]
     fn test_parse_epsv_various_formats() {
         let msg1 = "229 |||50001|";
-        let result1 = FtpConnection::parse_epsv_response(msg1);
+        let result1 = parse_epsv_response(msg1);
         assert_eq!(result1, Some(50001));
 
         let msg2 = "Entering Extended Passive Mode (|||60000|)";
-        let result2 = FtpConnection::parse_epsv_response(msg2);
+        let result2 = parse_epsv_response(msg2);
         assert_eq!(result2, Some(60000));
 
         let msg3 = "50001";
-        let result3 = FtpConnection::parse_epsv_response(msg3);
+        let result3 = parse_epsv_response(msg3);
         assert!(result3.is_none());
     }
 

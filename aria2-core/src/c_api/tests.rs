@@ -2,6 +2,23 @@ use super::*;
 use std::ffi::CString;
 use std::sync::Mutex;
 
+#[cfg(feature = "bittorrent")]
+#[path = "tests/bittorrent_options.rs"]
+mod bittorrent_options;
+#[path = "tests/ftp_proxy_options.rs"]
+mod ftp_proxy_options;
+#[path = "tests/ftp_reuse_options.rs"]
+mod ftp_reuse_options;
+#[path = "tests/http_adaptive_options.rs"]
+mod http_adaptive_options;
+#[path = "tests/http_auth_options.rs"]
+mod http_auth_options;
+#[path = "tests/public_tracker_sources.rs"]
+mod public_tracker_sources;
+#[cfg(feature = "sftp")]
+#[path = "tests/sftp_options.rs"]
+mod sftp_options;
+
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn kv(name: &str, value: &str) -> (Aria2RustKeyValue, CString, CString) {
@@ -15,6 +32,262 @@ fn kv(name: &str, value: &str) -> (Aria2RustKeyValue, CString, CString) {
         name_c,
         value_c,
     )
+}
+
+#[test]
+fn c_api_session_uses_protocol_identity_defaults() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_str("user-agent"))
+            .as_deref(),
+        Some(aria2_protocol::identity::DEFAULT_USER_AGENT)
+    );
+    #[cfg(feature = "bittorrent")]
+    {
+        assert_eq!(
+            session
+                .runtime
+                .block_on(session.config.get_global_str("peer-agent"))
+                .as_deref(),
+            Some(aria2_protocol::identity::DEFAULT_PEER_AGENT)
+        );
+        assert_eq!(
+            session
+                .runtime
+                .block_on(session.config.get_global_str("peer-id-prefix"))
+                .as_deref(),
+            Some(aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX)
+        );
+    }
+
+    session.finalize();
+}
+
+#[test]
+fn c_api_reports_failed_global_runtime_option_dispatch() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+    let (closed_sender, receiver) = crate::engine::engine_command::channel();
+    drop(receiver);
+    session.command_tx = closed_sender;
+
+    let result = session.change_global_options(vec![(
+        "max-concurrent-downloads".to_string(),
+        "3".to_string(),
+    )]);
+
+    assert_eq!(result, INTERNAL_ERROR);
+    assert!(!session.last_error.is_empty());
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("max-concurrent-downloads")),
+        Some(3),
+        "the validated global option remains stored when runtime dispatch fails"
+    );
+
+    session.finalize();
+}
+
+#[test]
+fn c_api_applies_registered_global_option_aliases() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    let result =
+        session.change_global_options(vec![("max-downloads".to_string(), "13".to_string())]);
+
+    assert_eq!(result, 0, "registered alias should be changeable");
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("max-concurrent-downloads")),
+        Some(13)
+    );
+
+    session.finalize();
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn c_api_ignores_dht_settings_in_global_runtime_changes() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    let result =
+        session.change_global_options(vec![("dht-message-timeout".to_string(), "23".to_string())]);
+
+    assert_eq!(result, 0, "unsupported global changes are ignored");
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-message-timeout")),
+        Some(10),
+        "DHT message timeout remains the configured process value"
+    );
+
+    session.finalize();
+}
+
+#[cfg(not(feature = "sftp"))]
+#[test]
+fn c_api_ignores_sftp_settings_in_global_runtime_changes_without_feature() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(Vec::new()).expect("session should start");
+
+    let result =
+        session.change_global_options(vec![("sftp-connect-timeout".to_string(), "41".to_string())]);
+
+    assert_eq!(result, 0, "unsupported global changes are ignored");
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("sftp-connect-timeout")),
+        None,
+        "SFTP options must not be stored without an SFTP consumer"
+    );
+
+    session.finalize();
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn c_api_accepts_dht_peer_storage_process_options_at_session_start() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = Aria2RustSession::new(vec![
+        ("dht-max-peer-info-hashes".to_string(), "1200".to_string()),
+        ("dht-max-peers-per-info-hash".to_string(), "37".to_string()),
+        ("dht-max-items".to_string(), "512".to_string()),
+    ])
+    .expect("C API session should accept DHT process configuration");
+
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-peer-info-hashes")),
+        Some(1200)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-peers-per-info-hash")),
+        Some(37)
+    );
+    assert_eq!(
+        session
+            .runtime
+            .block_on(session.config.get_global_i64("dht-max-items")),
+        Some(512)
+    );
+
+    session.finalize();
+}
+
+#[test]
+fn c_api_applies_process_engine_network_and_server_stat_options() {
+    let runtime = Runtime::new().unwrap();
+    let mut config = ConfigManager::new();
+    runtime.block_on(async {
+        config
+            .set_global_option("interface", OptionValue::Str("127.0.0.2".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("multiple-interface", OptionValue::Str("127.0.0.1".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("dns-timeout", OptionValue::Str("9".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("async-dns-server", OptionValue::Str("127.0.0.1".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("server-stat-timeout", OptionValue::Str("0".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("server-stat-if", OptionValue::Str("stats.in".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("server-stat-of", OptionValue::Str("stats.out".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("save-server-stat-interval", OptionValue::Str("17".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-concurrent-downloads", OptionValue::Str("3".into()))
+            .await
+            .unwrap();
+        config
+            .set_global_option(
+                "max-overall-download-limit",
+                OptionValue::Str("1024".into()),
+            )
+            .await
+            .unwrap();
+        config
+            .set_global_option("max-overall-upload-limit", OptionValue::Str("2048".into()))
+            .await
+            .unwrap();
+    });
+
+    let options = runtime.block_on(config.get_all_global_options());
+    let request_man = Arc::new(RequestGroupMan::new());
+    let engine = runtime.block_on(DownloadEngine::from_process_options(
+        &options,
+        Arc::clone(&request_man),
+    ));
+
+    assert_eq!(
+        engine.outbound_network_policy().addresses(),
+        ["127.0.0.2".parse::<std::net::IpAddr>().unwrap()]
+    );
+    runtime.block_on(async {
+        let dns_cache = engine.dns_cache().lock().await;
+        assert_eq!(dns_cache.dns_timeout(), Duration::from_secs(9));
+        assert_eq!(
+            dns_cache.dns_server_addresses(),
+            ["127.0.0.1:53".parse::<std::net::SocketAddr>().unwrap()]
+        );
+    });
+    assert_eq!(engine.server_stat_max_age(), None);
+    assert_eq!(
+        engine.server_stat_input_path().unwrap(),
+        std::path::Path::new("stats.in")
+    );
+    assert_eq!(
+        engine.server_stat_output_path().unwrap(),
+        std::path::Path::new("stats.out")
+    );
+    assert_eq!(
+        engine.server_stat_save_interval(),
+        Some(Duration::from_secs(17))
+    );
+    assert_eq!(request_man.max_concurrent(), 3);
+    assert_eq!(request_man.global_download_limit(), Some(1024));
+    assert_eq!(request_man.global_upload_limit(), Some(2048));
 }
 
 #[test]
@@ -214,7 +487,10 @@ fn c_api_metalink_returns_all_created_gids() {
     let _keep_alive = [pause_name, pause_value];
     assert!(!session.is_null());
 
-    let metalink = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="file.bin"><size>4</size><url>http://127.0.0.1:1/file.bin</url></file></metalink>"#;
+    let metalink = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="first.bin"><size>4</size><url>http://127.0.0.1:1/first.bin</url></file><file name="second.bin"><size>4</size><url>http://127.0.0.1:1/second.bin</url></file></metalink>"#;
+    let (select_file_entry, select_file_name, select_file_value) = kv("select-file", "2");
+    let options = [select_file_entry];
+    let _keep_options = [select_file_name, select_file_value];
     let mut gids = [0u64; 2];
     let mut gid_count = 0usize;
     assert_eq!(
@@ -223,8 +499,8 @@ fn c_api_metalink_returns_all_created_gids() {
                 session,
                 metalink.as_ptr(),
                 metalink.len(),
-                ptr::null(),
-                0,
+                options.as_ptr(),
+                options.len(),
                 gids.as_mut_ptr(),
                 gids.len(),
                 &mut gid_count,
@@ -235,6 +511,15 @@ fn c_api_metalink_returns_all_created_gids() {
     assert_eq!(gid_count, 1);
     assert_ne!(gids[0], 0);
     assert_eq!(unsafe { aria2_rust_get_file_count(session, gids[0]) }, 1);
+    let required = unsafe { aria2_rust_get_file_path(session, gids[0], 1, ptr::null_mut(), 0) };
+    assert!(required > 1);
+    let mut path = vec![0 as c_char; required];
+    assert_eq!(
+        unsafe { aria2_rust_get_file_path(session, gids[0], 1, path.as_mut_ptr(), path.len()) },
+        required
+    );
+    let path = unsafe { CStr::from_ptr(path.as_ptr()) }.to_str().unwrap();
+    assert!(path.ends_with("second.bin"));
 
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
     assert_eq!(aria2_rust_library_deinit(), 0);

@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use aria2_protocol::sftp::connection::SshError;
 use aria2_protocol::sftp::file_ops::FileOpError;
+use aria2_protocol::sftp::session::SftpSessionError;
 
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
 use super::types::SftpDownloadCommand;
-use super::uri::sftp_percent_decode;
+use aria2_protocol::sftp::uri::percent_decode as sftp_percent_decode;
 
 #[test]
 fn test_sftp_path_decoding() {
@@ -119,6 +120,51 @@ fn test_build_ssh_options_with_password() {
 }
 
 #[test]
+fn sftp_connection_options_reach_the_protocol_connection() {
+    let options = DownloadOptions {
+        ssh_host_key_md: Some("sha-1=expected-fingerprint".to_string()),
+        sftp_connect_timeout: Some(41),
+        sftp_read_timeout: Some(73),
+        sftp_compression: true,
+        sftp_keepalive_interval: Some(0),
+        sftp_preferred_ciphers: Some(vec![
+            "aes256-gcm@openssh.com".to_string(),
+            "chacha20-poly1305@openssh.com".to_string(),
+        ]),
+        ..DownloadOptions::default()
+    };
+    let cmd = SftpDownloadCommand::new(
+        GroupId::new(98),
+        "sftp://user@example.com/file",
+        &options,
+        None,
+        None,
+    )
+    .expect("SFTP command should accept configured timeouts");
+
+    let ssh_options = cmd.build_ssh_options();
+    assert_eq!(
+        ssh_options.host_key_fingerprint.as_deref(),
+        Some("sha-1=expected-fingerprint")
+    );
+    assert_eq!(
+        ssh_options.host_key_mode,
+        aria2_protocol::sftp::connection::HostKeyCheckingMode::Strict
+    );
+    assert_eq!(ssh_options.connect_timeout, Duration::from_secs(41));
+    assert_eq!(ssh_options.read_timeout, Duration::from_secs(73));
+    assert!(ssh_options.compression);
+    assert_eq!(ssh_options.keepalive_interval, None);
+    assert_eq!(
+        ssh_options.preferred_ciphers,
+        [
+            "aes256-gcm@openssh.com".to_string(),
+            "chacha20-poly1305@openssh.com".to_string()
+        ]
+    );
+}
+
+#[test]
 fn test_build_ssh_options_without_password() {
     let cmd = SftpDownloadCommand {
         group: Arc::new(std::sync::RwLock::new(RequestGroup::new(
@@ -139,6 +185,7 @@ fn test_build_ssh_options_without_password() {
         global_limiter: None,
         checkpoint: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        dns_cache: None,
     };
     let opts = cmd.build_ssh_options();
     assert!(opts.password.is_none());
@@ -169,6 +216,20 @@ fn test_map_ssh_connect_timeout_to_recoverable() {
         mapped,
         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
     ));
+}
+
+#[test]
+fn sftp_host_key_rejection_is_terminal_and_does_not_retry() {
+    let mut command = create_test_cmd();
+    command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(0, 0);
+    let error = SshError::Config {
+        message: "SSH host-key fingerprint mismatch".into(),
+    };
+
+    let mapped = SftpDownloadCommand::map_ssh_error(&error, "h", 22, "/f");
+
+    assert!(matches!(mapped, Aria2Error::Fatal(FatalError::Config(_))));
+    assert!(!command.should_retry_error(0, &mapped));
 }
 
 #[test]
@@ -206,6 +267,57 @@ fn test_map_network_error_to_recoverable() {
         mapped,
         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
     ));
+}
+
+#[test]
+fn test_map_unclassified_server_status_to_terminal_failure() {
+    let err = FileOpError::Other {
+        message: "READ failed (code=4): Generic failure".into(),
+    };
+    let mapped = SftpDownloadCommand::map_file_op_error(&err, "host", "/f");
+    assert!(matches!(&mapped, Aria2Error::DownloadFailed(_)));
+    assert!(!create_test_cmd().should_retry_error(0, &mapped));
+}
+
+#[test]
+fn sftp_download_reader_preserves_early_eof_task_error() {
+    let mapped = SftpDownloadCommand::map_download_read_error(
+        aria2_protocol::sftp::transfer::SftpDownloadReadError::UnexpectedEof {
+            offset: 7,
+            total_size: 9,
+        },
+        "host",
+        "/file",
+    );
+
+    assert!(matches!(
+        mapped,
+        Aria2Error::DownloadFailed(message)
+            if message == "SFTP remote file ended before the advertised length: 7 < 9"
+    ));
+}
+
+#[test]
+fn sftp_session_protocol_errors_are_terminal_but_timeouts_are_retryable() {
+    let mut command = create_test_cmd();
+    command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(2, 0);
+
+    let protocol_error =
+        SftpDownloadCommand::map_session_error(&SftpSessionError::UnsupportedVersion {
+            server_version: 4,
+            minimum: 3,
+        });
+    assert!(matches!(&protocol_error, Aria2Error::DownloadFailed(_)));
+    assert!(!command.should_retry_error(0, &protocol_error));
+
+    let timeout_error = SftpDownloadCommand::map_session_error(&SftpSessionError::Timeout(
+        Duration::from_millis(50),
+    ));
+    assert!(matches!(
+        &timeout_error,
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+    ));
+    assert!(command.should_retry_error(0, &timeout_error));
 }
 
 #[test]
@@ -324,5 +436,6 @@ fn create_test_cmd() -> SftpDownloadCommand {
         global_limiter: None,
         checkpoint: None,
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        dns_cache: None,
     }
 }

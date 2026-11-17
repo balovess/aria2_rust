@@ -96,7 +96,7 @@ impl Default for FileEntry {
             original_name: String::new(),
             suffix_path: String::new(),
             last_faster_replace: Instant::now(),
-            max_connection_per_server: 1,
+            max_connection_per_server: crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER,
             requested: false,
             unique_protocol: false,
         }

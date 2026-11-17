@@ -28,6 +28,12 @@ impl CompactPeerV4 {
     pub fn port(&self) -> u16 {
         u16::from_be_bytes([self.0[4], self.0[5]])
     }
+
+    /// Convert this compact BEP 11 peer endpoint to the protocol address type.
+    pub fn to_peer_addr(&self) -> crate::bittorrent::peer::address::PeerAddr {
+        let ip = std::net::Ipv4Addr::from(*self.ip()).to_string();
+        crate::bittorrent::peer::address::PeerAddr::new(&ip, self.port())
+    }
 }
 
 /// Compact IPv6 peer representation: 16 bytes IP + 2 bytes port = 18 bytes.
@@ -43,6 +49,12 @@ impl CompactPeerV6 {
     /// Get the port in host byte order.
     pub fn port(&self) -> u16 {
         u16::from_be_bytes([self.0[16], self.0[17]])
+    }
+
+    /// Convert this compact BEP 11 peer endpoint to the protocol address type.
+    pub fn to_peer_addr(&self) -> crate::bittorrent::peer::address::PeerAddr {
+        let ip = std::net::Ipv6Addr::from(*self.ip()).to_string();
+        crate::bittorrent::peer::address::PeerAddr::new(&ip, self.port())
     }
 }
 
@@ -92,11 +104,43 @@ impl UtPexMessage {
         }
     }
 
+    /// Build a wire-level PEX message from discovered protocol peer addresses.
+    ///
+    /// Addresses that are not valid IPv4 or IPv6 literals are ignored, matching
+    /// the established PEX encoder behavior. Added peers receive zero flags.
+    pub fn from_peer_addrs(
+        added: &[crate::bittorrent::peer::address::PeerAddr],
+        dropped: &[crate::bittorrent::peer::address::PeerAddr],
+    ) -> Self {
+        let mut message = Self::new();
+        for peer in added {
+            if let Some(compact) = peer.to_compact_v4() {
+                message.added.push(CompactPeerV4(compact));
+                message.added_f.push(0);
+            } else if let Some(compact) = peer.to_compact_v6() {
+                message.added6.push(CompactPeerV6(compact));
+                message.added6_f.push(0);
+            }
+        }
+        for peer in dropped {
+            if let Some(compact) = peer.to_compact_v4() {
+                message.dropped.push(CompactPeerV4(compact));
+            } else if let Some(compact) = peer.to_compact_v6() {
+                message.dropped6.push(CompactPeerV6(compact));
+            }
+        }
+        message
+    }
+
     /// Encode this message to the payload bytes (after the ext_id byte).
     ///
     /// Mirrors C++ `UTPexExtensionMessage::getPayload()` which separates
     /// IPv4 and IPv6 peers into distinct keys per BEP 11.
     pub fn to_payload(&self) -> Vec<u8> {
+        self.to_bencode_value().encode()
+    }
+
+    pub(crate) fn to_bencode_value(&self) -> BencodeValue {
         let mut dict = BTreeMap::new();
 
         // IPv4 added peers + flags
@@ -149,7 +193,7 @@ impl UtPexMessage {
             dict.insert(b"dropped6".to_vec(), BencodeValue::Bytes(compact));
         }
 
-        BencodeValue::Dict(dict).encode()
+        BencodeValue::Dict(dict)
     }
 
     /// Parse a ut_pex payload (the bytes after the ext_id byte).
@@ -160,7 +204,11 @@ impl UtPexMessage {
         let (val, _) = BencodeValue::decode(payload)
             .map_err(|e| format!("Failed to decode ut_pex payload: {}", e))?;
 
-        let dict = val
+        Self::from_bencode_value(&val)
+    }
+
+    pub(crate) fn from_bencode_value(value: &BencodeValue) -> Result<Self, String> {
+        let dict = value
             .as_dict()
             .ok_or("ut_pex payload is not a bencoded dict")?;
 

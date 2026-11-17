@@ -137,6 +137,8 @@ pub struct BtDownloadCommand {
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
     pub(crate) multi_file_layout: Option<MultiFileLayout>,
+    /// Process-wide reservation budget for multi-file payload handles.
+    pub(crate) open_file_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 
     /// File allocation strategy from options
     /// ("none" / "prealloc" / "falloc" / "trunc" / "mmap"). Mirrors C++
@@ -228,6 +230,8 @@ pub struct BtDownloadCommand {
     pub(crate) torrent_upload_limiter: RateLimiter,
     /// Process-wide outbound TCP policy for tracker/peer protocol adapters.
     pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
+    /// Shared resolver configured by the owning download engine.
+    pub(crate) dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
 
     /// Shared rejection state for verified bad piece sources.
     pub(crate) peer_rejection: crate::engine::bittorrent::peer::storage::SharedPeerRejection,
@@ -346,7 +350,8 @@ mod tests {
         )
         .expect("test torrent should construct");
 
-        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap())
+            .expect("temporary directory should be created in the workspace");
         let dht_path = temp_dir.path().join("dht.dat");
         let dht = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
             aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {

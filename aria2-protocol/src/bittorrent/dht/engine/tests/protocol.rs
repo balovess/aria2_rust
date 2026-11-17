@@ -306,7 +306,7 @@ async fn test_bep44_udp_roundtrip_and_store_restart() {
     use crate::bittorrent::bencode::codec::BencodeValue;
     use ed25519_dalek::{Signer, SigningKey};
 
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let dht_path = temp_dir.path().join("dht.dat");
     let node_a_id = [0x11; 20];
     let node_b_id = [0x22; 20];

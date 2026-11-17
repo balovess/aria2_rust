@@ -4,7 +4,7 @@ impl Aria2RustSession {
     pub(super) fn new(raw_options: Vec<(String, String)>) -> std::result::Result<Self, String> {
         let runtime = Runtime::new().map_err(|error| format!("runtime init failed: {error}"))?;
         let (config, keep_running) = runtime.block_on(async {
-            let mut config = ConfigManager::new();
+            let mut config = ConfigManager::new_without_config();
             let mut keep_running = false;
             for (name, value) in raw_options {
                 if name == "keep-running" {
@@ -27,58 +27,14 @@ impl Aria2RustSession {
         })?;
 
         let request_man = Arc::new(RequestGroupMan::new());
-        let mut engine = DownloadEngine::new();
-        #[cfg(feature = "bittorrent")]
-        {
-            let sources = runtime.block_on(config.get_global_option("bt-tracker-source"));
-            let sources = match sources {
-                Some(OptionValue::List(values)) => values,
-                Some(OptionValue::Str(value)) => value
-                    .split([',', '\n'])
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                _ => Vec::new(),
-            };
-            let update_interval = runtime
-                .block_on(config.get_global_i64("bt-tracker-update-interval"))
-                .filter(|seconds| *seconds > 0)
-                .map(|seconds| Duration::from_secs(seconds as u64))
-                .unwrap_or(
-                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL,
-                );
-            let enabled = runtime
-                .block_on(config.get_global_bool("enable-public-trackers"))
-                .unwrap_or(true);
-            engine.set_public_tracker_config(
-                aria2_protocol::bittorrent::tracker::public_list::TrackerCatalogConfig {
-                    enabled,
-                    sources,
-                    update_interval,
-                },
-            );
-        }
-        engine.set_request_group_man(Arc::clone(&request_man));
+        let process_options = runtime.block_on(config.get_all_global_options());
+        let mut engine = runtime.block_on(DownloadEngine::from_process_options(
+            &process_options,
+            Arc::clone(&request_man),
+        ));
         // The C API keeps the event loop alive between synchronous `run` calls,
         // matching the original library's RUN_ONCE mode.
         engine.set_keep_alive(true);
-
-        let max_concurrent = runtime.block_on(config.get_global_i64("max-concurrent-downloads"));
-        if let Some(max) = max_concurrent.filter(|value| *value >= 0) {
-            request_man.set_max_concurrent(max as u32);
-        }
-
-        let download_limit = runtime
-            .block_on(config.get_global_i64("max-overall-download-limit"))
-            .and_then(non_zero_limit);
-        let upload_limit = runtime
-            .block_on(config.get_global_i64("max-overall-upload-limit"))
-            .and_then(non_zero_limit);
-        if download_limit.is_some() || upload_limit.is_some() {
-            engine.set_global_rate_limiter(RateLimiterConfig::new(download_limit, upload_limit));
-            request_man.set_global_speed_limit(download_limit, upload_limit);
-        }
 
         let command_tx = engine.engine_command_sender();
         let shutdown_tx = engine.take_shutdown_sender();
@@ -377,27 +333,21 @@ impl Aria2RustSession {
     }
 
     pub(super) fn change_global_options(&mut self, options: Vec<(String, String)>) -> i32 {
-        let mut download_limit_changed = false;
-        let mut upload_limit_changed = false;
-        let mut max_concurrent = None;
-        #[cfg(feature = "bittorrent")]
-        let mut public_tracker_sources = None;
-        #[cfg(feature = "bittorrent")]
-        let mut public_tracker_update_interval = None;
-        #[cfg(feature = "bittorrent")]
-        let mut public_trackers_enabled = None;
+        let mut keep_running = None;
+        let mut validated_options = Vec::with_capacity(options.len());
+        let mut changed_options = HashSet::new();
         for (name, value) in options {
             if name == "keep-running" {
                 match parse_bool(&value) {
-                    Ok(value) => self.keep_running = value,
+                    Ok(value) => keep_running = Some(value),
                     Err(error) => return self.fail(error, INVALID_ARGUMENT),
                 }
                 continue;
             }
-            if !self.config.registry().contains(&name) {
+            if !self.config.registry().contains(&name) || !is_global_option_changeable(&name) {
                 continue;
             }
-            let parsed = match self
+            let _parsed = match self
                 .config
                 .registry()
                 .get(&name)
@@ -406,67 +356,34 @@ impl Aria2RustSession {
                 Some(value) => value,
                 None => return self.fail(format!("invalid option {name}"), INVALID_ARGUMENT),
             };
+            changed_options.insert(name.clone());
+            validated_options.push((name, value));
+        }
+
+        // Match aria2's batch semantics: parse every supplied value before
+        // mutating global configuration or dispatching runtime changes.
+        for (name, value) in validated_options {
             if self
                 .runtime
                 .block_on(
                     self.config
-                        .set_global_option(&name, OptionValue::Str(value.clone())),
+                        .set_global_option(&name, OptionValue::Str(value)),
                 )
                 .is_err()
             {
                 return self.fail(format!("invalid option {name}"), INVALID_ARGUMENT);
             }
-            match name.as_str() {
-                "max-concurrent-downloads" => max_concurrent = parsed.as_i64(),
-                "max-overall-download-limit" => download_limit_changed = true,
-                "max-overall-upload-limit" => upload_limit_changed = true,
-                #[cfg(feature = "bittorrent")]
-                "bt-tracker-source" => public_tracker_sources = Some(value),
-                #[cfg(feature = "bittorrent")]
-                "bt-tracker-update-interval" => public_tracker_update_interval = parsed.as_i64(),
-                #[cfg(feature = "bittorrent")]
-                "enable-public-trackers" => public_trackers_enabled = parsed.as_bool(),
-                _ => {}
-            }
+        }
+        if let Some(value) = keep_running {
+            self.keep_running = value;
         }
 
-        if let Some(max) = max_concurrent.filter(|value| *value >= 0) {
-            let _ = self
-                .command_tx
-                .send(EngineCommand::SetMaxConcurrent { max: max as u32 });
-        }
-        if download_limit_changed || upload_limit_changed {
-            let download_limit = self
-                .runtime
-                .block_on(self.config.get_global_i64("max-overall-download-limit"))
-                .and_then(non_zero_limit);
-            let upload_limit = self
-                .runtime
-                .block_on(self.config.get_global_i64("max-overall-upload-limit"))
-                .and_then(non_zero_limit);
-            let _ = self.command_tx.send(EngineCommand::SetGlobalRateLimit {
-                download_limit,
-                upload_limit,
-            });
-        }
-        #[cfg(feature = "bittorrent")]
+        let effective_options = self.runtime.block_on(self.config.get_all_global_options());
+        for command in
+            runtime_commands_for_global_option_changes(&changed_options, &effective_options)
         {
-            if let Some(sources) = public_tracker_sources {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackerSources { sources });
-            }
-            if let Some(seconds) = public_tracker_update_interval.filter(|seconds| *seconds > 0) {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackerUpdateInterval {
-                        seconds: seconds as u64,
-                    });
-            }
-            if let Some(enabled) = public_trackers_enabled {
-                let _ = self
-                    .command_tx
-                    .send(EngineCommand::SetPublicTrackersEnabled { enabled });
+            if let Err(error) = self.command_tx.send(command) {
+                return self.fail(error.to_string(), INTERNAL_ERROR);
             }
         }
         0

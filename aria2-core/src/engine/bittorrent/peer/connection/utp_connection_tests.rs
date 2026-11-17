@@ -1,6 +1,6 @@
 use super::super::utp_transport::{UtpTransportActor, UtpTransportHandle};
 use super::utp_connection::UtpPeerConnection;
-use aria2_protocol::bittorrent::utp::UtpSocket;
+use aria2_protocol::bittorrent::utp::{UtpSocket, UtpSocketOptions};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -11,6 +11,7 @@ fn start_transport() -> (UtpTransportHandle, UtpTransportActor, CancellationToke
     let shutdown = CancellationToken::new();
     let actor = UtpTransportActor::bind(
         "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        UtpSocketOptions::default(),
         incoming_tx,
         shutdown.clone(),
     )

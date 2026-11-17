@@ -62,8 +62,12 @@ impl MetalinkToRequestGroup {
         options: &DownloadOptions,
         gids: &mut impl Iterator<Item = crate::request::request_group::GroupId>,
     ) -> Result<MetalinkGroupExpansion> {
-        let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
-            .map_err(Aria2Error::MetalinkParse)?;
+        let base_uri = self
+            .base_uri
+            .as_deref()
+            .or(options.metalink_base_uri.as_deref());
+        let doc =
+            MetalinkDocument::parse(metalink_data, base_uri).map_err(Aria2Error::MetalinkParse)?;
         let mut resource_files = Vec::new();
         #[cfg(feature = "bittorrent")]
         let mut torrent_files = Vec::new();
@@ -78,7 +82,7 @@ impl MetalinkToRequestGroup {
         }
 
         let resource_groups =
-            self.create_resource_groups(metalink_data, options, resource_files, gids)?;
+            self.create_resource_groups(metalink_data, options, base_uri, resource_files, gids)?;
         #[cfg(feature = "bittorrent")]
         let torrent_graphs = self.create_torrent_graphs(options, torrent_files, gids)?;
 
@@ -93,11 +97,13 @@ impl MetalinkToRequestGroup {
         &self,
         metalink_data: &[u8],
         options: &DownloadOptions,
+        base_uri: Option<&str>,
         prepared: Vec<(usize, MetalinkFile)>,
         gids: &mut impl Iterator<Item = crate::request::request_group::GroupId>,
     ) -> Result<Vec<Arc<RwLock<crate::request::request_group::RequestGroup>>>> {
         let mut groups = Vec::new();
         for (index, file) in prepared {
+            let file = Arc::new(file);
             let urls: Vec<String> = file
                 .get_sorted_urls()
                 .into_iter()
@@ -115,12 +121,11 @@ impl MetalinkToRequestGroup {
             let group = Arc::new(RwLock::new(
                 crate::request::request_group::RequestGroup::new(gid, urls, options.clone()),
             ));
+            group.recover().set_parsed_metalink_file(Arc::clone(&file));
             group
                 .recover()
                 .set_metalink_source(metalink_data.to_vec(), index);
-            group
-                .recover()
-                .set_metalink_base_uri(self.base_uri.as_deref());
+            group.recover().set_metalink_base_uri(base_uri);
             group.recover().set_output_name(file.name.clone());
             if self.pause_requested {
                 group.recover().request_pause();

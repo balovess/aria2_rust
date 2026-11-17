@@ -34,8 +34,9 @@ pub(super) struct AuthRetryRequest<'a> {
     pub url_parsed: &'a Option<reqwest::Url>,
     pub status_code: u16,
     pub authentication_used: bool,
+    pub allow_origin_auth: bool,
     pub resume_state: &'a ResumeState,
-    pub auth_factory: &'a mut AuthConfigFactory,
+    pub auth_factory: &'a std::sync::Arc<std::sync::Mutex<AuthConfigFactory>>,
     pub auth_opts: &'a AuthResolveOptions,
 }
 
@@ -59,11 +60,19 @@ impl SequentialDownloader {
             url_parsed,
             status_code,
             authentication_used,
+            allow_origin_auth,
             resume_state,
             auth_factory,
             auth_opts,
         } = request;
         let is_proxy = status_code == 407;
+        if !is_proxy && !allow_origin_auth {
+            tracing::debug!(
+                status_code,
+                "Skipping origin auth challenge after cross-origin redirect"
+            );
+            return None;
+        }
         let header_name = if is_proxy {
             "proxy-authenticate"
         } else {
@@ -135,15 +144,20 @@ impl SequentialDownloader {
             None => return None,
         };
 
-        let result = auth_challenge_handler::handle_auth_challenge(
-            &challenge,
-            auth_factory,
-            &url,
-            auth_opts,
-            crate::http::request::HttpMethod::Get,
-            authentication_used,
-            1, // nc
-        );
+        let result = {
+            let mut auth_factory = auth_factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            auth_challenge_handler::handle_auth_challenge(
+                &challenge,
+                &mut auth_factory,
+                &url,
+                auth_opts,
+                crate::http::request::HttpMethod::Get,
+                authentication_used,
+                1, // nc
+            )
+        };
 
         match result {
             AuthChallengeResult::RetryWithAuth {
@@ -170,11 +184,23 @@ impl SequentialDownloader {
                 let cookie_header = url_parsed
                     .as_ref()
                     .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
-                let retry_request = self.request_policy.apply(
-                    retry_request,
-                    cookie_header.as_deref().filter(|value| !value.is_empty()),
-                    &[(header_name.to_string(), authorization_header.clone())],
-                );
+                let retry_cookie = cookie_header.as_deref().filter(|value| !value.is_empty());
+                let retry_request = if is_proxy {
+                    self.request_policy.apply_for_origin_with_proxy_auth(
+                        retry_request,
+                        retry_cookie,
+                        &[],
+                        allow_origin_auth,
+                        Some(&authorization_header),
+                    )
+                } else {
+                    self.request_policy.apply_for_origin(
+                        retry_request,
+                        retry_cookie,
+                        &[(header_name.to_string(), authorization_header.clone())],
+                        allow_origin_auth,
+                    )
+                };
 
                 tracing::info!(
                     status_code,

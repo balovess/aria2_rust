@@ -1,17 +1,16 @@
 mod execution;
 #[cfg(test)]
 mod tests;
+mod transport;
 mod types;
 
 pub use types::{select_mirrors_by_priority, try_mirrors_with_failover};
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use crate::error::{Aria2Error, FatalError, Result};
+use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
+use std::sync::Arc;
 
 use types::FileDownloadInfo;
 
@@ -28,22 +27,18 @@ pub struct MetalinkFileInfo {
 
 pub struct MetalinkDownloadCommand {
     pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
-    pub(crate) client: reqwest::Client,
     pub(crate) output_path: std::path::PathBuf,
     pub(crate) started: bool,
     pub(crate) completed: bool,
     pub(crate) completed_bytes: u64,
-    /// Raw Metalink data for re-parsing during execute().
-    /// Only used for single-file mode. Empty in multi-file mode
-    /// (each per-file command stores only its own file's data).
-    pub(crate) metalink_data: Vec<u8>,
-    /// Parsed file info for per-file mode (set by create_multi_file).
-    /// When present, execute() uses this instead of re-parsing metalink_data.
+    pub(crate) progress_offset: u64,
+    /// Parsed file info for single-file and per-file execution.
+    /// Grouped commands keep one entry per file in `grouped_file_infos`.
     pub(crate) file_info: Option<FileDownloadInfo>,
     /// Parsed files for a grouped Metalink payload. A single command owns
     /// the group so the request context can schedule all selected files.
     pub(crate) grouped_file_infos: Vec<(std::path::PathBuf, FileDownloadInfo)>,
-    pub(crate) checkpoint: Option<crate::engine::progress_checkpoint::ProgressCheckpoint>,
+    pub(crate) protocol_runtime: Option<transport::ProtocolRuntime>,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for mirror downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
@@ -59,6 +54,8 @@ pub struct MetalinkDownloadCommand {
         Option<Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>>,
     #[cfg(feature = "bittorrent")]
     pub(crate) lpd_manager: Option<Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) open_file_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 }
 
 mod constructors;
@@ -75,6 +72,17 @@ impl MetalinkDownloadCommand {
     /// to the per-download limiter.
     pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
         self.global_limiter = Some(limiter);
+    }
+
+    pub(crate) fn set_protocol_runtime(
+        &mut self,
+        adapters: crate::engine::protocol_adapter::ProtocolAdapterRegistry,
+        services: crate::engine::protocol_adapter::ProtocolServices,
+    ) {
+        self.protocol_runtime = Some(transport::ProtocolRuntime {
+            adapters: Arc::new(adapters),
+            services,
+        });
     }
 
     #[cfg(feature = "bittorrent")]
@@ -109,6 +117,14 @@ impl MetalinkDownloadCommand {
         self.lpd_manager = Some(manager);
     }
 
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn set_open_file_budget(
+        &mut self,
+        budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
+    ) {
+        self.open_file_budget = Some(budget);
+    }
+
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.recover()
     }
@@ -122,28 +138,8 @@ impl MetalinkDownloadCommand {
     }
 }
 
-pub(crate) fn build_http_client_with_source(
-    options: &DownloadOptions,
-    local_address: Option<std::net::IpAddr>,
-) -> Result<reqwest::Client> {
-    crate::http::client_pool::ensure_rustls_provider();
-    let client_tls = crate::http::client_identity::ClientTlsConfig::from_download_options(options);
-    let builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .gzip(options.http_accept_gzip)
-        .user_agent(crate::constants::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(5));
-    let builder = match local_address {
-        Some(address) => builder.local_address(address),
-        None => builder,
-    };
-    let builder = crate::http::client_identity::apply(builder, &client_tls)?;
-    crate::http::client_pool::configure_http2_download_client(builder)
-        .build()
-        .map_err(|e| {
-            Aria2Error::Fatal(FatalError::Config(format!(
-                "HTTP client build failed: {}",
-                e
-            )))
-        })
+pub(crate) fn validate_http_client_options(options: &DownloadOptions) -> Result<()> {
+    let tls = crate::http::client_identity::ClientTlsConfig::from_download_options(options);
+    let _ = crate::http::client_identity::apply(reqwest::Client::builder(), &tls)?;
+    Ok(())
 }

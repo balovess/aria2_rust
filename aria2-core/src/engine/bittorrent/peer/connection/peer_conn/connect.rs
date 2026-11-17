@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::engine::bittorrent::peer::stats::PeerStats;
-use crate::error::{Aria2Error, FatalError, Result};
+use crate::error::{Aria2Error, Result};
 use crate::network::OutboundNetworkPolicy;
 
 use super::super::super::utp_transport::UtpTransportHandle;
@@ -60,6 +60,7 @@ impl BtPeerConn {
             stats: PeerStats::new([0u8; 20], endpoint),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            peer_exchange_option: None,
             upload_state: None,
             upload_progress: None,
             actor_startup: None,
@@ -107,6 +108,7 @@ impl BtPeerConn {
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            peer_exchange_option: None,
             upload_state: None,
             upload_progress: None,
             actor_startup: None,
@@ -123,11 +125,11 @@ impl BtPeerConn {
     ) -> Result<Self> {
         let socket_addr = addr
             .to_socket_addr()
-            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
+            .map_err(|error| Aria2Error::BittorrentParse(error.to_string()))?;
         let stream = tokio::time::timeout(options.timeout, policy.connect(socket_addr))
             .await
-            .map_err(|_| Aria2Error::Fatal(FatalError::Config("peer connection timeout".into())))?
-            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
+            .map_err(|_| Aria2Error::Network("peer connection timeout".into()))?
+            .map_err(|error| Aria2Error::Network(error.to_string()))?;
         let connection = aria2_protocol::bittorrent::peer::mse::connect_with_stream(
             stream,
             info_hash_v1,
@@ -142,7 +144,7 @@ impl BtPeerConn {
                 socket_addr,
                 ConnectionType::Tcp,
             )),
-            Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
+            Err(e) => Err(Aria2Error::Network(e)),
         }
     }
 
@@ -158,7 +160,7 @@ impl BtPeerConn {
     ) -> Result<Self> {
         let socket_addr = addr
             .to_socket_addr()
-            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
+            .map_err(|error| Aria2Error::BittorrentParse(error.to_string()))?;
         let result = match tokio::time::timeout(timeout, policy.connect(socket_addr)).await {
             Ok(Ok(stream)) => {
                 aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_stream(
@@ -182,7 +184,7 @@ impl BtPeerConn {
                 socket_addr,
                 ConnectionType::Tcp,
             )),
-            Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
+            Err(e) => Err(Aria2Error::Network(e)),
         }
     }
 
@@ -286,6 +288,7 @@ impl BtPeerConn {
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            peer_exchange_option: None,
             upload_state: None,
             upload_progress: None,
             actor_startup: None,

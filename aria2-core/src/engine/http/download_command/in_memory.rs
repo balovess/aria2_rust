@@ -52,24 +52,62 @@ impl DownloadCommand {
             return Ok(());
         }
 
-        let url = reqwest::Url::parse(uri).ok();
-        let cookie_header = url
-            .as_ref()
-            .map(|url| {
-                self.create_cookie_helper()
-                    .build_cookie_header_from_url(url)
-            })
-            .filter(|header| !header.is_empty());
-
-        let request =
-            self.request_policy
-                .apply(self.client.get(uri), cookie_header.as_deref(), &[]);
-
-        let response = request.send().await.map_err(|error| {
+        let mut current_url = reqwest::Url::parse(uri).map_err(|error| {
             Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
-                message: error.to_string(),
+                message: format!("invalid HTTP metadata URL {uri}: {error}"),
             })
         })?;
+        let mut origin_scope =
+            crate::http::request_policy::RedirectOriginScope::new(current_url.clone());
+        let cookie_helper = self.create_cookie_helper();
+        let mut redirect_count = 0;
+        let response = loop {
+            self.request_policy.wait_before_request().await;
+            let cookie_header = cookie_helper.build_cookie_header_from_url(&current_url);
+            let allow_origin_auth = origin_scope.allows_sensitive_headers(&current_url);
+            let request = self.request_policy.apply_for_origin(
+                self.client.get(current_url.as_str()),
+                (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
+                &[],
+                allow_origin_auth,
+            );
+            let response = request.send().await.map_err(|error| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                    message: error.to_string(),
+                })
+            })?;
+            cookie_helper.extract_and_store_cookies(current_url.as_str(), &response);
+
+            let status_code = response.status().as_u16();
+            if !crate::http::response::is_redirect_status(status_code) {
+                break response;
+            }
+            if redirect_count >= crate::http::skip_response::MAX_REDIRECT_COUNT {
+                return Err(Aria2Error::Recoverable(
+                    crate::error::RecoverableError::HttpTooManyRedirects {
+                        count: redirect_count,
+                    },
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    Aria2Error::Recoverable(crate::error::RecoverableError::HttpProtocolError {
+                        message: format!("HTTP {status_code} redirect without Location header"),
+                    })
+                })?;
+            let next_url = current_url.join(location).map_err(|error| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::HttpProtocolError {
+                    message: format!("failed to resolve redirect URL '{location}': {error}"),
+                })
+            })?;
+            self.group.recover_mut().add_redirect_uri(next_url.as_str());
+            origin_scope.follow_redirect(&current_url, &next_url);
+            current_url = next_url;
+            redirect_count += 1;
+        };
         let status = response.status();
         if !status.is_success() {
             if status.as_u16() == 404 {

@@ -1,17 +1,11 @@
-//! HTTP Digest Authentication (RFC 2617) implementation
+//! Core compatibility types for HTTP Digest authentication.
 //!
-//! Provides parsing of WWW-Authenticate Digest challenges and building
-//! of Authorization header values for HTTP Digest authentication.
-//!
-//! Note: The actual hash computation (MD5/SHA-256/SHA-512-256) delegates to
-//! `crate::auth::digest_auth::DigestAuthProvider`, which provides correct
-//! RFC 7616-compliant hash implementations. This module focuses on the
-//! challenge parsing and response formatting aspects.
+//! Challenge syntax, response computation, and Authorization serialization
+//! live in `aria2_protocol::http::digest`; these types preserve the existing
+//! core API and map protocol parse errors into `Aria2Error`.
 
-use std::collections::HashMap;
 use std::fmt;
 
-use crate::auth::digest_auth::{DigestAlgorithm, DigestAuthProvider};
 use crate::error::Aria2Error;
 
 /// Parsed WWW-Authenticate header for Digest auth challenge
@@ -78,151 +72,17 @@ impl DigestAuthChallenge {
     /// assert_eq!(challenge.nonce, "dcd98b7102dd2f0e8b11d0f600bfb0c093");
     /// ```
     pub fn parse(header_value: &str) -> Result<Self, Aria2Error> {
-        let mut header_parts = header_value
-            .trim()
-            .splitn(2, |character: char| character.is_ascii_whitespace());
-        let scheme = header_parts.next().unwrap_or_default();
-        if !scheme.eq_ignore_ascii_case("Digest") {
-            return Err(Aria2Error::Parse(
-                "Not a Digest challenge: missing 'Digest' scheme".to_string(),
-            ));
-        }
-        let digest_part = header_parts.next().unwrap_or_default();
-
-        let params = parse_digest_parameters(digest_part)?;
-
-        // Validate required fields
-        let nonce = params.get("nonce").cloned().ok_or_else(|| {
-            Aria2Error::Parse("Missing required 'nonce' parameter in Digest challenge".to_string())
-        })?;
-
-        Ok(DigestAuthChallenge {
-            realm: params.get("realm").cloned().unwrap_or_default(),
-            nonce,
-            qop: select_qop(params.get("qop").map(String::as_str))?,
-            algorithm: normalize_algorithm(params.get("algorithm").map(String::as_str))?,
-            opaque: params.get("opaque").cloned(),
-            stale: params
-                .get("stale")
-                .map(|s| s.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+        let challenge = aria2_protocol::http::digest::DigestChallenge::parse(header_value)
+            .map_err(|error| Aria2Error::Parse(error.to_string()))?;
+        Ok(Self {
+            realm: challenge.realm,
+            nonce: challenge.nonce,
+            qop: challenge.qop,
+            algorithm: challenge.algorithm,
+            opaque: challenge.opaque,
+            stale: challenge.stale,
         })
     }
-}
-
-fn parse_digest_parameters(input: &str) -> Result<HashMap<String, String>, Aria2Error> {
-    let bytes = input.as_bytes();
-    let mut index = 0;
-    let mut params = HashMap::new();
-
-    while index < bytes.len() {
-        while index < bytes.len() && (bytes[index].is_ascii_whitespace() || bytes[index] == b',') {
-            index += 1;
-        }
-        if index == bytes.len() {
-            break;
-        }
-
-        let key_start = index;
-        while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b',' {
-            index += 1;
-        }
-        let key = input[key_start..index].trim();
-        if key.is_empty() || index == bytes.len() || bytes[index] != b'=' {
-            return Err(Aria2Error::Parse(
-                "Invalid Digest challenge parameter".to_string(),
-            ));
-        }
-        index += 1;
-        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-            index += 1;
-        }
-
-        let value = if bytes.get(index) == Some(&b'"') {
-            index += 1;
-            let mut value = String::new();
-            let mut closed = false;
-            while index < bytes.len() {
-                match bytes[index] {
-                    b'\\' if index + 1 < bytes.len() => {
-                        value.push(bytes[index + 1] as char);
-                        index += 2;
-                    }
-                    b'"' => {
-                        index += 1;
-                        closed = true;
-                        break;
-                    }
-                    byte => {
-                        value.push(byte as char);
-                        index += 1;
-                    }
-                }
-            }
-            if !closed {
-                return Err(Aria2Error::Parse(
-                    "Unterminated quoted Digest challenge parameter".to_string(),
-                ));
-            }
-            value
-        } else {
-            let value_start = index;
-            while index < bytes.len() && bytes[index] != b',' {
-                index += 1;
-            }
-            input[value_start..index].trim().to_string()
-        };
-
-        params.insert(key.to_ascii_lowercase(), value);
-        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-            index += 1;
-        }
-        if index < bytes.len() && bytes[index] != b',' {
-            return Err(Aria2Error::Parse(
-                "Invalid Digest challenge parameter separator".to_string(),
-            ));
-        }
-    }
-
-    Ok(params)
-}
-
-fn select_qop(value: Option<&str>) -> Result<Option<String>, Aria2Error> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    value
-        .split(',')
-        .map(str::trim)
-        .find(|qop| qop.eq_ignore_ascii_case("auth"))
-        .or_else(|| {
-            value
-                .split(',')
-                .map(str::trim)
-                .find(|qop| qop.eq_ignore_ascii_case("auth-int"))
-        })
-        .map(|qop| qop.to_ascii_lowercase())
-        .ok_or_else(|| Aria2Error::Parse(format!("Unsupported Digest qop: {value}")))
-        .map(Some)
-}
-
-fn normalize_algorithm(value: Option<&str>) -> Result<String, Aria2Error> {
-    let algorithm = value.unwrap_or("MD5");
-    let canonical = match algorithm.to_ascii_uppercase().as_str() {
-        "MD5" => "MD5",
-        "MD5-SESS" => "MD5-sess",
-        "SHA-256" => "SHA-256",
-        "SHA-256-SESS" => "SHA-256-sess",
-        "SHA-512-256" => "SHA-512-256",
-        "SHA-512-256-SESS" => "SHA-512-256-sess",
-        _ => {
-            return Err(Aria2Error::Parse(format!(
-                "Unsupported Digest algorithm: {algorithm}"
-            )));
-        }
-    };
-    Ok(canonical.to_string())
 }
 
 /// Built Digest authentication response ready for inclusion in an Authorization header
@@ -262,28 +122,19 @@ impl DigestAuthResponse {
     ///        algorithm="...", opaque="..."
     /// ```
     pub fn to_header_value(&self) -> String {
-        let mut fields = vec![
-            format!(r#"username="{}""#, escape_quoted(&self.username)),
-            format!(r#"realm="{}""#, escape_quoted(&self.realm)),
-            format!(r#"nonce="{}""#, escape_quoted(&self.nonce)),
-            format!(r#"uri="{}""#, escape_quoted(&self.uri)),
-            format!(r#"response="{}""#, self.response),
-            format!("algorithm={}", self.algorithm),
-        ];
-        if let Some(qop) = self.qop.as_deref() {
-            fields.push(format!("qop={qop}"));
-            fields.push(format!("nc={:08x}", self.nc));
-            fields.push(format!(r#"cnonce="{}""#, escape_quoted(&self.cnonce)));
-        } else if self.algorithm.eq_ignore_ascii_case("MD5-sess")
-            || self.algorithm.eq_ignore_ascii_case("SHA-256-sess")
-            || self.algorithm.eq_ignore_ascii_case("SHA-512-256-sess")
-        {
-            fields.push(format!(r#"cnonce="{}""#, escape_quoted(&self.cnonce)));
+        aria2_protocol::http::digest::DigestResponse {
+            username: self.username.clone(),
+            realm: self.realm.clone(),
+            nonce: self.nonce.clone(),
+            uri: self.uri.clone(),
+            qop: self.qop.clone(),
+            nc: self.nc,
+            cnonce: self.cnonce.clone(),
+            response: self.response.clone(),
+            algorithm: self.algorithm.clone(),
+            opaque: self.opaque.clone(),
         }
-        if let Some(opaque) = self.opaque.as_deref() {
-            fields.push(format!(r#"opaque="{}""#, escape_quoted(opaque)));
-        }
-        format!("Digest {}", fields.join(", "))
+        .to_header_value()
     }
 
     /// Compute a Digest authentication response per RFC 2617 section 3.2.2.1.
@@ -319,68 +170,41 @@ impl DigestAuthResponse {
         challenge: &DigestAuthChallenge,
         nc: u32,
     ) -> Self {
-        // Determine the hash algorithm from the challenge
-        let algorithm_name = challenge.algorithm.to_ascii_uppercase();
-        let algorithm = match algorithm_name.as_str() {
-            "SHA-256" | "SHA-256-SESS" => DigestAlgorithm::Sha256,
-            "SHA-512-256" | "SHA-512-256-SESS" => DigestAlgorithm::Sha512_256,
-            _ => DigestAlgorithm::Md5,
-        };
-        let is_session_algorithm = algorithm_name.ends_with("-SESS");
-
-        // Create a DigestAuthProvider to leverage its correct hash implementations
-        let provider =
-            DigestAuthProvider::new(username.to_string(), password.to_string(), Some(algorithm));
-
-        // Compute HA2 = H(method:uri)
-        // Generate random cnonce (client nonce) using crypto-quality randomness
-        let cnonce = format!("{:016x}", rand::random::<u64>());
-        let qop = select_qop(challenge.qop.as_deref()).unwrap_or(None);
-
-        // RFC 7616 uses a second HA1 derivation for -sess algorithms.
-        let initial_ha1 = provider.compute_ha1(&challenge.realm);
-        let ha1 = if is_session_algorithm {
-            provider.hash_kd(&initial_ha1, &format!("{}:{}", challenge.nonce, cnonce))
-        } else {
-            initial_ha1
-        };
-
-        let ha2 = provider.compute_ha2(method, uri, qop.as_deref(), None);
-
-        let nc_str = format!("{:08x}", nc);
-
-        // Compute final response = KD(HA1, nonce:nc:cnonce:qop:HA2) or KD(HA1, nonce:HA2)
-        let response = provider.compute_response(
-            &ha1,
-            &challenge.nonce,
-            &nc_str,
-            &cnonce,
-            qop.as_deref(),
-            &ha2,
-        );
-
-        DigestAuthResponse {
-            username: username.to_string(),
+        let protocol_challenge = aria2_protocol::http::digest::DigestChallenge {
             realm: challenge.realm.clone(),
             nonce: challenge.nonce.clone(),
-            uri: uri.to_string(),
-            qop,
-            nc,
-            cnonce,
-            response,
+            qop: challenge.qop.clone(),
             algorithm: challenge.algorithm.clone(),
             opaque: challenge.opaque.clone(),
+            stale: challenge.stale,
+        };
+        let response = aria2_protocol::http::digest::DigestResponse::compute(
+            username,
+            password,
+            method,
+            uri,
+            &protocol_challenge,
+            nc,
+        );
+        DigestAuthResponse {
+            username: response.username,
+            realm: response.realm,
+            nonce: response.nonce,
+            uri: response.uri,
+            qop: response.qop,
+            nc: response.nc,
+            cnonce: response.cnonce,
+            response: response.response,
+            algorithm: response.algorithm,
+            opaque: response.opaque,
         }
     }
-}
-
-fn escape_quoted(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::digest_auth::{DigestAlgorithm, DigestAuthProvider};
 
     // --- DigestAuthChallenge tests ---
 

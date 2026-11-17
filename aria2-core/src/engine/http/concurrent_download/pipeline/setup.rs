@@ -8,6 +8,7 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::{ResumeState, is_sequential_checkpoint};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::DownloadOptions;
+use crate::selector::uri_selector::UriSelector;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::ConcurrentDownloader;
@@ -33,6 +34,27 @@ pub(super) struct PreparedMultiMirrorDownload {
     pub(super) ctrl_bytes_since_save: u64,
 }
 
+fn build_uri_selector(uri_selector: &str, uris: &[String]) -> Result<Box<dyn UriSelector>> {
+    let stat_man = crate::selector::server_stat_man::ServerStatMan::shared().clone();
+    match uri_selector {
+        "inorder" => Ok(Box::new(
+            crate::selector::uri_selector::InorderUriSelector::new(),
+        )),
+        "feedback" => Ok(Box::new(
+            crate::selector::feedback_uri_selector::FeedbackUriSelector::new(stat_man),
+        )),
+        "adaptive" => Ok(Box::new(
+            crate::selector::adaptive_uri_selector::AdaptiveUriSelector::new_with_uris(
+                stat_man,
+                uris.to_vec(),
+            ),
+        )),
+        unsupported => Err(crate::error::Aria2Error::InvalidArgument(format!(
+            "unsupported URI selector: {unsupported}"
+        ))),
+    }
+}
+
 pub(super) async fn prepare(
     dl: &mut ConcurrentDownloader,
     uris: &[String],
@@ -49,11 +71,12 @@ pub(super) async fn prepare(
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        .clamp(1, 16) as usize;
+        .clamp(1, constants::MAX_CONNECTION_PER_SERVER as u16) as usize;
     let requested_session_limit = options
         .max_http2_sessions_per_server
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
-        .clamp(1, max_conn as u16) as usize;
+        .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
+        as usize;
     let session_limit = requested_session_limit.min(dl.range_clients.len().max(1));
 
     let mirror_config = crate::engine::mirror_coordinator::MirrorConfig {
@@ -64,12 +87,7 @@ pub(super) async fn prepare(
         max_retries: max_retries_per_segment,
     };
 
-    let selector = Box::new(
-        crate::selector::adaptive_uri_selector::AdaptiveUriSelector::new_with_uris(
-            crate::selector::server_stat_man::ServerStatMan::shared().clone(),
-            uris.to_vec(),
-        ),
-    );
+    let selector = build_uri_selector(&options.uri_selector, uris)?;
     let segment_manager = ConcurrentSegmentManager::new_with_selector(
         total_length,
         uris.to_vec(),
@@ -295,4 +313,36 @@ pub(super) async fn prepare(
         ctrl_save_interval,
         ctrl_bytes_since_save,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_uri_selector;
+
+    fn candidates() -> Vec<String> {
+        vec![
+            "http://first.example/file".to_string(),
+            "http://second.example/file".to_string(),
+        ]
+    }
+
+    #[test]
+    fn configured_uri_selector_selects_the_requested_strategy() {
+        let uris = candidates();
+        let used_hosts = vec![(0, "first.example".to_string())];
+
+        let inorder = build_uri_selector("inorder", &uris).unwrap();
+        assert_eq!(inorder.select(&uris, &used_hosts), Some(0));
+
+        let feedback = build_uri_selector("feedback", &uris).unwrap();
+        assert_eq!(feedback.select(&uris, &used_hosts), Some(1));
+
+        let adaptive = build_uri_selector("adaptive", &uris).unwrap();
+        assert!(adaptive.select(&uris, &used_hosts).is_some());
+    }
+
+    #[test]
+    fn unknown_uri_selector_is_rejected() {
+        assert!(build_uri_selector("unknown", &candidates()).is_err());
+    }
 }

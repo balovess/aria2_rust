@@ -229,6 +229,11 @@ async fn write_serialized_to_file_async(path: &Path, data: &[u8]) -> Result<(), 
 }
 
 fn write_serialized_to_file_sync(path: &Path, data: &[u8]) -> Result<(), String> {
+    write_atomic_file_sync(path, data)
+}
+
+pub(super) fn write_atomic_file_sync(path: &Path, data: &[u8]) -> Result<(), String> {
+    let _process_lock = acquire_process_file_lock(path)?;
     let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
     let mut file = std::fs::File::create(&tmp_path)
         .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
@@ -490,7 +495,6 @@ impl DhtPersistence {
         nodes: &[DhtNode],
     ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes);
-        let _process_lock = acquire_process_file_lock(path)?;
         write_serialized_to_file_sync(path, &data)?;
 
         Ok(nodes.len())

@@ -125,6 +125,93 @@ fn test_decode_partial_payload_returns_error() {
 }
 
 #[test]
+fn malformed_packet_trailing_payload_is_rejected() {
+    let packet = SftpPacket::Status {
+        request_id: 1,
+        code: SSH_FX_OK,
+        message: "ok".to_string(),
+        language: "en".to_string(),
+    };
+    let mut encoded = packet.encode().unwrap();
+    encoded.push(0xff);
+    let payload_length = (encoded.len() - 4) as u32;
+    encoded[..4].copy_from_slice(&payload_length.to_be_bytes());
+
+    let error = SftpPacket::decode(&encoded).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn malformed_string_length_does_not_reserve_declared_size() {
+    // Outer packet: DATA, request id 1, string length u32::MAX, no string data.
+    let bytes = [
+        0, 0, 0, 9,   // packet payload length
+        103, // SSH_FXP_DATA
+        0, 0, 0, 1, // request id
+        0xff, 0xff, 0xff, 0xff, // impossible string length
+    ];
+
+    let error = SftpPacket::decode(&bytes).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn malformed_name_count_is_rejected_before_reserving_entries() {
+    // NAME packet with the maximum entry count and no entry payload.
+    let bytes = [
+        0, 0, 0, 9,   // packet payload length
+        104, // SSH_FXP_NAME
+        0, 0, 0, 1, // request id
+        0xff, 0xff, 0xff, 0xff, // count
+    ];
+
+    let error = SftpPacket::decode(&bytes).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn frame_length_addition_rejects_platform_size_overflow() {
+    let error = super::codec::checked_frame_length(usize::MAX).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn maximum_sftp_frame_size_is_inclusive_of_the_length_prefix() {
+    assert_eq!(
+        super::codec::checked_frame_length(MAX_SFTP_FRAME_SIZE - 4).unwrap(),
+        MAX_SFTP_FRAME_SIZE
+    );
+}
+
+#[test]
+fn decoder_rejects_oversized_frame_from_length_prefix_alone() {
+    let payload_length = u32::try_from(MAX_SFTP_FRAME_SIZE - 3).unwrap();
+    let error = SftpPacket::decode(&payload_length.to_be_bytes()).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exceeds the maximum"));
+}
+
+#[test]
+fn encoder_rejects_frame_larger_than_the_protocol_cap() {
+    let packet = SftpPacket::Data {
+        request_id: 1,
+        data: vec![0; MAX_SFTP_FRAME_SIZE],
+    };
+
+    let error = packet.encode().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exceeds the maximum"));
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn wire_lengths_reject_values_larger_than_u32() {
+    let error = super::wire::checked_u32_length(u32::MAX as usize + 1, "test length").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
 fn test_packet_type_codes() {
     assert_eq!(SftpPacket::Init { version: 3 }.packet_type(), SSH_FXP_INIT);
     assert_eq!(

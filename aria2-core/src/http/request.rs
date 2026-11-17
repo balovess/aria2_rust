@@ -4,11 +4,10 @@
 //! headers, and authentication helpers. Mirrors C++ aria2's
 //! `HttpRequest::createRequest()` for header generation.
 
-use base64::{Engine, engine::general_purpose};
 use std::collections::HashMap;
 use url::Url;
 
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 
 /// HTTP request method enum
 #[derive(Debug, Clone, PartialEq)]
@@ -56,35 +55,61 @@ impl HttpRequest {
     /// Serialize the HTTP request to raw bytes
     ///
     /// Serializes the request to a byte sequence according to the HTTP/1.1 specification.
-    /// Format: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`
+    /// Format: `METHOD PATH VERSION\r\nHeaders\r\n\r\nBody`. This is a raw
+    /// compatibility serializer; use [`Self::try_to_bytes`] for network transmission.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut result = String::new();
+        let target = self.request_target();
+        let method = self.method.to_string();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        aria2_protocol::http::request::serialize_http_request(
+            &method,
+            &target,
+            &headers,
+            self.body.as_deref(),
+        )
+    }
 
-        // Request line: METHOD /path HTTP/1.1
+    /// Validate and serialize this request for network transmission.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
+        let target = self.request_target();
+        let method = self.method.to_string();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        aria2_protocol::http::request::try_serialize_http_request(
+            &method,
+            &target,
+            &headers,
+            self.body.as_deref(),
+        )
+        .map_err(|error| Aria2Error::InvalidArgument(format!("invalid HTTP request: {error}")))
+    }
+
+    fn request_target(&self) -> String {
         let path = self.url.path();
-        let query = self.url.query();
-        if let Some(q) = query {
-            result.push_str(&format!("{} {}?{} HTTP/1.1\r\n", self.method, path, q));
+        if let Some(query) = self.url.query() {
+            format!("{path}?{query}")
         } else {
-            result.push_str(&format!("{} {} HTTP/1.1\r\n", self.method, path));
+            path.to_owned()
         }
+    }
 
-        // Headers
-        for (key, value) in &self.headers {
-            result.push_str(&format!("{}: {}\r\n", key, value));
-        }
-
-        // Empty line separating header and body
-        result.push_str("\r\n");
-
-        let mut bytes = result.into_bytes();
-
-        // Body
-        if let Some(ref body) = self.body {
-            bytes.extend_from_slice(body);
-        }
-
-        bytes
+    fn validate_for_serialization(&self) -> Result<()> {
+        let target = self.request_target();
+        let method = self.method.to_string();
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        aria2_protocol::http::request::validate_http_request(&method, &target, &headers)
+            .map_err(|error| Aria2Error::InvalidArgument(format!("invalid HTTP request: {error}")))
     }
 }
 
@@ -359,7 +384,7 @@ impl HttpRequestBuilder {
         let mut final_headers = self.headers;
 
         // Host header (mirrors C++ getHostText() — omit default ports)
-        if !final_headers.contains_key("Host") {
+        if !has_header(&final_headers, "Host") {
             let host = self.url.host_str().unwrap_or("");
             let port = self.url.port_or_known_default();
             let should_omit_port = match port {
@@ -378,7 +403,7 @@ impl HttpRequestBuilder {
         }
 
         // User-Agent header
-        if !final_headers.contains_key("User-Agent") {
+        if !has_header(&final_headers, "User-Agent") {
             final_headers.insert(
                 "User-Agent".to_string(),
                 crate::constants::USER_AGENT.to_string(),
@@ -386,28 +411,28 @@ impl HttpRequestBuilder {
         }
 
         // Accept header
-        if !final_headers.contains_key("Accept") {
+        if !has_header(&final_headers, "Accept") {
             final_headers.insert("Accept".to_string(), "*/*".to_string());
         }
 
         // Accept-Encoding header (mirrors C++ contentEncodingEnabled_ + acceptGzip_)
-        if self.accept_gzip && !final_headers.contains_key("Accept-Encoding") {
+        if self.accept_gzip && !has_header(&final_headers, "Accept-Encoding") {
             final_headers.insert("Accept-Encoding".to_string(), "deflate, gzip".to_string());
         }
 
         // Pragma and Cache-Control headers (mirrors C++ noCache_)
         if self.no_cache {
-            if !final_headers.contains_key("Pragma") {
+            if !has_header(&final_headers, "Pragma") {
                 final_headers.insert("Pragma".to_string(), "no-cache".to_string());
             }
-            if !final_headers.contains_key("Cache-Control") {
+            if !has_header(&final_headers, "Cache-Control") {
                 final_headers.insert("Cache-Control".to_string(), "no-cache".to_string());
             }
         }
 
         // Connection header (mirrors C++ !isKeepAliveEnabled() && !isPipeliningEnabled())
         // HTTP/1.1 default is keep-alive, so we only emit Connection when explicitly needed
-        if !final_headers.contains_key("Connection") {
+        if !has_header(&final_headers, "Connection") {
             if self.connection_close {
                 final_headers.insert("Connection".to_string(), "close".to_string());
             } else if self.proxy_keep_alive {
@@ -420,7 +445,7 @@ impl HttpRequestBuilder {
 
         // Range header (mirrors C++ segment-based Range logic in createRequest())
         if let Some(start) = self.range_start
-            && !final_headers.contains_key("Range")
+            && !has_header(&final_headers, "Range")
         {
             let range_value = match self.range_end {
                 Some(end) => format!("bytes={}-{}", start, end),
@@ -431,7 +456,7 @@ impl HttpRequestBuilder {
 
         // Want-Digest header (mirrors C++ !noWantDigest_)
         // C++ format: "SHA-512;q=1, SHA-256;q=1, SHA;q=0.1"
-        if self.want_digest && !final_headers.contains_key("Want-Digest") {
+        if self.want_digest && !has_header(&final_headers, "Want-Digest") {
             final_headers.insert(
                 "Want-Digest".to_string(),
                 "SHA-512;q=1, SHA-256;q=1, SHA;q=0.1".to_string(),
@@ -440,61 +465,69 @@ impl HttpRequestBuilder {
 
         // If-Modified-Since header (mirrors C++ ifModSinceHeader_)
         if let Some(ref val) = self.if_modified_since
-            && !final_headers.contains_key("If-Modified-Since")
+            && !has_header(&final_headers, "If-Modified-Since")
         {
             final_headers.insert("If-Modified-Since".to_string(), val.clone());
         }
 
         // If-None-Match header (ETag-based conditional GET)
         if let Some(ref val) = self.if_none_match
-            && !final_headers.contains_key("If-None-Match")
+            && !has_header(&final_headers, "If-None-Match")
         {
             final_headers.insert("If-None-Match".to_string(), val.clone());
         }
 
         // Referer header (mirrors C++ request_->getReferer())
         if let Some(ref val) = self.referer
-            && !final_headers.contains_key("Referer")
+            && !has_header(&final_headers, "Referer")
         {
             final_headers.insert("Referer".to_string(), val.clone());
         }
 
         // Cookie header (mirrors C++ cookieStorage_->criteriaFind())
         if let Some(ref val) = self.cookie
-            && !final_headers.contains_key("Cookie")
+            && !has_header(&final_headers, "Cookie")
         {
             final_headers.insert("Cookie".to_string(), val.clone());
         }
 
         // Authorization header (mirrors C++ authConfig_->getAuthText())
         if let Some(ref val) = self.authorization
-            && !final_headers.contains_key("Authorization")
+            && !has_header(&final_headers, "Authorization")
         {
             final_headers.insert("Authorization".to_string(), val.clone());
         }
 
         // Proxy-Authorization header (mirrors C++ getProxyAuthString())
         if let Some(ref val) = self.proxy_authorization
-            && !final_headers.contains_key("Proxy-Authorization")
+            && !has_header(&final_headers, "Proxy-Authorization")
         {
             final_headers.insert("Proxy-Authorization".to_string(), val.clone());
         }
 
         // Content-Length header (if body is present)
         if let Some(body) = &self.body
-            && !final_headers.contains_key("Content-Length")
+            && !has_header(&final_headers, "Content-Length")
         {
             let len = body.len();
             final_headers.insert("Content-Length".to_string(), len.to_string());
         }
 
-        Ok(HttpRequest {
+        let request = HttpRequest {
             method: self.method,
             url: self.url,
             headers: final_headers,
             body: self.body,
-        })
+        };
+        request.validate_for_serialization()?;
+        Ok(request)
     }
+}
+
+fn has_header(headers: &HashMap<String, String>, name: &str) -> bool {
+    headers
+        .keys()
+        .any(|header_name| header_name.eq_ignore_ascii_case(name))
 }
 
 /// Generate Basic Auth header value
@@ -510,9 +543,7 @@ impl HttpRequestBuilder {
 /// assert_eq!(auth_header, "Basic dXNlcjpwYXNz");
 /// ```
 pub fn basic_auth(username: &str, password: &str) -> String {
-    let credentials = format!("{}:{}", username, password);
-    let encoded = general_purpose::STANDARD.encode(credentials.as_bytes());
-    format!("Basic {}", encoded)
+    aria2_protocol::http::auth::basic_authorization(username, password)
 }
 
 /// Generate Bearer Token header value
@@ -525,5 +556,5 @@ pub fn basic_auth(username: &str, password: &str) -> String {
 ///
 /// Complete Authorization header value (e.g., `Bearer my-token`)
 pub fn bearer_token(token: &str) -> String {
-    format!("Bearer {}", token)
+    aria2_protocol::http::auth::bearer_authorization(token)
 }

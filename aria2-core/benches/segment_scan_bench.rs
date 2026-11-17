@@ -1,7 +1,8 @@
 //! Benchmark bitfield-wide piece-stat updates and stream-selection queries.
 
 use aria2_core::segment::{BitfieldMan, PieceStatMan};
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn make_pattern(num_pieces: usize, stride: usize, phase: usize) -> Vec<u8> {
     let mut bitfield = vec![0u8; num_pieces.div_ceil(8)];

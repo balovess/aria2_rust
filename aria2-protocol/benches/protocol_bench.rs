@@ -1,9 +1,10 @@
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::hint::black_box;
 use std::net::SocketAddr;
 
 fn bench_bencode_encode_dict(c: &mut Criterion) {
@@ -156,7 +157,7 @@ fn bench_dht_sample_infohashes(c: &mut Criterion) {
             let mut hashes = storage.info_hashes();
             hashes.sort_unstable();
             hashes.dedup();
-            hashes.shuffle(&mut rand::thread_rng());
+            hashes.shuffle(&mut rand::rng());
             hashes.truncate(SAMPLE_LIMIT);
             black_box(hashes)
         })

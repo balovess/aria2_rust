@@ -74,7 +74,7 @@ impl Handshake {
         }
     }
 
-    /// Builder-pattern version of [`set_dht_enabled`].
+    /// Builder-pattern version of [`Self::set_dht_enabled`].
     pub fn with_dht(mut self, enabled: bool) -> Self {
         self.set_dht_enabled(enabled);
         self
@@ -89,7 +89,7 @@ impl Handshake {
         }
     }
 
-    /// Builder-pattern version of [`set_bep52_enabled`].
+    /// Builder-pattern version of [`Self::set_bep52_enabled`].
     pub fn with_bep52(mut self, enabled: bool) -> Self {
         self.set_bep52_enabled(enabled);
         self
@@ -193,6 +193,18 @@ impl Handshake {
     /// Check whether the peer supports the BEP 52 hybrid upgrade path.
     pub fn supports_bep52(&self) -> bool {
         (self.reserved[7] & RESERVED_BEP52) != 0
+    }
+
+    /// Returns whether this handshake identifies the expected v1 torrent or
+    /// a compatible v2 hash advertised with BEP 52 support.
+    pub fn matches_info_hash(
+        &self,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+    ) -> bool {
+        self.info_hash == *info_hash_v1
+            || info_hash_v2
+                .is_some_and(|hash| self.info_hash == hash[..20] && self.supports_bep52())
     }
 
     pub fn peer_id_str(&self) -> String {

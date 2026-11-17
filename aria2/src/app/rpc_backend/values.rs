@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use aria2_core::config::{OptionRegistry, is_global_option_changeable};
-use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::engine::runtime_option_updates::runtime_commands_for_global_option_changes;
+use aria2_rpc::rpc_helpers::normalize_change_global_option_options;
 use aria2_rpc::{BackendError, BackendResponse, BackendResult};
 
 use super::CoreRpcBackend;
@@ -11,11 +12,19 @@ impl CoreRpcBackend {
         &self,
         changes: HashMap<String, serde_json::Value>,
     ) -> Result<BackendResult, BackendError> {
-        let changes: HashMap<_, _> = changes
-            .into_iter()
-            .filter(|(key, _)| is_global_option_changeable(key))
-            .collect();
         let registry = OptionRegistry::new();
+        let changes: HashMap<_, _> = normalize_change_global_option_options(&changes)
+            .into_iter()
+            .filter(|(key, value)| {
+                is_global_option_changeable(key)
+                    && !(value.is_array()
+                        && registry
+                            .get(key)
+                            .is_some_and(|definition| definition.cumulative_delimiter.is_none()))
+                    && !(value.as_array().is_some_and(Vec::is_empty)
+                        && OptionRegistry::canonical_name(key) != "bt-tracker-source")
+            })
+            .collect();
         let mut parsed = Vec::with_capacity(changes.len());
         for (key, value) in &changes {
             let value = registry
@@ -27,7 +36,7 @@ impl CoreRpcBackend {
         // Complete all adapter-specific validation before touching the shared
         // configuration. This keeps a rejected request from partially
         // applying an unrelated option in the same RPC batch.
-        let max_concurrent = parsed
+        let _max_concurrent = parsed
             .iter()
             .find(|(key, _)| key == "max-concurrent-downloads")
             .map(|(_, value)| {
@@ -39,7 +48,7 @@ impl CoreRpcBackend {
             })
             .transpose()?;
 
-        let runtime_rate_limits = if changes.contains_key("max-overall-download-limit")
+        let _runtime_rate_limits = if changes.contains_key("max-overall-download-limit")
             || changes.contains_key("max-overall-upload-limit")
         {
             let options = self.global_options().await;
@@ -62,27 +71,18 @@ impl CoreRpcBackend {
         };
 
         #[cfg(feature = "bittorrent")]
-        let tracker_sources = changes
+        let _tracker_sources = changes
             .get("bt-tracker-source")
             .map(|value| {
                 let sources = rpc_value_to_string(value).ok_or_else(|| {
                     Self::execution("Option 'bt-tracker-source' must be a string or array")
                 })?;
-                if sources
-                    .split([',', '\n'])
-                    .map(str::trim)
-                    .all(|source| source.is_empty())
-                {
-                    return Err(Self::execution(
-                        "Option 'bt-tracker-source' must contain at least one source",
-                    ));
-                }
                 Ok(sources)
             })
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let tracker_update_interval = changes
+        let _tracker_update_interval = changes
             .get("bt-tracker-update-interval")
             .map(|value| {
                 let seconds = parse_u64(value, "bt-tracker-update-interval")?;
@@ -96,7 +96,21 @@ impl CoreRpcBackend {
             .transpose()?;
 
         #[cfg(feature = "bittorrent")]
-        let public_trackers_enabled = parsed
+        let _tracker_source_timeout = changes
+            .get("bt-tracker-source-timeout")
+            .map(|value| {
+                let seconds = parse_u64(value, "bt-tracker-source-timeout")?;
+                if seconds == 0 {
+                    return Err(Self::execution(
+                        "Option 'bt-tracker-source-timeout' must be greater than zero",
+                    ));
+                }
+                Ok(seconds)
+            })
+            .transpose()?;
+
+        #[cfg(feature = "bittorrent")]
+        let _public_trackers_enabled = parsed
             .iter()
             .find(|(key, _)| key == "enable-public-trackers")
             .map(|(_, value)| {
@@ -106,6 +120,35 @@ impl CoreRpcBackend {
             })
             .transpose()?;
 
+        #[cfg(feature = "bittorrent")]
+        let _incoming_peer_handshake_timeout = parsed
+            .iter()
+            .find(|(key, _)| key == "bt-incoming-peer-handshake-timeout")
+            .map(|(_, value)| {
+                let seconds = value.as_i64().ok_or_else(|| {
+                    Self::execution(
+                        "Option 'bt-incoming-peer-handshake-timeout' must be an integer",
+                    )
+                })?;
+                u64::try_from(seconds).map_err(|_| {
+                    Self::execution(
+                        "Option 'bt-incoming-peer-handshake-timeout' must be greater than zero",
+                    )
+                })
+            })
+            .transpose()?;
+
+        #[cfg(feature = "bittorrent")]
+        let _utp_options_changed = [
+            "bt-utp-max-connections",
+            "bt-utp-connect-timeout",
+            "bt-utp-idle-timeout",
+            "bt-utp-keepalive-interval",
+        ]
+        .iter()
+        .any(|name| changes.contains_key(*name));
+
+        let changed_options = changes.keys().cloned().collect();
         {
             let mut config = self.config.write().await;
             for (key, value) in &parsed {
@@ -115,42 +158,14 @@ impl CoreRpcBackend {
                     .map_err(Self::execution)?;
             }
         }
-
-        if let Some(max) = max_concurrent {
-            self.send(EngineCommand::SetMaxConcurrent { max })?;
-        }
-        if let Some((download_limit, upload_limit)) = runtime_rate_limits {
-            self.send(EngineCommand::SetGlobalRateLimit {
-                download_limit,
-                upload_limit,
-            })?;
-        }
-
-        #[cfg(feature = "bittorrent")]
+        let effective_options = self.config.read().await.get_all_global_options().await;
+        for command in
+            runtime_commands_for_global_option_changes(&changed_options, &effective_options)
         {
-            if let Some(sources) = tracker_sources {
-                self.send(EngineCommand::SetPublicTrackerSources { sources })?;
-            }
-            if let Some(seconds) = tracker_update_interval {
-                self.send(EngineCommand::SetPublicTrackerUpdateInterval { seconds })?;
-            }
-            if let Some(enabled) = public_trackers_enabled {
-                self.send(EngineCommand::SetPublicTrackersEnabled { enabled })?;
-            }
+            self.send(command)?;
         }
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
     }
-}
-
-pub(super) fn normalize_options(
-    options: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, serde_json::Value> {
-    options
-        .iter()
-        .filter_map(|(key, value)| {
-            rpc_value_to_string(value).map(|value| (key.clone(), serde_json::Value::String(value)))
-        })
-        .collect()
 }
 
 fn rpc_value_to_string(value: &serde_json::Value) -> Option<String> {
@@ -203,3 +218,5 @@ fn parse_rate_limit(
     }
     Ok((bytes as u64 > 0).then_some(bytes as u64))
 }
+#[cfg(all(test, feature = "bittorrent"))]
+mod tests;

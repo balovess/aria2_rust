@@ -64,17 +64,19 @@ pub fn extract_compact_nodes_from_response(response: &DhtMessage) -> Vec<(Socket
         // Keep the length-based fallback for peers that place IPv6 records in
         // `nodes` instead of using the standard `nodes6` key.
         let ipv6 = if data.len().is_multiple_of(26) {
-            false
+            Some(false)
         } else if data.len().is_multiple_of(38) {
-            true
+            Some(true)
         } else {
-            return nodes;
+            None
         };
-        nodes.extend(
-            parse_bep5_compact_nodes(data, ipv6)
-                .into_iter()
-                .map(|(node, node_id)| (node.to_socket_addr(), node_id)),
-        );
+        if let Some(ipv6) = ipv6 {
+            nodes.extend(
+                parse_bep5_compact_nodes(data, ipv6)
+                    .into_iter()
+                    .map(|(node, node_id)| (node.to_socket_addr(), node_id)),
+            );
+        }
     }
     if let Some(data) = result.dict_get(b"nodes6").and_then(BencodeValue::as_bytes) {
         nodes.extend(
@@ -162,6 +164,42 @@ mod tests {
                 "10.0.0.1:6881".parse().unwrap(),
                 "[::1]:6881".parse().unwrap(),
             ]
+        );
+    }
+
+    #[test]
+    fn malformed_ipv4_nodes_do_not_hide_valid_ipv6_nodes() {
+        let mut ipv6_nodes = vec![0xCD; 20];
+        ipv6_nodes.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        ipv6_nodes.extend_from_slice(&6881u16.to_be_bytes());
+        let response = DhtMessage::new_response(
+            vec![1, 2],
+            BencodeValue::Dict(BTreeMap::from([
+                (b"nodes".to_vec(), BencodeValue::Bytes(vec![1, 2, 3])),
+                (b"nodes6".to_vec(), BencodeValue::Bytes(ipv6_nodes)),
+            ])),
+        );
+
+        let nodes = extract_compact_nodes_from_response(&response);
+
+        assert_eq!(nodes, vec![("[::1]:6881".parse().unwrap(), [0xCD; 20])]);
+    }
+
+    #[test]
+    fn ignores_incomplete_trailing_node_record() {
+        let mut data = vec![0xAB; 20];
+        data.extend_from_slice(&[10, 0, 0, 2]);
+        data.extend_from_slice(&5000u16.to_be_bytes());
+        data.extend_from_slice(&[0xCD; 7]);
+
+        let nodes = parse_bep5_compact_nodes(&data, false);
+
+        assert_eq!(
+            nodes,
+            vec![(
+                CompactNode::V4(Ipv4Addr::new(10, 0, 0, 2), 5000),
+                [0xAB; 20]
+            )]
         );
     }
 }

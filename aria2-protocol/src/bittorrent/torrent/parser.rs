@@ -70,6 +70,15 @@ pub struct TorrentMeta {
     pub nodes: Vec<(String, u16)>,
 }
 
+/// Extract BEP 19 web-seed URLs from raw bencoded torrent data without
+/// requiring the rest of the metainfo document to be valid.
+pub fn parse_web_seeds_from_bytes(torrent_bytes: &[u8]) -> Vec<String> {
+    let Ok((root, _)) = BencodeValue::decode(torrent_bytes) else {
+        return Vec::new();
+    };
+    optional_fields::parse_url_list(&root)
+}
+
 impl TorrentMeta {
     /// BEP 52 uses the first 20 bytes of the SHA-256 infohash on the wire.
     /// v1 torrents continue to use their SHA-1 infohash unchanged.

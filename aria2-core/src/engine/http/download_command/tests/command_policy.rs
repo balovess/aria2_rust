@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
+fn http2_session_pool_count_uses_its_own_limit() {
     let options = DownloadOptions {
         http_version: crate::http::HttpVersion::Http2,
         max_http2_sessions_per_server: Some(16),
@@ -10,7 +10,7 @@ fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
     };
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&options),
-        1
+        crate::constants::MAX_HTTP2_SESSIONS_PER_SERVER
     );
 
     let options = DownloadOptions {
@@ -27,26 +27,33 @@ fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&DownloadOptions::default()),
         crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+            .max(crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER)
     );
 }
 
 #[test]
-fn http11_and_auto_pools_allow_the_configured_connection_ceiling() {
-    for http_version in [
-        crate::http::HttpVersion::Http11,
-        crate::http::HttpVersion::Auto,
-    ] {
-        let options = DownloadOptions {
-            http_version,
-            max_connection_per_server: Some(7),
-            max_http2_sessions_per_server: Some(2),
-            ..DownloadOptions::default()
-        };
-        assert_eq!(
-            crate::engine::http::client_config::range_client_pool_count(&options),
-            7
-        );
-    }
+fn http11_and_auto_pools_cover_their_protocol_limits() {
+    let http11 = DownloadOptions {
+        http_version: crate::http::HttpVersion::Http11,
+        max_connection_per_server: Some(7),
+        max_http2_sessions_per_server: Some(2),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&http11),
+        7
+    );
+
+    let auto = DownloadOptions {
+        http_version: crate::http::HttpVersion::Auto,
+        max_connection_per_server: Some(1),
+        max_http2_sessions_per_server: Some(4),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&auto),
+        4
+    );
 }
 
 #[test]
@@ -273,6 +280,78 @@ async fn in_memory_http_records_each_payload_chunk_for_timeout() {
         group.recover().last_network_activity() > first_activity,
         "each non-empty in-memory HTTP chunk must refresh the inactivity clock"
     );
+}
+
+#[tokio::test]
+async fn in_memory_http_redirect_strips_cross_origin_sensitive_headers() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_address = target_listener.local_addr().unwrap();
+    let target = tokio::spawn(async move {
+        let (mut stream, _) = target_listener.accept().await.unwrap();
+        let request = super::read_http_request(&mut stream)
+            .await
+            .to_ascii_lowercase();
+        assert!(request.starts_with("get /metadata.torrent http/1.1\r\n"));
+        assert!(!request.contains("x-api-key:"));
+        assert!(request.contains("x-trace-id: trace-123\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n")
+            .await
+            .unwrap();
+    });
+
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_address = source_listener.local_addr().unwrap();
+    let source = tokio::spawn(async move {
+        let (mut stream, _) = source_listener.accept().await.unwrap();
+        let request = super::read_http_request(&mut stream)
+            .await
+            .to_ascii_lowercase();
+        assert!(request.starts_with("get /metadata.torrent http/1.1\r\n"));
+        assert!(request.contains("x-api-key: api-secret\r\n"));
+        assert!(request.contains("x-trace-id: trace-123\r\n"));
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/metadata.torrent\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let url = format!("http://{source_address}/metadata.torrent");
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        header: vec![
+            "X-API-Key: api-secret".to_string(),
+            "X-Trace-ID: trace-123".to_string(),
+        ],
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(9002),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command =
+        DownloadCommand::new_with_group(Arc::clone(&group), &url, &options, None, None).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("in-memory redirect should complete")
+        .expect("in-memory redirect should download successfully");
+
+    assert_eq!(
+        group.recover().in_memory_data().as_deref(),
+        Some(b"ok\n".as_slice())
+    );
+    source.await.unwrap();
+    target.await.unwrap();
 }
 
 #[tokio::test]

@@ -26,7 +26,7 @@ pub(super) fn create(
 ) -> SegmentRequests {
     let (write_tx, write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let authorities = [authority_key.to_owned()];
-    let executor = HttpSegmentRequestExecutor::new_with_clients(
+    let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
         dl.range_clients.as_slice(),
         dl.request_policy.clone(),
@@ -37,6 +37,8 @@ pub(super) fn create(
         &authorities,
         max_conn,
     );
+    executor.set_shared_auth_factory(std::sync::Arc::clone(&dl.auth_factory));
+    executor.set_origin_sensitive_headers_allowed(dl.origin_sensitive_headers_allowed);
     if let Some((known_authority, version)) = &dl.initial_http_protocol
         && known_authority == authority_key
     {
@@ -69,12 +71,18 @@ pub(super) fn update_capacity(
     let is_http2 = executor.is_http2(authority_key);
     if executor.in_flight_for(authority_key) == 0 && !download_complete {
         let update = adaptive.finish_round(is_http2);
-        if let Some(connections) = update.connection_target {
+        if let Some(ranges) = update.range_target {
             tracing::info!(
-                target_connections = connections,
+                target_ranges = ranges,
+                target_sessions = adaptive.connection_target(is_http2),
                 range_target = adaptive.range_target(is_http2),
                 split_budget = split,
-                "HTTP adaptive physical connection count changed"
+                direction = if update.increased {
+                    "probe-up"
+                } else {
+                    "backoff"
+                },
+                "HTTP adaptive Range concurrency target adjusted"
             );
         }
     }
@@ -82,4 +90,17 @@ pub(super) fn update_capacity(
     if is_http2 {
         executor.set_active_h2_sessions(authority_key, adaptive.connection_target(is_http2));
     }
+}
+
+pub(super) fn update_connection_snapshot(
+    executor: &HttpSegmentRequestExecutor,
+    connection_guard: &ActiveConnectionGuard,
+) {
+    connection_guard.set(executor.in_flight());
+    let counts = executor.active_connection_counts();
+    connection_guard.set_http_counts(
+        counts.http1_connections,
+        counts.http2_sessions,
+        counts.http2_streams,
+    );
 }

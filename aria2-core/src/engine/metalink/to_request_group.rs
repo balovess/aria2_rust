@@ -25,10 +25,12 @@ use tracing::{debug, info};
 use crate::engine::metalink::download_command::MetalinkDownloadCommand;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{DownloadOptions, RequestGroup};
+#[cfg(feature = "bittorrent")]
+use aria2_protocol::metalink::parser::{MediaType, MetaUrlEntry};
 use aria2_protocol::metalink::parser::{
     MetalinkDocument, MetalinkFile, group_entry_by_metaurl_name,
 };
-use aria2_protocol::metalink::resource::LOWEST_PRIORITY;
+use aria2_protocol::metalink::resource::{LOWEST_PRIORITY, ResourceType};
 use std::sync::{Arc, RwLock};
 
 #[cfg(feature = "bittorrent")]
@@ -212,6 +214,24 @@ impl MetalinkToRequestGroup {
             .filter(|protocol| !protocol.eq_ignore_ascii_case("none"));
 
         file.drop_unsupported_resources();
+        #[cfg(feature = "bittorrent")]
+        {
+            let mut torrent_meta_urls = Vec::new();
+            file.urls.retain(|url| {
+                if url.resource_type == ResourceType::BitTorrent {
+                    torrent_meta_urls.push(
+                        MetaUrlEntry::new(&url.url, MediaType::Torrent).with_priority(url.priority),
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+            file.meta_urls.extend(torrent_meta_urls);
+        }
+        #[cfg(not(feature = "bittorrent"))]
+        file.urls
+            .retain(|url| url.resource_type != ResourceType::BitTorrent);
         if !locations.is_empty() {
             let location_refs: Vec<&str> = locations.iter().map(String::as_str).collect();
             file.set_location_priority(&location_refs, -LOWEST_PRIORITY);
@@ -279,8 +299,12 @@ impl MetalinkToRequestGroup {
         metalink_data: &[u8],
         options: &DownloadOptions,
     ) -> Result<Vec<MetalinkDownloadCommand>> {
-        let doc = MetalinkDocument::parse(metalink_data, self.base_uri.as_deref())
-            .map_err(Aria2Error::MetalinkParse)?;
+        let base_uri = self
+            .base_uri
+            .as_deref()
+            .or(options.metalink_base_uri.as_deref());
+        let doc =
+            MetalinkDocument::parse(metalink_data, base_uri).map_err(Aria2Error::MetalinkParse)?;
         self.create_request_groups(doc, options)
     }
 

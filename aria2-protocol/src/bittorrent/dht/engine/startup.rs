@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 use super::super::handler::DhtLocalPeerLookup;
 use super::super::node::DhtNode;
-use super::super::peer_storage::DhtPeerStorage;
+use super::super::peer_storage::{DhtPeerStorage, DhtPeerStorageConfig};
 use super::super::persistence::DhtPersistence;
 use super::super::routing_table::RoutingTable;
 use super::super::socket::DhtSocket;
@@ -37,7 +37,15 @@ impl DhtEngine {
     /// `Bootstrapping` to `Running`, or [`DhtEngineConfig::local`] to skip
     /// bootstrap entirely.
     pub async fn start(config: DhtEngineConfig) -> std::io::Result<Arc<Self>> {
-        Self::start_inner(config, None).await
+        Self::start_inner(config, DhtPeerStorageConfig::default(), None).await
+    }
+
+    /// Start the engine with explicit bounds for locally announced peers.
+    pub async fn start_with_peer_storage_config(
+        config: DhtEngineConfig,
+        peer_storage_config: DhtPeerStorageConfig,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::start_inner(config, peer_storage_config, None).await
     }
 
     /// Start the engine and include a locally active peer in matching
@@ -50,11 +58,34 @@ impl DhtEngine {
     where
         F: Fn(&[u8; 20], IpAddr) -> Option<SocketAddr> + Send + Sync + 'static,
     {
-        Self::start_inner(config, Some(Arc::new(lookup) as Arc<DhtLocalPeerLookup>)).await
+        Self::start_inner(
+            config,
+            DhtPeerStorageConfig::default(),
+            Some(Arc::new(lookup) as Arc<DhtLocalPeerLookup>),
+        )
+        .await
+    }
+
+    /// Start the engine with local-peer replies and explicit peer-storage bounds.
+    pub async fn start_with_local_peer_lookup_and_storage_config<F>(
+        config: DhtEngineConfig,
+        peer_storage_config: DhtPeerStorageConfig,
+        lookup: F,
+    ) -> std::io::Result<Arc<Self>>
+    where
+        F: Fn(&[u8; 20], IpAddr) -> Option<SocketAddr> + Send + Sync + 'static,
+    {
+        Self::start_inner(
+            config,
+            peer_storage_config,
+            Some(Arc::new(lookup) as Arc<DhtLocalPeerLookup>),
+        )
+        .await
     }
 
     async fn start_inner(
         config: DhtEngineConfig,
+        peer_storage_config: DhtPeerStorageConfig,
         local_peer_lookup: Option<Arc<DhtLocalPeerLookup>>,
     ) -> std::io::Result<Arc<Self>> {
         let persisted_data = if let Some(ref path) = config.dht_file_path
@@ -93,9 +124,8 @@ impl DhtEngine {
             persisted_data.as_ref().expect("checked above").self_id
         } else if config.self_id == [0u8; 20] {
             let mut id = [0u8; 20];
-            use rand::{RngCore, SeedableRng};
-            // Use StdRng instead of ThreadRng to satisfy Send across async boundaries.
-            rand::rngs::StdRng::from_entropy().fill_bytes(&mut id);
+            use rand::Rng;
+            rand::rng().fill_bytes(&mut id);
             id
         } else {
             config.self_id
@@ -165,22 +195,25 @@ impl DhtEngine {
         let (state_updates, _state_receiver) = watch::channel(DhtEngineState::Bootstrapping);
 
         let token_tracker = Arc::new(std::sync::Mutex::new(TokenTracker::new()));
-        let peer_storage = Arc::new(DhtPeerStorage::new());
-        let item_store = config
+        let peer_storage = Arc::new(DhtPeerStorage::with_config(peer_storage_config));
+        let item_store = if let Some(path) = config
             .dht_file_path
             .as_deref()
             .map(|path| path.with_extension("items"))
-            .and_then(|path| match DhtItemStore::load_from_file_sync(&path) {
+        {
+            match DhtItemStore::load_from_file_with_limit(&path, config.max_stored_items).await {
                 Ok(store) => {
                     info!(path = %path.display(), "Loaded BEP 44 item store");
-                    Some(store)
+                    store
                 }
                 Err(error) => {
                     debug!(path = %path.display(), "BEP 44 item store unavailable: {error}");
-                    None
+                    DhtItemStore::with_max_items(config.max_stored_items)
                 }
-            })
-            .unwrap_or_default();
+            }
+        } else {
+            DhtItemStore::with_max_items(config.max_stored_items)
+        };
         let tracker = Arc::new(TransactionTracker::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 

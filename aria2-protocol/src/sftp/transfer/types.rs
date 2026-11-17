@@ -87,6 +87,10 @@ impl Default for TransferOptions {
 }
 
 impl TransferOptions {
+    pub(super) fn effective_buffer_size(&self) -> usize {
+        self.buffer_size.clamp(MIN_BUFFER_SIZE, MAX_BUFFER_SIZE)
+    }
+
     /// Set the resume offset for partial download continuation.
     pub fn with_resume(mut self, offset: u64) -> Self {
         self.resume_offset = offset;

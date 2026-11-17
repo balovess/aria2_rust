@@ -209,8 +209,8 @@ impl Bitfield {
 
         // Count full bytes
         let full_bytes = self.num_bits / 8;
-        for i in 0..full_bytes {
-            count += self.bits[i].count_ones() as usize;
+        for byte in self.bits.iter().take(full_bytes) {
+            count += byte.count_ones() as usize;
         }
 
         // Count remaining bits in the last partial byte

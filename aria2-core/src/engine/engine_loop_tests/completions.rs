@@ -152,10 +152,8 @@ async fn failed_network_task_marks_only_the_observed_dns_peer_bad() {
     let group = ctx.group_man.find_group(gid).unwrap();
     group.recover().inc_commands();
 
-    let cached = ctx
-        .dns_cache
-        .lock()
-        .await
+    let dns_cache = ctx.dns_cache.lock().await.clone();
+    let cached = dns_cache
         .resolve("localhost", 80)
         .await
         .expect("localhost should resolve for the DNS cache fixture");
@@ -208,10 +206,8 @@ async fn async_dns_disabled_does_not_modify_shared_dns_cache_on_failure() {
     let group = ctx.group_man.find_group(gid).unwrap();
     group.recover().inc_commands();
 
-    let cached = ctx
-        .dns_cache
-        .lock()
-        .await
+    let dns_cache = ctx.dns_cache.lock().await.clone();
+    let cached = dns_cache
         .resolve("localhost", 80)
         .await
         .expect("localhost should resolve for the DNS cache fixture");

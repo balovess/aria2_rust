@@ -8,9 +8,9 @@ use tracing::info;
 
 #[test]
 fn test_pex_support_detection() {
-    assert!(PexHandler::is_supported_by_peer(&[Some(1)]));
-    assert!(!PexHandler::is_supported_by_peer(&[Some(2)]));
-    assert!(!PexHandler::is_supported_by_peer(&[None]));
+    assert!(PexHandler::is_supported_by_peer_id(Some(9)));
+    assert!(!PexHandler::is_supported_by_peer_id(Some(0)));
+    assert!(!PexHandler::is_supported_by_peer_id(None));
 }
 
 #[test]
@@ -110,6 +110,11 @@ fn test_encode_decode_compact_peers_v6() {
 
     let encoded = encode_compact_peers_v6(&peers);
     assert_eq!(encoded.len(), 18);
+
+    let decoded = decode_compact_peers_v6(&encoded).unwrap();
+    assert_eq!(decoded.len(), peers.len());
+    assert_eq!(decoded[0].ip, peers[0].ip);
+    assert_eq!(decoded[0].port, peers[0].port);
 }
 
 #[test]
@@ -332,6 +337,7 @@ fn test_pex_dedup_logic_removes_duplicates() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_mse_encrypted_pex_roundtrip() {
     use crate::bittorrent::extension::mse_crypto::{MseCryptoState, MseDerivedKeys};
 
@@ -370,12 +376,9 @@ fn test_pex_integration_flow_seeder_advertises_ut_pex() {
 
     let client_addr = PeerAddr::new("10.0.0.50", 6890);
 
-    let _local_ext_ids = [None, Some(1), Some(2)];
-    let remote_ext_ids = vec![Some(1), None, Some(3)];
-
     assert!(
-        PexHandler::is_supported_by_peer(&remote_ext_ids),
-        "Remote should support ut_pex (ID=1)"
+        PexHandler::is_supported_by_peer_id(Some(3)),
+        "A non-zero negotiated ut_pex ID should be supported"
     );
 
     let pex_to_send = PexHandler::build_pex_added(&seeder_known_peers, &client_addr, 50);

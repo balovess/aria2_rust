@@ -21,7 +21,7 @@ const MAX_MAGNET_METADATA_PEERS_PER_SOURCE: usize = 20;
 
 pub struct MagnetDownloadCommand {
     group: Arc<std::sync::RwLock<RequestGroup>>,
-    magnet_uri: String,
+    magnet_link: Arc<aria2_protocol::bittorrent::magnet::MagnetLink>,
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
@@ -34,6 +34,7 @@ pub struct MagnetDownloadCommand {
     /// Carried through to the internally-created `BtDownloadCommand`.
     global_limiter: Option<RateLimiter>,
     outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
+    dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
     #[cfg(feature = "bittorrent")]
     public_tracker_catalog:
         Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
@@ -43,9 +44,19 @@ pub struct MagnetDownloadCommand {
     bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>>,
     #[cfg(feature = "bittorrent")]
     lpd_manager: Option<Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>>,
+    #[cfg(feature = "bittorrent")]
+    open_file_budget: Option<Arc<crate::filesystem::open_file_budget::OpenFileBudget>>,
 }
 
 impl MagnetDownloadCommand {
+    async fn execute_handed_off_bt_command(
+        command: &mut crate::engine::bittorrent::download::command::BtDownloadCommand,
+    ) -> Result<()> {
+        let result = command.execute().await;
+        command.shutdown().await;
+        result
+    }
+
     pub fn new(
         gid: GroupId,
         magnet_uri: &str,
@@ -75,6 +86,13 @@ impl MagnetDownloadCommand {
         self.outbound_network_policy = policy;
     }
 
+    pub(crate) fn set_dns_cache(
+        &mut self,
+        dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
+    ) {
+        self.dns_cache = dns_cache;
+    }
+
     /// Create a magnet download command that reuses an externally-managed
     /// `RequestGroup` (e.g. from the engine's promotion flow).
     ///
@@ -97,7 +115,7 @@ impl MagnetDownloadCommand {
             (uri, opts)
         };
 
-        let _ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri)
+        let magnet_link = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri)
             .map_err(|e| Aria2Error::MagnetParse(format!("Invalid magnet link: {}", e)))?;
 
         let dir = output_dir
@@ -111,23 +129,30 @@ impl MagnetDownloadCommand {
             .map(validate_magnet_output_name)
             .transpose()?
             .or_else(|| {
-                _ml.display_name
+                magnet_link
+                    .display_name
                     .as_deref()
                     .and_then(sanitize_magnet_display_name)
             })
             .unwrap_or_else(|| "magnet_download".to_string());
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
+        {
+            let group = group.recover();
+            group.set_output_name(filename.clone());
+            group.set_resolved_output_path(path.to_string_lossy().into_owned());
+        }
+
         info!(
             "MagnetDownloadCommand created (shared group): {} -> {} (hash={})",
             filename,
             path.display(),
-            _ml.info_hash_hex()
+            magnet_link.info_hash_hex()
         );
 
         Ok(Self {
             group,
-            magnet_uri: magnet_uri.to_string(),
+            magnet_link: Arc::new(magnet_link),
             output_path: path,
             started: false,
             completed_bytes: 0,
@@ -140,6 +165,9 @@ impl MagnetDownloadCommand {
             dht_engines: DhtEngineSet::default(),
             global_limiter: None,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+            dns_cache: Arc::new(tokio::sync::Mutex::new(
+                crate::dns::dns_cache::DnsCache::new(),
+            )),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -148,6 +176,8 @@ impl MagnetDownloadCommand {
             bt_registry: None,
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: None,
         })
     }
 
@@ -181,6 +211,14 @@ impl MagnetDownloadCommand {
         manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
     ) {
         self.lpd_manager = Some(manager);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(crate) fn set_open_file_budget(
+        &mut self,
+        budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
+    ) {
+        self.open_file_budget = Some(budget);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
@@ -255,8 +293,7 @@ impl Command for MagnetDownloadCommand {
             self.started = true;
         }
 
-        let ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&self.magnet_uri)
-            .map_err(|e| Aria2Error::MagnetParse(format!("Magnet parse error: {}", e)))?;
+        let ml = Arc::clone(&self.magnet_link);
 
         info!(
             "Magnet download: hash={}, name={:?}",
@@ -290,13 +327,21 @@ impl Command for MagnetDownloadCommand {
         };
 
         let torrent_bytes =
-            Self::normalize_magnet_metadata(&ml, &torrent_bytes).map_err(|error| {
+            aria2_protocol::bittorrent::torrent::metainfo::normalize_magnet_metadata(
+                &torrent_bytes,
+                &ml.trackers,
+            )
+            .map_err(|error| {
                 Aria2Error::Fatal(FatalError::Config(format!(
                     "Fetched magnet metadata is invalid: {error}"
                 )))
             })?;
 
-        let torrent_bytes = Self::merge_magnet_web_seeds(&ml, &torrent_bytes).map_err(|error| {
+        let torrent_bytes = aria2_protocol::bittorrent::torrent::metainfo::merge_magnet_web_seeds(
+            &torrent_bytes,
+            &ml.ws,
+        )
+        .map_err(|error| {
             Aria2Error::Fatal(FatalError::Config(format!(
                 "Fetched metadata could not include magnet web seeds: {error}"
             )))
@@ -357,6 +402,7 @@ impl Command for MagnetDownloadCommand {
             &[],
             &self.outbound_network_policy,
         )?;
+        bt_cmd.set_dns_cache(Arc::clone(&self.dns_cache));
         bt_cmd.local_peer_id = self.local_peer_id;
         bt_cmd.initial_peer_swarm = self.initial_peer_swarm.take();
         self.group.recover_mut().set_bt_metadata_data(torrent_bytes);
@@ -364,6 +410,10 @@ impl Command for MagnetDownloadCommand {
             .notify_metadata_resolved(MetadataResolvedEvent::new(gid, vec![gid]));
         if let Some(gl) = self.global_limiter.clone() {
             bt_cmd.set_global_limiter(gl);
+        }
+        #[cfg(feature = "bittorrent")]
+        if let Some(budget) = self.open_file_budget.clone() {
+            bt_cmd.set_open_file_budget(budget);
         }
         #[cfg(feature = "bittorrent")]
         if let Some(catalog) = self.public_tracker_catalog.clone() {
@@ -381,11 +431,7 @@ impl Command for MagnetDownloadCommand {
 
         self.handoff_dht_engine_to_bt(&mut bt_cmd).await;
 
-        let download_result = bt_cmd.execute().await;
-        if download_result.is_err() {
-            bt_cmd.shutdown().await;
-        }
-        download_result?;
+        Self::execute_handed_off_bt_command(&mut bt_cmd).await?;
 
         self.shutdown_dht_engine().await;
 

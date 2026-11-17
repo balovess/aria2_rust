@@ -2,8 +2,7 @@ use tracing::{info, warn};
 
 use aria2_protocol::metalink::parser::{MetaUrlEntry, UrlEntry};
 
-/// Parsed file information used by per-file command instances
-/// created by `create_multi_file()`.
+/// Parsed file information shared by single-file and per-file command paths.
 #[derive(Clone)]
 pub(crate) struct FileDownloadInfo {
     /// Sorted URL entries for this file.

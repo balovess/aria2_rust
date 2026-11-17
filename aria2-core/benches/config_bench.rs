@@ -1,5 +1,6 @@
 use aria2_core::config::{OptionDef, OptionRegistry, OptionType, OptionValue};
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use criterion::{BenchmarkId, Criterion, criterion_group};
+use std::hint::black_box;
 
 fn gen_registry() -> OptionRegistry {
     OptionRegistry::new()

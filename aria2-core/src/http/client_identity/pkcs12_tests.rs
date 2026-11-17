@@ -138,11 +138,13 @@ fn aes_cbc_pkcs12_key_bag_with_prf(
 
 fn aes_gcm_pkcs12_key_bag(algorithm_oid: &[u64], tag_len: usize) -> p12_q3::SafeBagKind {
     use aes_gcm::aead::consts::U12;
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use aes_gcm::aead::{AeadInOut, KeyInit};
 
     let password = p12_q3::BmpString::with_two_trailing_zeros("");
     let salt = b"rust-owned-gcm-salt";
     let nonce = [9u8; 12];
+    let nonce = aes_gcm::Nonce::try_from(nonce.as_slice())
+        .expect("test AES-GCM nonce should have the right length");
     let key_len = if algorithm_oid.last() == Some(&6) {
         16
     } else {
@@ -156,28 +158,28 @@ fn aes_gcm_pkcs12_key_bag(algorithm_oid: &[u64], tag_len: usize) -> p12_q3::Safe
         let cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12, U12>::new_from_slice(&key)
             .expect("AES-128-GCM test key should have the right length");
         cipher
-            .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut encrypted_data)
+            .encrypt_inout_detached(&nonce, &[], encrypted_data.as_mut_slice().into())
             .expect("AES-128-GCM test encryption should succeed")
             .to_vec()
     } else if key_len == 16 {
         let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key)
             .expect("AES-128-GCM test key should have the right length");
         cipher
-            .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut encrypted_data)
+            .encrypt_inout_detached(&nonce, &[], encrypted_data.as_mut_slice().into())
             .expect("AES-128-GCM test encryption should succeed")
             .to_vec()
     } else if tag_len == 12 {
         let cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12, U12>::new_from_slice(&key)
             .expect("AES-256-GCM test key should have the right length");
         cipher
-            .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut encrypted_data)
+            .encrypt_inout_detached(&nonce, &[], encrypted_data.as_mut_slice().into())
             .expect("AES-256-GCM test encryption should succeed")
             .to_vec()
     } else {
         let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key)
             .expect("AES-256-GCM test key should have the right length");
         cipher
-            .encrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut encrypted_data)
+            .encrypt_inout_detached(&nonce, &[], encrypted_data.as_mut_slice().into())
             .expect("AES-256-GCM test encryption should succeed")
             .to_vec()
     };

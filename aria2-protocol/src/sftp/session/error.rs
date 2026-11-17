@@ -32,6 +32,8 @@ pub enum SftpSessionError {
     ChannelClosed,
     #[error("server SFTP version {server_version} is below minimum {minimum}")]
     UnsupportedVersion { server_version: u32, minimum: u32 },
+    #[error("server SFTP version {server_version} is above maximum {maximum}")]
+    UnsupportedVersionAboveMaximum { server_version: u32, maximum: u32 },
     #[error("expected SFTP {expected} packet, got packet type {actual_type}")]
     UnexpectedPacket {
         expected: &'static str,
@@ -39,6 +41,8 @@ pub enum SftpSessionError {
     },
     #[error("SFTP response request ID mismatch: expected {expected}, got {actual:?}")]
     RequestIdMismatch { expected: u32, actual: Option<u32> },
+    #[error("SFTP session is unusable after an interrupted request/response exchange")]
+    SessionPoisoned,
 }
 
 impl SftpSessionError {
@@ -54,8 +58,10 @@ impl SftpSessionError {
             Self::PacketEncode(_)
             | Self::PacketDecode(_)
             | Self::UnsupportedVersion { .. }
+            | Self::UnsupportedVersionAboveMaximum { .. }
             | Self::UnexpectedPacket { .. }
-            | Self::RequestIdMismatch { .. } => false,
+            | Self::RequestIdMismatch { .. }
+            | Self::SessionPoisoned => false,
         }
     }
 }

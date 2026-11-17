@@ -68,7 +68,7 @@ async fn test_dht_engine_binds_configured_ipv6_udp_source() {
 async fn save_state_does_not_restore_a_node_removed_from_the_live_routing_table() {
     use crate::bittorrent::dht::persistence::DhtPersistence;
 
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let path = temp_dir.path().join("dht.dat");
     let stale_id = [0xA7; 20];
     let stale_node = DhtNode::new(stale_id, "127.0.0.1:6881".parse().unwrap());
@@ -111,7 +111,7 @@ async fn startup_restores_a_fresh_aria2_v2_routing_snapshot() {
     use crate::bittorrent::dht::persistence::DhtPersistence;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let path = temp_dir.path().join("dht.dat");
     let self_id = [0xA8; 20];
     let node_id = [0x27; 20];
@@ -146,7 +146,7 @@ async fn startup_restores_a_fresh_aria2_v2_routing_snapshot() {
 async fn startup_restores_only_nodes_matching_the_bound_ip_family() {
     use crate::bittorrent::dht::persistence::DhtPersistence;
 
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let path = temp_dir.path().join("shared-dht.dat");
     let self_id = [0xA8; 20];
     let ipv4_id = [0x11; 20];
@@ -194,10 +194,37 @@ async fn startup_restores_only_nodes_matching_the_bound_ip_family() {
 }
 
 #[tokio::test]
+async fn startup_restores_bep44_items_from_the_async_store_loader() {
+    use crate::bittorrent::bencode::codec::BencodeValue;
+    use crate::bittorrent::dht::store::DhtItemStore;
+
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dht_file_path = temp_dir.path().join("dht.dat");
+    let store_path = dht_file_path.with_extension("items");
+    let store = DhtItemStore::default();
+    let target = store
+        .put_immutable(BencodeValue::Bytes(b"restored BEP 44 item".to_vec()))
+        .expect("fixture item should be valid");
+    store
+        .save_to_file_sync(&store_path)
+        .expect("fixture item store should be persisted");
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        dht_file_path: Some(dht_file_path),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT should start after asynchronously restoring the item store");
+
+    assert_eq!(engine.context.item_store.get(&target), store.get(&target));
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
 async fn configured_bootstrap_endpoints_are_all_seeded() {
     use crate::bittorrent::dht::persistence::DhtPersistence;
 
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let dht_file_path = temp_dir.path().join("dht.dat");
     let bootstrap_nodes = [
         "192.0.2.1:6881",

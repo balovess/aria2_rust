@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::RngExt;
 use tracing::debug;
 
 use super::DefaultPeerStorage;
@@ -57,8 +57,8 @@ impl DefaultPeerStorage {
         }
 
         // Variable timeout: [120, 720] seconds (C++: 120 + getRandomNumber(601)).
-        let mut rng = rand::thread_rng();
-        let extra_secs: u64 = rng.gen_range(0..TEMP_REJECT_TIMEOUT_RANGE_SECS);
+        let mut rng = rand::rng();
+        let extra_secs: u64 = rng.random_range(0..TEMP_REJECT_TIMEOUT_RANGE_SECS);
         let timeout_secs = TEMP_REJECT_TIMEOUT_MIN_SECS + extra_secs;
 
         debug!("Temporarily rejected peer {} for {}s", ipaddr, timeout_secs);

@@ -1,4 +1,5 @@
 mod lifecycle;
+mod process_options;
 mod progress;
 
 use std::path::PathBuf;
@@ -69,6 +70,9 @@ pub struct DownloadEngine {
     /// Process-wide Local Peer Discovery manager and receive loop.
     #[cfg(feature = "bittorrent")]
     pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    /// Process-wide file-handle budget for multi-file downloads.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) open_file_budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -153,6 +157,8 @@ impl DownloadEngine {
             ),
             #[cfg(feature = "bittorrent")]
             lpd_manager,
+            #[cfg(feature = "bittorrent")]
+            open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(100),
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
@@ -289,6 +295,22 @@ impl DownloadEngine {
         self.set_dns_config(timeout, None);
     }
 
+    /// Configure the process-wide incoming BitTorrent peer handshake timeout.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_incoming_peer_handshake_timeout(&mut self, timeout: Duration) {
+        self.bt_listener.set_incoming_handshake_timeout(timeout);
+    }
+
+    /// Configure uTP socket settings for transport endpoints created later.
+    /// Existing endpoints remain active with their current settings.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_utp_socket_options(
+        &mut self,
+        options: aria2_protocol::bittorrent::utp::UtpSocketOptions,
+    ) {
+        self.bt_listener.set_utp_socket_options(options);
+    }
+
     /// Configure the process-wide DNS timeout and optional explicit nameservers.
     pub fn set_dns_config(
         &mut self,
@@ -338,6 +360,13 @@ impl DownloadEngine {
     #[cfg(feature = "bittorrent")]
     pub fn set_public_tracker_config(&mut self, config: TrackerCatalogConfig) {
         self.public_tracker_catalog.set_config_now(config);
+    }
+
+    /// Configure the complete-request timeout for remote tracker list sources.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_public_tracker_source_timeout(&mut self, timeout: Duration) {
+        self.public_tracker_catalog
+            .set_source_request_timeout_now(timeout);
     }
 
     /// Configure the process-wide Local Peer Discovery manager before `run()`.

@@ -95,7 +95,7 @@ async fn test_stress_50_concurrent_downloads() {
 
     // Track memory after test
     let mem_after = get_memory_usage();
-    let mem_growth = mem_after - mem_before;
+    let mem_growth = mem_after.saturating_sub(mem_before);
 
     // Memory should not grow excessively (allow up to 30MB growth for 50 downloads)
     assert!(
@@ -651,7 +651,7 @@ async fn test_stress_request_group_man_concurrent() {
 fn get_memory_usage() -> usize {
     use std::cell::RefCell;
     thread_local! {
-        static SYS: RefCell<System> = RefCell::new(System::new());
+        static SYS: RefCell<System> = RefCell::new(System::new().expect("initialize sysinfo"));
     }
 
     // On Linux, release glibc's cached free-list memory back to the OS
@@ -664,7 +664,7 @@ fn get_memory_usage() -> usize {
     let pid = Pid::from_u32(std::process::id());
     let rss = SYS.with(|cell| {
         let mut sys = cell.borrow_mut();
-        if !sys.refresh_process(pid) {
+        if sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true) == 0 {
             return 0;
         }
         sys.process(pid).map(|p| p.memory()).unwrap_or(0)

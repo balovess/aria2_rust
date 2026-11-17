@@ -369,6 +369,28 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
             }
 
             #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackerSourceTimeout { seconds } => {
+                ctx.public_tracker_catalog
+                    .set_source_request_timeout(Duration::from_secs(seconds.max(1)))
+                    .await;
+                mark_session_dirty(ctx);
+                info!(seconds, "Public tracker source timeout changed at runtime");
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackerSourceConcurrency {
+                max_concurrent_sources,
+            } => {
+                ctx.public_tracker_catalog
+                    .set_source_fetch_concurrency_limit(max_concurrent_sources);
+                mark_session_dirty(ctx);
+                info!(
+                    max_concurrent_sources,
+                    "Public tracker source concurrency limit changed"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
             EngineCommand::SetPublicTrackersEnabled { enabled } => {
                 let mut config = ctx.public_tracker_catalog.config().await;
                 config.enabled = enabled;
@@ -377,6 +399,56 @@ pub(super) async fn process_engine_commands<R: EngineCommandQueue>(
                 info!(
                     enabled,
                     "Public tracker catalog enabled state changed at runtime"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetIncomingPeerHandshakeTimeout { seconds } => {
+                ctx.bt_listener
+                    .set_incoming_handshake_timeout(Duration::from_secs(seconds));
+                info!(
+                    seconds,
+                    "Incoming BitTorrent peer handshake timeout updated"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetUtpSocketOptions { options } => {
+                ctx.bt_listener.set_utp_socket_options(options);
+                info!("uTP socket options updated for future transport endpoints");
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetBtMaxOpenFiles { max } => {
+                ctx.open_file_budget.set_max_open_files(max);
+                info!(
+                    max,
+                    "BitTorrent multi-file open-file limit updated at runtime"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetDhtPeerStorageConfig { config } => {
+                ctx.bt_registry
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_global_dht_peer_storage_config(config);
+                info!(
+                    max_info_hashes = config.max_info_hashes,
+                    max_peers_per_info_hash = config.max_peers_per_info_hash,
+                    "DHT peer-storage limits updated at runtime"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetDhtItemStoreLimit { max_items } => {
+                ctx.bt_registry
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_global_dht_item_store_limit(max_items);
+                info!(
+                    max_items,
+                    "DHT BEP 44 item-storage limit updated at runtime"
                 );
             }
         }

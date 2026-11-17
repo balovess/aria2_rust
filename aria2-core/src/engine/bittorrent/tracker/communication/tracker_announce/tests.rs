@@ -138,8 +138,13 @@ async fn stopped_announce_respects_total_shutdown_budget() {
     let mut announcer = TrackerAnnouncer::new(&[vec![url]], &None);
     announcer.set_timeouts(Duration::from_secs(10), Duration::from_secs(10));
     announcer.set_stopped_timeout(Duration::from_millis(100));
+    let shared = Arc::new(std::sync::RwLock::new(TrackerRuntimeSnapshot::default()));
+    announcer.set_runtime_snapshot(Arc::clone(&shared));
     announcer.announce.set_runtime_halted(true);
-    announcer.announce.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+    announcer
+        .announce
+        .announce_list_mut()
+        .set_event(AnnounceEvent::Downloading);
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -148,6 +153,13 @@ async fn stopped_announce_respects_total_shutdown_budget() {
     .await;
     assert!(result.is_ok(), "stopped announce exceeded shutdown budget");
     assert!(!announcer.stopped_sent);
+    {
+        let snapshot = shared.read().expect("tracker runtime snapshot lock");
+        assert_eq!(snapshot.in_flight, 0);
+        assert_eq!(snapshot.trackers.len(), 1);
+        assert_eq!(snapshot.trackers[0].in_flight, 0);
+        assert_ne!(snapshot.trackers[0].status, "announcing");
+    }
 
     server.await.expect("tracker test server should exit");
 }
@@ -247,6 +259,214 @@ async fn http_tracker_reuses_one_policy_bound_connection_for_stopped_announce() 
 }
 
 #[tokio::test]
+async fn http_tracker_announce_uses_configured_proxy_credentials_and_outbound_binding() {
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local proxy fixture");
+    let proxy_address = proxy.local_addr().expect("proxy fixture address");
+    let response_body = {
+        let mut response = BTreeMap::new();
+        response.insert(b"interval".to_vec(), BencodeValue::Int(1));
+        response.insert(b"peers".to_vec(), BencodeValue::Bytes(Vec::new()));
+        BencodeValue::Dict(response).encode()
+    };
+    let server = tokio::spawn(async move {
+        let (mut socket, peer) = proxy.accept().await.expect("proxy should accept request");
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            socket
+                .read_exact(&mut byte)
+                .await
+                .expect("read proxy request");
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        socket
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write proxy response headers");
+        socket
+            .write_all(&response_body)
+            .await
+            .expect("write proxy response body");
+        (
+            peer.ip(),
+            String::from_utf8(request).expect("HTTP request is UTF-8"),
+        )
+    });
+
+    let tracker_url = "http://tracker-source.invalid/announce".to_string();
+    let mut announcer = TrackerAnnouncer::new(&[vec![tracker_url]], &None);
+    announcer.set_outbound_network_policy(Arc::new(OutboundNetworkPolicy::single(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+    )));
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://{proxy_address}")),
+        http_proxy_user: Some("proxy-user".to_string()),
+        http_proxy_passwd: Some("proxy-pass".to_string()),
+        no_proxy: Some(String::new()),
+        bt_tracker_timeout: 2,
+        bt_tracker_connect_timeout: 2,
+        ..DownloadOptions::default()
+    };
+    announcer.set_websocket_options(&options);
+
+    announcer
+        .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+        .await
+        .expect("HTTP tracker announce through proxy should succeed");
+
+    let (source_address, request) = server
+        .await
+        .expect("proxy fixture should finish after one announce");
+    assert_eq!(
+        source_address,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))
+    );
+    assert!(
+        request.starts_with("GET http://tracker-source.invalid/announce?"),
+        "proxy must receive absolute-form tracker request; got {request:?}"
+    );
+    let proxy_authorization = request.lines().find_map(|header| {
+        let (name, value) = header.split_once(':')?;
+        name.eq_ignore_ascii_case("proxy-authorization")
+            .then_some(value.trim())
+    });
+    assert_eq!(
+        proxy_authorization,
+        Some("Basic cHJveHktdXNlcjpwcm94eS1wYXNz"),
+        "proxy credentials must be sent to the configured proxy; request was {request:?}"
+    );
+}
+
+#[tokio::test]
+async fn http_tracker_client_cache_separates_direct_and_proxy_routes() {
+    let response_body = {
+        let mut response = BTreeMap::new();
+        response.insert(b"interval".to_vec(), BencodeValue::Int(1));
+        response.insert(b"peers".to_vec(), BencodeValue::Bytes(Vec::new()));
+        BencodeValue::Dict(response).encode()
+    };
+    let direct = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind direct tracker fixture");
+    let direct_address = direct.local_addr().expect("direct tracker address");
+    let direct_body = response_body.clone();
+    let direct_server = tokio::spawn(async move {
+        let (mut socket, _) = direct.accept().await.expect("direct tracker accepts");
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            socket
+                .read_exact(&mut byte)
+                .await
+                .expect("read direct request");
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            direct_body.len()
+        );
+        socket
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write headers");
+        socket.write_all(&direct_body).await.expect("write body");
+    });
+
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy fixture");
+    let proxy_address = proxy.local_addr().expect("proxy address");
+    let proxy_server = tokio::spawn(async move {
+        let (mut socket, peer) = proxy.accept().await.expect("proxy accepts");
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            socket
+                .read_exact(&mut byte)
+                .await
+                .expect("read proxy request");
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        socket
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write headers");
+        socket.write_all(&response_body).await.expect("write body");
+        (
+            peer.ip(),
+            String::from_utf8(request).expect("HTTP request is UTF-8"),
+        )
+    });
+
+    let direct_url = format!("http://{direct_address}/announce");
+    let mut announcer = TrackerAnnouncer::new(&[vec![direct_url]], &None);
+    announcer.set_outbound_network_policy(Arc::new(OutboundNetworkPolicy::single(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+    )));
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://{proxy_address}")),
+        no_proxy: Some("127.0.0.1".to_string()),
+        bt_tracker_timeout: 2,
+        bt_tracker_connect_timeout: 2,
+        ..DownloadOptions::default()
+    };
+    announcer.set_websocket_options(&options);
+    announcer
+        .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+        .await
+        .expect("first tracker announce should use direct route");
+
+    let proxy_tracker = "http://tracker-source.invalid/announce";
+    announcer
+        .announce
+        .announce_list_mut()
+        .reconfigure(&[vec![proxy_tracker.to_string()]]);
+    announcer
+        .announce_http(
+            &[0u8; 20],
+            &[1u8; 20],
+            0,
+            1,
+            0,
+            AnnounceEvent::Started,
+            proxy_tracker,
+        )
+        .await
+        .expect("second tracker announce should use the proxy route");
+
+    direct_server
+        .await
+        .expect("direct tracker fixture should finish");
+    let (source_address, request) = proxy_server
+        .await
+        .expect("proxy fixture should finish after the second announce");
+    assert_eq!(
+        source_address,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))
+    );
+    assert!(request.starts_with("GET http://tracker-source.invalid/announce?"));
+}
+
+#[tokio::test]
 async fn public_trackers_are_selected_separately_from_torrent_failover_tiers() {
     let catalog = Arc::new(PublicTrackerList::new());
     let existing_torrent_tracker = catalog
@@ -322,16 +542,22 @@ async fn websocket_tracker_announces_started_and_stopped_events() {
             assert_eq!(request["action"], "announce");
             assert_eq!(request["event"], expected_event);
             assert_eq!(request["port"], 51413);
+            let info_hash = request["info_hash"]
+                .as_str()
+                .expect("announce includes binary info hash");
 
             websocket
                 .send(Message::Text(
                     serde_json::json!({
+                        "action": "announce",
+                        "info_hash": info_hash,
                         "interval": 60,
                         "complete": 2,
                         "incomplete": 3,
                         "peers": [{"ip": "192.0.2.20", "port": 6881}]
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ))
                 .await
                 .expect("send tracker response");
@@ -385,8 +611,16 @@ fn test_tracker_announcer_with_announce_url() {
 fn test_tracker_announcer_udp_detection() {
     let urls = vec![vec!["udp://tracker.example.com:6969/announce".to_string()]];
     let _announcer = TrackerAnnouncer::new(&urls, &None);
-    assert!(is_udp_tracker("udp://tracker.example.com:6969/announce"));
-    assert!(!is_udp_tracker("http://tracker.example.com:6969/announce"));
+    use aria2_protocol::bittorrent::tracker::url::{TrackerTransport, classify_tracker_url};
+
+    assert_eq!(
+        classify_tracker_url("udp://tracker.example.com:6969/announce"),
+        Some(TrackerTransport::Udp)
+    );
+    assert_eq!(
+        classify_tracker_url("http://tracker.example.com:6969/announce"),
+        Some(TrackerTransport::Http)
+    );
 }
 
 #[test]

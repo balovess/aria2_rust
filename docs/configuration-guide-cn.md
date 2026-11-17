@@ -130,7 +130,9 @@ aria2c --conf-path=aria2.conf --reset-config
 
 以下目录覆盖当前 `OptionRegistry` 注册的 canonical 名称，但“已注册”不等于“已接线”。当前源码明确标记为 `supported: false` 的选项只用于兼容旧配置，解析时会保留并警告，不会改变运行行为。其他选项也应以当前构建的 `aria2c --help` 和实际测试为准。`max-retries`、`enable-lpd`、`dht-message-path`、`server-stat-file`、`max-downloads` 是兼容别名，分别映射到 `max-tries`、`bt-enable-lpd`、`dht-file-path`、`server-stat-of`、`max-concurrent-downloads`。
 
-当前明确未接线的兼容选项：`interface`、`multiple-interface`、`async-dns-server`、`dns-timeout`、`enable-async-dns6`、`event-poll`、`optimize-concurrent-downloads`、`optimize-concurrent-downloads-coeffA`、`optimize-concurrent-downloads-coeffB`、`rlimit-nofile`、`select-least-used-host`、`socket-recv-buffer-size`、`dscp`、`max-http-pipelining`。这些名称可以出现在兼容配置中，但不要依赖它们提供对应功能。
+当前明确未接线的兼容选项：`enable-async-dns6`、`event-poll`、`optimize-concurrent-downloads`、`optimize-concurrent-downloads-coeffA`、`optimize-concurrent-downloads-coeffB`、`rlimit-nofile`、`select-least-used-host`、`socket-recv-buffer-size`、`dscp`、`max-http-pipelining`。这些名称可以出现在兼容配置中，但不要依赖它们提供对应功能。
+
+SSH/SFTP 选项（`ssh-host-key-md` 和下表中的 5 个 `sftp-*` 选项）在所有构建中保留注册，但只有启用 `sftp` 构建 feature 时才可用。未启用时，配置文件中的设置会警告后忽略；CLI 或任务级显式设置会被拒绝。
 
 ### General：基础、会话、界面和日志
 
@@ -179,7 +181,12 @@ aria2c --conf-path=aria2.conf --reset-config
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS 校验、CA、客户端证书/私钥、最低 TLS 版本 |
 | `allow-overwrite`, `auto-file-renaming`, `continue`, `remote-time` | 覆盖、自动改名、续传、远端时间 |
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP 连接、流水线、压缩、认证和响应行为 |
-| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type`, `ssh-host-key-md` | FTP 被动模式、连接复用、传输类型、SSH 主机密钥摘要 |
+| `ftp-pasv`, `ftp-reuse-connection`, `ftp-type` | FTP 被动模式、连接复用、传输类型 |
+| `ssh-host-key-md` | SFTP SSH 主机密钥指纹 |
+| `sftp-connect-timeout`, `sftp-read-timeout` | SFTP 连接建立和协议 I/O 超时（秒，1..600；默认 15 和 30） |
+| `sftp-compression` | 启用 SFTP 的 SSH 压缩（默认 `false`） |
+| `sftp-keepalive-interval` | SSH keepalive 间隔（秒，0..600；默认 60；0 禁用） |
+| `sftp-preferred-ciphers` | 逗号分隔的 SSH cipher 有序偏好列表；留空使用库默认值 |
 
 HTTP 下载中，`split` 是任务级分段预算，不再有固定的配置上限；实际生效值
 受文件大小、`min-split-size`（默认 `20M`）和运行时资源约束。`piece-length`
@@ -188,7 +195,7 @@ HTTP 下载中，`split` 是任务级分段预算，不再有固定的配置上�
 默认 `5`。
 
 `max-connection-per-server`（`-x`）限制单个下载对同一服务器的并发访问，取值范围
-仍为 `1..=16`。本实现当前默认 `16`，原始 aria2 默认 `1`。对 HTTP/1.1，
+仍为 `1..=16`，默认 `1`，与原始 aria2 一致。对 HTTP/1.1，
 即使 `split` 更大，`-x=1` 也只会允许一个活动 Range 请求。HTTP/2 中该上限作用于
 独立客户端会话池，会话内部仍可复用多个并发流。
 
@@ -230,6 +237,17 @@ DHT 的协议引擎维护参数也可从配置文件、CLI 和 RPC 统一设置�
 | `dht-bootstrap-timeout` | `60` | bootstrap 后台任务上限（秒） |
 | `dht-max-concurrent-lookups` | `16` | 并发 DHT lookup 数量上限 |
 | `dht-persistence-max-age` | `86400` | 接受磁盘快照的最大年龄（秒） |
+
+#### DHT 存储上限
+
+| 选项 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `dht-max-peer-info-hashes` | `4096` | 每个 DHT 引擎保存的本地 announce swarm 数量上限 |
+| `dht-max-peers-per-info-hash` | `50` | 每个 swarm 保存的本地 peer 数量上限 |
+| `dht-max-items` | `4096` | 每个 DHT 引擎保存的 BEP 44 target 数量上限 |
+
+这些进程级选项可通过配置文件、CLI、C API session 选项和全局 RPC 选项设置。
+运行时修改会立即生效；调低上限时会淘汰最早写入的条目。
 
 快照会复用其中保存的本地 node id；超过 `dht-persistence-max-age` 的快照不会
 注入路由表，合并保存时也不会继续保留过期旧节点。`aria2.getDhtStatus` 会

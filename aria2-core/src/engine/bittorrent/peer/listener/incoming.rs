@@ -6,51 +6,86 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 
-use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::super::storage::{DefaultPeerStorage, PeerEntry};
 use super::{IncomingPeer, IncomingPeerConnection, SharedRoute};
+use aria2_protocol::bittorrent::peer::listener::{AcceptedPeer, PeerTcpListener};
+
+const ACCEPT_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const ACCEPT_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(super) async fn run_shared_listener(
-    listener: Arc<TcpListener>,
+    listener: Arc<PeerTcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    incoming_handshake_slots: Arc<Semaphore>,
+    incoming_handshake_timeout_nanos: Arc<std::sync::atomic::AtomicU64>,
     shutdown: CancellationToken,
 ) {
     enum Event {
         Shutdown,
-        Accepted(io::Result<(tokio::net::TcpStream, SocketAddr)>),
-        ConnectionFinished(Result<(), JoinError>),
+        Accepted(io::Result<AcceptedPeer>),
+        AcceptRetryElapsed,
+        ConnectionFinished(Result<OwnedSemaphorePermit, JoinError>),
     }
 
     let connection_shutdown = shutdown.child_token();
-    let mut connections = JoinSet::new();
+    let mut connections = JoinSet::<OwnedSemaphorePermit>::new();
+    let mut accept_retry_deadline = None;
+    let mut accept_retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
     loop {
         let event = tokio::select! {
             _ = shutdown.cancelled() => Event::Shutdown,
-            result = listener.accept() => Event::Accepted(result),
+            _ = tokio::time::sleep_until(
+                accept_retry_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if accept_retry_deadline.is_some() => Event::AcceptRetryElapsed,
+            result = listener.accept(), if accept_retry_deadline.is_none() => Event::Accepted(result),
             result = connections.join_next(), if !connections.is_empty() => {
                 Event::ConnectionFinished(result.expect("non-empty JoinSet has a task"))
             }
         };
         match event {
             Event::Shutdown => break,
-            Event::Accepted(Ok((stream, endpoint))) => {
+            Event::AcceptRetryElapsed => accept_retry_deadline = None,
+            Event::Accepted(Ok(AcceptedPeer {
+                stream,
+                addr: endpoint,
+            })) => {
+                accept_retry_deadline = None;
+                accept_retry_delay = ACCEPT_RETRY_INITIAL_DELAY;
+                let permit = match Arc::clone(&incoming_handshake_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::debug!(%endpoint, "Dropping incoming TCP peer at handshake capacity");
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let routes = Arc::clone(&routes);
+                let timeout = std::time::Duration::from_nanos(
+                    incoming_handshake_timeout_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 let connection_shutdown = connection_shutdown.clone();
                 connections.spawn(async move {
                     tokio::select! {
                         _ = connection_shutdown.cancelled() => {},
-                        _ = process_incoming_tcp_peer(stream, endpoint, routes) => {},
+                        _ = process_incoming_tcp_peer(stream, endpoint, routes, timeout) => {},
                     }
+                    permit
                 });
             }
             Event::Accepted(Err(error)) => {
-                tracing::debug!(%error, "BitTorrent listener accept failed");
-                break;
+                tracing::warn!(
+                    %error,
+                    retry_in_ms = accept_retry_delay.as_millis(),
+                    "BitTorrent listener accept failed; retrying"
+                );
+                accept_retry_deadline = Some(tokio::time::Instant::now() + accept_retry_delay);
+                accept_retry_delay = (accept_retry_delay * 2).min(ACCEPT_RETRY_MAX_DELAY);
             }
+            Event::ConnectionFinished(Ok(permit)) => drop(permit),
             Event::ConnectionFinished(Err(error)) if !error.is_cancelled() => {
                 tracing::warn!(%error, "Incoming BitTorrent TCP task failed");
             }
@@ -70,6 +105,7 @@ async fn process_incoming_tcp_peer(
     stream: tokio::net::TcpStream,
     endpoint: SocketAddr,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    timeout: std::time::Duration,
 ) {
     let endpoint = normalize_peer_endpoint(endpoint);
     let (known_info_hashes, policies) = {
@@ -83,10 +119,13 @@ async fn process_incoming_tcp_peer(
             .collect::<HashMap<_, _>>();
         (known_info_hashes, policies)
     };
-    let incoming = match aria2_protocol::bittorrent::peer::incoming::receive_with_policies(
+    let incoming = match aria2_protocol::bittorrent::peer::incoming::receive_with_options(
         stream,
         &known_info_hashes,
         &policies,
+        aria2_protocol::bittorrent::peer::incoming::IncomingHandshakeOptions {
+            read_timeout: timeout,
+        },
     )
     .await
     {
@@ -108,14 +147,24 @@ async fn process_incoming_tcp_peer(
         tracing::debug!(%endpoint, "Rejected incoming peer for unknown info-hash");
         return;
     };
-    let connection = match incoming
-        .complete(route.local_peer_id, route.info_hash_v2, route.dht_enabled)
-        .await
-    {
-        Ok(connection) => connection,
-        Err(error) => {
-            tracing::debug!(%endpoint, %error, "Incoming BitTorrent handshake failed");
+    let connection = tokio::select! {
+        biased;
+        _ = route.cancellation.cancelled() => {
+            tracing::debug!(%endpoint, "Dropping incoming peer after torrent route was unregistered");
             return;
+        }
+        result = incoming.complete(
+            route.local_peer_id,
+            route.info_hash_v2,
+            route.dht_enabled_for(endpoint),
+        ) => {
+            match result {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::debug!(%endpoint, %error, "Incoming BitTorrent handshake failed");
+                    return;
+                }
+            }
         }
     };
     tracing::debug!(%endpoint, remote_peer_id = ?connection.remote_peer_id(), "Incoming BitTorrent handshake completed");
@@ -125,16 +174,18 @@ async fn process_incoming_tcp_peer(
 pub(super) async fn run_shared_utp_listener(
     mut incoming: mpsc::Receiver<super::super::utp_transport::IncomingUtpConnection>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    incoming_handshake_slots: Arc<Semaphore>,
+    incoming_handshake_timeout_nanos: Arc<std::sync::atomic::AtomicU64>,
     shutdown: CancellationToken,
 ) {
     enum Event {
         Shutdown,
         Incoming(Option<super::super::utp_transport::IncomingUtpConnection>),
-        ConnectionFinished(Result<(), JoinError>),
+        ConnectionFinished(Result<OwnedSemaphorePermit, JoinError>),
     }
 
     let connection_shutdown = shutdown.child_token();
-    let mut connections = JoinSet::new();
+    let mut connections = JoinSet::<OwnedSemaphorePermit>::new();
     loop {
         let event = tokio::select! {
             _ = shutdown.cancelled() => Event::Shutdown,
@@ -146,15 +197,27 @@ pub(super) async fn run_shared_utp_listener(
         match event {
             Event::Shutdown | Event::Incoming(None) => break,
             Event::Incoming(Some(incoming)) => {
+                let permit = match Arc::clone(&incoming_handshake_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::debug!(endpoint = %incoming.endpoint, "Dropping incoming uTP peer at handshake capacity");
+                        continue;
+                    }
+                };
                 let routes = Arc::clone(&routes);
                 let connection_shutdown = connection_shutdown.clone();
+                let timeout = std::time::Duration::from_nanos(
+                    incoming_handshake_timeout_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 connections.spawn(async move {
                     tokio::select! {
                         _ = connection_shutdown.cancelled() => {},
-                        _ = route_incoming_utp_peer(incoming, routes) => {},
+                        _ = route_incoming_utp_peer(incoming, routes, timeout) => {},
                     }
+                    permit
                 });
             }
+            Event::ConnectionFinished(Ok(permit)) => drop(permit),
             Event::ConnectionFinished(Err(error)) if !error.is_cancelled() => {
                 tracing::warn!(%error, "Incoming BitTorrent uTP task failed");
             }
@@ -170,12 +233,17 @@ pub(super) async fn run_shared_utp_listener(
     .await;
 }
 
-async fn drain_connections(mut connections: JoinSet<()>, failure_message: &'static str) {
+async fn drain_connections(
+    mut connections: JoinSet<OwnedSemaphorePermit>,
+    failure_message: &'static str,
+) {
     while let Some(result) = connections.join_next().await {
-        if let Err(error) = result
-            && !error.is_cancelled()
-        {
-            tracing::warn!(%error, "{failure_message}");
+        match result {
+            Ok(permit) => drop(permit),
+            Err(error) if !error.is_cancelled() => {
+                tracing::warn!(%error, "{failure_message}");
+            }
+            Err(_) => {}
         }
     }
 }
@@ -194,13 +262,14 @@ fn normalize_peer_endpoint(endpoint: SocketAddr) -> SocketAddr {
 async fn route_incoming_utp_peer(
     incoming: super::super::utp_transport::IncomingUtpConnection,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
+    timeout: std::time::Duration,
 ) {
     let endpoint = normalize_peer_endpoint(incoming.endpoint);
-    let (mut connection, handshake) =
+    let mut connection =
         match super::super::connection::UtpPeerConnection::receive_incoming_handshake(
             incoming.connection,
             endpoint,
-            std::time::Duration::from_secs(30),
+            timeout,
         )
         .await
         {
@@ -210,6 +279,10 @@ async fn route_incoming_utp_peer(
                 return;
             }
         };
+    let Some(handshake) = connection.session_remote_handshake() else {
+        tracing::debug!(%endpoint, "Rejected uTP peer without a completed BitTorrent handshake");
+        return;
+    };
     let info_hash = handshake.info_hash;
     let route = routes
         .read()
@@ -224,15 +297,19 @@ async fn route_incoming_utp_peer(
         tracing::debug!(%endpoint, "Rejected plaintext uTP peer because encryption is required");
         return;
     }
-    if let Err(error) = connection
-        .complete_incoming_handshake(
-            &handshake,
+    let handshake_result = tokio::select! {
+        biased;
+        _ = route.cancellation.cancelled() => {
+            tracing::debug!(%endpoint, "Dropping incoming uTP peer after torrent route was unregistered");
+            return;
+        }
+        result = connection.complete_incoming_handshake(
             &route.local_peer_id,
             route.info_hash_v2,
-            route.dht_enabled,
-        )
-        .await
-    {
+            route.dht_enabled_for(endpoint),
+        ) => result,
+    };
+    if let Err(error) = handshake_result {
         tracing::debug!(%endpoint, %error, "Failed to complete incoming uTP handshake");
         return;
     }
@@ -273,15 +350,12 @@ async fn admit_incoming_peer(
     }
 
     let mut admission = PeerAdmissionGuard::new(Arc::clone(&route.peer_storage), endpoint);
-    if route
-        .sender
-        .send(IncomingPeer {
-            connection,
-            endpoint,
-        })
-        .await
-        .is_ok()
-    {
+    let delivered = tokio::select! {
+        biased;
+        _ = route.cancellation.cancelled() => false,
+        result = route.sender.send(IncomingPeer { connection, endpoint }) => result.is_ok(),
+    };
+    if delivered {
         admission.commit();
     } else {
         tracing::debug!(%endpoint, "Incoming BitTorrent peer route receiver closed");

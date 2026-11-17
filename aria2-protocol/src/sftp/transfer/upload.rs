@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use super::super::file_ops::{FileAttributes, FileOpError, OpenFlags};
+use super::super::file_ops::{FileAttributePatch, FileOpError, FileTimestamps, OpenFlags};
 use super::types::{TransferError, TransferOptions, TransferProgress};
 use super::{PROGRESS_REPORT_INTERVAL, SftpTransfer};
 impl<'a> SftpTransfer<'a> {
@@ -64,29 +64,27 @@ impl<'a> SftpTransfer<'a> {
         };
         let total_size = metadata.len();
 
-        // Open remote file for writing
-        let mut remote_file = match self
-            .ops
-            .open(remote_path, OpenFlags::write_create(), 0o644)
-            .await
-        {
-            Ok(f) => f,
-            Err(error) => {
-                return Err(TransferError::remote(
-                    "open for writing",
-                    remote_path,
-                    error,
-                ));
-            }
-        };
-
         // Determine starting offset (resume support)
         let start_offset = if options.resume_offset > 0 {
-            options.resume_offset.min(total_size)
+            if options.resume_offset > total_size {
+                return Err(TransferError::local(
+                    "validate resume offset",
+                    local_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "resume offset {} exceeds local file size {total_size}",
+                            options.resume_offset
+                        ),
+                    ),
+                ));
+            }
+            options.resume_offset
         } else if options.resume_offset == 0 {
             // Check if remote file already exists (for auto-resume)
             match self.ops.lstat(remote_path).await {
-                Ok(attr) if attr.is_regular_file => attr.size.min(total_size),
+                Ok(attr) if attr.is_regular_file && attr.size <= total_size => attr.size,
+                Ok(attr) if attr.is_regular_file => 0,
                 Ok(_) | Err(FileOpError::NotFound { .. }) => 0,
                 Err(error) => {
                     return Err(TransferError::remote(
@@ -123,8 +121,28 @@ impl<'a> SftpTransfer<'a> {
             ));
         }
 
+        // Inspect the remote file and prepare the local source before opening
+        // the destination. Opening with TRUNC before calculating the resume
+        // offset destroys the prefix that the resumed upload is meant to keep.
+        let open_flags = if start_offset > 0 {
+            OpenFlags::write_create_no_truncate()
+        } else {
+            OpenFlags::write_create()
+        };
+        let mut remote_file = match self.ops.open(remote_path, open_flags, 0o644).await {
+            Ok(file) => file,
+            Err(error) => {
+                return Err(TransferError::remote(
+                    "open for writing",
+                    remote_path,
+                    error,
+                ));
+            }
+        };
+
         // Upload loop
-        let mut buf = vec![0u8; options.buffer_size];
+        let buffer_size = options.effective_buffer_size();
+        let mut buf = vec![0u8; buffer_size];
         let mut transferred = start_offset;
         let start_time = std::time::Instant::now();
         let mut last_report = start_offset;
@@ -140,13 +158,34 @@ impl<'a> SftpTransfer<'a> {
                 break;
             }
 
-            let to_read = (options.buffer_size as u64).min(remaining) as usize;
+            let to_read = (buffer_size as u64).min(remaining) as usize;
 
             let n = match tokio::io::AsyncReadExt::read(&mut local_file, &mut buf[..to_read]).await
             {
-                Ok(0) => break,
+                Ok(0) => {
+                    if let Err(close_error) = remote_file.close().await {
+                        warn!(
+                            "[SFTP] Error closing remote file after early local EOF: {close_error}"
+                        );
+                    }
+                    return Err(TransferError::local(
+                        format!("read at offset {transferred}"),
+                        local_path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "local file ended before its reported size of {total_size} bytes"
+                            ),
+                        ),
+                    ));
+                }
                 Ok(n) => n,
                 Err(error) => {
+                    if let Err(close_error) = remote_file.close().await {
+                        warn!(
+                            "[SFTP] Error closing remote file after local read failure: {close_error}"
+                        );
+                    }
                     return Err(TransferError::local(
                         format!("read at offset {transferred}"),
                         local_path,
@@ -156,6 +195,9 @@ impl<'a> SftpTransfer<'a> {
             };
 
             if let Err(e) = remote_file.write_at(transferred, &buf[..n]).await {
+                if let Err(close_error) = remote_file.close().await {
+                    warn!("[SFTP] Error closing remote file after write failure: {close_error}");
+                }
                 return Err(TransferError::remote(
                     format!("write at offset={transferred}, len={n}"),
                     remote_path,
@@ -190,54 +232,59 @@ impl<'a> SftpTransfer<'a> {
 
         // Finalize
         // Note: SFTP v3 does not have a native fsync operation (fsync@openssh.com is an extension)
-        if let Err(e) = remote_file.close().await {
-            warn!("[SFTP] Error closing remote file: {}", e);
+        if let Err(error) = remote_file.close().await {
+            return Err(TransferError::remote(
+                "close after upload",
+                remote_path,
+                error,
+            ));
         }
         drop(local_file);
 
         // Preserve source permissions and timestamps in one SFTP SETSTAT.
         if options.preserve_permissions || options.preserve_time {
-            let mut attrs = FileAttributes::default();
+            let mut attrs = FileAttributePatch::default();
 
             if options.preserve_permissions {
                 #[cfg(unix)]
                 {
-                    attrs.permissions = metadata.permissions().mode() as u32 & 0o7777;
+                    attrs.permissions = Some(metadata.permissions().mode() as u32 & 0o7777);
                 }
                 #[cfg(not(unix))]
                 {
-                    attrs.permissions = if metadata.permissions().readonly() {
+                    attrs.permissions = Some(if metadata.permissions().readonly() {
                         0o444
                     } else {
                         0o644
-                    };
+                    });
                 }
             }
 
             if options.preserve_time {
-                attrs.atime = match metadata.accessed() {
-                    Ok(time) => time
-                        .duration_since(UNIX_EPOCH)
-                        .map(|time| time.as_secs().min(u64::from(u32::MAX)) as u32)
-                        .unwrap_or(0),
-                    Err(error) => {
+                let atime = metadata.accessed();
+                let mtime = metadata.modified();
+                match (atime, mtime) {
+                    (Ok(atime), Ok(mtime)) => {
+                        let to_sftp_time = |time: std::time::SystemTime| {
+                            time.duration_since(UNIX_EPOCH)
+                                .map(|duration| duration.as_secs().min(u64::from(u32::MAX)) as u32)
+                                .unwrap_or(0)
+                        };
+                        attrs.timestamps = Some(FileTimestamps {
+                            atime: to_sftp_time(atime),
+                            mtime: to_sftp_time(mtime),
+                        });
+                    }
+                    (Err(error), _) => {
                         warn!("[SFTP] Failed to read local access time: {}", error);
-                        0
                     }
-                };
-                attrs.mtime = match metadata.modified() {
-                    Ok(time) => time
-                        .duration_since(UNIX_EPOCH)
-                        .map(|time| time.as_secs().min(u64::from(u32::MAX)) as u32)
-                        .unwrap_or(0),
-                    Err(error) => {
+                    (_, Err(error)) => {
                         warn!("[SFTP] Failed to read local modification time: {}", error);
-                        0
                     }
-                };
+                }
             }
 
-            if let Err(error) = self.ops.set_stat(remote_path, &attrs).await {
+            if let Err(error) = self.ops.set_stat_patch(remote_path, &attrs).await {
                 warn!("[SFTP] Failed to preserve remote file metadata: {}", error);
             }
         }

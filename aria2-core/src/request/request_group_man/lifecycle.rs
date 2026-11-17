@@ -377,6 +377,11 @@ impl RequestGroupMan {
 
     // ── Option Updates ──────────────────────────────────────────────────
 
+    /// Apply a raw option batch to a group without classifying immediate and
+    /// pending changes or restarting an active task.
+    ///
+    /// Adapters implementing aria2's `changeOption` lifecycle should use
+    /// [`Self::change_group_options`] instead.
     pub fn update_group_options(
         &self,
         gid_hex: &str,

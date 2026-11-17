@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use rand::RngCore;
+use rand::Rng;
 
 /// Return the process-wide peer ID, matching aria2's static peer identity.
 pub fn generate_peer_id() -> [u8; 20] {
@@ -13,7 +13,7 @@ pub fn generate_peer_id_with_prefix(prefix: &str) -> [u8; 20] {
     let prefix_bytes = prefix.as_bytes();
     let copy_len = prefix_bytes.len().min(id.len());
     id[..copy_len].copy_from_slice(&prefix_bytes[..copy_len]);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     rng.fill_bytes(&mut id[copy_len..]);
     id
 }

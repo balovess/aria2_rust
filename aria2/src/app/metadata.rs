@@ -57,7 +57,7 @@ fn render_torrent(torrent: &aria2_protocol::bittorrent::torrent::parser::Torrent
         writeln!(
             output,
             "Creation Date: {}",
-            aria2_core::http::cookie::parsing::format_http_date(creation_date)
+            aria2_protocol::http::cookie::parsing::format_http_date(creation_date)
         )
         .unwrap();
     }
@@ -160,19 +160,6 @@ fn print_file_row(index: usize, path: &str, length: u64) {
 }
 
 #[cfg(feature = "bittorrent")]
-fn percent_encode_query_component(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                char::from(byte).to_string()
-            }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
-}
-
-#[cfg(feature = "bittorrent")]
 fn torrent_magnet_uri(
     torrent: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
 ) -> String {
@@ -182,18 +169,18 @@ fn torrent_magnet_uri(
     );
     if !torrent.info.name.is_empty() {
         uri.push_str("&dn=");
-        uri.push_str(&percent_encode_query_component(&torrent.info.name));
+        uri.push_str(&aria2_protocol::uri::percent_encode(&torrent.info.name));
     }
     if torrent.announce_list.is_empty() {
         if !torrent.announce.is_empty() {
             uri.push_str("&tr=");
-            uri.push_str(&percent_encode_query_component(&torrent.announce));
+            uri.push_str(&aria2_protocol::uri::percent_encode(&torrent.announce));
         }
     } else {
         for tier in &torrent.announce_list {
             for tracker in tier {
                 uri.push_str("&tr=");
-                uri.push_str(&percent_encode_query_component(tracker));
+                uri.push_str(&aria2_protocol::uri::percent_encode(tracker));
             }
         }
     }
@@ -265,5 +252,28 @@ mod tests {
         assert!(output.contains("Info Hash:"));
         assert!(output.contains("Files:"));
         assert!(output.contains("test.bin"));
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn generated_magnet_uri_round_trips_encoded_query_components() {
+        let data = b"d8:announce14:http://tracker4:infod4:name8:test.bin6:lengthi4e12:piece lengthi4e6:pieces20:12345678901234567890ee";
+        let mut torrent = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(data)
+            .expect("test torrent should parse");
+        torrent.info.name = "name +/文件.bin".to_string();
+        torrent.announce = "https://tracker.example/announce?token=a+b&flag=1".to_string();
+
+        let uri = super::torrent_magnet_uri(&torrent);
+        assert!(uri.contains("dn=name%20%2B%2F%E6%96%87%E4%BB%B6.bin"));
+        assert!(
+            uri.contains("tr=https%3A%2F%2Ftracker.example%2Fannounce%3Ftoken%3Da%2Bb%26flag%3D1")
+        );
+        let parsed = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&uri)
+            .expect("generated magnet URI should parse");
+        assert_eq!(parsed.display_name.as_deref(), Some("name +/文件.bin"));
+        assert_eq!(
+            parsed.trackers,
+            ["https://tracker.example/announce?token=a+b&flag=1"]
+        );
     }
 }

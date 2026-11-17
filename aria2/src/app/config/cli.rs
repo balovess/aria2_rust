@@ -166,6 +166,7 @@ impl App {
         set_str!("metalink-os", g.metalink_os);
         set_str!("metalink-location", g.metalink_location);
         set_str!("metalink-preferred-protocol", g.metalink_preferred_protocol);
+        set_str!("select-file", g.select_file);
         set_bool_true!("parameterized-uri", g.parameterized_uri);
         set_bool_true!("pause", g.pause);
         set_bool_true!("remove-control-file", g.remove_control_file);
@@ -268,6 +269,49 @@ impl App {
             "max-http2-streams-per-session",
             h.max_http2_streams_per_session
         );
+        set_bool_true!("http-adaptive-enabled", h.http_adaptive_enabled);
+        set_u64!(
+            "http-adaptive-reduction-percent",
+            h.http_adaptive_reduction_percent
+        );
+        set_u64!(
+            "http-adaptive-recovery-interval",
+            h.http_adaptive_recovery_interval
+        );
+        set_u64!(
+            "http-adaptive-recovery-successes-min",
+            h.http_adaptive_recovery_successes_min
+        );
+        set_u64!(
+            "http-adaptive-recovery-successes-max",
+            h.http_adaptive_recovery_successes_max
+        );
+        set_u64!(
+            "http-adaptive-start-interval-ms",
+            h.http_adaptive_start_interval_ms
+        );
+        set_u64!("http-adaptive-backoff-base", h.http_adaptive_backoff_base);
+        set_u64!("http-adaptive-backoff-max", h.http_adaptive_backoff_max);
+        set_u64!(
+            "http-adaptive-capacity-start-interval-ms",
+            h.http_adaptive_capacity_start_interval_ms
+        );
+        set_u64!(
+            "http-adaptive-capacity-start-interval-max-ms",
+            h.http_adaptive_capacity_start_interval_max_ms
+        );
+        set_u64!(
+            "http-adaptive-rate-recovery-successes",
+            h.http_adaptive_rate_recovery_successes
+        );
+        set_u64!(
+            "http-adaptive-rate-min-interval-ms",
+            h.http_adaptive_rate_min_interval_ms
+        );
+        set_u64!(
+            "http-adaptive-backoff-reset-after",
+            h.http_adaptive_backoff_reset_after
+        );
         set_str!("http-version", h.http_version);
         set_u64!("max-http-pipelining", h.max_http_pipelining);
         // Negation: --no-check-certificate takes precedence over --check-certificate
@@ -307,11 +351,18 @@ impl App {
         set_bool_true!("ftp-reuse-connection", h.ftp_reuse_connection);
         set_str!("ftp-type", h.ftp_type);
         set_str!("ssh-host-key-md", h.ssh_host_key_md);
+        set_u64!("sftp-connect-timeout", h.sftp_connect_timeout);
+        set_u64!("sftp-read-timeout", h.sftp_read_timeout);
+        set_bool_true!("sftp-compression", h.sftp_compression);
+        set_u64!("sftp-keepalive-interval", h.sftp_keepalive_interval);
+        set_str!("sftp-preferred-ciphers", h.sftp_preferred_ciphers);
 
         // --- BitTorrent options ---
         set_f64!("seed-time", b.seed_time);
         set_f64!("seed-ratio", b.seed_ratio);
         set_u64!("bt-max-peers", b.bt_max_peers);
+        set_str!("bt-piece-selection-strategy", b.bt_piece_selection_strategy);
+        set_u64!("bt-endgame-threshold", b.bt_endgame_threshold);
         set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
         set_u64!(
             "bt-optimistic-unchoke-interval",
@@ -324,13 +375,15 @@ impl App {
         set_u64!("bt-keep-alive-interval", b.bt_keep_alive_interval);
         set_u64!("bt-timeout", b.bt_timeout);
         set_u64!("bt-request-timeout", b.bt_request_timeout);
-        set_u64!("bt-max-upload-slots", b.bt_max_upload_slots);
-        set_u64!(
-            "bt-optimistic-unchoke-interval",
-            b.bt_optimistic_unchoke_interval
-        );
-        set_u64!("bt-snubbed-timeout", b.bt_snubbed_timeout);
         set_u64!("peer-connection-timeout", b.peer_connection_timeout);
+        set_u64!(
+            "bt-incoming-peer-handshake-timeout",
+            b.bt_incoming_peer_handshake_timeout
+        );
+        set_u64!("bt-utp-max-connections", b.bt_utp_max_connections);
+        set_u64!("bt-utp-connect-timeout", b.bt_utp_connect_timeout);
+        set_u64!("bt-utp-idle-timeout", b.bt_utp_idle_timeout);
+        set_u64!("bt-utp-keepalive-interval", b.bt_utp_keepalive_interval);
         set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);
         set_bool_true!("bt-force-encryption", b.bt_force_encryption);
@@ -375,6 +428,11 @@ impl App {
         set_bool_true!("enable-public-trackers", b.enable_public_trackers);
         set_str!("bt-tracker-source", b.bt_tracker_source);
         set_u64!("bt-tracker-update-interval", b.bt_tracker_update_interval);
+        set_u64!("bt-tracker-source-timeout", b.bt_tracker_source_timeout);
+        set_u64!(
+            "bt-tracker-source-concurrency",
+            b.bt_tracker_source_concurrency
+        );
         set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
         set_u64!("bt-tracker-interval", b.bt_tracker_interval);
         set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);
@@ -386,12 +444,11 @@ impl App {
         set_u64!("dht-cleanup-interval", b.dht_cleanup_interval);
         set_u64!("dht-save-interval", b.dht_save_interval);
         set_u64!("dht-bootstrap-timeout", b.dht_bootstrap_timeout);
-        if let Some(value) = b.dht_max_concurrent_lookups {
-            conf.set_global_option("dht-max-concurrent-lookups", OptionValue::Int(value as i64))
-                .await
-                .map_err(|e| format!("--dht-max-concurrent-lookups: {}", e))?;
-        }
+        set_u64!("dht-max-concurrent-lookups", b.dht_max_concurrent_lookups);
         set_u64!("dht-persistence-max-age", b.dht_persistence_max_age);
+        set_u64!("dht-max-peer-info-hashes", b.dht_max_peer_info_hashes);
+        set_u64!("dht-max-peers-per-info-hash", b.dht_max_peers_per_info_hash);
+        set_u64!("dht-max-items", b.dht_max_items);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
         set_str!("dht-entry-point6", b.dht_entry_point6);
@@ -400,7 +457,6 @@ impl App {
         set_path!("dht-file-path6", b.dht_file_path6);
         set_str!("peer-id-prefix", b.peer_id_prefix);
         set_str!("peer-agent", b.peer_agent);
-        set_str!("select-file", b.select_file);
         if !b.index_out.is_empty() {
             conf.set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
                 .await

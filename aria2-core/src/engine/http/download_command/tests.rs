@@ -62,3 +62,5 @@ mod filename_metadata;
 mod network_auth;
 
 mod resume;
+
+mod resume_checkpoint;

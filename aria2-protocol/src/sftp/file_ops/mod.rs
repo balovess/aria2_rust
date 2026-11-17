@@ -29,7 +29,9 @@ use super::session::SftpSession;
 mod tests;
 mod types;
 
-pub use types::{FileAttributes, FileOpError, OpenFlags};
+pub use types::{
+    FileAttributePatch, FileAttributes, FileOpError, FileOwner, FileTimestamps, OpenFlags,
+};
 
 async fn request(
     session: &SftpSession,
@@ -47,6 +49,23 @@ fn unexpected_response(operation: &str, packet: SftpPacket) -> FileOpError {
         "Unexpected response to {operation}: type={}",
         packet.packet_type()
     ))
+}
+
+fn read_response_data(response: SftpPacket, requested_length: u32) -> Result<Vec<u8>, FileOpError> {
+    match response {
+        SftpPacket::Data { data, .. } if (data.len() as u64) <= u64::from(requested_length) => {
+            Ok(data)
+        }
+        SftpPacket::Data { data, .. } => Err(FileOpError::other(format!(
+            "READ returned {} bytes for a request of {requested_length}",
+            data.len()
+        ))),
+        SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
+        SftpPacket::Status { code, message, .. } => {
+            Err(FileOpError::from_status("Read", code, message, None))
+        }
+        other => Err(unexpected_response("READ", other)),
+    }
 }
 
 fn expect_handle(
@@ -119,9 +138,9 @@ fn expect_name(
 
 /// An open remote file handle obtained via `SftpFileOps::open()`.
 ///
-/// Provides streaming read/write access at arbitrary offsets. The handle is
-/// automatically closed when dropped, but callers should prefer explicit
-/// `close()` for error handling.
+/// Provides streaming read/write access at arbitrary offsets. Dropping the
+/// value cannot send the asynchronous SFTP CLOSE request; callers should close
+/// explicitly, including on error paths, while the session is still usable.
 pub struct SftpRemoteFile<'a> {
     /// Reference to the session for issuing requests
     session: &'a SftpSession,
@@ -162,14 +181,7 @@ impl<'a> SftpRemoteFile<'a> {
 
         let resp = request(self.session, pkt, "READ").await?;
 
-        match resp {
-            SftpPacket::Data { data, .. } => Ok(data),
-            SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
-            SftpPacket::Status { code, message, .. } => {
-                Err(FileOpError::from_status("Read", code, message, None))
-            }
-            other => Err(unexpected_response("READ", other)),
-        }
+        read_response_data(resp, len)
     }
 
     /// Write `data` starting at `offset` to the remote file.
@@ -327,11 +339,36 @@ impl<'a> SftpFileOps<'a> {
     // -----------------------------------------------------------------
 
     /// Set file attributes by path (SSH_FXP_SETSTAT).
+    ///
+    /// Zero-valued fields in [`FileAttributes`] are treated as unknown. SFTP v3
+    /// sends UID/GID and access/modification times in pairs, so the legacy
+    /// conversion omits a pair when either value is zero. Use
+    /// [`set_stat_patch`](Self::set_stat_patch) to set explicit zero values.
     pub async fn set_stat(&self, path: &str, attrs: &FileAttributes) -> Result<(), FileOpError> {
+        self.set_stat_wire(path, attrs.to_wire()).await
+    }
+
+    /// Set only the selected file attributes by path (SSH_FXP_SETSTAT).
+    ///
+    /// `Some(0)` is sent as an explicit zero value; `None` leaves the field
+    /// unchanged.
+    pub async fn set_stat_patch(
+        &self,
+        path: &str,
+        attrs: &FileAttributePatch,
+    ) -> Result<(), FileOpError> {
+        self.set_stat_wire(path, attrs.to_wire()).await
+    }
+
+    async fn set_stat_wire(
+        &self,
+        path: &str,
+        attrs: super::packet::SftpFileAttrs,
+    ) -> Result<(), FileOpError> {
         let pkt = SftpPacket::Setstat {
             request_id: 0,
             path: path.to_string(),
-            attrs: attrs.to_wire(),
+            attrs,
         };
 
         let resp = request(self.session, pkt, "SETSTAT").await?;

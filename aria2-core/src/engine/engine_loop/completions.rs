@@ -94,6 +94,25 @@ fn failure_code_and_message(
     (map_error_code(error), error.to_string())
 }
 
+fn is_controlled_lifecycle_failure(
+    group: &crate::request::request_group::RequestGroup,
+    error: &Aria2Error,
+) -> bool {
+    let lifecycle_requested = group.is_pause_requested()
+        || group.is_paused_flag()
+        || group.is_removed()
+        || !matches!(group.get_halt_reason(), HaltReason::None);
+    lifecycle_requested
+        && matches!(
+            error,
+            Aria2Error::DownloadFailed(message)
+                if matches!(
+                    message.as_str(),
+                    "Download paused" | "Download halted" | "Download cancelled by user"
+                )
+        )
+}
+
 pub(super) trait CompletionQueue {
     fn try_completion(&mut self) -> Result<(GroupId, CommandGeneration, TaskResult), ()>;
 }
@@ -166,6 +185,13 @@ fn apply_completion_state(
             // C++ removes a RequestGroup only after its final
             // AbstractCommand is destroyed. Keep the group active
             // while other command instances are still running.
+        }
+        ProcessedTaskResult::Failed(error)
+            if !last_command && is_controlled_lifecycle_failure(&group, &error) =>
+        {
+            // A pause/halt can stop several HTTP range commands in one group.
+            // Do not let an early command's expected cancellation poison the
+            // group before the remaining commands report their final state.
         }
         ProcessedTaskResult::Failed(error) if !last_command => {
             // A non-final command failure is recorded for the group,

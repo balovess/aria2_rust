@@ -12,9 +12,10 @@ use tracing::warn;
 
 use crate::constants;
 use crate::error::{Aria2Error, Result};
-use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
+use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::OutboundNetworkPolicy;
-use crate::request::request_group::DownloadOptions;
+use crate::request::request_group::{DownloadOptions, HttpProxyOptions};
+use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 
 /// Resolved endpoints used to pin direct and proxied HTTP clients to the
 /// already-selected DNS answers.
@@ -27,16 +28,18 @@ pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
     let max_connections = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        .clamp(1, constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
-        as usize;
+        .clamp(1, constants::MAX_CONNECTION_PER_SERVER as u16) as usize;
     let requested_sessions = options
         .max_http2_sessions_per_server
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
-        .clamp(1, constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
         as usize;
+    // Auto must provision both possibilities before ALPN reveals the protocol.
+    // The executor enforces the selected protocol's independent concurrency cap.
     match options.http_version {
-        crate::http::HttpVersion::Http2 => requested_sessions.min(max_connections),
-        crate::http::HttpVersion::Auto | crate::http::HttpVersion::Http11 => max_connections,
+        crate::http::HttpVersion::Http2 => requested_sessions,
+        crate::http::HttpVersion::Auto => max_connections.max(requested_sessions),
+        crate::http::HttpVersion::Http11 => max_connections,
     }
 }
 
@@ -59,20 +62,21 @@ pub(super) fn build_download_clients(
     .flatten()
     .any(|proxy| !proxy.is_empty());
     let proxy_origin = http_proxy_origin(uri, options);
-    let target_remote = resolved_addresses
+    let target_remotes = resolved_addresses
         .target
-        .as_ref()
-        .and_then(|addresses| addresses.first().copied())
+        .as_deref()
+        .filter(|addresses| !addresses.is_empty())
+        .map(<[_]>::to_vec)
         .or_else(|| {
             uri_host(uri).and_then(|host| {
                 host.parse::<IpAddr>().ok().map(|ip| {
-                    std::net::SocketAddr::new(
+                    vec![std::net::SocketAddr::new(
                         ip,
                         url::Url::parse(uri)
                             .ok()
                             .and_then(|url| url.port_or_known_default())
                             .unwrap_or(80),
-                    )
+                    )]
                 })
             })
         });
@@ -98,16 +102,16 @@ pub(super) fn build_download_clients(
             )))
         })?
     } else {
-        target_remote
-            .map(|remote| outbound_network_policy.source_for(remote))
-            .transpose()
-            .map_err(|error| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Outbound network policy cannot serve {uri}: {error}"
-                )))
-            })?
-            .flatten()
-            .or_else(|| outbound_network_policy.addresses().into_iter().next())
+        let source = source_for_remotes(
+            outbound_network_policy,
+            target_remotes.as_deref().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "Outbound network policy cannot serve {uri}: {error}"
+            )))
+        })?;
+        source.or_else(|| outbound_network_policy.addresses().into_iter().next())
     };
 
     let client = build_download_client(
@@ -118,6 +122,7 @@ pub(super) fn build_download_clients(
         local_address,
         resolved_addresses,
     )?;
+    let connect_timeout = http_connect_timeout(options);
     let has_custom_tls = client_tls.requires_custom_client();
     let has_resolved_target = resolved_addresses
         .target
@@ -125,11 +130,12 @@ pub(super) fn build_download_clients(
         .is_some_and(|addresses| !addresses.is_empty());
     let session_count = range_client_pool_count(options);
     let range_clients = if proxy_disabled && !has_resolved_target && !has_custom_tls {
-        crate::http::client_pool::get_bound_download_clients_with_version(
+        crate::http::client_pool::get_bound_download_clients_with_version_and_timeout(
             local_address,
             options.http_accept_gzip,
             session_count,
             options.http_version,
+            connect_timeout,
         )
     } else {
         let mut clients = Vec::with_capacity(session_count);
@@ -160,57 +166,83 @@ pub(super) fn build_download_clients(
 /// first outbound socket. The command factory uses this to resolve proxy DNS
 /// before the synchronous reqwest client is built.
 pub(crate) fn http_proxy_origin(uri: &str, options: &DownloadOptions) -> Option<(String, u16)> {
-    let parsed_uri = url::Url::parse(uri).ok()?;
-    let hostname = parsed_uri.host_str()?;
-    let target_port = parsed_uri.port_or_known_default()?;
+    options.http_proxy_options().proxy_for_uri(uri)
+}
 
-    if let Some(no_proxy) = options.no_proxy.as_deref() {
-        let matcher = NoProxyMatcher::from_env_value(no_proxy);
-        let bypassed = hostname
-            .parse::<IpAddr>()
-            .map(|address| matcher.should_bypass(&std::net::SocketAddr::new(address, target_port)))
-            .unwrap_or_else(|_| matcher.should_bypass_hostname(hostname));
-        if bypassed {
-            return None;
+/// Apply the task's HTTP proxy routes to a reqwest client.
+///
+/// Shared by ordinary HTTP downloads and BitTorrent WebSeeds so scheme
+/// precedence, credentials, bypass rules, and invalid-proxy handling agree.
+pub(crate) fn apply_proxy_options(
+    mut builder: reqwest::ClientBuilder,
+    options: &HttpProxyOptions,
+) -> reqwest::ClientBuilder {
+    let no_proxy = options.no_proxy.as_deref();
+    if let Some(proxy) = options
+        .http_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = add_reqwest_proxy(
+            builder,
+            ProxyTarget::Http,
+            proxy,
+            options.credentials_for_scheme("http"),
+            no_proxy,
+        );
+    }
+    if let Some(proxy) = options
+        .https_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = add_reqwest_proxy(
+            builder,
+            ProxyTarget::Https,
+            proxy,
+            options.credentials_for_scheme("https"),
+            no_proxy,
+        );
+    }
+    if let Some(proxy) = options
+        .all_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        match ProxyUrl::parse(proxy) {
+            Ok(parsed) => match parsed.protocol {
+                ProxyProtocol::Http
+                | ProxyProtocol::Https
+                | ProxyProtocol::Socks4
+                | ProxyProtocol::Socks5 => {
+                    builder = add_reqwest_proxy(
+                        builder,
+                        ProxyTarget::All,
+                        proxy,
+                        options.credentials_for_scheme("all"),
+                        no_proxy,
+                    );
+                }
+            },
+            Err(_) => warn!(
+                proxy = %proxy_log_target(proxy),
+                "Ignoring invalid all-proxy configuration"
+            ),
         }
     }
-
-    let candidate = match parsed_uri.scheme() {
-        "http" => options
-            .http_proxy
-            .as_deref()
-            .filter(|proxy| !proxy.is_empty())
-            .or_else(|| {
-                options
-                    .all_proxy
-                    .as_deref()
-                    .filter(|proxy| !proxy.is_empty())
-            }),
-        "https" => options
-            .https_proxy
-            .as_deref()
-            .filter(|proxy| !proxy.is_empty())
-            .or_else(|| {
-                options
-                    .all_proxy
-                    .as_deref()
-                    .filter(|proxy| !proxy.is_empty())
-            }),
-        _ => None,
-    }?;
-    let proxy = ProxyUrl::parse(candidate).ok()?;
-    if !matches!(
-        proxy.protocol,
-        crate::http::socks_connector::ProxyProtocol::Http
-            | crate::http::socks_connector::ProxyProtocol::Https
-    ) {
-        return None;
-    }
-    Some((proxy.host, proxy.port))
+    builder
 }
 
 pub(super) fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
+}
+
+pub(crate) fn http_connect_timeout(options: &DownloadOptions) -> Duration {
+    Duration::from_secs(
+        options
+            .connect_timeout
+            .unwrap_or(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS),
+    )
 }
 
 pub(super) fn source_for_remotes(
@@ -249,6 +281,7 @@ pub(super) fn build_download_client(
     resolved_addresses: &ResolvedNetworkAddresses,
 ) -> Result<Arc<reqwest::Client>> {
     let has_custom_tls = client_tls.requires_custom_client();
+    let connect_timeout = http_connect_timeout(options);
     if proxy_disabled {
         if let Some(addresses) = resolved_addresses
             .target
@@ -261,9 +294,7 @@ pub(super) fn build_download_client(
                 ))
             })?;
             let builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(
-                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                ))
+                .connect_timeout(connect_timeout)
                 .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
@@ -286,9 +317,7 @@ pub(super) fn build_download_client(
 
         if has_custom_tls {
             let builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(
-                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                ))
+                .connect_timeout(connect_timeout)
                 .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
@@ -315,17 +344,18 @@ pub(super) fn build_download_client(
                 });
         }
 
-        return Ok(crate::http::client_pool::get_bound_client_with_version(
-            local_address,
-            options.http_accept_gzip,
-            options.http_version,
-        ));
+        return Ok(
+            crate::http::client_pool::get_bound_client_with_version_and_timeout(
+                local_address,
+                options.http_accept_gzip,
+                options.http_version,
+                connect_timeout,
+            ),
+        );
     }
 
     let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(
-            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-        ))
+        .connect_timeout(connect_timeout)
         .gzip(options.http_accept_gzip)
         .user_agent(constants::USER_AGENT)
         // Redirects are handled by SequentialDownloader so direct, DNS-pinned,
@@ -339,61 +369,16 @@ pub(super) fn build_download_client(
             constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )));
 
-    let no_proxy = options.no_proxy.as_deref();
-    if let Some(proxy) = options
-        .http_proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        builder = add_reqwest_proxy(
-            builder,
-            ProxyTarget::Http,
-            proxy,
-            options.proxy_credentials_for_scheme("http"),
-            no_proxy,
-        );
-    }
-    if let Some(proxy) = options
-        .https_proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        builder = add_reqwest_proxy(
-            builder,
-            ProxyTarget::Https,
-            proxy,
-            options.proxy_credentials_for_scheme("https"),
-            no_proxy,
-        );
-    }
-    if let Some(all_proxy) = options
-        .all_proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        match ProxyUrl::parse(all_proxy) {
-            Ok(parsed) => match parsed.protocol {
-                crate::http::socks_connector::ProxyProtocol::Http
-                | crate::http::socks_connector::ProxyProtocol::Https => {
-                    builder = add_reqwest_proxy(
-                        builder,
-                        ProxyTarget::All,
-                        all_proxy,
-                        options.proxy_credentials_for_scheme("all"),
-                        no_proxy,
-                    );
-                }
-                _ => {
-                    tracing::info!(
-                        "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
-                        all_proxy
-                    );
-                }
-            },
-            Err(error) => {
-                warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, error);
-            }
-        }
+    builder = apply_proxy_options(builder, &options.http_proxy_options());
+
+    if let (Some((proxy_host, _)), Some(proxy_addresses)) = (
+        http_proxy_origin(uri, options),
+        resolved_addresses
+            .proxy
+            .as_deref()
+            .filter(|addresses| !addresses.is_empty()),
+    ) {
+        builder = builder.resolve_to_addrs(&proxy_host, proxy_addresses);
     }
 
     let builder = apply_local_address(builder, local_address);
@@ -426,23 +411,45 @@ pub(crate) fn build_reqwest_proxy(
     password: Option<&str>,
     no_proxy: Option<&str>,
 ) -> std::result::Result<reqwest::Proxy, reqwest::Error> {
-    let mut proxy = match target {
-        ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
-        ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
-        ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+    let mut proxy = if let Some(no_proxy) = no_proxy {
+        // Reqwest's built-in NO_PROXY rules treat an unprefixed domain as a
+        // suffix, while aria2's matcher treats it as an exact hostname. Use
+        // the same matcher for proxy selection and actual request routing.
+        match target {
+            ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
+            ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
+            ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+        };
+        let no_proxy = NoProxyMatcher::from_env_value(no_proxy);
+        let proxy_url = proxy_url.to_owned();
+        reqwest::Proxy::custom(move |url| {
+            let scheme_matches = match target {
+                ProxyTarget::Http => url.scheme() == "http",
+                ProxyTarget::Https => url.scheme() == "https",
+                ProxyTarget::All => matches!(url.scheme(), "http" | "https"),
+            };
+            let bypass = url
+                .host_str()
+                .is_some_and(|host| no_proxy.should_bypass_hostname(host));
+            (scheme_matches && !bypass).then(|| proxy_url.clone())
+        })
+    } else {
+        match target {
+            ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
+            ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
+            ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+        }
     };
 
     // Preserve credentials embedded in the proxy URL unless an option
     // explicitly overrides them, matching AbstractCommand::makeProxyUri().
     if username.is_some() || password.is_some() {
-        let embedded = proxy_url.parse::<reqwest::Url>().ok();
+        let embedded = ProxyUrl::parse(proxy_url).ok();
         let embedded_user = embedded
             .as_ref()
-            .filter(|url| !url.username().is_empty())
-            .map(|url| url.username().to_string());
-        let embedded_password = embedded
-            .as_ref()
-            .and_then(|url| url.password().map(str::to_string));
+            .and_then(|proxy| proxy.username.as_deref())
+            .map(str::to_string);
+        let embedded_password = embedded.and_then(|proxy| proxy.password);
         let effective_user = username.map(str::to_owned).or(embedded_user);
         let effective_password = password
             .map(str::to_owned)
@@ -452,10 +459,6 @@ pub(crate) fn build_reqwest_proxy(
         if let Some(user) = effective_user {
             proxy = proxy.basic_auth(&user, &effective_password);
         }
-    }
-
-    if let Some(no_proxy) = no_proxy {
-        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
     }
 
     Ok(proxy)
@@ -477,8 +480,35 @@ pub(crate) fn add_reqwest_proxy(
     ) {
         Ok(proxy) => builder.proxy(proxy),
         Err(error) => {
-            warn!(%proxy_url, ?target, %error, "Ignoring invalid HTTP proxy configuration");
+            warn!(
+                proxy = %proxy_log_target(proxy_url),
+                ?target,
+                error = %error.without_url(),
+                "Ignoring invalid HTTP proxy configuration"
+            );
             builder
         }
     }
 }
+
+fn proxy_log_target(proxy_url: &str) -> String {
+    let Ok(proxy) = ProxyUrl::parse(proxy_url) else {
+        return "<invalid proxy URL>".to_string();
+    };
+    let scheme = match proxy.protocol {
+        ProxyProtocol::Http => "http",
+        ProxyProtocol::Https => "https",
+        ProxyProtocol::Socks4 => "socks4",
+        ProxyProtocol::Socks5 => "socks5",
+    };
+    let host = if proxy.host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{}]", proxy.host)
+    } else {
+        proxy.host
+    };
+
+    format!("{scheme}://{host}:{}", proxy.port)
+}
+
+#[cfg(test)]
+mod tests;

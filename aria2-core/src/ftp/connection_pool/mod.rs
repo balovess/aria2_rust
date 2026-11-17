@@ -1,4 +1,4 @@
-//! Optional FTP connection pool for callers that own the FTP lifecycle.
+//! FTP control-session pool shared by the engine's download commands.
 //!
 //! This module provides a connection pool for FTP control connections that:
 //! - Reuses existing connections to avoid repeated authentication
@@ -6,11 +6,9 @@
 //! - Supports concurrent access from multiple download tasks
 //! - Provides health checking for stale connections
 //!
-//! The main download engine does not inject this pool into its FTP command.
-//! That command supports TLS and proxy-specific control streams, while this
-//! pool deliberately stores only plain `TcpStream` control connections. Keep
-//! the pool as a standalone adapter until those transport invariants share a
-//! real seam.
+//! The download engine shares this pool across FTP commands. Its internal
+//! entries retain the complete protocol control session, including buffered
+//! response state and the transport policy needed by FTPS and proxy routes.
 //!
 //! # Example
 //!
@@ -37,6 +35,7 @@
 //! ```
 
 mod operations;
+mod session;
 mod stats;
 
 #[cfg(test)]
@@ -264,8 +263,14 @@ impl PooledConnection {
 /// LRU entry for tracking access order
 #[derive(Debug, Clone)]
 pub(crate) struct LruEntry {
-    pub(crate) key: ConnectionKey,
+    pub(crate) key: PoolKey,
     pub(crate) last_access: std::time::Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum PoolKey {
+    Raw(ConnectionKey),
+    Control(ControlSessionKey),
 }
 
 /// FTP connection pool configuration
@@ -303,14 +308,18 @@ impl Default for PoolConfig {
 
 /// Thread-safe FTP connection pool with LRU eviction
 pub struct FtpConnectionPool {
-    /// Connection storage
-    pub(crate) connections: Arc<Mutex<HashMap<ConnectionKey, PooledConnection>>>,
-    /// LRU tracking (ordered by last access time)
-    pub(crate) lru_order: Arc<Mutex<Vec<LruEntry>>>,
+    /// Raw-stream and protocol-session entries share one capacity and LRU.
+    pub(crate) state: Mutex<PoolState>,
     /// Pool configuration
     pub(crate) config: PoolConfig,
     /// Statistics
-    pub(crate) stats: Arc<Mutex<PoolStats>>,
+    pub(crate) stats: Mutex<PoolStats>,
+}
+
+pub(crate) struct PoolState {
+    pub(crate) connections: HashMap<ConnectionKey, PooledConnection>,
+    pub(crate) control_sessions: HashMap<ControlSessionKey, PooledControlSession>,
+    pub(crate) lru_order: Vec<LruEntry>,
 }
 
 impl FtpConnectionPool {
@@ -333,10 +342,13 @@ impl FtpConnectionPool {
     /// Create a new connection pool with custom configuration
     pub fn with_config(config: PoolConfig) -> Self {
         Self {
-            connections: Arc::new(Mutex::new(HashMap::new())),
-            lru_order: Arc::new(Mutex::new(Vec::new())),
+            state: Mutex::new(PoolState {
+                connections: HashMap::new(),
+                control_sessions: HashMap::new(),
+                lru_order: Vec::new(),
+            }),
             config,
-            stats: Arc::new(Mutex::new(PoolStats::default())),
+            stats: Mutex::new(PoolStats::default()),
         }
     }
 }
@@ -356,3 +368,5 @@ pub fn create_custom_pool(config: PoolConfig) -> Arc<FtpConnectionPool> {
 
 // Re-export sibling module items so the public API is unchanged.
 pub use stats::PoolStats;
+
+pub(crate) use session::{ControlSessionIdentity, ControlSessionKey, PooledControlSession};

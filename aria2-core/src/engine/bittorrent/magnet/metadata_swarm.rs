@@ -9,7 +9,6 @@ use aria2_protocol::bittorrent::message::extension::UtMetadataMessage;
 use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
 use crate::engine::bittorrent::dht::engine_set::DhtEngineSet;
-use crate::engine::bittorrent::magnet::metadata_collector::MetadataCollector;
 use crate::engine::bittorrent::magnet::metadata_exchange::{
     METADATA_MAX_SIZE, MetadataExchangeConfig, MetadataExchangeError,
 };
@@ -20,6 +19,7 @@ use crate::engine::bittorrent::peer::message_handler::{
 };
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::{BtPeerSource, DownloadOptions};
+use aria2_protocol::bittorrent::message::extension::MetadataCollector;
 
 const MAX_METADATA_INFLIGHT: usize = 64;
 const MAX_METADATA_INFLIGHT_PER_PEER: usize = 4;
@@ -140,8 +140,7 @@ impl MetadataPeerSwarm {
             None,
             &outbound_network_policy,
         )
-        .await
-        .map_err(|error| MetadataExchangeError::IoError(error.to_string()))?;
+        .await;
 
         let source_by_endpoint = candidates.into_iter().collect::<HashMap<_, _>>();
         let mut accepted_peer_ids = HashSet::new();

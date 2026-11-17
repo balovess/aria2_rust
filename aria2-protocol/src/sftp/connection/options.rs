@@ -26,7 +26,7 @@ impl std::fmt::Display for HostKeyCheckingMode {
 }
 
 /// Configuration options for establishing an SSH connection
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SshOptions {
     /// Remote hostname or IP address
     pub host: String,
@@ -40,7 +40,7 @@ pub struct SshOptions {
     pub private_key_path: Option<String>,
     /// Passphrase for encrypted private keys
     pub private_key_passphrase: Option<String>,
-    /// Timeout for TCP connection establishment
+    /// Timeout for connection establishment, SSH negotiation, authentication, and SFTP channel opening.
     pub connect_timeout: Duration,
     /// Timeout for read operations on the SSH channel
     pub read_timeout: Duration,
@@ -48,6 +48,8 @@ pub struct SshOptions {
     pub host_key_mode: HostKeyCheckingMode,
     /// Expected fingerprint in `hashType=digest` form.
     pub host_key_fingerprint: Option<String>,
+    /// OpenSSH-format known-hosts file. Defaults to `~/.ssh/known_hosts`.
+    pub known_hosts_path: Option<PathBuf>,
     /// Compression setting (not all servers support this)
     pub compression: bool,
     /// Keep-alive interval (None to disable)
@@ -56,21 +58,48 @@ pub struct SshOptions {
     pub preferred_ciphers: Vec<String>,
 }
 
+impl std::fmt::Debug for SshOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let password = self.password.as_ref().map(|_| "[REDACTED]");
+        let username = (!self.username.is_empty()).then_some("[REDACTED]");
+        let private_key_passphrase = self.private_key_passphrase.as_ref().map(|_| "[REDACTED]");
+        f.debug_struct("SshOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &username)
+            .field("password", &password)
+            .field("private_key_path", &self.private_key_path)
+            .field("private_key_passphrase", &private_key_passphrase)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("read_timeout", &self.read_timeout)
+            .field("host_key_mode", &self.host_key_mode)
+            .field("host_key_fingerprint", &self.host_key_fingerprint)
+            .field("known_hosts_path", &self.known_hosts_path)
+            .field("compression", &self.compression)
+            .field("keepalive_interval", &self.keepalive_interval)
+            .field("preferred_ciphers", &self.preferred_ciphers)
+            .finish()
+    }
+}
+
 impl Default for SshOptions {
     fn default() -> Self {
         Self {
             host: "localhost".to_string(),
-            port: 22,
+            port: crate::sftp::DEFAULT_PORT,
             username: String::new(),
             password: None,
             private_key_path: None,
             private_key_passphrase: None,
-            connect_timeout: Duration::from_secs(15),
-            read_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(crate::DEFAULT_SFTP_CONNECT_TIMEOUT_SECS),
+            read_timeout: Duration::from_secs(crate::DEFAULT_SFTP_READ_TIMEOUT_SECS),
             host_key_mode: HostKeyCheckingMode::default(),
             host_key_fingerprint: None,
+            known_hosts_path: None,
             compression: false,
-            keepalive_interval: Some(Duration::from_secs(60)),
+            keepalive_interval: Some(Duration::from_secs(
+                crate::DEFAULT_SFTP_KEEPALIVE_INTERVAL_SECS,
+            )),
             preferred_ciphers: Vec::new(),
         }
     }
@@ -81,7 +110,7 @@ impl SshOptions {
     pub fn new(host: &str, username: &str) -> Self {
         Self {
             host: host.to_string(),
-            port: 22,
+            port: crate::sftp::DEFAULT_PORT,
             username: username.to_string(),
             ..Default::default()
         }
@@ -123,6 +152,12 @@ impl SshOptions {
         self
     }
 
+    /// Set the OpenSSH-format known-hosts file used for host-key verification.
+    pub fn with_known_hosts_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.known_hosts_path = Some(path.into());
+        self
+    }
+
     /// Set custom timeouts
     pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Self {
         self.connect_timeout = connect;
@@ -133,6 +168,24 @@ impl SshOptions {
     /// Enable or disable compression
     pub fn with_compression(mut self, enabled: bool) -> Self {
         self.compression = enabled;
+        self
+    }
+
+    /// Set the preferred SSH cipher algorithms in negotiation order.
+    ///
+    /// Names are validated when the connection is established.
+    pub fn with_preferred_ciphers<I, S>(mut self, ciphers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.preferred_ciphers = ciphers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the SSH keep-alive interval, or disable keep-alives with `None`.
+    pub fn with_keepalive_interval(mut self, interval: Option<Duration>) -> Self {
+        self.keepalive_interval = interval;
         self
     }
 

@@ -42,4 +42,5 @@ fn digest_parameter<'a>(header: &'a str, name: &str) -> Option<&'a str> {
 mod auth;
 mod basic;
 mod range_probe;
+mod retry_after;
 mod streaming;

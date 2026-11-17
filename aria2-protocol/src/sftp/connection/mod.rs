@@ -15,15 +15,20 @@ use md5::Md5;
 use russh::client;
 use russh::keys;
 use russh::keys::ssh_key::HashAlg;
+use russh::{cipher, compression};
 use sha1::Digest as Sha1Digest;
 use sha1::Sha1;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info};
 
+mod error;
 mod options;
 #[cfg(test)]
 mod tests;
 
+pub use error::SshError;
 pub use options::{HostKeyCheckingMode, SshOptions};
 
 #[cfg(test)]
@@ -61,6 +66,84 @@ fn matches_fingerprint(key: &russh::keys::ssh_key::PublicKey, expected: &str) ->
     }
 }
 
+fn verify_server_key(
+    options: &SshOptions,
+    server_key: &russh::keys::ssh_key::PublicKey,
+    known_hosts_path: &Path,
+) -> Result<bool, SshError> {
+    if let Some(expected) = options.host_key_fingerprint.as_deref() {
+        return if matches_fingerprint(server_key, expected) {
+            Ok(true)
+        } else {
+            Err(SshError::Config {
+                message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
+            })
+        };
+    }
+
+    if options.host_key_mode == HostKeyCheckingMode::Disable {
+        tracing::warn!("[SFTP] Host key checking DISABLED - connection may be insecure");
+        return Ok(true);
+    }
+
+    let recorded_keys = russh::keys::known_hosts::known_host_keys_path(
+        &options.host,
+        options.port,
+        known_hosts_path,
+    )
+    .map_err(|error| SshError::Config {
+        message: format!("SSH known-hosts verification failed: {error}"),
+    })?;
+
+    if recorded_keys
+        .iter()
+        .any(|(_, recorded_key)| recorded_key == server_key)
+    {
+        return Ok(true);
+    }
+
+    if !recorded_keys.is_empty() {
+        return Err(SshError::Config {
+            message: format!("SSH host key changed for {}", options.target()),
+        });
+    }
+
+    match options.host_key_mode {
+        HostKeyCheckingMode::Strict => Err(SshError::Config {
+            message: format!(
+                "SSH host key for {} is not present in {}",
+                options.target(),
+                known_hosts_path.display()
+            ),
+        }),
+        HostKeyCheckingMode::AcceptNew => {
+            russh::keys::known_hosts::learn_known_hosts_path(
+                &options.host,
+                options.port,
+                server_key,
+                known_hosts_path,
+            )
+            .map_err(|error| SshError::Config {
+                message: format!("Failed to record SSH host key: {error}"),
+            })?;
+            Ok(true)
+        }
+        HostKeyCheckingMode::Disable => unreachable!("handled before known-hosts lookup"),
+    }
+}
+
+fn resolve_known_hosts_path(options: &SshOptions) -> Result<PathBuf, SshError> {
+    if let Some(path) = options.known_hosts_path.as_ref() {
+        return Ok(path.clone());
+    }
+
+    dirs::home_dir()
+        .map(|home| home.join(".ssh").join("known_hosts"))
+        .ok_or_else(|| SshError::Config {
+            message: "Cannot locate the home directory for SSH known-hosts verification".into(),
+        })
+}
+
 // Russh Client Handler
 // =============================================================================
 
@@ -70,11 +153,18 @@ fn matches_fingerprint(key: &russh::keys::ssh_key::PublicKey, expected: &str) ->
 /// connection-level verification behavior.
 struct SshClientHandler {
     options: Arc<SshOptions>,
+    host_key_error: Arc<std::sync::Mutex<Option<SshError>>>,
 }
 
 impl SshClientHandler {
-    fn new(options: Arc<SshOptions>) -> Self {
-        Self { options }
+    fn new(
+        options: Arc<SshOptions>,
+        host_key_error: Arc<std::sync::Mutex<Option<SshError>>>,
+    ) -> Self {
+        Self {
+            options,
+            host_key_error,
+        }
     }
 }
 
@@ -85,38 +175,32 @@ impl client::Handler for SshClientHandler {
     #[allow(refining_impl_trait)]
     fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        let mode = self.options.host_key_mode.clone();
-        let expected = self.options.host_key_fingerprint.clone();
-        let server_key = _server_public_key.clone();
+        let options = Arc::clone(&self.options);
+        let host_key_error = Arc::clone(&self.host_key_error);
+        let server_key = _server_public_key.public_key();
         async move {
-            debug!("[SFTP] Checking server key (mode={})", mode);
-            if let Some(expected) = expected {
-                if !matches_fingerprint(&server_key, &expected) {
-                    return Err(SshError::Handshake {
-                        message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
-                    });
-                }
-                return Ok(true);
+            debug!(
+                "[SFTP] Checking server key (mode={})",
+                options.host_key_mode
+            );
+            let result = (|| {
+                let path = if options.host_key_fingerprint.is_some()
+                    || options.host_key_mode == HostKeyCheckingMode::Disable
+                {
+                    PathBuf::new()
+                } else {
+                    resolve_known_hosts_path(&options)?
+                };
+                verify_server_key(&options, &server_key, &path)
+            })();
+            if let Err(error @ SshError::Config { .. }) = &result {
+                *host_key_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.clone());
             }
-
-            match mode {
-                HostKeyCheckingMode::Strict => {
-                    debug!("[SFTP] Strict host key checking - accepting key");
-                    Ok(true)
-                }
-                HostKeyCheckingMode::AcceptNew => {
-                    info!("[SFTP] Accept-new mode - accepting server key");
-                    Ok(true)
-                }
-                HostKeyCheckingMode::Disable => {
-                    tracing::warn!(
-                        "[SFTP] Host key checking DISABLED - connection may be insecure"
-                    );
-                    Ok(true)
-                }
-            }
+            result
         }
     }
 }
@@ -139,7 +223,8 @@ pub struct SshConnection {
 impl std::fmt::Debug for SshConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SshConnection")
-            .field("target", &self.options.target())
+            .field("host", &self.options.host)
+            .field("port", &self.options.port)
             .field("host_key_mode", &self.options.host_key_mode)
             .finish()
     }
@@ -165,20 +250,26 @@ impl SshConnection {
     pub async fn connect(options: SshOptions) -> Result<Self, SshError> {
         let target = options.target();
         debug!("[SFTP] Connecting to SSH (russh): {}", target);
-        let stream = tokio::time::timeout(
-            options.connect_timeout,
-            tokio::net::TcpStream::connect((options.host.as_str(), options.port)),
-        )
+        let timeout = options.connect_timeout;
+        let host = options.host.clone();
+        let port = options.port;
+        tokio::time::timeout(timeout, async move {
+            let config = build_client_config(&options)?;
+            let stream = tokio::net::TcpStream::connect((options.host.as_str(), options.port))
+                .await
+                .map_err(|error| SshError::ConnectFailed {
+                    host: options.host.clone(),
+                    port: options.port,
+                    message: error.to_string(),
+                })?;
+            Self::connect_with_config(options, stream, config).await
+        })
         .await
         .map_err(|_| SshError::ConnectTimeout {
-            host: options.host.clone(),
-            port: options.port,
-            timeout_secs: options.connect_timeout.as_secs(),
+            host,
+            port,
+            timeout_secs: timeout.as_secs(),
         })?
-        .map_err(|error| SshError::Handshake {
-            message: format!("SSH TCP connection failed: {error}"),
-        })?;
-        Self::connect_with_stream(options, stream).await
     }
 
     /// Complete the SSH handshake over a TCP stream created by the caller.
@@ -190,39 +281,61 @@ impl SshConnection {
         options: SshOptions,
         stream: tokio::net::TcpStream,
     ) -> Result<Self, SshError> {
+        let config = build_client_config(&options)?;
+        Self::connect_with_config(options, stream, config).await
+    }
+
+    async fn connect_with_config(
+        options: SshOptions,
+        stream: tokio::net::TcpStream,
+        config: client::Config,
+    ) -> Result<Self, SshError> {
         let target = options.target();
         debug!("[SFTP] Connecting to SSH (russh): {}", target);
 
         let options_arc = Arc::new(options);
 
-        // Step 1: Build russh client config
-        let config = client::Config::default();
         let config = Arc::new(config);
 
-        // Step 2: Create handler and establish SSH connection over the supplied TCP stream.
-        let handler = SshClientHandler::new(Arc::clone(&options_arc));
+        // A caller-supplied socket may still stall during either the SSH
+        // handshake or authentication, so the protocol connection timeout
+        // covers both phases. The engine may wrap this operation in a wider
+        // deadline that also includes policy-based DNS and TCP establishment.
+        let timeout = options_arc.connect_timeout;
+        let connection = async {
+            // Step 2: Create handler and establish SSH over the supplied stream.
+            let host_key_error = Arc::new(std::sync::Mutex::new(None));
+            let handler =
+                SshClientHandler::new(Arc::clone(&options_arc), Arc::clone(&host_key_error));
 
-        let mut handle = tokio::time::timeout(
-            options_arc.connect_timeout,
-            client::connect_stream(config, stream, handler),
-        )
-        .await
-        .map_err(|_| SshError::ConnectTimeout {
-            host: options_arc.host.clone(),
-            port: options_arc.port,
-            timeout_secs: options_arc.connect_timeout.as_secs(),
-        })?
-        .map_err(|e| SshError::Handshake {
-            message: format!("SSH handshake failed: {}", e),
-        })?;
+            let mut handle = client::connect_stream(config, stream, handler)
+                .await
+                .map_err(|error| {
+                    host_key_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                        .unwrap_or_else(|| SshError::Handshake {
+                            message: format!("SSH handshake failed: {error}"),
+                        })
+                })?;
 
-        info!(
-            "[SFTP] SSH handshake complete (russh): {} (key_check={})",
-            target, options_arc.host_key_mode
-        );
+            info!(
+                "[SFTP] SSH handshake complete (russh): {} (key_check={})",
+                target, options_arc.host_key_mode
+            );
 
-        // Step 3: Authenticate
-        Self::authenticate(&mut handle, &options_arc).await?;
+            // Step 3: Authenticate under the same connection deadline.
+            Self::authenticate(&mut handle, &options_arc).await?;
+            Ok::<_, SshError>(handle)
+        };
+        let handle = tokio::time::timeout(timeout, connection)
+            .await
+            .map_err(|_| SshError::ConnectTimeout {
+                host: options_arc.host.clone(),
+                port: options_arc.port,
+                timeout_secs: timeout.as_secs(),
+            })??;
 
         info!("[SFTP] SSH authenticated successfully: {}", target);
 
@@ -326,23 +439,30 @@ impl SshConnection {
         &mut self,
     ) -> Result<russh::Channel<russh::client::Msg>, SshError> {
         debug!("[SFTP] Opening SFTP subsystem channel");
-
-        // Open a session channel
+        let timeout = self.options.connect_timeout;
+        let target = self.options.target();
+        // russh sends the subsystem request without waiting for its reply. The
+        // SFTP INIT response is read by `SftpSession::open` under read_timeout.
         let channel =
-            self.handle
-                .channel_open_session()
-                .await
-                .map_err(|e| SshError::SubsystemInit {
-                    message: format!("Failed to open session channel: {}", e),
+            tokio::time::timeout(timeout, async {
+                let channel = self.handle.channel_open_session().await.map_err(|e| {
+                    SshError::SubsystemInit {
+                        message: format!("Failed to open session channel: {}", e),
+                    }
                 })?;
 
-        // Request the SFTP subsystem on this channel
-        channel
-            .request_subsystem(true, "sftp")
+                channel.request_subsystem(true, "sftp").await.map_err(|e| {
+                    SshError::SubsystemInit {
+                        message: format!("Failed to request SFTP subsystem: {}", e),
+                    }
+                })?;
+
+                Ok::<_, SshError>(channel)
+            })
             .await
-            .map_err(|e| SshError::SubsystemInit {
-                message: format!("Failed to request SFTP subsystem: {}", e),
-            })?;
+            .map_err(|_| SshError::ConnectionLost {
+                message: format!("Opening SFTP channel for {target} timed out after {timeout:?}"),
+            })??;
 
         debug!("[SFTP] SFTP subsystem channel opened successfully");
         Ok(channel)
@@ -364,96 +484,29 @@ impl SshConnection {
     }
 }
 
-// =============================================================================
-// Error Types
-// =============================================================================
+fn build_client_config(options: &SshOptions) -> Result<client::Config, SshError> {
+    let mut config = client::Config {
+        keepalive_interval: options.keepalive_interval,
+        ..Default::default()
+    };
+    config.preferred.compression = if options.compression {
+        Cow::Borrowed(&[compression::ZLIB_LEGACY, compression::NONE])
+    } else {
+        Cow::Borrowed(&[compression::NONE])
+    };
 
-/// Comprehensive error type for SSH/SFTP connection operations
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum SshError {
-    #[error("TCP connect timed out connecting to {host}:{port} after {timeout_secs}s")]
-    ConnectTimeout {
-        host: String,
-        port: u16,
-        timeout_secs: u64,
-    },
-
-    #[error("TCP connection failed to {host}:{port}: {message}")]
-    ConnectFailed {
-        host: String,
-        port: u16,
-        message: String,
-    },
-
-    #[error("SSH handshake failed: {message}")]
-    Handshake { message: String },
-
-    #[error("Authentication failed ({method}): {message}")]
-    AuthFailed { method: String, message: String },
-
-    #[error("No authentication credentials available: {message}")]
-    NoCredentials { message: String },
-
-    #[error("SSH session initialization failed: {message}")]
-    SessionInit { message: String },
-
-    #[error("SFTP subsystem initialization failed: {message}")]
-    SubsystemInit { message: String },
-
-    #[error("Configuration error: {message}")]
-    Config { message: String },
-
-    #[error("Protocol error: {message}")]
-    Protocol { message: String },
-
-    #[error("Connection lost: {message}")]
-    ConnectionLost { message: String },
-}
-
-impl SshError {
-    /// Check if this error indicates a network/connectivity issue that may be retryable
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::ConnectTimeout { .. } | Self::ConnectFailed { .. } | Self::ConnectionLost { .. }
-        )
+    if !options.preferred_ciphers.is_empty() {
+        let ciphers = options
+            .preferred_ciphers
+            .iter()
+            .map(|name| {
+                cipher::Name::try_from(name.as_str()).map_err(|()| SshError::Config {
+                    message: format!("Unsupported SSH cipher: {name}"),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        config.preferred.cipher = Cow::Owned(ciphers);
     }
 
-    /// Check if this error indicates an authentication failure (permanent)
-    pub fn is_auth_failure(&self) -> bool {
-        matches!(self, Self::AuthFailed { .. })
-    }
-
-    /// Map this SSH error to a user-friendly error message suitable for display
-    pub fn user_message(&self) -> String {
-        match self {
-            Self::ConnectTimeout { host, port, .. } => {
-                format!("Connection to {}:{} timed out", host, port)
-            }
-            Self::ConnectFailed {
-                host,
-                port,
-                message,
-            } => {
-                format!("Cannot connect to {}:{}: {}", host, port, message)
-            }
-            Self::AuthFailed { method, .. } => {
-                format!("Authentication failed ({})", method)
-            }
-            Self::NoCredentials { .. } => "No valid credentials provided".to_string(),
-            Self::Handshake { message } => {
-                format!("SSH handshake failed: {}", message)
-            }
-            other => other.to_string(),
-        }
-    }
-}
-
-/// Required by russh Handler trait: Self::Error must implement From<russh::Error>
-impl From<russh::Error> for SshError {
-    fn from(err: russh::Error) -> Self {
-        SshError::Protocol {
-            message: err.to_string(),
-        }
-    }
+    Ok(config)
 }

@@ -16,60 +16,24 @@ impl MetalinkDownloadCommand {
         #[cfg(not(feature = "bittorrent"))]
         let _ = allow_torrent_fallback;
 
-        // Resolve file info: either from pre-parsed file_info (multi-file mode)
-        // or by re-parsing the raw metalink_data (single-file mode).
-        // We extract owned data to avoid lifetime/borrow issues.
-        let sorted_urls_owned: Vec<aria2_protocol::metalink::parser::UrlEntry>;
-        let expected_size: Option<u64>;
-        let hash_entry_owned: Option<aria2_protocol::metalink::parser::HashEntry>;
-        let pieces_owned: Option<aria2_protocol::metalink::parser::PieceInfo>;
-        let torrent_metaurls_owned: Vec<aria2_protocol::metalink::parser::MetaUrlEntry>;
+        // Constructors parse the protocol document once and hand execution an
+        // owned file projection. Grouped commands create per-file commands
+        // with the same projection before entering this path.
+        let info = self.file_info.as_ref().ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config(
+                "Metalink file execution has no parsed file data".into(),
+            ))
+        })?;
+        let sorted_urls_owned = info.sorted_urls.clone();
+        let expected_size = info.expected_size;
+        let hash_entry_owned = info.hash_entry.clone();
+        let pieces_owned = info.pieces.clone();
+        let torrent_metaurls_owned = info.torrent_metaurls.clone();
 
-        match &self.file_info {
-            Some(info) => {
-                sorted_urls_owned = info.sorted_urls.clone();
-                expected_size = info.expected_size;
-                hash_entry_owned = info.hash_entry.clone();
-                pieces_owned = info.pieces.clone();
-                torrent_metaurls_owned = info.torrent_metaurls.clone();
-            }
-            None => {
-                let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(
-                    &self.metalink_data,
-                    None,
-                )
-                .map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
-                })?;
-
-                let file = if doc.files.len() == 1 {
-                    &doc.files[0]
-                } else {
-                    // Multi-file Metalink in single-file mode: use first file
-                    &doc.files[0]
-                };
-
-                sorted_urls_owned = file
-                    .get_sorted_urls()
-                    .iter()
-                    .map(|u| (*u).clone())
-                    .collect();
-                expected_size = file.size;
-                hash_entry_owned = file.strongest_hash().cloned();
-                pieces_owned = file.pieces.clone();
-                torrent_metaurls_owned = file
-                    .meta_urls
-                    .iter()
-                    .filter(|m| m.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent)
-                    .cloned()
-                    .collect();
-
-                if sorted_urls_owned.is_empty() && torrent_metaurls_owned.is_empty() {
-                    return Err(Aria2Error::Fatal(FatalError::Config(
-                        "No download mirrors available".into(),
-                    )));
-                }
-            }
+        if sorted_urls_owned.is_empty() && torrent_metaurls_owned.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "No download mirrors available".into(),
+            )));
         }
 
         if sorted_urls_owned.is_empty() {
@@ -105,14 +69,19 @@ impl MetalinkDownloadCommand {
 
         let mut last_error = None;
 
-        for url_entry in &sorted_urls_owned {
+        for (source_index, url_entry) in sorted_urls_owned.iter().enumerate() {
             debug!(
                 "Trying mirror [priority={}] : {}",
                 url_entry.priority, url_entry.url
             );
 
             match self
-                .download_payload_with_retry(&resolved_output_path, &url_entry.url, expected_size)
+                .download_payload_with_retry(
+                    &resolved_output_path,
+                    &url_entry.url,
+                    expected_size,
+                    source_index,
+                )
                 .await
             {
                 Ok(payload) => {
@@ -176,7 +145,15 @@ impl MetalinkDownloadCommand {
                         continue;
                     }
 
-                    self.complete_checkpoint().await;
+                    if let Err(error) = crate::filesystem::durability::replace_file(
+                        &payload.path,
+                        &resolved_output_path,
+                    )
+                    .await
+                    {
+                        global_registry().release(&resolved_output_path).await;
+                        return Err(error);
+                    }
                     self.completed_bytes = payload.completed_length;
 
                     {
@@ -214,8 +191,17 @@ impl MetalinkDownloadCommand {
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
                     ) || self.should_stop_after_not_found(&e)
                     {
+                        let stage_path = self.stage_path(&resolved_output_path, source_index);
+                        self.discard_checkpoint(&stage_path).await;
                         global_registry().release(&resolved_output_path).await;
                         return Err(e);
+                    }
+                    if matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                    ) {
+                        let stage_path = self.stage_path(&resolved_output_path, source_index);
+                        self.discard_checkpoint(&stage_path).await;
                     }
                     last_error = Some(e);
                 }
@@ -230,7 +216,10 @@ impl MetalinkDownloadCommand {
         #[cfg(feature = "bittorrent")]
         if allow_torrent_fallback && !torrent_metaurls_owned.is_empty() {
             warn!("All HTTP mirrors failed, falling back to torrent metaurl");
-            self.discard_checkpoint(&resolved_output_path).await;
+            for (source_index, _) in sorted_urls_owned.iter().enumerate() {
+                let stage = self.stage_path(&resolved_output_path, source_index);
+                self.discard_checkpoint(&stage).await;
+            }
             return self.try_torrent_metaurl(&torrent_metaurls_owned).await;
         }
 

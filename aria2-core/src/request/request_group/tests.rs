@@ -59,6 +59,7 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     group.set_download_speed_cached(128);
     group.set_upload_speed_cached(32);
     group.set_stream_connection_count(1);
+    group.set_http_connection_counts(1, 2, 7);
     group.set_bt_connection_count(1);
     group.set_bt_metadata(2, 512, "01234567890123456789".to_string());
     group.set_bt_bitfield(Some(vec![0xC0]));
@@ -101,6 +102,9 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     assert_eq!(snapshot.upload_length, 64);
     assert_eq!(snapshot.download_speed, 128);
     assert_eq!(snapshot.connections, 2);
+    assert_eq!(snapshot.http1_connections, 1);
+    assert_eq!(snapshot.http2_sessions, 2);
+    assert_eq!(snapshot.http2_streams, 7);
     assert_eq!(bt.peer_count(), 2);
     assert_eq!(bt.seeder_count(), 1);
     assert_eq!(bt.num_pieces, 2);
@@ -782,6 +786,21 @@ fn test_try_update_option_new_runtime_changeable() {
     );
     assert_eq!(group.options().bt_endgame_threshold, 50);
 
+    assert!(
+        group
+            .try_update_option(
+                "bt-piece-selection-strategy",
+                serde_json::json!("sequential")
+            )
+            .unwrap()
+    );
+    assert_eq!(group.options().bt_piece_selection_strategy, "sequential");
+    assert!(
+        group
+            .try_update_option("bt-piece-selection-strategy", serde_json::json!("unknown"))
+            .is_err()
+    );
+
     // seed-time
     assert!(
         group
@@ -1019,10 +1038,42 @@ fn test_command_counter_does_not_underflow() {
 
 #[test]
 fn test_runtime_option_updates_populate_execution_fields() {
+    use std::collections::HashMap;
+
     let mut group = RequestGroup::new(
         GroupId::new(2),
         vec!["http://example.com/file".to_string()],
         DownloadOptions::default(),
+    );
+
+    let changes = group
+        .classify_runtime_options(HashMap::from([(
+            "ftp-reuse-connection".to_string(),
+            serde_json::json!(false),
+        )]))
+        .expect("FTP reuse setting should be valid for a reserved task");
+    assert_eq!(
+        changes.immediate.get("ftp-reuse-connection"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(changes.pending.get("ftp-reuse-connection"), None);
+
+    let mut active = RequestGroup::new(
+        GroupId::new(3),
+        vec!["ftp://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    active.start().expect("request group should become active");
+    let changes = active
+        .classify_runtime_options(HashMap::from([(
+            "ftp-reuse-connection".to_string(),
+            serde_json::json!(false),
+        )]))
+        .expect("FTP reuse setting should be valid for an active task");
+    assert!(changes.immediate.is_empty());
+    assert_eq!(
+        changes.pending.get("ftp-reuse-connection"),
+        Some(&serde_json::json!(false))
     );
 
     assert!(
@@ -1060,6 +1111,18 @@ fn test_runtime_option_updates_populate_execution_fields() {
             .try_update_option("ftp-pasv", serde_json::json!("false"))
             .unwrap()
     );
+    assert!(
+        group
+            .try_update_option("ftp-reuse-connection", serde_json::json!("false"))
+            .unwrap()
+    );
+    assert!(!group.options().ftp_reuse_connection);
+    assert!(
+        group
+            .try_update_option("ftp-reuse-connection", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(group.options().ftp_reuse_connection);
     assert!(
         group
             .try_update_option("ftp-user", serde_json::json!("alice"))
@@ -1133,6 +1196,22 @@ fn test_runtime_option_updates_populate_execution_fields() {
             .map(String::as_str),
         Some("https://tracker.test/announce")
     );
+}
+
+#[test]
+fn peer_exchange_runtime_option_updates_the_live_actor_signal() {
+    let mut group = RequestGroup::new(GroupId::new(3), Vec::new(), DownloadOptions::default());
+    let enabled = group.bt_peer_exchange_enabled();
+
+    assert!(enabled.load(std::sync::atomic::Ordering::Acquire));
+    group
+        .try_update_option("enable-peer-exchange", serde_json::json!(false))
+        .unwrap();
+    assert!(!enabled.load(std::sync::atomic::Ordering::Acquire));
+    group
+        .try_update_option("enable-peer-exchange", serde_json::json!(true))
+        .unwrap();
+    assert!(enabled.load(std::sync::atomic::Ordering::Acquire));
 }
 
 #[test]

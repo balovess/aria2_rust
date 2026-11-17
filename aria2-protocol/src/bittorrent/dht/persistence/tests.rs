@@ -111,7 +111,7 @@ fn test_deserialize_aria2_compatible_v2_format() {
 
 #[test]
 fn test_repeated_file_save_replaces_existing_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let path = dir.path().join("dht.dat");
     let first = DhtNode::new([0x01; 20], "127.0.0.1:6881".parse().unwrap());
     let second = DhtNode::new([0x02; 20], "127.0.0.1:6882".parse().unwrap());
@@ -179,7 +179,7 @@ fn test_collect_good_nodes_only() {
 
 #[test]
 fn test_save_load_file_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let path = dir.path().join("dht.dat");
 
     let self_id = [0x99u8; 20];

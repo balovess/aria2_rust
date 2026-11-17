@@ -9,7 +9,17 @@ use crate::engine::protocol_adapter::{
 };
 use crate::error::Result;
 
-pub(crate) struct FtpCommandAdapter;
+pub(crate) struct FtpCommandAdapter {
+    connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
+}
+
+impl FtpCommandAdapter {
+    pub(crate) fn new(
+        connection_pool: Arc<crate::ftp::connection_pool::FtpConnectionPool>,
+    ) -> Self {
+        Self { connection_pool }
+    }
+}
 
 fn ftp_origin(uri: &str) -> Option<(String, u16)> {
     let parsed = Url::parse(uri).ok()?;
@@ -40,17 +50,14 @@ impl ProtocolCommandAdapter for FtpCommandAdapter {
             command.set_global_limiter(limiter);
         }
         command.set_outbound_network_policy(Arc::clone(&services.outbound_network_policy));
+        command.set_connection_pool(Arc::clone(&self.connection_pool));
         if request.options.async_dns {
             command.set_dns_cache(Arc::clone(&services.dns_cache));
-            if let Some((hostname, port)) = ftp_origin(&request.first_uri)
-                && let Ok(addresses) = services
-                    .dns_cache
-                    .lock()
-                    .await
-                    .resolve_with_refresh(&hostname, port)
-                    .await
-            {
-                command.set_resolved_addresses(addresses);
+            if let Some((hostname, port)) = ftp_origin(&request.first_uri) {
+                let dns_cache = services.dns_cache.lock().await.clone();
+                if let Ok(addresses) = dns_cache.resolve_with_refresh(&hostname, port).await {
+                    command.set_resolved_addresses(addresses);
+                }
             }
         }
 

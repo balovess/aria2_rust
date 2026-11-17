@@ -22,12 +22,43 @@ const RUST_HTTP2_POLICY_EXTENSIONS: &[&str] = &[
 ];
 
 const RUST_HTTP_RANGE_POLICY_EXTENSIONS: &[&str] = &["min-http-range-size"];
+const RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS: &[&str] = &["sftp-connect-timeout", "sftp-read-timeout"];
+const RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS: &[&str] = &[
+    "sftp-compression",
+    "sftp-keepalive-interval",
+    "sftp-preferred-ciphers",
+];
+const RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS: &[&str] = &[
+    "http-adaptive-enabled",
+    "http-adaptive-reduction-percent",
+    "http-adaptive-recovery-interval",
+    "http-adaptive-recovery-successes-min",
+    "http-adaptive-recovery-successes-max",
+    "http-adaptive-start-interval-ms",
+    "http-adaptive-backoff-base",
+    "http-adaptive-backoff-max",
+    "http-adaptive-capacity-start-interval-ms",
+    "http-adaptive-capacity-start-interval-max-ms",
+    "http-adaptive-rate-recovery-successes",
+    "http-adaptive-rate-min-interval-ms",
+    "http-adaptive-backoff-reset-after",
+];
 
 const RUST_BITTORRENT_POLICY_EXTENSIONS: &[&str] = &[
     "bt-max-upload-slots",
     "bt-optimistic-unchoke-interval",
     "bt-snubbed-timeout",
 ];
+
+const RUST_BITTORRENT_INITIAL_POLICY_EXTENSIONS: &[&str] = &[
+    "bt-piece-selection-strategy",
+    "bt-endgame-threshold",
+    "enable-utp",
+    "utp-listen-port",
+];
+
+const RUST_BITTORRENT_GLOBAL_POLICY_EXTENSIONS: &[&str] =
+    &["bt-piece-selection-strategy", "bt-endgame-threshold"];
 
 const RUST_DHT_POLICY_EXTENSIONS: &[&str] = &[
     "enable-dht",
@@ -52,6 +83,12 @@ const RUST_DHT_POLICY_EXTENSIONS: &[&str] = &[
     "dht-bootstrap-timeout",
     "dht-max-concurrent-lookups",
     "dht-persistence-max-age",
+];
+
+const RUST_DHT_GLOBAL_POLICY_EXTENSIONS: &[&str] = &[
+    "dht-max-items",
+    "dht-max-peer-info-hashes",
+    "dht-max-peers-per-info-hash",
 ];
 
 fn compatibility_policy_names(policy: &str) -> BTreeSet<String> {
@@ -114,9 +151,13 @@ fn assert_policy_matches_baseline(
 fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions() {
     let mut initial_extensions = vec!["bt-tracker-stopped-timeout"];
     initial_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_BITTORRENT_INITIAL_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setInitialOption",
         compatibility_policy_names("setInitialOption"),
@@ -124,14 +165,25 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         &initial_extensions,
     );
     let mut global_extensions = vec![
+        "bt-incoming-peer-handshake-timeout",
         "bt-tracker-source",
+        "bt-tracker-source-timeout",
+        "bt-tracker-source-concurrency",
         "bt-tracker-update-interval",
         "bt-tracker-stopped-timeout",
+        "bt-utp-connect-timeout",
+        "bt-utp-idle-timeout",
+        "bt-utp-keepalive-interval",
+        "bt-utp-max-connections",
         "enable-public-trackers",
     ];
-    global_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_DHT_GLOBAL_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_BITTORRENT_GLOBAL_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeGlobalOption",
         compatibility_policy_names("setChangeGlobalOption"),
@@ -140,9 +192,12 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     );
     let mut reserved_extensions = vec!["enable-public-trackers"];
     reserved_extensions.extend_from_slice(RUST_BITTORRENT_POLICY_EXTENSIONS);
-    reserved_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_BITTORRENT_INITIAL_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_RANGE_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeOptionForReserved",
         compatibility_policy_names("setChangeOptionForReserved"),

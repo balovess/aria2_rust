@@ -199,6 +199,12 @@ impl BtDownloadCommand {
                 return Err(error);
             }
         };
+        if let Some(route) = &self.bt_peer_route {
+            route.set_dht_capabilities(
+                !self.is_private && self.dht_engines.ipv4().is_some(),
+                !self.is_private && self.dht_engines.ipv6().is_some(),
+            );
+        }
 
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
         // BEP 0027 (Private Torrent): PEX must be disabled for private torrents

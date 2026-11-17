@@ -968,6 +968,82 @@ async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() 
 }
 
 #[tokio::test]
+async fn test_e2e_engine_unpause_before_task_stops_remains_active() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "engine-unpause-race.bin";
+    let output_path = dir.path().join(output_name);
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        use_head: false,
+        split: Some(1),
+        continue_download: true,
+        always_resume: false,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1004);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new();
+    engine.set_request_group_man(Arc::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if tokio::fs::metadata(&output_path)
+                .await
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sequential HTTP engine did not make progress");
+
+    command_tx
+        .send(EngineCommand::Pause { gid })
+        .expect("HTTP pause command should be accepted");
+    command_tx
+        .send(EngineCommand::Unpause { gid })
+        .expect("HTTP unpause command should be accepted");
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        matches!(
+            group.read().unwrap().status(),
+            DownloadStatus::Active | DownloadStatus::Complete
+        ),
+        "an unpaused download still running must be Active, not {:?}",
+        group.read().unwrap().status()
+    );
+    wait_for_http_engine(engine_task, "the unpaused download did not finish").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+    assert_eq!(
+        tokio::fs::metadata(output_path).await.unwrap().len(),
+        2 * 1024 * 1024
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_engine_save_session_flushes_sequential_http_control_file() {
     let server = start_server().await;
     let dir = tmp_dir();

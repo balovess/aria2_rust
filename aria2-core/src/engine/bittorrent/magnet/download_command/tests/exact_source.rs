@@ -21,10 +21,15 @@ async fn magnet_exact_source_returns_matching_torrent_without_dht() {
             .await
             .expect("accept exact-source request");
         let mut request = [0u8; 4096];
-        let _request_len = socket
+        let request_len = socket
             .read(&mut request)
             .await
             .expect("read exact-source request");
+        assert!(
+            String::from_utf8_lossy(&request[..request_len])
+                .to_ascii_lowercase()
+                .contains("user-agent: test-magnet-client/1.0")
+        );
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             server_torrent.len()
@@ -49,8 +54,12 @@ async fn magnet_exact_source_returns_matching_torrent_without_dht() {
     MagnetDownloadCommand::metadata_matches_magnet(&magnet, &torrent)
         .expect("test magnet hash should match test torrent");
     let command = make_test_command();
+    let options = DownloadOptions {
+        user_agent: Some("test-magnet-client/1.0".to_string()),
+        ..DownloadOptions::default()
+    };
     let metadata = command
-        .fetch_magnet_exact_source(&magnet, &DownloadOptions::default())
+        .fetch_magnet_exact_source(&magnet, &options)
         .await
         .expect("exact source should return metadata");
     server.await.expect("exact-source server should finish");
@@ -71,11 +80,14 @@ async fn magnet_exact_source_reads_file_url_without_dht() {
     std::fs::write(&path, &torrent).expect("write exact-source torrent");
     let source =
         url::Url::from_file_path(&path).expect("temporary path should convert to a file URL");
-    let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
-        "magnet:?xt=urn:btih:{}&xs={source}",
-        hex::encode(info_hash)
-    ))
-    .expect("file exact-source magnet should parse");
+    let magnet_query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("xt", &format!("urn:btih:{}", hex::encode(info_hash)))
+        .append_pair("xs", source.as_str())
+        .finish();
+    let magnet =
+        aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!("magnet:?{magnet_query}"))
+            .expect("file exact-source magnet should parse");
+    assert_eq!(magnet.exact_sources, [source.as_str()]);
 
     let command = make_test_command();
     let metadata = command

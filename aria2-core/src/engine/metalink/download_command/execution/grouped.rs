@@ -25,15 +25,19 @@ impl MetalinkDownloadCommand {
         for (path, info) in &grouped_files {
             let mut command = Self {
                 group: std::sync::Arc::clone(&self.group),
-                client: self.client.clone(),
                 output_path: path.clone(),
                 started: true,
                 completed: false,
                 completed_bytes: 0,
-                metalink_data: Vec::new(),
+                progress_offset: completed_bytes,
                 file_info: Some(info.clone()),
                 grouped_file_infos: Vec::new(),
-                checkpoint: None,
+                protocol_runtime: self.protocol_runtime.as_ref().map(|runtime| {
+                    super::super::transport::ProtocolRuntime {
+                        adapters: std::sync::Arc::clone(&runtime.adapters),
+                        services: runtime.services.clone(),
+                    }
+                }),
                 global_limiter: self.global_limiter.clone(),
                 outbound_network_policy: std::sync::Arc::clone(&self.outbound_network_policy),
                 #[cfg(feature = "bittorrent")]
@@ -44,6 +48,8 @@ impl MetalinkDownloadCommand {
                 bt_listener: self.bt_listener.clone(),
                 #[cfg(feature = "bittorrent")]
                 lpd_manager: self.lpd_manager.clone(),
+                #[cfg(feature = "bittorrent")]
+                open_file_budget: self.open_file_budget.clone(),
             };
             match command.execute_file(false, false).await {
                 Ok(()) => {
@@ -58,6 +64,10 @@ impl MetalinkDownloadCommand {
                     );
                 }
             }
+        }
+
+        if let Some(error) = self.lifecycle_error() {
+            return Err(error);
         }
 
         if direct_failed && self.lifecycle_error().is_none() {
@@ -146,6 +156,9 @@ impl MetalinkDownloadCommand {
                     #[cfg(feature = "bittorrent")]
                     if let Some(manager) = self.lpd_manager.clone() {
                         bt_cmd.set_lpd_manager(manager);
+                    }
+                    if let Some(budget) = self.open_file_budget.clone() {
+                        bt_cmd.set_open_file_budget(budget);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
@@ -291,6 +304,9 @@ impl MetalinkDownloadCommand {
                     #[cfg(feature = "bittorrent")]
                     if let Some(manager) = self.lpd_manager.clone() {
                         bt_cmd.set_lpd_manager(manager);
+                    }
+                    if let Some(budget) = self.open_file_budget.clone() {
+                        bt_cmd.set_open_file_budget(budget);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().completed_length();

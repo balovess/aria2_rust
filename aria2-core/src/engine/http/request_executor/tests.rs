@@ -55,6 +55,17 @@ fn total_and_authority_limits_are_independent() {
 }
 
 #[test]
+fn h1_admission_uses_the_registered_per_server_connection_cap() {
+    let state = ExecutorState::new(&["http://cap.test:80".into()], 64, usize::MAX, 1);
+    let authority = state.authority("http://cap.test:80").unwrap();
+
+    assert_eq!(
+        authority.connection_limit,
+        crate::constants::MAX_CONNECTION_PER_SERVER
+    );
+}
+
+#[test]
 fn h2_prefers_streams_on_each_session_before_opening_another() {
     let state = Arc::new(ExecutorState::new(
         &["https://h2.test:443".into()],
@@ -90,6 +101,54 @@ fn h1_spreads_active_requests_across_session_pools() {
         .collect();
     let slots: Vec<_> = reservations.iter().map(|(_, index)| *index).collect();
     assert_eq!(slots, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn live_connection_counts_separate_h1_connections_from_h2_sessions_and_streams() {
+    crate::http::client_pool::ensure_rustls_provider();
+    let state = Arc::new(ExecutorState::new(
+        &["http://h1.test:80".into(), "https://h2.test:443".into()],
+        16,
+        16,
+        4,
+    ));
+    let h1 = state.authority("http://h1.test:80").unwrap();
+    h1.protocol.store(1, Ordering::Release);
+    h1.in_flight.store(2, Ordering::Release);
+
+    let h2 = state.authority("https://h2.test:443").unwrap();
+    h2.protocol.store(2, Ordering::Release);
+    h2.active_h2_sessions.store(3, Ordering::Release);
+    h2.in_flight.store(5, Ordering::Release);
+    h2.client_in_flight[0].store(3, Ordering::Release);
+    h2.client_in_flight[2].store(2, Ordering::Release);
+
+    let (result_tx, result_rx) = mpsc::channel(1);
+    let executor = HttpSegmentRequestExecutor {
+        result_rx,
+        result_tx,
+        clients: vec![reqwest::Client::new()],
+        request_policy: HttpRequestPolicy::default(),
+        cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
+        auth_options: AuthResolveOptions::default(),
+        auth_factory: Arc::new(std::sync::Mutex::new(
+            crate::http::auth::AuthConfigFactory::new(),
+        )),
+        origin_sensitive_headers_allowed: true,
+        state,
+        total_limit: 16,
+        tasks: Vec::new(),
+        next_task_id: 1,
+    };
+
+    assert_eq!(
+        executor.active_connection_counts(),
+        HttpConnectionCounts {
+            http1_connections: 2,
+            http2_sessions: 2,
+            http2_streams: 5,
+        }
+    );
 }
 
 #[test]
@@ -144,7 +203,10 @@ async fn completion_event_reclaims_only_its_task() {
         request_policy: HttpRequestPolicy::default(),
         cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
         auth_options: AuthResolveOptions::default(),
-        netrc_path: None,
+        auth_factory: Arc::new(std::sync::Mutex::new(
+            crate::http::auth::AuthConfigFactory::new(),
+        )),
+        origin_sensitive_headers_allowed: true,
         state: Arc::new(ExecutorState::new(&[], 1, 1, 1)),
         total_limit: 1,
         tasks: vec![
@@ -210,7 +272,10 @@ async fn selecting_next_result_does_not_drop_a_received_completion() {
         request_policy: HttpRequestPolicy::default(),
         cookie_helper: CookieHelper::new(Arc::new(crate::http::cookie::CookieStorage::new()), None),
         auth_options: AuthResolveOptions::default(),
-        netrc_path: None,
+        auth_factory: Arc::new(std::sync::Mutex::new(
+            crate::http::auth::AuthConfigFactory::new(),
+        )),
+        origin_sensitive_headers_allowed: true,
         state: Arc::clone(&state),
         total_limit: 1,
         tasks: vec![RunningTask {

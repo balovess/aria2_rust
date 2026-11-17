@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::engine::bittorrent::peer::choking_algorithm::PeerIdentity;
 use crate::engine::bittorrent::peer::stats::PeerStats;
@@ -193,11 +193,11 @@ impl BtSeederStateChoke {
                     .filter(|entry| Some(entry.identity) != current)
                     .count();
                 let candidate_offset = if alternative_count > 0 {
-                    let mut rng = rand::thread_rng();
-                    rng.gen_range(0..alternative_count)
+                    let mut rng = rand::rng();
+                    rng.random_range(0..alternative_count)
                 } else {
-                    let mut rng = rand::thread_rng();
-                    rng.gen_range(0..optimistic_candidates.len())
+                    let mut rng = rand::rng();
+                    rng.random_range(0..optimistic_candidates.len())
                 };
                 let picked = if alternative_count > 0 {
                     optimistic_candidates

@@ -95,7 +95,7 @@ impl HttpSegmentDownloader {
 
         let collect_timing = progress.is_some() && tracing::enabled!(tracing::Level::DEBUG);
         let request_started = collect_timing.then(Instant::now);
-        let (response, effective_url) = self
+        let (response, effective_url, _) = self
             .send_range_request(url, &range_header, cookie_header, headers)
             .await?;
         let response_headers_wait = request_started

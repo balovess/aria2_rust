@@ -385,16 +385,19 @@ fn runtime_policy_names_are_unique_and_registered() {
         .chain(RUNTIME_CHANGEABLE_OPTIONS)
         .chain(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS)
     {
+        let registered_and_supported = registry
+            .get(name)
+            .is_some_and(|definition| definition.is_supported());
         if super::runtime::is_option_available(name) {
             assert!(
-                registry.contains(name),
+                registered_and_supported,
                 "runtime policy '{}' has no registered option in this build",
                 name
             );
         } else {
             assert!(
-                !registry.contains(name),
-                "feature-gated runtime policy '{}' must not be registered in this build",
+                !registered_and_supported,
+                "feature-gated runtime policy '{}' must not be supported in this build",
                 name
             );
         }
@@ -428,6 +431,9 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         let Some(definition) = registry.get(name) else {
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         let raw = non_default_sample(definition);
         config_content.push_str(name);
         config_content.push('=');
@@ -469,6 +475,9 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         let Some(definition) = registry.get(name) else {
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         if INITIAL_IDENTITY_OPTIONS.contains(name) {
             continue;
         }
@@ -488,18 +497,25 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
                         name, error
                     )
                 });
-        let rpc_session =
-            crate::session::session_entry::download_options_to_map(&rpc_download_options);
         let snapshot = crate::config::project_initial_options(
             options
                 .iter()
                 .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone()))),
+        );
+        let rpc_session = crate::session::session_entry::download_options_to_map_with_snapshot(
+            &rpc_download_options,
+            Some(&snapshot),
         );
         let serialized = crate::session::session_entry::download_options_to_map_with_snapshot(
             &download_options,
             Some(&snapshot),
         );
         let wire_name = session_wire_name(name);
+        let expected_wire_value = if *name == "header" {
+            raw.replace(',', "\n")
+        } else {
+            raw.clone()
+        };
         let reaches_all_entry_points = [
             ("config-file", &file_session),
             ("cli", &cli_session),
@@ -508,13 +524,13 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         ]
         .into_iter()
         .all(|(source, map)| {
-            if map.get(wire_name) != Some(&raw) {
+            if map.get(wire_name) != Some(&expected_wire_value) {
                 eprintln!(
                     "initial option '{}' from {} serialized as {:?}, expected {:?}",
                     name,
                     source,
                     map.get(wire_name),
-                    raw
+                    expected_wire_value
                 );
                 false
             } else {
@@ -557,6 +573,9 @@ fn every_task_runtime_policy_has_a_real_download_option_consumer() {
             // corresponding protocol feature.
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         let raw = non_default_sample(definition);
         let value = serde_json::Value::String(raw);
         assert!(
@@ -711,6 +730,9 @@ async fn every_global_runtime_policy_reaches_config_manager_storage() {
         let Some(definition) = registry.get(name) else {
             continue;
         };
+        if !definition.is_supported() {
+            continue;
+        }
         let raw = non_default_sample(definition);
         let parsed = definition.parse_value(&raw).unwrap_or_else(|error| {
             panic!("global option '{}' sample is invalid: {}", name, error)
@@ -724,6 +746,46 @@ async fn every_global_runtime_policy_reaches_config_manager_storage() {
             Some(parsed),
             "global option '{}' did not round-trip through ConfigManager",
             name
+        );
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn dht_engine_options_are_not_change_global_options() {
+    use super::runtime::RUNTIME_GLOBAL_CHANGEABLE_OPTIONS;
+
+    for name in [
+        "enable-dht",
+        "enable-dht6",
+        "dht-listen-port",
+        "dht-listen-addr",
+        "dht-listen-addr6",
+        "dht-entry-point",
+        "dht-entry-point-host",
+        "dht-entry-point-port",
+        "dht-entry-point6",
+        "dht-entry-point-host6",
+        "dht-entry-point-port6",
+        "dht-file-path",
+        "dht-file-path6",
+        "dht-message-timeout",
+        "dht-refresh-check-interval",
+        "dht-token-rotation-interval",
+        "dht-node-contact-interval",
+        "dht-cleanup-interval",
+        "dht-save-interval",
+        "dht-bootstrap-timeout",
+        "dht-max-concurrent-lookups",
+        "dht-persistence-max-age",
+    ] {
+        assert!(
+            !RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&name),
+            "DHT option '{name}' must not be accepted by changeGlobalOption"
+        );
+        assert!(
+            !super::is_global_option_changeable(name),
+            "DHT option '{name}' must not be marked globally runtime-changeable"
         );
     }
 }
@@ -960,7 +1022,22 @@ fn bittorrent_execution_options_round_trip_through_task_session() {
 fn initial_option_snapshot_is_reserved_for_wire_fidelity_only() {
     assert_eq!(
         super::runtime::INITIAL_SNAPSHOT_WIRE_OPTIONS,
-        &["min-http-range-size", "min-split-size"],
+        &[
+            "http-adaptive-reduction-percent",
+            "http-adaptive-recovery-interval",
+            "http-adaptive-recovery-successes-min",
+            "http-adaptive-recovery-successes-max",
+            "http-adaptive-start-interval-ms",
+            "http-adaptive-backoff-base",
+            "http-adaptive-backoff-max",
+            "http-adaptive-capacity-start-interval-ms",
+            "http-adaptive-capacity-start-interval-max-ms",
+            "http-adaptive-rate-recovery-successes",
+            "http-adaptive-rate-min-interval-ms",
+            "http-adaptive-backoff-reset-after",
+            "min-http-range-size",
+            "min-split-size",
+        ],
         "raw snapshot preservation must not become an execution fallback"
     );
 }

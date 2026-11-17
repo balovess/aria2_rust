@@ -1,6 +1,6 @@
 mod group_state;
 mod not_found;
-mod rpc_update;
 mod runtime;
+mod runtime_update;
 #[cfg(test)]
 mod tests;

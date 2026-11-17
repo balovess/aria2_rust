@@ -13,24 +13,26 @@ use crate::bittorrent::utp::packet::{PacketType, UtpPacket, UtpPacketError};
 use crate::bittorrent::utp::timer::{TimerManager, TimerType};
 
 mod close;
+mod options;
 #[cfg(test)]
 mod tests;
 mod timers;
-
-/// Maximum number of concurrent uTP connections per socket
-const MAX_CONNECTIONS: usize = 100;
-
-/// Default timeout for connection establishment
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Default timeout for idle connections
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Default keepalive interval
-const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+pub use options::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_MAX_CONNECTIONS, UtpSocketOptions,
+};
 
 /// Maximum receive buffer size for UDP
 const MAX_UDP_RECV_BUFFER: usize = 65535;
+
+fn find_available_connection_id(
+    start: u16,
+    mut is_occupied: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    (0..=u16::MAX)
+        .map(|offset| start.wrapping_add(offset))
+        .find(|connection_id| !is_occupied(*connection_id))
+}
 
 /// Errors that can occur during socket operations
 #[derive(Debug, thiserror::Error)]
@@ -89,12 +91,7 @@ pub struct UtpSocket {
     /// Local socket address
     local_addr: SocketAddr,
     timestamp_origin: Instant,
-    /// Connection timeout
-    connect_timeout: Duration,
-    /// Idle timeout for connections
-    idle_timeout: Duration,
-    /// Keepalive interval
-    keepalive_interval: Duration,
+    options: UtpSocketOptions,
     /// Whether the socket is closed
     is_closed: bool,
     /// Receive buffer
@@ -112,22 +109,34 @@ impl UtpSocket {
 
     /// Create a new uTP socket bound to an explicit local socket address.
     pub fn bind_addr(addr: SocketAddr) -> Result<Self, UtpSocketError> {
+        Self::bind_addr_with_options(addr, UtpSocketOptions::default())
+    }
+
+    /// Bind a uTP socket with explicit resource and connection-lifecycle settings.
+    pub fn bind_addr_with_options(
+        addr: SocketAddr,
+        options: UtpSocketOptions,
+    ) -> Result<Self, UtpSocketError> {
         let socket = UdpSocket::bind(addr).map_err(UtpSocketError::BindFailed)?;
         let local_addr = socket.local_addr().map_err(UtpSocketError::BindFailed)?;
         socket
             .set_nonblocking(true)
             .map_err(UtpSocketError::BindFailed)?;
 
+        let timers = TimerManager::with_defaults(
+            options.connect_timeout(),
+            options.idle_timeout(),
+            options.keepalive_interval(),
+        );
+
         Ok(Self {
             socket,
             async_socket: OnceLock::new(),
             connections: HashMap::new(),
-            timers: TimerManager::new(),
+            timers,
             local_addr,
             timestamp_origin: Instant::now(),
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            idle_timeout: DEFAULT_IDLE_TIMEOUT,
-            keepalive_interval: DEFAULT_KEEPALIVE_INTERVAL,
+            options,
             is_closed: false,
             recv_buffer: vec![0u8; MAX_UDP_RECV_BUFFER],
         })
@@ -176,17 +185,20 @@ impl UtpSocket {
 
     /// Set connection timeout
     pub fn set_connect_timeout(&mut self, timeout: Duration) {
-        self.connect_timeout = timeout;
+        self.options.set_connect_timeout(timeout);
+        self.timers.set_default_connect_timeout(timeout);
     }
 
     /// Set idle timeout for connections
     pub fn set_idle_timeout(&mut self, timeout: Duration) {
-        self.idle_timeout = timeout;
+        self.options.set_idle_timeout(timeout);
+        self.timers.set_default_idle_timeout(timeout);
     }
 
     /// Set keepalive interval
     pub fn set_keepalive_interval(&mut self, interval: Duration) {
-        self.keepalive_interval = interval;
+        self.options.set_keepalive_interval(interval);
+        self.timers.set_default_keepalive_interval(interval);
     }
 
     /// Check if socket is closed
@@ -205,23 +217,16 @@ impl UtpSocket {
             return Err(UtpSocketError::SocketClosed);
         }
 
-        if self.connections.len() >= MAX_CONNECTIONS {
+        if self.connections.len() >= self.options.max_connections() {
             return Err(UtpSocketError::MaxConnectionsReached);
         }
 
-        let mut attempts = 0;
-        let (conn, syn_packet, conn_id) = loop {
-            attempts += 1;
-            if attempts > MAX_CONNECTIONS + 1 {
-                return Err(UtpSocketError::MaxConnectionsReached);
-            }
-            let mut conn = UtpConnection::new();
-            let syn_packet = conn.connect(remote_addr)?;
-            let conn_id = conn.local_connection_id();
-            if !self.connections.contains_key(&conn_id) {
-                break (conn, syn_packet, conn_id);
-            }
-        };
+        let conn_id = find_available_connection_id(rand::random(), |connection_id| {
+            self.connections.contains_key(&connection_id)
+        })
+        .ok_or(UtpSocketError::MaxConnectionsReached)?;
+        let mut conn = UtpConnection::new();
+        let syn_packet = conn.connect_with_local_id(remote_addr, conn_id)?;
 
         self.send_packet(&syn_packet, remote_addr)?;
 
@@ -229,8 +234,11 @@ impl UtpSocket {
 
         self.connections.insert(conn_id, conn);
 
-        self.timers
-            .set_timer(conn_id, TimerType::ConnectTimeout, self.connect_timeout);
+        self.timers.set_timer(
+            conn_id,
+            TimerType::ConnectTimeout,
+            self.options.connect_timeout(),
+        );
         self.timers
             .set_timer(conn_id, TimerType::Retransmit(syn_packet.seq_nr), rto);
 
@@ -359,9 +367,14 @@ impl UtpSocket {
                             let mut congestion_loss_applied = false;
                             let mut fast_retransmissions = Vec::new();
                             for seq_nr in handling.fast_retransmit {
-                                if let Some(retransmission) =
-                                    conn.retransmit_packet(seq_nr, !congestion_loss_applied)
-                                {
+                                if let Some(retransmission) = conn.retransmit_packet(
+                                    seq_nr,
+                                    if congestion_loss_applied {
+                                        super::connection::RetransmitEvent::None
+                                    } else {
+                                        super::connection::RetransmitEvent::Loss
+                                    },
+                                ) {
                                     if retransmission.packet_type().ok() == Some(PacketType::StData)
                                     {
                                         congestion_loss_applied = true;
@@ -370,7 +383,7 @@ impl UtpSocket {
                                     fast_retransmissions.push((seq_nr, retransmission));
                                 }
                             }
-                            let keepalive_interval = self.keepalive_interval;
+                            let keepalive_interval = self.options.keepalive_interval();
                             (
                                 handling.response_packets,
                                 handling.acknowledged,
@@ -413,12 +426,17 @@ impl UtpSocket {
                                 TimerType::Keepalive,
                                 keepalive_interval,
                             );
+                            self.timers.set_timer(
+                                conn_id,
+                                TimerType::IdleTimeout,
+                                self.options.idle_timeout(),
+                            );
                         }
                         ConnectionState::Closing => {
                             self.timers.set_timer(
                                 conn_id,
                                 TimerType::IdleTimeout,
-                                self.idle_timeout,
+                                self.options.idle_timeout(),
                             );
                         }
                         _ => {}
@@ -447,7 +465,7 @@ impl UtpSocket {
             return Ok(());
         }
 
-        if self.connections.len() >= MAX_CONNECTIONS {
+        if self.connections.len() >= self.options.max_connections() {
             let mut reset = UtpPacket::reset(packet.connection_id);
             reset.timestamp_microseconds = self.timestamp_origin.elapsed().as_micros() as u32;
             self.send_packet(&reset, addr)?;
@@ -462,8 +480,13 @@ impl UtpSocket {
 
         self.connections.insert(conn_id, conn);
 
+        self.timers.set_timer(
+            conn_id,
+            TimerType::Keepalive,
+            self.options.keepalive_interval(),
+        );
         self.timers
-            .set_timer(conn_id, TimerType::Keepalive, self.keepalive_interval);
+            .set_timer(conn_id, TimerType::IdleTimeout, self.options.idle_timeout());
 
         Ok(())
     }

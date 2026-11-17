@@ -1,19 +1,17 @@
 //! FTP control connection establishment and data-channel TLS.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::io::BufReader;
 use tracing::{debug, info};
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
-use aria2_protocol::ftp::connection::control_io::{FtpControlWriteError, write_control_command};
-use aria2_protocol::ftp::tls::{self as tls, FtpControlStream, FtpDataStream, FtpsConfig};
+use aria2_protocol::ftp::connection::{FtpControlSession, FtpControlSessionError};
+use aria2_protocol::ftp::tls::{self as tls, FtpControlStream, FtpDataStream, FtpsClient};
 
-use crate::ftp::connection::{
-    FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig, read_response_impl,
-};
+use crate::ftp::connection::{FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig};
+use crate::ftp::connection_pool::PooledControlSession;
 use crate::network::{ConnectionContext, OutboundNetworkPolicy};
 
 // ---------------------------------------------------------------------------
@@ -22,14 +20,49 @@ use crate::network::{ConnectionContext, OutboundNetworkPolicy};
 
 /// Raw FTP control connection handler
 pub(super) struct RawFtpControl {
-    pub(super) reader: BufReader<FtpControlStream>,
+    pub(super) reader: FtpControlSession<FtpControlStream>,
     pub(super) host: String,
     pub(super) connection: ConnectionContext,
-    pub(super) ftps_config: Option<FtpsConfig>,
+    pub(super) ftps_client: Option<FtpsClient>,
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    request_timeout: Option<Duration>,
+    pool_lifetime: (Instant, u64),
 }
 
 impl RawFtpControl {
+    pub(super) fn from_pooled(session: PooledControlSession) -> Self {
+        let (
+            reader,
+            connection,
+            ftps_client,
+            outbound_network_policy,
+            created_at,
+            _last_used,
+            reuse_count,
+        ) = session.into_parts();
+        Self {
+            reader,
+            host: connection.endpoint.hostname().to_owned(),
+            connection,
+            ftps_client,
+            outbound_network_policy,
+            request_timeout: None,
+            pool_lifetime: (created_at, reuse_count),
+        }
+    }
+
+    pub(super) fn into_pooled(self) -> PooledControlSession {
+        let (created_at, reuse_count) = self.pool_lifetime;
+        let mut pooled = PooledControlSession::new(
+            self.reader,
+            self.connection,
+            self.ftps_client,
+            self.outbound_network_policy,
+        );
+        pooled.restore_lifetime(created_at, reuse_count);
+        pooled
+    }
+
     async fn connect_tcp_at(
         host: &str,
         port: u16,
@@ -67,21 +100,45 @@ impl RawFtpControl {
         stream: FtpControlStream,
         host: &str,
         connection: ConnectionContext,
-        ftps_config: Option<FtpsConfig>,
+        ftps_client: Option<FtpsClient>,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
         Self {
-            reader: BufReader::new(stream),
+            reader: FtpControlSession::new(stream),
             host: host.to_string(),
             connection,
-            ftps_config,
+            ftps_client,
             outbound_network_policy,
+            request_timeout: None,
+            pool_lifetime: (Instant::now(), 0),
         }
     }
 
-    async fn read_welcome(&mut self) -> Result<()> {
+    pub(super) fn set_request_timeout(&mut self, timeout: Option<Duration>) {
+        self.request_timeout = timeout;
+    }
+
+    pub(super) fn command_timeout(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(|| Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS))
+    }
+
+    pub(super) fn data_connection_timeout(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(|| Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS))
+    }
+
+    pub(super) fn transfer_completion_timeout(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(|| Duration::from_secs(constants::FTP_TRANSFER_COMPLETE_TIMEOUT_SECS))
+    }
+
+    async fn read_welcome(&mut self, request_timeout: Option<Duration>) -> Result<()> {
         let welcome = self
-            .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
+            .read_response(
+                request_timeout
+                    .unwrap_or_else(|| Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS)),
+            )
             .await?;
 
         if welcome.0 != 220 {
@@ -96,28 +153,27 @@ impl RawFtpControl {
     }
 
     /// Send a command to the FTP server.
+    #[cfg(test)]
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        debug!("FTP CMD: {}", cmd.trim());
-        write_control_command(self.reader.get_mut(), cmd)
+        debug!(
+            "FTP CMD: {}",
+            cmd.split_whitespace().next().unwrap_or_default()
+        );
+        self.reader
+            .send_command(cmd)
             .await
-            .map_err(|error| {
-                let message = match error {
-                    FtpControlWriteError::Command(error)
-                    | FtpControlWriteError::Terminator(error) => {
-                        format!("FTP write command failed: {}", error)
-                    }
-                    FtpControlWriteError::Flush(error) => {
-                        format!("FTP flush failed: {}", error)
-                    }
-                };
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message })
-            })?;
+            .map_err(map_session_error)?;
         Ok(())
     }
 
     /// Read response from FTP server with timeout.
     pub(super) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
-        read_response_impl(&mut self.reader, timeout_dur).await
+        let response = self
+            .reader
+            .read_response(timeout_dur)
+            .await
+            .map_err(map_session_error)?;
+        Ok((response.code, response.message))
     }
 
     pub(super) fn connection_context(&self) -> &ConnectionContext {
@@ -128,8 +184,9 @@ impl RawFtpControl {
         &self,
         stream: tokio::net::TcpStream,
     ) -> Result<FtpDataStream> {
-        if let Some(config) = &self.ftps_config {
-            let tls_stream = tls::upgrade_data_stream(stream, &self.host, config)
+        if let Some(client) = &self.ftps_client {
+            let tls_stream = client
+                .upgrade_data_stream(stream, &self.host)
                 .await
                 .map_err(|error| {
                     Aria2Error::Network(format!("FTPS data TLS handshake failed: {}", error))
@@ -141,6 +198,7 @@ impl RawFtpControl {
     }
 
     /// Send command and read response in one operation.
+    #[cfg(test)]
     pub(super) async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
         self.send_command(cmd).await?;
         self.read_response(Duration::from_secs(constants::FTP_COMMAND_TIMEOUT_SECS))
@@ -152,6 +210,7 @@ impl RawFtpControl {
         port: u16,
         socket_addr: std::net::SocketAddr,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(
             host,
@@ -167,7 +226,7 @@ impl RawFtpControl {
             None,
             outbound_network_policy,
         );
-        ctrl.read_welcome().await?;
+        ctrl.read_welcome(request_timeout).await?;
 
         info!("Connected to FTP server {}:{}", host, port);
         Ok(ctrl)
@@ -182,9 +241,10 @@ impl RawFtpControl {
         host: &str,
         port: u16,
         proxy: &FtpProxyConfig,
-        ftps_config: Option<&FtpsConfig>,
+        ftps_client: Option<&FtpsClient>,
         ftps_implicit: bool,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let tunnel_config = FtpProxyTunnelConfig {
             proxy_host: proxy.proxy_host.clone(),
@@ -206,22 +266,27 @@ impl RawFtpControl {
         })?;
         let connection = ConnectionContext::new(host, port, peer_addr);
 
-        if let Some(config) = ftps_config {
+        if let Some(client) = ftps_client {
             if ftps_implicit {
-                let tls_stream = tls::perform_tls_handshake(stream, host, config)
-                    .await
-                    .map_err(|error| {
-                        Aria2Error::Network(format!("FTPS proxy TLS handshake failed: {}", error))
-                    })?;
+                let tls_stream =
+                    client
+                        .perform_tls_handshake(stream, host)
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::Network(format!(
+                                "FTPS proxy TLS handshake failed: {}",
+                                error
+                            ))
+                        })?;
                 let mut ctrl = Self::from_stream(
                     FtpControlStream::Tls(Box::new(tls_stream)),
                     host,
                     connection,
-                    Some(config.clone()),
+                    Some(client.clone()),
                     Arc::clone(&outbound_network_policy),
                 );
-                ctrl.read_welcome().await?;
-                tls::negotiate_protected_data_channel(&mut ctrl.reader)
+                ctrl.read_welcome(request_timeout).await?;
+                tls::negotiate_protected_data_channel(ctrl.reader.reader_mut())
                     .await
                     .map_err(|error| {
                         Aria2Error::Network(format!("FTPS data protection failed: {}", error))
@@ -236,7 +301,7 @@ impl RawFtpControl {
                 None,
                 Arc::clone(&outbound_network_policy),
             );
-            plain.read_welcome().await?;
+            plain.read_welcome(request_timeout).await?;
             let Self {
                 reader,
                 host,
@@ -247,19 +312,21 @@ impl RawFtpControl {
                 FtpControlStream::Plain(stream) => stream,
                 FtpControlStream::Tls(_) => unreachable!("fresh FTPS proxy stream is plain"),
             };
-            let tls_stream = tls::upgrade_control_stream(stream, &host, config)
-                .await
-                .map_err(|error| {
-                    Aria2Error::Network(format!("FTPS proxy control upgrade failed: {}", error))
-                })?;
+            let tls_stream =
+                client
+                    .upgrade_control_stream(stream, &host)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::Network(format!("FTPS proxy control upgrade failed: {}", error))
+                    })?;
             let mut ctrl = Self::from_stream(
                 FtpControlStream::Tls(Box::new(tls_stream)),
                 &host,
                 connection,
-                Some(config.clone()),
+                Some(client.clone()),
                 Arc::clone(&outbound_network_policy),
             );
-            ctrl.read_welcome().await?;
+            ctrl.read_welcome(request_timeout).await?;
             return Ok(ctrl);
         }
 
@@ -270,7 +337,7 @@ impl RawFtpControl {
             None,
             outbound_network_policy,
         );
-        ctrl.read_welcome().await?;
+        ctrl.read_welcome(request_timeout).await?;
         info!(
             "Connected to FTP server {}:{} through HTTP proxy {}:{}",
             host, port, proxy.proxy_host, proxy.proxy_port
@@ -283,8 +350,9 @@ impl RawFtpControl {
         host: &str,
         port: u16,
         socket_addr: std::net::SocketAddr,
-        config: &FtpsConfig,
+        client: &FtpsClient,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(
             host,
@@ -300,7 +368,7 @@ impl RawFtpControl {
             None,
             Arc::clone(&outbound_network_policy),
         );
-        plain.read_welcome().await?;
+        plain.read_welcome(request_timeout).await?;
 
         let Self {
             reader,
@@ -312,7 +380,8 @@ impl RawFtpControl {
             FtpControlStream::Plain(stream) => stream,
             FtpControlStream::Tls(_) => unreachable!("fresh FTPS control stream is plain"),
         };
-        let tls_stream = tls::upgrade_control_stream(stream, &host, config)
+        let tls_stream = client
+            .upgrade_control_stream(stream, &host)
             .await
             .map_err(|error| {
                 Aria2Error::Network(format!("FTPS control upgrade failed: {}", error))
@@ -323,7 +392,7 @@ impl RawFtpControl {
             FtpControlStream::Tls(Box::new(tls_stream)),
             &host,
             connection,
-            Some(config.clone()),
+            Some(client.clone()),
             outbound_network_policy,
         ))
     }
@@ -333,8 +402,9 @@ impl RawFtpControl {
         host: &str,
         port: u16,
         socket_addr: std::net::SocketAddr,
-        config: &FtpsConfig,
+        client: &FtpsClient,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
+        request_timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(
             host,
@@ -343,7 +413,8 @@ impl RawFtpControl {
             Arc::clone(&outbound_network_policy),
         )
         .await?;
-        let tls_stream = tls::perform_tls_handshake(stream, host, config)
+        let tls_stream = client
+            .perform_tls_handshake(stream, host)
             .await
             .map_err(|error| {
                 Aria2Error::Network(format!("FTPS TLS handshake failed: {}", error))
@@ -352,12 +423,12 @@ impl RawFtpControl {
             FtpControlStream::Tls(Box::new(tls_stream)),
             host,
             connection,
-            Some(config.clone()),
+            Some(client.clone()),
             outbound_network_policy,
         );
-        ctrl.read_welcome().await?;
+        ctrl.read_welcome(request_timeout).await?;
 
-        tls::negotiate_protected_data_channel(&mut ctrl.reader)
+        tls::negotiate_protected_data_channel(ctrl.reader.reader_mut())
             .await
             .map_err(|error| {
                 Aria2Error::Network(format!("FTPS data protection failed: {}", error))
@@ -370,3 +441,85 @@ impl RawFtpControl {
         Ok(ctrl)
     }
 }
+
+pub(super) fn map_session_error(error: FtpControlSessionError) -> Aria2Error {
+    use aria2_protocol::ftp::connection::control_io::FtpControlReadError;
+
+    match error {
+        FtpControlSessionError::ReadTimeout(timeout) => {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("FTP response timeout after {timeout:?}"),
+            })
+        }
+        FtpControlSessionError::Read(FtpControlReadError::Timeout) => {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: "FTP response timeout".into(),
+            })
+        }
+        FtpControlSessionError::Read(FtpControlReadError::Io(error)) => {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("FTP read response error: {error}"),
+            })
+        }
+        FtpControlSessionError::Write(error) => {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("FTP write command failed: {error}"),
+            })
+        }
+        FtpControlSessionError::InvalidResponse(line) => {
+            Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+                message: format!("Invalid FTP response line: {line:?}"),
+            })
+        }
+        FtpControlSessionError::InvalidValue(message) => {
+            Aria2Error::Recoverable(RecoverableError::FtpProtocolError { message })
+        }
+        FtpControlSessionError::Rejected { command, response } => {
+            if response.code == 550 && matches!(command, "CWD" | "SIZE" | "RETR") {
+                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+            } else {
+                let message = match command {
+                    "USER" => format!(
+                        "Unexpected USER response: {} {}",
+                        response.code, response.message
+                    ),
+                    "PASS" => format!("Login failed: {} {}", response.code, response.message),
+                    "TYPE A" => format!(
+                        "TYPE A (ASCII) failed: {} {}",
+                        response.code, response.message
+                    ),
+                    "TYPE I" => format!(
+                        "TYPE I (binary) failed: {} {}",
+                        response.code, response.message
+                    ),
+                    "PWD" | "CWD" | "PASV" | "PORT" => {
+                        format!("{command} failed: {} {}", response.code, response.message)
+                    }
+                    "EPRT" => format!(
+                        "EPRT failed for IPv6: {} {}",
+                        response.code, response.message
+                    ),
+                    "RETR" => format!(
+                        "RETR unexpected response: {} {}",
+                        response.code, response.message
+                    ),
+                    _ => format!("{command} failed: {} {}", response.code, response.message),
+                };
+                Aria2Error::Recoverable(RecoverableError::FtpProtocolError { message })
+            }
+        }
+        FtpControlSessionError::IncompleteResponse => {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: "FTP response ended before CRLF-terminated response was complete".into(),
+            })
+        }
+        FtpControlSessionError::ResponseTooLarge(bytes) => {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Max FTP recv buffer reached. length={bytes}"),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

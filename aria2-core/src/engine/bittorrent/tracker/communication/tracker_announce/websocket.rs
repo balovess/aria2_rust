@@ -27,6 +27,8 @@ impl TrackerAnnouncer {
                 numwant: self.announce.numwant(),
                 port: self.announce.tcp_port(),
                 event,
+                request_timeout: Duration::from_secs(self.tracker_timeout_secs),
+                connect_timeout: Duration::from_secs(self.tracker_connect_timeout_secs),
                 options: &self.websocket_options,
             },
             &self.outbound_network_policy,
@@ -36,7 +38,11 @@ impl TrackerAnnouncer {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
+                warn!(
+                    tracker = %aria2_protocol::http::redirect::url_origin_for_logging(tracker_url),
+                    error_kind = ?error.kind,
+                    "WebSocket tracker announce failed"
+                );
                 self.last_failure_kind = Some(error.kind);
                 self.announce.announce_failure();
                 return None;

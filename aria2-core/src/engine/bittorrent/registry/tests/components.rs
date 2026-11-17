@@ -6,7 +6,91 @@ use std::sync::Arc;
 use crate::download::DownloadContext;
 use crate::engine::bittorrent::peer::storage::PeerStorage;
 use crate::engine::bittorrent::tracker::communication::BtAnnounce;
+use crate::request::request_group::DownloadOptions;
 use crate::segment::piece_storage::PieceStorage;
+
+#[test]
+fn dht_engine_configuration_uses_process_options_over_task_overrides() {
+    let mut registry = BtRegistry::new();
+    let process_options = DownloadOptions {
+        dht_message_timeout: 17,
+        dht_listen_port: Some("49000-49001".to_string()),
+        dht_file_path: Some("process-dht.dat".to_string()),
+        ..Default::default()
+    };
+    registry.set_global_dht_options(Arc::new(
+        crate::engine::bittorrent::dht::config::DhtEngineOptions::from(&process_options),
+    ));
+
+    let task_options = DownloadOptions {
+        dht_message_timeout: 3,
+        dht_listen_port: Some("50000".to_string()),
+        dht_file_path: Some("task-dht.dat".to_string()),
+        ..Default::default()
+    };
+    let options = registry.global_dht_options();
+
+    assert_eq!(options.dht_message_timeout, 17);
+    assert_eq!(options.dht_listen_port.as_deref(), Some("49000-49001"));
+    assert_eq!(options.dht_file_path.as_deref(), Some("process-dht.dat"));
+    assert_ne!(
+        options.dht_message_timeout,
+        task_options.dht_message_timeout
+    );
+}
+
+#[test]
+fn registry_default_dht_configuration_does_not_inherit_task_overrides() {
+    let registry = BtRegistry::new();
+    let task_options = DownloadOptions {
+        dht_message_timeout: 3,
+        dht_listen_port: Some("50000".to_string()),
+        dht_file_path: Some("task-dht.dat".to_string()),
+        ..Default::default()
+    };
+    let options = registry.global_dht_options();
+    let defaults = crate::engine::bittorrent::dht::config::DhtEngineOptions::default();
+
+    assert_eq!(options.dht_message_timeout, defaults.dht_message_timeout);
+    assert_eq!(options.dht_listen_port, defaults.dht_listen_port);
+    assert_eq!(options.dht_file_path, defaults.dht_file_path);
+    assert_ne!(
+        options.dht_message_timeout,
+        task_options.dht_message_timeout
+    );
+}
+
+#[tokio::test]
+async fn global_dht_start_applies_process_peer_storage_limits() {
+    let registry = Arc::new(std::sync::RwLock::new(BtRegistry::new()));
+    let engine = BtRegistry::get_or_start_global_dht_engine_with_storage_config(
+        &registry,
+        91,
+        aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+        aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+            max_info_hashes: 7,
+            max_peers_per_info_hash: 5,
+        },
+    )
+    .await
+    .expect("process DHT engine should start with configured peer-storage limits");
+
+    assert_eq!(engine.stats().await.max_peer_info_hashes, 7);
+    registry
+        .write()
+        .unwrap()
+        .set_global_dht_peer_storage_config(
+            aria2_protocol::bittorrent::dht::DhtPeerStorageConfig {
+                max_info_hashes: 3,
+                max_peers_per_info_hash: 2,
+            },
+        );
+    assert_eq!(engine.stats().await.max_peer_info_hashes, 3);
+    let options = registry.read().unwrap().global_dht_options();
+    assert_eq!(options.dht_max_peer_info_hashes, 3);
+    assert_eq!(options.dht_max_peers_per_info_hash, 2);
+    engine.shutdown_async().await;
+}
 
 /// Helper: create a BtObject with DownloadContext and TorrentAttribute.
 fn make_bt_object_with_info_hash(
@@ -328,6 +412,25 @@ async fn global_dht_engine_install_returns_the_existing_canonical_engine() {
     first.shutdown_async().await;
     second.shutdown_async().await;
     ipv6.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn final_dht_shutdown_takes_download_engines_and_deduplicates_shared_handles() {
+    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+
+    let engine = DhtEngine::start(DhtEngineConfig::local())
+        .await
+        .expect("local DHT engine should start");
+    let mut registry = BtRegistry::new();
+    registry.set_global_dht_engine(Arc::clone(&engine));
+    registry.set_dht_engine_for_gid(7, Arc::clone(&engine));
+
+    let engines = registry.take_all_dht_engines();
+
+    assert_eq!(engines.len(), 1);
+    assert!(Arc::ptr_eq(&engines[0], &engine));
+    assert!(registry.get_dht_engines().is_empty());
+    engine.shutdown_async().await;
 }
 
 #[test]

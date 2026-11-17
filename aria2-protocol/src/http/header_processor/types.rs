@@ -1,0 +1,174 @@
+//! HTTP header types: parse state, response head, and size constants.
+
+/// Maximum allowed size for a single header field name (bytes).
+pub(super) const MAX_FIELD_NAME_LEN: usize = 1024;
+/// Maximum allowed size for a single header field value (bytes).
+pub(super) const MAX_FIELD_VALUE_LEN: usize = 8192;
+/// Maximum total header block size (bytes).
+///
+/// Matches aria2's `HttpHeaderProcessor` 8 KiB aggregate header limit while
+/// still bounding allocations from an untrusted peer.
+pub(super) const MAX_HEADER_SIZE: usize = 8 * 1024;
+
+// ---------------------------------------------------------------------------
+// HttpHeaderParseState
+// ---------------------------------------------------------------------------
+
+/// Parse state for the streaming HTTP header processor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HttpHeaderParseState {
+    /// Waiting for the status line to arrive.
+    ParsingStatusLine,
+    /// Status line received; collecting header lines.
+    ParsingHeaders,
+    /// End-of-headers marker (`\r\n\r\n`) received; header data is complete.
+    Complete,
+    /// Malformed input detected; parsing cannot continue.
+    Error(String),
+}
+
+impl HttpHeaderParseState {
+    /// Returns `true` if headers are fully parsed.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    /// Returns `true` if the processor is in an error state.
+    pub fn is_error(&self) -> bool {
+        matches!(self, Self::Error(_))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HttpResponseHead
+// ---------------------------------------------------------------------------
+
+/// Parsed HTTP response head (status line + headers, no body).
+///
+/// Header names are stored in lowercase for efficient case-insensitive lookup.
+/// Duplicate header names are preserved (important for `Set-Cookie` etc.).
+#[derive(Clone)]
+pub struct HttpResponseHead {
+    /// HTTP version string (e.g., `"HTTP/1.1"`)
+    pub http_version: String,
+    /// HTTP status code (e.g., 200, 404)
+    pub status_code: u16,
+    /// Reason phrase (e.g., `"OK"`, `"Not Found"`)
+    pub reason_phrase: String,
+    /// Ordered header name-value pairs; names are lowercase.
+    headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for HttpResponseHead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpResponseHead")
+            .field("http_version", &self.http_version)
+            .field("status_code", &self.status_code)
+            .field("reason_phrase", &self.reason_phrase)
+            .field("header_count", &self.headers.len())
+            .finish()
+    }
+}
+
+impl HttpResponseHead {
+    /// Create a new `HttpResponseHead` from its components.
+    pub(crate) fn new(
+        http_version: String,
+        status_code: u16,
+        reason_phrase: String,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            http_version,
+            status_code,
+            reason_phrase,
+            headers,
+        }
+    }
+
+    /// Create a response head from externally parsed HTTP components.
+    /// Header names are normalized to lowercase and duplicates are preserved.
+    pub fn from_parts(
+        http_version: String,
+        status_code: u16,
+        reason_phrase: String,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self::new(
+            http_version,
+            status_code,
+            reason_phrase,
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                .collect(),
+        )
+    }
+}
+
+impl HttpResponseHead {
+    /// Look up the first value for a header name (case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Look up all values for a header name (case-insensitive).
+    /// Useful for headers like `Set-Cookie` that may appear multiple times.
+    pub fn header_all(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    /// Parse `Content-Length` header value as `u64`.
+    pub fn content_length(&self) -> Option<u64> {
+        self.header("content-length")
+            .and_then(|v| v.parse::<u64>().ok())
+    }
+
+    /// Check whether `Transfer-Encoding` header is present.
+    pub fn has_transfer_encoding(&self) -> bool {
+        self.header("transfer-encoding").is_some()
+    }
+
+    /// Returns an iterator over all header name-value pairs.
+    pub fn iter_headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpResponseHead;
+
+    #[test]
+    fn response_head_debug_redacts_sensitive_header_values() {
+        let response = HttpResponseHead::from_parts(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            vec![
+                (
+                    "Set-Cookie".to_string(),
+                    "session=cookie-secret".to_string(),
+                ),
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Digest nonce=challenge-secret".to_string(),
+                ),
+            ],
+        );
+
+        let debug = format!("{response:?}");
+        assert!(debug.contains("status_code: 200"));
+        assert!(debug.contains("header_count: 2"));
+        assert!(!debug.contains("cookie-secret"));
+        assert!(!debug.contains("challenge-secret"));
+    }
+}

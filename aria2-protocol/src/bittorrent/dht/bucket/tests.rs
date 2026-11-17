@@ -35,6 +35,22 @@ fn test_add_node() {
 }
 
 #[test]
+fn unverified_duplicate_cannot_replace_verified_node_endpoint() {
+    let local = make_local_node();
+    let mut bucket = Bucket::new(&local);
+    let node_id = [0x21; 20];
+    let verified_addr: SocketAddr = "192.0.2.1:6881".parse().unwrap();
+    let advertised_addr: SocketAddr = "198.51.100.9:6881".parse().unwrap();
+    bucket.add_node(DhtNode::new(node_id, verified_addr));
+
+    bucket.add_node(DhtNode::unverified(node_id, advertised_addr));
+
+    assert_eq!(bucket.count_node(), 1);
+    assert_eq!(bucket.nodes()[0].addr(), verified_addr);
+    assert!(bucket.nodes()[0].is_good());
+}
+
+#[test]
 fn test_add_node_full_bucket_replaces_bad() {
     let local = make_local_node();
     let mut bucket = Bucket::new(&local);
@@ -72,10 +88,13 @@ fn test_add_node_full_bucket_rejects() {
         bucket.add_node(node);
     }
     assert!(bucket.is_full());
+    let previous_update = std::time::Instant::now() - std::time::Duration::from_secs(1_800);
+    bucket.last_updated = previous_update;
 
     // All nodes are good; new node should be rejected.
     let new_node = DhtNode::new([0xFFu8; 20], "127.0.0.1:9999".parse().unwrap());
     assert!(!bucket.add_node(new_node));
+    assert_eq!(bucket.last_updated, previous_update);
 }
 
 #[test]
@@ -162,6 +181,30 @@ fn test_cache_node_limit() {
 }
 
 #[test]
+fn replacement_cache_deduplicates_ids_and_active_nodes() {
+    let local = make_local_node();
+    let mut bucket = Bucket::new(&local);
+    let active_id = [1; 20];
+    let candidate_id = [2; 20];
+    bucket.add_node(DhtNode::new(active_id, "127.0.0.1:6882".parse().unwrap()));
+
+    bucket.cache_node(DhtNode::new(active_id, "127.0.0.1:6999".parse().unwrap()));
+    bucket.cache_node(DhtNode::new(
+        candidate_id,
+        "127.0.0.1:6883".parse().unwrap(),
+    ));
+    bucket.cache_node(DhtNode::new(
+        candidate_id,
+        "127.0.0.1:6884".parse().unwrap(),
+    ));
+
+    assert_eq!(bucket.cached_nodes().len(), 1);
+    assert_eq!(bucket.cached_nodes()[0].id(), &candidate_id);
+    assert_eq!(bucket.cached_nodes()[0].addr().port(), 6884);
+    assert!(bucket.nodes().iter().any(|node| node.id() == &active_id));
+}
+
+#[test]
 fn test_drop_node_promotes_cached() {
     let local = make_local_node();
     let mut bucket = Bucket::new(&local);
@@ -212,6 +255,21 @@ fn test_get_random_node_id() {
     let id = bucket.get_random_node_id();
     // For a full-range bucket, the ID should be within range.
     assert!(bucket.is_in_range(&id));
+}
+
+#[test]
+fn random_bucket_target_preserves_only_non_random_prefix_bits() {
+    let local_id = [0x80; 20];
+    let mut min_id = [0; 20];
+    min_id[..2].copy_from_slice(&[0x80, 0x80]);
+    let bucket = Bucket::new_for_range(9, min_id, [0xFF; 20], local_id);
+    let mut random_id = [0xFF; 20];
+
+    bucket.apply_fixed_prefix(&mut random_id);
+
+    assert_eq!(random_id[0], 0x80);
+    assert_eq!(random_id[1], 0xFF);
+    assert!(bucket.is_in_range(&random_id));
 }
 
 #[test]

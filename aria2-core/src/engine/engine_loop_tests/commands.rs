@@ -23,6 +23,7 @@ async fn state_changing_command_marks_dirty_and_persists() {
         group_man: man,
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
         outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        ftp_connection_pool: Arc::new(crate::ftp::connection_pool::FtpConnectionPool::new(4)),
         auto_save: Some(auto_save.clone()),
         auto_save_dirty_signal: Some(auto_save_dirty_signal),
         event_hooks: Arc::new(DownloadEventHooks::new()),
@@ -48,6 +49,8 @@ async fn state_changing_command_marks_dirty_and_persists() {
         ),
         #[cfg(feature = "bittorrent")]
         lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
+        #[cfg(feature = "bittorrent")]
+        open_file_budget: crate::filesystem::open_file_budget::OpenFileBudget::new(100),
     };
 
     // Send an AddDownload command through the engine-command channel.
@@ -129,6 +132,87 @@ async fn global_rate_limit_command_updates_shared_limiter_and_snapshot() {
     let man = &ctx.group_man;
     assert_eq!(man.global_download_limit(), Some(2_000));
     assert_eq!(man.global_upload_limit(), Some(1_000));
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn bt_max_open_files_command_updates_the_shared_budget() {
+    let mut ctx = test_ctx(false);
+    let (tx, mut rx) = crate::engine::engine_command::channel();
+    tx.send(EngineCommand::SetBtMaxOpenFiles { max: 17 })
+        .unwrap();
+    let mut running_downloads = Vec::new();
+    let mut halt_requested = false;
+    let mut force_halt_requested = false;
+    let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+
+    process_engine_commands(
+        &mut ctx,
+        &mut rx,
+        &mut running_downloads,
+        &mut halt_requested,
+        &mut force_halt_requested,
+        &completion_tx,
+    )
+    .await;
+
+    assert_eq!(ctx.open_file_budget.max_open_files(), 17);
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn incoming_handshake_timeout_command_updates_live_listener_behavior() {
+    use crate::engine::bittorrent::peer::listener::BtPeerRouteConfig;
+    use crate::engine::bittorrent::peer::storage::DefaultPeerStorage;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut ctx = test_ctx(false);
+    let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+    let (port, _incoming, _route) = ctx
+        .bt_listener
+        .register(BtPeerRouteConfig {
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ports: vec![0],
+            info_hash: [102; 20],
+            info_hash_v2: None,
+            local_peer_id: [1; 20],
+            caretaker_id: 102,
+            max_peers: 1,
+            peer_storage: storage,
+            crypto_policy: Default::default(),
+            dht_enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let (tx, mut rx) = crate::engine::engine_command::channel();
+    tx.send(EngineCommand::SetIncomingPeerHandshakeTimeout { seconds: 1 })
+        .unwrap();
+    let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+    process_engine_commands(
+        &mut ctx,
+        &mut rx,
+        &mut Vec::new(),
+        &mut false,
+        &mut false,
+        &completion_tx,
+    )
+    .await;
+
+    let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    stream.write_all(b"x").await.unwrap();
+    let mut byte = [0; 1];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+    ctx.bt_listener.shutdown().await;
+    assert_eq!(
+        read.expect("runtime timeout command should close the incomplete handshake")
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

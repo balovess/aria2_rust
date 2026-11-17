@@ -1,7 +1,7 @@
 //! SFTP packet types, wire encoding, and protocol constants.
 //!
-//! Implements the SSH File Transfer Protocol (IETF draft-ietf-secsh-filexfer-02 / v3-v6)
-//! packet types with binary encode/decode for the russh channel transport.
+//! Implements the SFTP version 3 packet types used by the session layer, with
+//! binary encode/decode for the russh channel transport.
 //!
 //! ## Wire Format
 //!

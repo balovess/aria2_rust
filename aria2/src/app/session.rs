@@ -100,8 +100,13 @@ impl App {
 
             // Keep the persisted request options separate from Rust-only
             // session metadata before reconstructing execution settings.
-            let option_snapshot = Self::session_option_snapshot(&entry.options);
-            let opts = Self::map_entry_to_download_options(&entry.options);
+            let mut restored_options = entry.options.clone();
+            // A session entry represents interrupted work. Resume from its
+            // data/control files even if persisted per-task options disabled
+            // continuation or came from an older session without that option.
+            restored_options.insert("continue".to_string(), "true".to_string());
+            let option_snapshot = Self::session_option_snapshot(&restored_options);
+            let opts = Self::map_entry_to_download_options(&restored_options);
 
             #[cfg(all(feature = "metalink", feature = "bittorrent"))]
             if let Some(payload_gid) = standard_graph_payload_gid(entry) {
@@ -168,6 +173,11 @@ impl App {
                             }
                             group.update_progress(entry.completed_length);
                             group.set_total_length(entry.total_length);
+                        }
+                        if (entry.paused || entry.status == "paused")
+                            && let Err(error) = self.request_man.pause_group(gid)
+                        {
+                            warn!(gid = %gid.value(), error = %error, "Failed to restore paused task state");
                         }
                     }
                     Err(e) => {

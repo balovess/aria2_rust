@@ -299,9 +299,6 @@ impl SessionPersistence {
 
         // Build DownloadOptions from stored state
         let mut options = DownloadOptions::from_option_strings(&resume_data.options);
-        if let Some(value) = resume_data.options.get("ssh-host-key-md") {
-            options.ssh_host_key_md = Some(value.clone());
-        }
 
         // Set output path if available
         if let Some(ref output_path) = resume_data.output_path {

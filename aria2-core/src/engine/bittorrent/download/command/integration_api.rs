@@ -10,12 +10,26 @@ use crate::engine::hook_manager::HookManager;
 // ==================== P1/P2 Integration API ====================
 
 impl BtDownloadCommand {
+    pub(crate) fn set_open_file_budget(
+        &mut self,
+        budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
+    ) {
+        self.open_file_budget = Some(budget);
+    }
+
     /// Set the process-wide policy used for outbound peer connections.
     pub fn set_outbound_network_policy(
         &mut self,
         policy: Arc<crate::network::OutboundNetworkPolicy>,
     ) {
         self.outbound_network_policy = policy;
+    }
+
+    pub(crate) fn set_dns_cache(
+        &mut self,
+        dns_cache: Arc<tokio::sync::Mutex<crate::dns::dns_cache::DnsCache>>,
+    ) {
+        self.dns_cache = dns_cache;
     }
 
     /// Enable BT progress persistence for resume support.

@@ -45,10 +45,10 @@ impl PieceStorage for DefaultPieceStorage {
             }
             StreamPieceSelectorKind::Random => {
                 // C++ RandomStreamPieceSelector: pick random start, then inorder
-                use rand::Rng;
+                use rand::RngExt;
                 let num_pieces = self.bfman.num_pieces();
                 let start = if num_pieces > 0 {
-                    rand::thread_rng().gen_range(0..num_pieces)
+                    rand::rng().random_range(0..num_pieces)
                 } else {
                     0
                 };

@@ -6,8 +6,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use super::super::bt_announce::{BtAnnounce, is_udp_tracker};
-use super::super::types::AnnounceEvent;
+use aria2_protocol::bittorrent::tracker::url::{
+    TrackerTransport, classify_tracker_url, is_udp_tracker_url,
+};
+
+use super::super::AnnounceEvent;
+use super::super::bt_announce::BtAnnounce;
 use crate::engine::bittorrent::tracker::udp_client::{
     UdpAnnounceParams, UdpError, UdpTrackerClient, resolve_udp_tracker_addr,
 };
@@ -67,7 +71,7 @@ pub struct TrackerAnnouncer {
     last_failure_kind: Option<TrackerFailureKind>,
     http_tls: ClientTlsConfig,
     outbound_network_policy: Arc<OutboundNetworkPolicy>,
-    http_clients: HashMap<Option<std::net::IpAddr>, reqwest::Client>,
+    http_clients: HashMap<(Option<std::net::IpAddr>, Option<String>), reqwest::Client>,
     websocket_options: DownloadOptions,
     tracker_timeout_secs: u64,
     tracker_connect_timeout_secs: u64,
@@ -120,9 +124,14 @@ impl TrackerAnnouncer {
         self.http_clients.clear();
     }
 
-    /// Apply per-download proxy and timeout options to WebSocket trackers.
+    /// Apply per-download proxy and timeout options to tracker transports.
     pub fn set_websocket_options(&mut self, options: &DownloadOptions) {
         self.websocket_options = options.clone();
+        self.set_timeouts(
+            Duration::from_secs(options.bt_tracker_timeout),
+            Duration::from_secs(options.bt_tracker_connect_timeout),
+        );
+        self.http_clients.clear();
     }
 
     /// Set the per-download tracker request and connection timeouts.
@@ -194,13 +203,10 @@ impl TrackerAnnouncer {
         self.tracker_attempt_started(&tracker_url);
         self.publish_runtime_snapshot();
         let event = self.announce.announce_list().get_event();
-        let result = if is_udp_tracker(&tracker_url) {
+        let result = if is_udp_tracker_url(&tracker_url) {
             self.announce_udp(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
                 .await
-        } else if reqwest::Url::parse(&tracker_url)
-            .ok()
-            .is_some_and(|url| matches!(url.scheme(), "ws" | "wss"))
-        {
+        } else if classify_tracker_url(&tracker_url) == Some(TrackerTransport::WebSocket) {
             self.announce_websocket(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
                 .await
         } else {
@@ -249,6 +255,9 @@ impl TrackerAnnouncer {
             return false;
         }
 
+        if let Some(client) = self.udp_client.as_mut() {
+            client.cancel_pending_requests();
+        }
         self.announce.announce_cancelled();
         self.tracker_attempt_finished(&tracker_url, false);
         self.publish_runtime_snapshot();

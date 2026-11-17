@@ -16,6 +16,7 @@ pub(crate) struct BtCommandServices {
     pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>,
     pub(crate) bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
     pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    pub(crate) open_file_budget: Arc<crate::filesystem::open_file_budget::OpenFileBudget>,
 }
 
 pub(crate) struct BtCommandAdapter {
@@ -45,20 +46,25 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
         let uri_lower = request.first_uri.to_ascii_lowercase();
         let bt_metadata = request.group.recover().bt_metadata_data();
         if uri_lower.starts_with("bt://") || bt_metadata.is_some() {
-            let torrent_bytes = bt_metadata
-                .or_else(|| {
-                    request
+            let torrent_bytes = match bt_metadata {
+                Some(metadata) => Some(metadata),
+                None => {
+                    let metadata_path = request
                         .group
                         .recover()
                         .metadata_info()
-                        .and_then(|info| info.metadata_path().map(std::path::PathBuf::from))
-                        .and_then(|path| std::fs::read(path).ok())
-                })
-                .ok_or_else(|| {
-                    Aria2Error::Fatal(FatalError::Config(
-                        "Resolved BitTorrent payload has no metadata source".to_string(),
-                    ))
-                })?;
+                        .and_then(|info| info.metadata_path().map(std::path::PathBuf::from));
+                    match metadata_path {
+                        Some(path) => tokio::fs::read(path).await.ok(),
+                        None => None,
+                    }
+                }
+            }
+            .ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "Resolved BitTorrent payload has no metadata source".to_string(),
+                ))
+            })?;
             let mut command = crate::engine::bittorrent::download::command::BtDownloadCommand::new_with_group_and_mappings_with_policy(
                 request.group,
                 &torrent_bytes,
@@ -67,9 +73,11 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
                 &[],
                 &services.outbound_network_policy,
             )?;
+            command.set_dns_cache(Arc::clone(&services.dns_cache));
             command.set_bt_listener(Arc::clone(&self.services.bt_listener));
             command.set_bt_registry(Arc::clone(&self.services.bt_registry));
             command.set_lpd_manager(Arc::clone(&self.services.lpd_manager));
+            command.set_open_file_budget(Arc::clone(&self.services.open_file_budget));
             if let Some(limiter) = services.global_limiter.clone() {
                 command.set_global_limiter(limiter);
             }
@@ -81,9 +89,11 @@ impl ProtocolCommandAdapter for BtCommandAdapter {
             request.group,
             request.options.dir.as_deref(),
         )?;
+        command.set_dns_cache(Arc::clone(&services.dns_cache));
         command.set_bt_listener(Arc::clone(&self.services.bt_listener));
         command.set_bt_registry(Arc::clone(&self.services.bt_registry));
         command.set_lpd_manager(Arc::clone(&self.services.lpd_manager));
+        command.set_open_file_budget(Arc::clone(&self.services.open_file_budget));
         command.set_outbound_network_policy(Arc::clone(&services.outbound_network_policy));
         if let Some(limiter) = services.global_limiter.clone() {
             command.set_global_limiter(limiter);

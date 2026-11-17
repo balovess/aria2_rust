@@ -3,7 +3,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
 
 /// FTP connection configuration options.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FtpOptions {
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
@@ -14,6 +14,27 @@ pub struct FtpOptions {
     pub keepalive_interval: Option<Duration>,
     /// Maximum number of retry attempts for transient errors.
     pub max_retries: u32,
+}
+
+impl std::fmt::Debug for FtpOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FtpOptions")
+            .field("connect_timeout", &self.connect_timeout)
+            .field("read_timeout", &self.read_timeout)
+            .field("passive_mode", &self.passive_mode)
+            .field(
+                "username",
+                &(!self.username.is_empty()).then_some("[REDACTED]"),
+            )
+            .field(
+                "password",
+                &(!self.password.is_empty()).then_some("[REDACTED]"),
+            )
+            .field("keepalive_interval", &self.keepalive_interval)
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
 }
 
 impl Default for FtpOptions {
@@ -170,5 +191,24 @@ impl FtpActiveDataListener {
     /// that apply their own network policy or diagnostics.
     pub async fn accept_with_peer(self) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
         self.listener.accept().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FtpOptions;
+
+    #[test]
+    fn ftp_options_debug_redacts_credentials() {
+        let options = FtpOptions {
+            username: "private-user".to_string(),
+            password: "private-password".to_string(),
+            ..FtpOptions::default()
+        };
+
+        let debug = format!("{options:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-user"));
+        assert!(!debug.contains("private-password"));
     }
 }

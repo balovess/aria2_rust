@@ -20,7 +20,10 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
         )));
     }
 
-    if trimmed.starts_with("magnet:?") || trimmed.starts_with("magnet?") {
+    if trimmed
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("magnet:?"))
+    {
         return Ok(ValidatedUri {
             original: trimmed.to_string(),
             scheme: "magnet".to_string(),
@@ -67,7 +70,7 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
 
 pub fn is_magnet_link(uri: &str) -> bool {
     let t = uri.trim().to_lowercase();
-    t.starts_with("magnet:?") || t.starts_with("magnet?")
+    t.starts_with("magnet:?")
 }
 
 pub fn is_torrent_file(path: &str) -> bool {
@@ -162,4 +165,19 @@ fn is_windows_reserved_name(name: &str) -> bool {
             && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
             && bytes[3].is_ascii_digit()
             && bytes[3] != b'0')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_magnet_link, validate};
+
+    #[test]
+    fn magnet_requires_colon_and_query_delimiter() {
+        assert!(is_magnet_link("magnet:?xt=urn:btih:hash"));
+        assert!(is_magnet_link("MAGNET:?xt=urn:btih:hash"));
+        assert!(!is_magnet_link("magnet?xt=urn:btih:hash"));
+        assert!(validate("magnet:?xt=urn:btih:hash").is_ok());
+        assert!(validate("MAGNET:?xt=urn:btih:hash").is_ok());
+        assert!(validate("magnet?xt=urn:btih:hash").is_err());
+    }
 }

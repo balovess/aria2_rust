@@ -21,6 +21,14 @@ pub struct BitTorrentArgs {
     #[arg(short = 'B', long = "bt-max-peers")]
     pub bt_max_peers: Option<u64>,
 
+    /// BitTorrent piece selection strategy
+    #[arg(long = "bt-piece-selection-strategy")]
+    pub bt_piece_selection_strategy: Option<String>,
+
+    /// Remaining pieces at which endgame mode starts (0 disables it)
+    #[arg(long = "bt-endgame-threshold")]
+    pub bt_endgame_threshold: Option<u64>,
+
     /// Maximum upload slots to unchoke
     #[arg(long = "bt-max-upload-slots")]
     pub bt_max_upload_slots: Option<u64>,
@@ -60,6 +68,26 @@ pub struct BitTorrentArgs {
     /// BitTorrent peer connection timeout in seconds
     #[arg(long = "peer-connection-timeout", hide = true)]
     pub peer_connection_timeout: Option<u64>,
+
+    /// Maximum wait per read during an incoming BitTorrent peer handshake, in seconds
+    #[arg(long = "bt-incoming-peer-handshake-timeout")]
+    pub bt_incoming_peer_handshake_timeout: Option<u64>,
+
+    /// Maximum simultaneous uTP connections per local endpoint
+    #[arg(long = "bt-utp-max-connections")]
+    pub bt_utp_max_connections: Option<u64>,
+
+    /// uTP connection establishment timeout in seconds
+    #[arg(long = "bt-utp-connect-timeout")]
+    pub bt_utp_connect_timeout: Option<u64>,
+
+    /// uTP inactive connection timeout in seconds
+    #[arg(long = "bt-utp-idle-timeout")]
+    pub bt_utp_idle_timeout: Option<u64>,
+
+    /// uTP keepalive interval in seconds
+    #[arg(long = "bt-utp-keepalive-interval")]
+    pub bt_utp_keepalive_interval: Option<u64>,
 
     /// Seed without verifying hash
     #[arg(
@@ -331,6 +359,14 @@ pub struct BitTorrentArgs {
     #[arg(long = "bt-tracker-update-interval")]
     pub bt_tracker_update_interval: Option<u64>,
 
+    /// Timeout for each public tracker source download in seconds
+    #[arg(long = "bt-tracker-source-timeout")]
+    pub bt_tracker_source_timeout: Option<u64>,
+
+    /// Maximum concurrent downloads of remote public tracker lists
+    #[arg(long = "bt-tracker-source-concurrency")]
+    pub bt_tracker_source_concurrency: Option<u64>,
+
     /// Connect timeout for tracker in seconds
     #[arg(long = "bt-tracker-connect-timeout")]
     pub bt_tracker_connect_timeout: Option<u64>,
@@ -383,6 +419,18 @@ pub struct BitTorrentArgs {
     #[arg(long = "dht-persistence-max-age")]
     pub dht_persistence_max_age: Option<u64>,
 
+    /// Maximum announced swarms retained by each DHT engine
+    #[arg(long = "dht-max-peer-info-hashes")]
+    pub dht_max_peer_info_hashes: Option<usize>,
+
+    /// Maximum announced peers retained for each DHT info-hash
+    #[arg(long = "dht-max-peers-per-info-hash")]
+    pub dht_max_peers_per_info_hash: Option<usize>,
+
+    /// Maximum BEP 44 items retained by each DHT engine
+    #[arg(long = "dht-max-items")]
+    pub dht_max_items: Option<usize>,
+
     /// Enable IPv6 DHT
     #[arg(
         long = "enable-dht6",
@@ -420,10 +468,6 @@ pub struct BitTorrentArgs {
     /// Peer agent string for BitTorrent
     #[arg(long = "peer-agent")]
     pub peer_agent: Option<String>,
-
-    /// Comma-separated list of file indices to download (BT/Metalink, 1-indexed)
-    #[arg(long = "select-file")]
-    pub select_file: Option<String>,
 
     /// Set output filename for a BitTorrent file index (INDEX=PATH, repeatable)
     #[arg(short = 'O', long = "index-out")]

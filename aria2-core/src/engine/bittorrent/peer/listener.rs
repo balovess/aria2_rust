@@ -3,15 +3,20 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+use aria2_protocol::bittorrent::utp::UtpSocketOptions;
 use rand::seq::SliceRandom;
-use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use aria2_protocol::bittorrent::peer::listener::PeerTcpListener;
+
 use super::storage::DefaultPeerStorage;
+
+/// Process-wide cap for incoming TCP and uTP peer handshake tasks.
+const MAX_CONCURRENT_INCOMING_HANDSHAKES: usize = 128;
 
 /// A successfully admitted incoming peer.
 pub struct IncomingPeer {
@@ -48,11 +53,13 @@ struct SharedRoute {
     sender: mpsc::Sender<IncomingPeer>,
     crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
     info_hash_v2: Option<[u8; 32]>,
-    dht_enabled: bool,
+    dht_enabled_ipv4: Arc<AtomicBool>,
+    dht_enabled_ipv6: Arc<AtomicBool>,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 struct SharedListenerState {
-    listeners: Vec<Arc<TcpListener>>,
+    listeners: Vec<Arc<PeerTcpListener>>,
     listener_tasks: Vec<tokio::task::JoinHandle<()>>,
     local_addr: Option<SocketAddr>,
     next_route_id: u64,
@@ -89,6 +96,9 @@ pub struct BtPeerListenerManager {
     utp_incoming_rx: Arc<
         tokio::sync::Mutex<Option<mpsc::Receiver<super::utp_transport::IncomingUtpConnection>>>,
     >,
+    incoming_handshake_slots: Arc<Semaphore>,
+    incoming_handshake_timeout_nanos: Arc<AtomicU64>,
+    utp_socket_options: Arc<std::sync::RwLock<UtpSocketOptions>>,
     shutdown: CancellationToken,
 }
 
@@ -97,6 +107,36 @@ pub struct BtPeerRouteHandle {
     routes: Weak<RwLock<HashMap<[u8; 20], SharedRoute>>>,
     info_hash: [u8; 20],
     id: u64,
+}
+
+impl BtPeerRouteHandle {
+    pub(crate) fn set_dht_capabilities(&self, ipv4: bool, ipv6: bool) {
+        let Some(routes) = self.routes.upgrade() else {
+            return;
+        };
+        let routes = routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(route) = routes
+            .get(&self.info_hash)
+            .filter(|route| route.id == self.id)
+        else {
+            return;
+        };
+        route.dht_enabled_ipv4.store(ipv4, Ordering::Release);
+        route.dht_enabled_ipv6.store(ipv6, Ordering::Release);
+    }
+}
+
+impl SharedRoute {
+    fn dht_enabled_for(&self, endpoint: SocketAddr) -> bool {
+        let enabled = if endpoint.is_ipv6() {
+            &self.dht_enabled_ipv6
+        } else {
+            &self.dht_enabled_ipv4
+        };
+        enabled.load(Ordering::Acquire)
+    }
 }
 
 impl BtPeerListenerManager {
@@ -114,8 +154,38 @@ impl BtPeerListenerManager {
             utp_transports: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             utp_incoming_tx,
             utp_incoming_rx: Arc::new(tokio::sync::Mutex::new(Some(utp_incoming_rx))),
+            incoming_handshake_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_INCOMING_HANDSHAKES)),
+            incoming_handshake_timeout_nanos: Arc::new(AtomicU64::new(
+                aria2_protocol::bittorrent::peer::incoming::IncomingHandshakeOptions::default()
+                    .read_timeout
+                    .as_nanos() as u64,
+            )),
+            utp_socket_options: Arc::new(std::sync::RwLock::new(UtpSocketOptions::default())),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Set the process-wide timeout applied while receiving incoming
+    /// BitTorrent TCP and uTP handshakes. New connections observe the updated
+    /// value.
+    pub fn set_incoming_handshake_timeout(&self, timeout: std::time::Duration) {
+        let timeout_nanos = if timeout.is_zero() {
+            1_000_000_000
+        } else {
+            timeout.as_nanos().min(u128::from(u64::MAX)) as u64
+        };
+        self.incoming_handshake_timeout_nanos
+            .store(timeout_nanos, Ordering::Relaxed);
+    }
+
+    /// Set uTP options used when creating transport actors for new endpoints.
+    /// Existing actors keep their current options because their sockets are
+    /// shared by all torrent routes registered on that endpoint.
+    pub fn set_utp_socket_options(&self, options: UtpSocketOptions) {
+        *self
+            .utp_socket_options
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = options;
     }
 
     /// Register or reuse the process-owned uTP actor for one local endpoint.
@@ -138,11 +208,29 @@ impl BtPeerListenerManager {
                     "BitTorrent peer listener is shutting down",
                 ));
             }
-            if let Some(transport) = transports.get(&address) {
+            let actor_finished = transports
+                .get(&address)
+                .is_some_and(super::utp_transport::UtpTransportActor::is_finished);
+            if !actor_finished && let Some(transport) = transports.get(&address) {
                 transport.handle()
             } else {
+                if let Some(stopped) = transports.remove(&address)
+                    && let Err(error) = stopped.join().await
+                {
+                    tracing::warn!(%error, %address, "Stopped uTP actor failed while joining before restart");
+                }
+                if self.shutdown.is_cancelled() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "BitTorrent peer listener is shutting down",
+                    ));
+                }
                 let transport = super::utp_transport::UtpTransportActor::bind(
                     address,
+                    self.utp_socket_options
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
                     self.utp_incoming_tx.clone(),
                     self.shutdown.clone(),
                 )?;
@@ -153,9 +241,14 @@ impl BtPeerListenerManager {
         };
 
         if let Some(receiver) = self.utp_incoming_rx.lock().await.take() {
+            let incoming_handshake_slots = Arc::clone(&self.incoming_handshake_slots);
+            let incoming_handshake_timeout_nanos =
+                Arc::clone(&self.incoming_handshake_timeout_nanos);
             let task = tokio::spawn(incoming::run_shared_utp_listener(
                 receiver,
                 Arc::clone(&self.routes),
+                incoming_handshake_slots,
+                incoming_handshake_timeout_nanos,
                 self.shutdown.clone(),
             ));
             self.state.lock().await.listener_tasks.push(task);
@@ -199,7 +292,7 @@ impl BtPeerListenerManager {
             // aria2_original starts one peer listener per address family. On
             // Windows, an IPv6 socket is commonly v6-only, so an IPv4 peer
             // returned by a tracker would otherwise receive ECONNREFUSED.
-            if let Ok(listener) = TcpListener::bind(SocketAddr::new(
+            if let Ok(listener) = PeerTcpListener::bind(SocketAddr::new(
                 IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 local_addr.port(),
             ))
@@ -214,12 +307,23 @@ impl BtPeerListenerManager {
 
         let routes = Arc::clone(&self.routes);
         let shutdown = self.shutdown.clone();
+        let incoming_handshake_slots = Arc::clone(&self.incoming_handshake_slots);
+        let incoming_handshake_timeout_nanos = Arc::clone(&self.incoming_handshake_timeout_nanos);
         let mut listener_tasks = Vec::with_capacity(listeners.len());
         for listener in listeners {
             let routes = Arc::clone(&routes);
             let shutdown = shutdown.clone();
+            let incoming_handshake_slots = Arc::clone(&incoming_handshake_slots);
+            let incoming_handshake_timeout_nanos = Arc::clone(&incoming_handshake_timeout_nanos);
             listener_tasks.push(tokio::spawn(async move {
-                incoming::run_shared_listener(listener, routes, shutdown).await;
+                incoming::run_shared_listener(
+                    listener,
+                    routes,
+                    incoming_handshake_slots,
+                    incoming_handshake_timeout_nanos,
+                    shutdown,
+                )
+                .await;
             }));
         }
         self.state
@@ -308,7 +412,9 @@ impl BtPeerListenerManager {
                 sender,
                 crypto_policy,
                 info_hash_v2,
-                dht_enabled,
+                dht_enabled_ipv4: Arc::new(AtomicBool::new(dht_enabled)),
+                dht_enabled_ipv6: Arc::new(AtomicBool::new(dht_enabled)),
+                cancellation: tokio_util::sync::CancellationToken::new(),
             },
         );
         drop(routes);
@@ -354,6 +460,9 @@ impl Drop for BtPeerRouteHandle {
             .get(&self.info_hash)
             .is_some_and(|route| route.id == self.id)
         {
+            if let Some(route) = routes.get(&self.info_hash) {
+                route.cancellation.cancel();
+            }
             routes.remove(&self.info_hash);
         }
     }
@@ -362,12 +471,12 @@ impl Drop for BtPeerRouteHandle {
 async fn bind_ports(
     bind_ip: IpAddr,
     ports: impl IntoIterator<Item = u16>,
-) -> io::Result<TcpListener> {
+) -> io::Result<PeerTcpListener> {
     let mut ports = ports.into_iter().collect::<Vec<_>>();
-    ports.shuffle(&mut rand::thread_rng());
+    ports.shuffle(&mut rand::rng());
     let mut last_error = None;
     for port in ports {
-        match TcpListener::bind(SocketAddr::new(bind_ip, port)).await {
+        match PeerTcpListener::bind(SocketAddr::new(bind_ip, port)).await {
             Ok(listener) => return Ok(listener),
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => last_error = Some(error),
             Err(error) => return Err(error),

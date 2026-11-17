@@ -98,6 +98,26 @@ impl RequestGroup {
     }
 
     #[cfg(feature = "metalink")]
+    pub(crate) fn has_metalink_source(&self) -> bool {
+        self.metalink_data.recover().is_some() && self.metalink_file_index.recover().is_some()
+    }
+
+    #[cfg(feature = "metalink")]
+    pub(crate) fn set_parsed_metalink_file(
+        &self,
+        file: std::sync::Arc<aria2_protocol::metalink::parser::MetalinkFile>,
+    ) {
+        *self.parsed_metalink_file.recover_mut() = Some(file);
+    }
+
+    #[cfg(feature = "metalink")]
+    pub(crate) fn take_parsed_metalink_file(
+        &self,
+    ) -> Option<std::sync::Arc<aria2_protocol::metalink::parser::MetalinkFile>> {
+        self.parsed_metalink_file.recover_mut().take()
+    }
+
+    #[cfg(feature = "metalink")]
     pub fn metalink_base_uri(&self) -> Option<String> {
         self.metalink_base_uri.recover().clone()
     }

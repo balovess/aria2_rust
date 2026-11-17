@@ -26,6 +26,44 @@ pub use runtime::{
 };
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 
+/// Translate process-level uTP option values into protocol socket settings.
+#[cfg(feature = "bittorrent")]
+pub fn utp_socket_options_from_values(
+    max_connections: Option<i64>,
+    connect_timeout_secs: Option<i64>,
+    idle_timeout_secs: Option<i64>,
+    keepalive_interval_secs: Option<i64>,
+) -> aria2_protocol::bittorrent::utp::UtpSocketOptions {
+    use std::time::Duration;
+
+    use aria2_protocol::bittorrent::utp::{
+        DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL,
+        DEFAULT_MAX_CONNECTIONS, UtpSocketOptions,
+    };
+
+    UtpSocketOptions::default()
+        .with_max_connections(
+            max_connections
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(DEFAULT_MAX_CONNECTIONS),
+        )
+        .with_connect_timeout(Duration::from_secs(
+            connect_timeout_secs
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(DEFAULT_CONNECT_TIMEOUT.as_secs()),
+        ))
+        .with_idle_timeout(Duration::from_secs(
+            idle_timeout_secs
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(DEFAULT_IDLE_TIMEOUT.as_secs()),
+        ))
+        .with_keepalive_interval(Duration::from_secs(
+            keepalive_interval_secs
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(DEFAULT_KEEPALIVE_INTERVAL.as_secs()),
+        ))
+}
+
 #[cfg(test)]
 mod contract_tests;
 
@@ -90,6 +128,15 @@ impl ConfigManager {
             registry,
             change_tx,
         }
+    }
+
+    /// Create a manager with built-in defaults without reading environment
+    /// variables or an implicit configuration file.
+    ///
+    /// Use this for embedded entry points whose options must come only from
+    /// their explicit API inputs.
+    pub fn new_without_config() -> Self {
+        Self::new_with_registry_without_config(OptionRegistry::new())
     }
 
     /// Create a configuration manager with identity defaults supplied by an
@@ -442,10 +489,15 @@ mod tests {
         assert_eq!(mgr.get_global_bool("parameterized-uri").await, Some(true));
         assert_eq!(mgr.get_global_bool("enable-mmap").await, Some(true));
         assert_eq!(mgr.get_global_bool("use-head").await, Some(true));
+        assert_eq!(mgr.get_global_bool("continue").await, Some(true));
+        assert_eq!(
+            mgr.get_global_bool("http-adaptive-enabled").await,
+            Some(false)
+        );
         assert_eq!(mgr.get_global_i64("split").await, Some(16));
         assert_eq!(
             mgr.get_global_i64("max-connection-per-server").await,
-            Some(16)
+            Some(10)
         );
         assert_eq!(
             mgr.get_global_i64("min-split-size").await,
@@ -483,6 +535,34 @@ mod tests {
             Some("aria2-rust/9.9.9")
         );
         assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_config_embedding_identity_uses_supplied_defaults() {
+        let mgr = ConfigManager::new_with_identity_without_config(
+            "binary-product/2.0",
+            "binary-peer/2.0",
+        );
+
+        assert_eq!(
+            mgr.get_global_str("user-agent").await.as_deref(),
+            Some("binary-product/2.0")
+        );
+        #[cfg(feature = "bittorrent")]
+        assert_eq!(
+            mgr.get_global_str("peer-agent").await.as_deref(),
+            Some("binary-peer/2.0")
+        );
+        assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_config_manager_keeps_registry_defaults() {
+        let mgr = ConfigManager::new_without_config();
+
+        assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
+        assert_eq!(mgr.get_global_i64("split").await, Some(16));
+        assert_eq!(mgr.get_global_str("conf-path").await, None);
     }
 
     #[tokio::test]

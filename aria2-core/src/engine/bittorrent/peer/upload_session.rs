@@ -193,9 +193,11 @@ impl BtUploadState {
     ) -> Result<u64> {
         if let Some(validator) = &self.message_validator {
             validator.validate(&message).map_err(|error| {
-                crate::error::Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "invalid BitTorrent upload message: {error}"
-                )))
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure {
+                        message: format!("invalid BitTorrent upload message: {error}"),
+                    },
+                )
             })?;
         }
 
