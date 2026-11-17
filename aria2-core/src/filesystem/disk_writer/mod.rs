@@ -52,9 +52,10 @@ pub fn new_sequential_download_writer(
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
 
-    /// Flush prior writes through the file and namespace durability barriers.
-    /// In-memory writers may implement this as a no-op because they do not
-    /// provide crash-recoverable output.
+    /// Synchronize prior writes through the file and namespace durability
+    /// barriers. Unlike [`SeekableDiskWriter::flush`], this is a durability
+    /// operation, not merely a buffer flush. In-memory writers may implement it
+    /// as a no-op because they do not provide crash-recoverable output.
     async fn flush(&mut self) -> Result<()>;
 
     /// Synchronize file contents before a checkpoint is persisted.
@@ -106,6 +107,11 @@ pub trait SeekableDiskWriter: Send + Sync {
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize>;
     async fn truncate(&mut self, length: u64) -> Result<()>;
+
+    /// Drain this writer's cache to the operating-system page cache.
+    ///
+    /// This does not promise stable-storage durability. Use `sync_data` or
+    /// `sync_all` before publishing a checkpoint that depends on these bytes.
     async fn flush(&mut self) -> Result<()>;
 
     /// Synchronize file contents without releasing the writer.

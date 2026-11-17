@@ -13,12 +13,14 @@
 //! fundamentally different from the legacy `Arc<tokio::sync::Mutex<...>>`
 //! design which held the lock across async await points and serialized writes.
 //!
-//! Here the lock is held only for the synchronous syscall (microseconds),
-//! never across `.await` points. When multiple [`PositionedDiskWriter`]
-//! instances reference the same file path (each opening its own file
-//! descriptor), non-overlapping writes execute concurrently at the OS level
-//! because `pwrite` is atomic and offset-based — it does not mutate the
-//! shared file cursor.
+//! Here the lock is held only for the synchronous syscall, never across
+//! `.await` points. When multiple [`PositionedDiskWriter`] instances
+//! reference the same file path (each opening its own file descriptor), writes
+//! to non-overlapping ranges can execute concurrently at the OS level. The
+//! positioned-write APIs use an explicit offset and do not mutate a shared file
+//! cursor. They do not make an arbitrary multi-byte write transactional or
+//! guarantee atomic visibility to concurrent readers; callers must coordinate
+//! overlapping ranges themselves.
 
 pub(crate) mod platform_io;
 mod writer;
