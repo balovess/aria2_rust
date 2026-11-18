@@ -258,10 +258,9 @@ pub async fn resolve_dual_stack(
     host: &str,
     port: u16,
 ) -> std::io::Result<(SocketAddr, Option<SocketAddr>)> {
-    use tokio::net::lookup_host;
-
-    let addr_str = format!("{}:{}", host, port);
-    let addrs: Vec<SocketAddr> = lookup_host(&addr_str).await?.collect();
+    let addrs = crate::dns::DnsResolver::system()
+        .resolve(host, port)
+        .await?;
 
     if addrs.is_empty() {
         return Err(std::io::Error::new(

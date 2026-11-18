@@ -129,6 +129,10 @@ impl BtDownloadCommand {
         tracker_tiers = super::super::deduplicate_tracker_tiers(tracker_tiers);
         let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
         announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
+        announcer.set_dns_resolver(crate::dns::DnsResolver::new(
+            Arc::clone(&self.dns_cache),
+            self.group.recover().options().async_dns,
+        ));
         announcer.set_excluded_tracker_urls(excluded_trackers.clone());
         announcer.set_http_tls_config(tracker_tls);
         announcer.set_websocket_options(&websocket_options);
@@ -140,6 +144,7 @@ impl BtDownloadCommand {
         announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
         announcer.set_announce_options(force_encryption, external_ip);
         if enable_public_trackers && let Some(catalog) = public_tracker_catalog {
+            catalog.start_catalog_update();
             announcer.set_public_tracker_catalog(catalog, HashSet::new());
         }
 

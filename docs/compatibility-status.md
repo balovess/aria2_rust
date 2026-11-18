@@ -783,6 +783,12 @@ behavior. An unlisted behavior has not been audited here.
   `bt-tracker` remains a per-download option for that download's announce
   tiers. Runtime changes to the catalog options are projected to the shared
   catalog through the engine command path.
+- **Refresh lifecycle:** the process engine does not start the catalog refresh
+  loop at startup. It starts on the first non-private BitTorrent task that has
+  public trackers enabled. Ordinary HTTP/FTP downloads, private torrents, and
+  BitTorrent tasks with public trackers disabled do not trigger source fetches.
+  The first refresh is immediate; the default subsequent interval is 604800
+  seconds (7 days).
 - **Transport ownership:** `PublicTrackerList` accepts an injected source
   fetcher. The process engine supplies one using its DNS cache, configured
   outbound source-address policy, and TLS verification/identity options;
@@ -1744,6 +1750,11 @@ behavior. An unlisted behavior has not been audited here.
   that error instead of allowing reqwest to retry with system DNS. Each Hickory
   request has a 5-second timeout; Hickory and the fallback share the configured
   30-second default total lookup deadline.
+- **HTTP redirect path:** the HTTP client uses the task DNS resolver for every
+  hostname it needs to connect to, including cross-origin redirect targets.
+  Explicit DNS-server failures remain errors; when using system DNS, failed
+  Hickory resolution can fall back to Tokio system lookup. Candidate addresses
+  are filtered through the outbound source-address policy before connection.
 - **Proxy path:** HTTP assembly resolves the proxy as the first hop and lets
   reqwest use those resolved addresses. It does not separately resolve the
   origin when a proxy handles the request. Numeric origin and proxy addresses
@@ -1761,7 +1772,10 @@ behavior. An unlisted behavior has not been audited here.
   custom bootstrap hostnames and leaves default bootstrap resolution to the
   protocol engine. The `async-dns-server` list does not replace system DNS on
   this path, matching original aria2.
-- **Verification:** on this Windows host, a focused async test starts a local
+- **Verification:** a cross-origin HTTP redirect test maps a synthetic target
+  hostname through the injected client resolver to a loopback server, proving
+  the redirect does not rely on Windows system DNS. On this Windows host, a
+  focused async test starts a local
   UDP DNS fixture, configures it as the explicit server, and resolves a
   synthetic hostname through `DnsCache`. This confirms explicit-server
   runtime wiring. A second fixture returns NXDOMAIN and verifies the error stays
@@ -1788,6 +1802,18 @@ behavior. An unlisted behavior has not been audited here.
   lookup and explicit-DNS resolution through to the selected TCP peer. The
   explicit-server fixture stops at TCP accept; SSH negotiation/authentication
   against a remote SFTP server remains unverified.
+- **Shared resolver:** HTTP, FTP, SFTP, DHT bootstrap, BitTorrent trackers,
+  public tracker source fetches, magnet exact sources, WebSeed, and the Linux
+  HTTP splice path use `DnsResolver` for task hostname resolution. Reqwest
+  redirect targets use the same resolver. The cache-backed mode and system
+  mode preserve all returned A/AAAA candidates; route policy filters candidates
+  by source address, and TCP adapters try candidates until one connects.
+  Hickory DNS nameservers are queried serially in configured order. Resolver
+  unit tests verify dual-stack candidate retention and system mode. HTTP
+  redirect coverage uses the shared resolver adapter. Local DNS fixtures verify
+  that a successful primary prevents duplicate standby queries and that a
+  timed-out primary falls through to the backup. Packet-captured dual-stack
+  connection attempts remain unverified.
 
 ## C API process-engine option setup
 

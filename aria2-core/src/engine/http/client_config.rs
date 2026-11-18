@@ -22,6 +22,7 @@ use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 pub(crate) struct ResolvedNetworkAddresses {
     pub(crate) target: Option<Vec<std::net::SocketAddr>>,
     pub(crate) proxy: Option<Vec<std::net::SocketAddr>>,
+    pub(crate) resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
 }
 
 pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
@@ -299,6 +300,7 @@ pub(super) fn build_download_client(
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve_to_addrs(&host, addresses);
+            let builder = apply_dns_resolver(builder, resolved_addresses.resolver.as_ref());
             let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, client_tls)?;
             return options
@@ -315,7 +317,7 @@ pub(super) fn build_download_client(
                 });
         }
 
-        if has_custom_tls {
+        if has_custom_tls || resolved_addresses.resolver.is_some() {
             let builder = reqwest::Client::builder()
                 .connect_timeout(connect_timeout)
                 .gzip(options.http_accept_gzip)
@@ -328,6 +330,7 @@ pub(super) fn build_download_client(
                 .tcp_keepalive(Some(Duration::from_secs(
                     constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
                 )));
+            let builder = apply_dns_resolver(builder, resolved_addresses.resolver.as_ref());
             let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, client_tls)?;
             return options
@@ -344,14 +347,16 @@ pub(super) fn build_download_client(
                 });
         }
 
-        return Ok(
-            crate::http::client_pool::get_bound_client_with_version_and_timeout(
-                local_address,
-                options.http_accept_gzip,
-                options.http_version,
-                connect_timeout,
-            ),
-        );
+        if resolved_addresses.resolver.is_none() {
+            return Ok(
+                crate::http::client_pool::get_bound_client_with_version_and_timeout(
+                    local_address,
+                    options.http_accept_gzip,
+                    options.http_version,
+                    connect_timeout,
+                ),
+            );
+        }
     }
 
     let mut builder = reqwest::Client::builder()
@@ -370,6 +375,7 @@ pub(super) fn build_download_client(
         )));
 
     builder = apply_proxy_options(builder, &options.http_proxy_options());
+    builder = apply_dns_resolver(builder, resolved_addresses.resolver.as_ref());
 
     if let (Some((proxy_host, _)), Some(proxy_addresses)) = (
         http_proxy_origin(uri, options),
@@ -395,6 +401,16 @@ pub(super) fn build_download_client(
                 "Failed to build HTTP client: {error}"
             )))
         })
+}
+
+fn apply_dns_resolver(
+    builder: reqwest::ClientBuilder,
+    resolver: Option<&Arc<dyn reqwest::dns::Resolve>>,
+) -> reqwest::ClientBuilder {
+    match resolver {
+        Some(resolver) => builder.dns_resolver(Arc::clone(resolver)),
+        None => builder,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

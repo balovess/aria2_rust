@@ -83,6 +83,7 @@ pub async fn try_splice_download(
         file,
         file_offset,
         &OutboundNetworkPolicy::direct(),
+        &crate::dns::DnsResolver::system(),
     )
     .await
 }
@@ -96,6 +97,7 @@ pub async fn try_splice_download_with_policy(
     file: &std::fs::File,
     file_offset: u64,
     outbound_network_policy: &OutboundNetworkPolicy,
+    dns_resolver: &crate::dns::DnsResolver,
 ) -> io::Result<u64> {
     if length == 0 {
         return Ok(0);
@@ -129,8 +131,9 @@ pub async fn try_splice_download_with_policy(
     debug!(host, port, "splice_download: connecting");
 
     // 3. TCP connect.
+    let addresses = dns_resolver.resolve(host, port).await?;
     let mut stream = outbound_network_policy
-        .connect_host(host, port)
+        .connect_candidates(&addresses)
         .await
         .map_err(|e| {
             io::Error::new(
@@ -322,6 +325,7 @@ pub async fn try_splice_download_with_policy(
     _file: &std::fs::File,
     _file_offset: u64,
     _outbound_network_policy: &OutboundNetworkPolicy,
+    _dns_resolver: &crate::dns::DnsResolver,
 ) -> io::Result<u64> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

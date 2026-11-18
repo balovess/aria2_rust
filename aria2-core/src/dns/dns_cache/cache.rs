@@ -7,7 +7,9 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{
+    NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts, ServerOrderingStrategy,
+};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 
 use super::entry::DnsEntry;
@@ -609,6 +611,11 @@ fn build_resolver(dns_timeout: Duration, servers: Option<&[SocketAddr]>) -> Opti
         None => hickory_resolver::system_conf::read_system_conf().ok()?,
     };
     opts.use_hosts_file = ResolveHosts::Always;
+    // aria2's configured DNS list is primary/backup. Hickory defaults to
+    // querying two name servers concurrently, which duplicates every A/AAAA
+    // query when two servers are configured.
+    opts.num_concurrent_reqs = 1;
+    opts.server_ordering_strategy = ServerOrderingStrategy::UserProvidedOrder;
     // Bound an individual Hickory request while preserving the overall lookup deadline below.
     opts.timeout = dns_timeout.min(Duration::from_secs(5));
     TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())

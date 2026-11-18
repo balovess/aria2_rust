@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::parse_integer_segments;
-use crate::dns::dns_cache::DnsCache;
+use crate::dns::{DnsResolver, dns_cache::DnsCache};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::DownloadOptions;
 
@@ -402,18 +402,10 @@ async fn resolve_bootstrap_host(
     port: u16,
     async_dns: bool,
 ) -> Result<Vec<SocketAddr>> {
-    if let Ok(address) = host.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(address, port)]);
-    }
-    if async_dns {
-        let dns_cache = dns_cache.lock().await.clone();
-        dns_cache.resolve_with_refresh(host, port).await
-    } else {
-        tokio::net::lookup_host((host, port))
-            .await
-            .map(|addresses| addresses.collect())
-            .map_err(|error| Aria2Error::NameResolve(error.to_string()))
-    }
+    DnsResolver::from_cache(dns_cache.lock().await.clone(), async_dns)
+        .resolve(host, port)
+        .await
+        .map_err(|error| Aria2Error::NameResolve(error.to_string()))
 }
 
 fn parse_bootstrap_endpoint(endpoint: &str) -> Option<(&str, u16)> {

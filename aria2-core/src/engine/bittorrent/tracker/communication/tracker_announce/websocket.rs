@@ -32,6 +32,7 @@ impl TrackerAnnouncer {
                 options: &self.websocket_options,
             },
             &self.outbound_network_policy,
+            self.dns_resolver.as_ref(),
         )
         .await;
 

@@ -309,6 +309,19 @@ async fn test_explicit_dns_server_is_used_for_resolution() {
     let server_address = socket
         .local_addr()
         .expect("DNS fixture must expose its local address");
+    let standby_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("standby DNS fixture must bind a UDP socket");
+    let standby_address = standby_socket.local_addr().unwrap();
+    let standby = tokio::spawn(async move {
+        let mut request = [0u8; 512];
+        tokio::time::timeout(
+            Duration::from_millis(400),
+            standby_socket.recv_from(&mut request),
+        )
+        .await
+        .is_err()
+    });
     let server = tokio::spawn(async move {
         let mut request = [0u8; 512];
         for _ in 0..4 {
@@ -351,7 +364,10 @@ async fn test_explicit_dns_server_is_used_for_resolution() {
         }
     });
 
-    let cache = DnsCache::with_dns_servers(Duration::from_secs(2), vec![server_address]);
+    let cache = DnsCache::with_dns_servers(
+        Duration::from_secs(2),
+        vec![server_address, standby_address],
+    );
     let resolved = cache
         .resolve("custom.test", 80)
         .await
@@ -364,6 +380,82 @@ async fn test_explicit_dns_server_is_used_for_resolution() {
         .await
         .expect("DNS fixture must finish promptly")
         .expect("DNS fixture task must not fail");
+    assert!(
+        standby.await.unwrap(),
+        "standby must not receive duplicate queries"
+    );
+}
+
+#[tokio::test]
+async fn explicit_dns_uses_backup_after_primary_times_out() {
+    use tokio::net::UdpSocket;
+
+    let primary = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let primary_address = primary.local_addr().unwrap();
+    let primary_task = tokio::spawn(async move {
+        let mut packet = [0u8; 512];
+        tokio::time::timeout(Duration::from_secs(2), primary.recv_from(&mut packet))
+            .await
+            .expect("primary must receive the first query")
+            .expect("primary query receive must succeed");
+        // Intentionally do not reply: the configured secondary must take over.
+    });
+
+    let backup = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let backup_address = backup.local_addr().unwrap();
+    let backup_task = tokio::spawn(async move {
+        let mut packet = [0u8; 512];
+        let mut query_count = 0;
+        while query_count < 4 {
+            let Ok(Ok((length, peer))) =
+                tokio::time::timeout(Duration::from_secs(7), backup.recv_from(&mut packet)).await
+            else {
+                break;
+            };
+            query_count += 1;
+            let mut question_end = 12;
+            loop {
+                let label_length = packet[question_end] as usize;
+                question_end += 1;
+                if label_length == 0 {
+                    question_end += 4;
+                    break;
+                }
+                question_end += label_length;
+            }
+            let qtype = u16::from_be_bytes([packet[question_end - 4], packet[question_end - 3]]);
+            let mut response = Vec::with_capacity(question_end + 16);
+            response.extend_from_slice(&packet[..2]);
+            let answer_count = u16::from(qtype == 1);
+            response.extend_from_slice(&[0x81, 0x80, 0, 1]);
+            response.extend_from_slice(&answer_count.to_be_bytes());
+            response.extend_from_slice(&[0, 0, 0, 0]);
+            response.extend_from_slice(&packet[12..question_end]);
+            if qtype == 1 {
+                response.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4]);
+                response.extend_from_slice(&[127, 0, 0, 1]);
+            }
+            assert!(length >= question_end);
+            backup.send_to(&response, peer).await.unwrap();
+        }
+        query_count
+    });
+
+    let cache = DnsCache::with_dns_servers(
+        Duration::from_secs(7),
+        vec![primary_address, backup_address],
+    );
+    let addresses = cache
+        .resolve("failover.test", 80)
+        .await
+        .expect("backup server should resolve after primary timeout");
+    assert!(addresses.iter().any(|address| address.ip().is_loopback()));
+    primary_task.await.unwrap();
+    let backup_queries = backup_task.await.unwrap();
+    assert!(
+        backup_queries > 0,
+        "backup server must receive fallback queries"
+    );
 }
 
 #[tokio::test]

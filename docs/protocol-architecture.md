@@ -175,11 +175,14 @@ retry admission.
 
 1. `ProtocolAdapterRegistry` selects the HTTP adapter, which delegates
    command construction to `engine::http::command_factory`.
-2. `command_factory` resolves only the connection's first hop: the origin for
+2. `command_factory` resolves the connection's first hop: the origin for
    a direct request, or the proxy endpoint for a proxied request. Async DNS
    uses the shared cache; with `async-dns=false`, a constrained source policy
    uses the system resolver only to choose a compatible local address. The
    selected addresses are supplied to reqwest and the outbound-address policy.
+   The HTTP client also receives a per-task resolver so subsequent redirect
+   hosts use the same async DNS cache or system resolver choice; resolved
+   candidates are filtered through the outbound source-address policy.
    Core's `NoProxyMatcher` selects the first hop, and the reqwest proxy callback
    uses that same matcher so request routing cannot silently disagree with DNS
    resolution or source-address selection.

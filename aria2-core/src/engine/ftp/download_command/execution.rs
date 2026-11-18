@@ -3,6 +3,7 @@
 //! Implements the `Command` lifecycle for `FtpDownloadCommand`, including
 //! retry handling, cancellation, checkpoints, and address refresh.
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -277,8 +278,10 @@ impl FtpDownloadCommand {
 
     pub(super) async fn refresh_control_addresses(&mut self) -> Result<()> {
         if let Some(cache) = self.dns_cache.as_ref() {
-            let cache = cache.lock().await.clone();
-            let addresses = cache.resolve_with_refresh(&self.host, self.port).await?;
+            let addresses = crate::dns::DnsResolver::new(Arc::clone(cache), true)
+                .resolve(&self.host, self.port)
+                .await
+                .map_err(|error| Aria2Error::NameResolve(error.to_string()))?;
             if addresses.is_empty() {
                 return Err(Aria2Error::NameResolve(format!(
                     "No usable address for {}:{}",
@@ -289,15 +292,10 @@ impl FtpDownloadCommand {
             return Ok(());
         }
 
-        self.resolved_addresses = tokio::net::lookup_host((self.host.as_str(), self.port))
+        self.resolved_addresses = crate::dns::DnsResolver::system()
+            .resolve(&self.host, self.port)
             .await
-            .map_err(|error| {
-                Aria2Error::NameResolve(format!(
-                    "DNS resolution failed for {}:{}: {}",
-                    self.host, self.port, error
-                ))
-            })?
-            .collect();
+            .map_err(|error| Aria2Error::NameResolve(error.to_string()))?;
         if self.resolved_addresses.is_empty() {
             return Err(Aria2Error::NameResolve(format!(
                 "No address resolved for {}:{}",

@@ -61,6 +61,7 @@ async fn all_proxy_percent_decodes_embedded_basic_credentials() {
         crate::engine::http::client_config::ResolvedNetworkAddresses {
             target: None,
             proxy: Some(vec![proxy_address]),
+            resolver: None,
         },
         Arc::new(OutboundNetworkPolicy::direct()),
     )
@@ -132,6 +133,7 @@ async fn all_proxy_path_at_sign_does_not_become_proxy_credentials() {
         crate::engine::http::client_config::ResolvedNetworkAddresses {
             target: None,
             proxy: Some(vec![proxy_address]),
+            resolver: None,
         },
         Arc::new(OutboundNetworkPolicy::direct()),
     )
@@ -253,6 +255,7 @@ async fn all_proxy_socks5_routes_http_and_authenticates() {
         crate::engine::http::client_config::ResolvedNetworkAddresses {
             target: None,
             proxy: Some(vec![proxy_address]),
+            resolver: None,
         },
         Arc::new(OutboundNetworkPolicy::direct()),
     )
@@ -324,6 +327,7 @@ async fn all_proxy_socks4_routes_http() {
         crate::engine::http::client_config::ResolvedNetworkAddresses {
             target: None,
             proxy: Some(vec![proxy_address]),
+            resolver: None,
         },
         Arc::new(OutboundNetworkPolicy::direct()),
     )
@@ -389,6 +393,7 @@ async fn proxy_client_uses_the_resolved_proxy_addresses() {
         ResolvedNetworkAddresses {
             target: None,
             proxy: Some(vec![proxy_address]),
+            resolver: None,
         },
         Arc::new(OutboundNetworkPolicy::direct()),
     )

@@ -12,8 +12,9 @@ use aria2_protocol::bittorrent::tracker::url::{
 
 use super::super::AnnounceEvent;
 use super::super::bt_announce::BtAnnounce;
+use crate::dns::DnsResolver;
 use crate::engine::bittorrent::tracker::udp_client::{
-    UdpAnnounceParams, UdpError, UdpTrackerClient, resolve_udp_tracker_addr,
+    UdpAnnounceParams, UdpError, UdpTrackerClient,
 };
 use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
@@ -71,6 +72,7 @@ pub struct TrackerAnnouncer {
     last_failure_kind: Option<TrackerFailureKind>,
     http_tls: ClientTlsConfig,
     outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    dns_resolver: Option<DnsResolver>,
     http_clients: HashMap<(Option<std::net::IpAddr>, Option<String>), reqwest::Client>,
     websocket_options: DownloadOptions,
     tracker_timeout_secs: u64,
@@ -99,6 +101,7 @@ impl TrackerAnnouncer {
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_resolver: None,
             http_clients: HashMap::new(),
             websocket_options: DownloadOptions::default(),
             tracker_timeout_secs: 60,
@@ -122,6 +125,13 @@ impl TrackerAnnouncer {
     pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
         self.outbound_network_policy = policy;
         self.http_clients.clear();
+    }
+
+    /// Share the owning task's DNS cache and `async-dns` choice with tracker transports.
+    pub(crate) fn set_dns_resolver(&mut self, resolver: DnsResolver) {
+        self.dns_resolver = Some(resolver);
+        self.http_clients.clear();
+        self.udp_tracker_endpoint = None;
     }
 
     /// Apply per-download proxy and timeout options to tracker transports.

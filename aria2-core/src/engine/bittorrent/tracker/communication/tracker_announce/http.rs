@@ -106,12 +106,22 @@ impl TrackerAnnouncer {
                 )
             });
         let local_address = match tracker_host {
+            Some(_host) if self.outbound_network_policy.is_direct() => None,
             Some(host) => {
-                match self
-                    .outbound_network_policy
-                    .source_for_host(host, tracker_port)
-                    .await
-                {
+                let source = if let Some(resolver) = &self.dns_resolver {
+                    resolver
+                        .resolve(host, tracker_port)
+                        .await
+                        .and_then(|addresses| {
+                            self.outbound_network_policy
+                                .source_for_addresses(&addresses)
+                        })
+                } else {
+                    self.outbound_network_policy
+                        .source_for_host(host, tracker_port)
+                        .await
+                };
+                match source {
                     Ok(address) => address,
                     Err(error) => {
                         warn!(
@@ -153,6 +163,9 @@ impl TrackerAnnouncer {
                 local_address,
                 None,
                 proxy.map(|(_, _, proxy)| proxy),
+                self.dns_resolver.as_ref().map(|resolver| {
+                    resolver.reqwest_resolver(Arc::clone(&self.outbound_network_policy))
+                }),
             ) {
                 Ok(client) => client,
                 Err(error) => {

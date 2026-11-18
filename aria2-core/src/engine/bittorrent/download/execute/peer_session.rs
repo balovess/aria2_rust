@@ -226,15 +226,19 @@ impl BtDownloadCommand {
                 ClientTlsConfig::from_download_options(group.options())
             };
             info!("[BT] Initializing live per-file web-seed fallback");
-            Some(Arc::new(
+            let mut manager =
                 crate::engine::bittorrent::download::web_seed::WebSeedManager::for_request_group(
                     std::sync::Arc::clone(&self.group),
                     piece_length,
                     total_size,
                     web_seed_tls,
                     self.outbound_network_policy.clone(),
-                ),
-            ))
+                );
+            manager.set_dns_resolver(crate::dns::DnsResolver::new(
+                Arc::clone(&self.dns_cache),
+                self.group.recover().options().async_dns,
+            ));
+            Some(Arc::new(manager))
         } else {
             None
         };

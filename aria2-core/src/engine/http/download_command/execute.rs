@@ -505,6 +505,7 @@ impl DownloadCommand {
                         .with_outbound_network_policy(Arc::clone(
                             &self.outbound_network_policy,
                         ))
+                        .with_dns_resolver(self.dns_resolver.clone())
                         .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
                         if let Some(auth_factory) = fallback_auth_factory {
                             sequential_downloader = sequential_downloader.with_shared_auth_options(
@@ -537,6 +538,7 @@ impl DownloadCommand {
                 self.global_limiter.clone(),
             )
             .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy))
+            .with_dns_resolver(self.dns_resolver.clone())
             .with_origin_sensitive_headers_allowed(origin_sensitive_headers_allowed);
             if let Some(prepared) = prepared_get.take() {
                 sequential_downloader = sequential_downloader.with_prepared_response(prepared);

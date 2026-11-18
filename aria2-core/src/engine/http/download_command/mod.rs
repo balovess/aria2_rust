@@ -36,6 +36,7 @@ pub struct DownloadCommand {
     /// Independent transport pools used only for concurrent HTTP ranges.
     pub(super) range_clients: Arc<Vec<reqwest::Client>>,
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    pub(super) dns_resolver: crate::dns::DnsResolver,
     pub(super) output_path: std::path::PathBuf,
     /// Whether the filename came from an explicit `--out`/metadata name.
     /// Implicit HTTP names may be replaced by response metadata before I/O.

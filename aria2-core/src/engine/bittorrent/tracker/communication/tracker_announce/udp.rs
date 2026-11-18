@@ -20,7 +20,13 @@ impl TrackerAnnouncer {
         {
             *addr
         } else {
-            match resolve_udp_tracker_addr(tracker_url, &self.outbound_network_policy).await {
+            match crate::engine::bittorrent::tracker::udp_client::resolve_udp_tracker_addr_with_resolver(
+                tracker_url,
+                &self.outbound_network_policy,
+                self.dns_resolver.as_ref(),
+            )
+            .await
+            {
                 Ok(addr) => {
                     self.udp_tracker_endpoint = Some((tracker_url.to_owned(), addr));
                     addr
