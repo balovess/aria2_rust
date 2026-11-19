@@ -161,16 +161,23 @@ behavior. An unlisted behavior has not been audited here.
   iterations after this fix. This is local loopback simulation; it does not
   establish behavior against arbitrary remote servers.
 
-## Windows file allocation semantics
+## Cross-platform file allocation semantics
 
-- **Compatibility:** default `prealloc` zero-fills the target before the
-  download, matching aria2's Windows behavior. Only explicit `falloc` uses
-  `SetFileValidData`, which requires `SE_MANAGE_VOLUME_PRIVILEGE`; if it is
-  unavailable, the file remains sparse and first writes may incur allocation
-  and zeroing work during transfer.
-- **Verification:** focused file-allocation tests assert that `prealloc`
-  initializes new bytes to zero and preserves existing prefixes. Windows
-  `falloc` remains a separate privilege-dependent path.
+- **Compatibility:** default `prealloc` uses native allocation when available,
+  like aria2's adaptive iterator, and writes zeroes before transfer when the
+  native operation is unavailable. Linux `fallocate(2)` and macOS
+  `F_PREALLOCATE` remain the fast paths. Windows default `prealloc` uses the
+  same zero-fill path as aria2. Explicit Windows `falloc` still attempts
+  `SetFileValidData`; if its privilege/API call fails, it now zero-fills the
+  new region before transfer rather than leaving it sparse. `trunc` remains
+  intentionally sparse.
+- **Verification:** focused allocation tests assert that `prealloc`
+  initializes new bytes to zero and preserves existing prefixes. Native
+  runtime coverage is included in `.github/workflows/ci.yml` for Linux x86_64,
+  Windows x86_64, and macOS ARM64; those jobs run the workspace library tests
+  containing these checks. BSD is not in the current CI matrix, and the
+  platform-specific native-allocation failure branches still need explicit
+  failure injection to guarantee they execute on each runner.
 
 ## HTTP/2 Range session and stream limits
 

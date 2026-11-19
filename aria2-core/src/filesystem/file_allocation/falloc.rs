@@ -100,7 +100,7 @@ pub(crate) async fn fallocate(
                 return Ok(());
             }
             let errno = syscall_result.expect_err("failed fallocate must carry errno");
-            if errno == libc::EOPNOTSUPP {
+            if errno == libc::EOPNOTSUPP || errno == libc::ENOSYS {
                 tracing::warn!(
                     length,
                     "fallocate(2) not supported by filesystem; \
@@ -108,17 +108,15 @@ pub(crate) async fn fallocate(
                 );
                 // Preserve an existing partial download and clear only the
                 // newly extended region when falling back to zero-fill.
-                let existing_length = writer.len().await?.min(length);
-                writer.truncate(length).await?;
-                return strategies::async_zero_fill_from(writer, existing_length, length).await;
+                return strategies::zero_fill_allocation(writer, length).await;
             }
             // Other errors: return as I/O error
             Err(Aria2Error::Io(
                 std::io::Error::from_raw_os_error(errno).to_string(),
             ))
         } else {
-            // Fall back to set_len if no raw fd available
-            writer.truncate(length).await
+            // Fall back to real writes if no raw fd is available.
+            strategies::zero_fill_allocation(writer, length).await
         }
     }
 
@@ -178,14 +176,15 @@ pub(crate) async fn fallocate(
                         Aria2Error::Io(format!("F_PREALLOCATE task failed: {error}"))
                     })?;
                     if let Err(error) = fcntl_result {
-                        // Filesystem may not support F_PREALLOCATE; the file is
-                        // already sized above, so it remains sparse but correct.
+                        // Filesystem may not support F_PREALLOCATE. Initialize
+                        // new bytes now so transfer writes do not pay this cost.
                         tracing::warn!(
                             length,
                             error = %error,
-                            "F_PREALLOCATE failed on macOS, file remains sparse"
+                            "F_PREALLOCATE failed on macOS; falling back to zero-fill"
                         );
-                        return Ok(());
+                        return strategies::async_zero_fill_from(writer, existing_length, length)
+                            .await;
                     }
                     // F_PREALLOCATE succeeded but does NOT zero-fill the
                     // allocated blocks. Zero-fill when secure is requested,
@@ -204,15 +203,14 @@ pub(crate) async fn fallocate(
                         Ok(())
                     }
                 }
-                None => writer.truncate(length).await,
+                None => strategies::zero_fill_allocation(writer, length).await,
             }
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            // Other Unix (BSD, etc.): no portable preallocate syscall; use
-            // ftruncate via set_len which is the standard approach.
-            writer.truncate(length).await
+            // Other Unix (BSD, etc.) has no portable preallocation syscall.
+            strategies::zero_fill_allocation(writer, length).await
         }
     }
 

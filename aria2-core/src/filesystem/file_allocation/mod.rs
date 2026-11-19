@@ -12,8 +12,6 @@ pub use strategies::get_available_space;
 
 use super::positioned_disk_writer::PositionedDiskWriter;
 use crate::error::{Aria2Error, FatalError, Result};
-#[cfg(windows)]
-use crate::filesystem::disk_writer::SeekableDiskWriter;
 use std::path::Path;
 
 /// One-time warning emitted when `fallocate`-style allocation succeeds but
@@ -56,8 +54,8 @@ impl AllocationStrategy {
 
 /// Allocate file space using the specified strategy.
 /// This function provides cross-platform support for file preallocation:
-/// - `prealloc`: use platform-native allocation where its semantics match the
-///   mode, and zero-fill on Windows to match aria2's default behavior
+/// - `prealloc`: use native allocation where supported, zero-filling new bytes
+///   before transfer when native allocation is unavailable
 /// - `falloc`: use the platform-native allocation path with its Rust-owned
 ///   fallback behavior
 /// - `trunc`: use `set_len()` without attempting physical allocation
@@ -67,9 +65,9 @@ impl AllocationStrategy {
 /// * `writer` - Open positioned writer for the file
 /// * `length` - Desired file length in bytes
 /// * `strategy` - Allocation strategy to use
-/// * `secure` - When `true`, zero-fill allocated blocks on platforms that
-///   don't zero-fill (macOS, Windows). No-op on Linux where `fallocate(2)`
-///   always returns zeroed blocks.
+/// * `secure` - When `true`, zero-fill blocks after native allocation on
+///   platforms that may expose prior disk contents (macOS, Windows). Fallback
+///   zero-filling is always performed regardless of this flag.
 pub async fn allocate_file(
     writer: &mut PositionedDiskWriter,
     length: u64,
@@ -84,9 +82,7 @@ pub async fn allocate_file(
                 // aria2's Windows prealloc strategy writes zeroes before the
                 // download. Keep that work out of the HTTP write path; only
                 // explicit `falloc` may use SetFileValidData.
-                let existing_length = writer.len().await?.min(length);
-                writer.truncate(length).await?;
-                strategies::async_zero_fill_from(writer, existing_length, length).await
+                strategies::zero_fill_allocation(writer, length).await
             }
             #[cfg(not(windows))]
             {

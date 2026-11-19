@@ -10,8 +10,8 @@ use super::strategies;
 /// (rather than sparse holes). For processes running with administrator
 /// rights, the privilege exists in the token but is disabled by default —
 /// this function enables it. For non-admin processes, the privilege is not
-/// present, and the function returns `false` (the caller falls back to sparse
-/// files, which is the correct behavior for that case).
+/// present, and the function returns `false` (the caller zero-fills newly
+/// extended bytes before transfer).
 ///
 /// Returns `true` if the privilege was successfully enabled, `false` otherwise.
 pub(crate) fn try_enable_volume_privilege() -> bool {
@@ -81,8 +81,8 @@ pub(crate) fn try_enable_volume_privilege() -> bool {
 /// allocation. `SetFileValidData` does NOT zero-fill, so when `secure == true`
 /// we additionally run `async_zero_fill`. When `secure == false`, a one-time
 /// warning is emitted. Requires `SE_MANAGE_VOLUME_PRIVILEGE`; if the privilege
-/// is not held (or the call fails for any other reason), it falls back to the
-/// sparse file produced by `set_len` (SetEndOfFile).
+/// is not held (or the call fails for any other reason), it zero-fills newly
+/// added bytes before returning.
 pub(crate) async fn fallocate_windows(
     writer: &mut PositionedDiskWriter,
     length: u64,
@@ -162,18 +162,17 @@ pub(crate) async fn fallocate_windows(
         };
         if let Err(err) = allocation_result {
             if err == windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD {
-                // Promote to warn: SetFileValidData failure causes a 2x I/O
-                // penalty because the writer must zero-fill every block on
-                // first write (sparse file allocation on Windows).
                 tracing::warn!(
                     length,
                     "SetFileValidData requires SE_MANAGE_VOLUME_PRIVILEGE; \
-                     falling back to sparse file. This causes ~2x I/O on \
-                     first write because each block must be zeroed by the \
-                     writer instead of being pre-allocated."
+                     falling back to zero-fill before transfer."
                 );
             } else {
-                tracing::warn!(length, err, "SetFileValidData failed; file remains sparse");
+                tracing::warn!(
+                    length,
+                    err,
+                    "SetFileValidData failed; falling back to zero-fill"
+                );
             }
             false
         } else {
@@ -203,6 +202,6 @@ pub(crate) async fn fallocate_windows(
             Ok(())
         }
     } else {
-        Ok(())
+        strategies::async_zero_fill_from(writer, existing_length, length).await
     }
 }
