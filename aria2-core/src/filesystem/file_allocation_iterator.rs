@@ -398,7 +398,7 @@ impl AdaptiveFileAllocationIterator {
             );
             single.init();
             self.inner = Some(AdaptiveInner::Single(single));
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(windows))]

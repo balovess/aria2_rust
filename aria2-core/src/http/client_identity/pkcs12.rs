@@ -121,8 +121,7 @@ fn is_pkcs5_hmac_prf(algorithm: &[u64]) -> bool {
         &[1, 2, 840, 113549, 2, 10][..],
         &[1, 2, 840, 113549, 2, 11][..],
     ]
-    .iter()
-    .any(|arcs| algorithm == *arcs)
+    .contains(&algorithm)
 }
 
 fn p12_oid_matches(algorithm: &yasna_compat::models::ObjectIdentifier, arcs: &[u64]) -> bool {
@@ -151,7 +150,7 @@ fn is_supported_pkcs5_algorithm(algorithm: &p12_q3::AlgorithmIdentifier) -> bool
                 || p12_oid_matches(&other.algorithm_type, &[2, 16, 840, 1, 101, 3, 4, 1, 6])
                 || p12_oid_matches(&other.algorithm_type, &[2, 16, 840, 1, 101, 3, 4, 1, 22])
                 || p12_oid_matches(&other.algorithm_type, &[2, 16, 840, 1, 101, 3, 4, 1, 46])
-                || (is_pkcs5_hmac_prf(&other.algorithm_type.components())
+                || (is_pkcs5_hmac_prf(other.algorithm_type.components())
                     && has_der_null_parameters(other.params.as_deref()))
         }
         _ => false,
@@ -204,7 +203,7 @@ fn write_pkcs5_algorithm(writer: yasna::DERWriter, algorithm: &p12_q3::Algorithm
         p12_q3::AlgorithmIdentifier::OtherAlg(other) => {
             writer
                 .next()
-                .write_oid(&der_oid(&other.algorithm_type.components()));
+                .write_oid(&der_oid(other.algorithm_type.components()));
             if let Some(params) = &other.params {
                 writer.next().write_der(params);
             }
@@ -317,7 +316,7 @@ pub(super) fn decrypt_pkcs12_aes_gcm(
             pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_ref(), salt, iterations, &mut key)
         }
         p12_q3::AlgorithmIdentifier::OtherAlg(other)
-            if is_pkcs5_hmac_prf(&other.algorithm_type.components())
+            if is_pkcs5_hmac_prf(other.algorithm_type.components())
                 && has_der_null_parameters(other.params.as_deref()) =>
         {
             match other.algorithm_type.components().as_slice() {

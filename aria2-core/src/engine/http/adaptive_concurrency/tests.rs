@@ -116,7 +116,6 @@ fn configured_reduction_and_backoff_reach_the_controller() {
         reduction_percent: 50,
         backoff_base_secs: 3,
         backoff_max_secs: 5,
-        ..HttpAdaptiveOptions::default()
     };
     let mut controller = HttpAdaptiveConcurrency::new_with_settings(16, 16, 4, 4, 0, settings);
     let wait = controller.record_capacity_rejection(false, None);
