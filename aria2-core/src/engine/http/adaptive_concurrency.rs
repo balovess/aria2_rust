@@ -7,7 +7,9 @@
 //! requests, the controller probes upward by one Range. Configured connection,
 //! session, stream, and split limits remain hard ceilings and are never rewritten.
 //!
-//! Capacity feedback lowers the Range target multiplicatively and paces future starts.
+//! Capacity feedback lowers the Range target multiplicatively and applies a
+//! cooldown after explicit server rejection. Healthy Range starts are never
+//! paced by a timer.
 //! Temporary no-progress retries remain local to a Range and do not alter the
 //! global target.
 
@@ -15,16 +17,8 @@ use crate::request::request_group::HttpAdaptiveOptions;
 use rand::RngExt;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-const RECOVERY_PROBE_INTERVAL: Duration = Duration::from_secs(10);
-#[cfg(test)]
-const INITIAL_REQUEST_START_INTERVAL: Duration = Duration::from_millis(100);
-#[cfg(test)]
-const CAPACITY_REQUEST_START_INTERVAL: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const RATE_RECOVERY_SUCCESS_THRESHOLD: usize = 64;
-#[cfg(test)]
-const CAPACITY_BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
+const RECOVERY_SUCCESS_THRESHOLD: usize = 8;
+const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AdaptiveUpdate {
@@ -41,16 +35,10 @@ struct ProtocolTarget {
     drain_after_capacity_rejection: bool,
     cooldown_until: Option<Instant>,
     successful_ranges_since_adjustment: usize,
-    last_target_adjustment: Instant,
-    request_start_interval: Duration,
-    last_request_started: Option<Instant>,
-    capacity_feedback_received: bool,
-    successful_ranges_since_rate_adjustment: usize,
 }
 
 impl ProtocolTarget {
-    fn new(ceiling: usize, initial_request_start_interval: Duration) -> Self {
-        let now = Instant::now();
+    fn new(ceiling: usize) -> Self {
         Self {
             ceiling: ceiling.max(1),
             target: ceiling.max(1),
@@ -59,11 +47,6 @@ impl ProtocolTarget {
             drain_after_capacity_rejection: false,
             cooldown_until: None,
             successful_ranges_since_adjustment: 0,
-            last_target_adjustment: now,
-            request_start_interval: initial_request_start_interval,
-            last_request_started: None,
-            capacity_feedback_received: false,
-            successful_ranges_since_rate_adjustment: 0,
         }
     }
 }
@@ -134,21 +117,16 @@ impl HttpAdaptiveConcurrency {
         settings: HttpAdaptiveOptions,
     ) -> Self {
         let settings = settings.normalized();
-        let initial_interval = Duration::from_millis(settings.start_interval_ms);
         Self {
             settings,
             split_budget: split_budget.max(1),
-            http1: ProtocolTarget::new(
-                http1_connection_limit.min(split_budget.max(1)),
-                initial_interval,
-            ),
+            http1: ProtocolTarget::new(http1_connection_limit.min(split_budget.max(1))),
             http2: ProtocolTarget::new(
                 split_budget.max(1).min(
                     http2_session_limit
                         .max(1)
                         .saturating_mul(http2_streams_per_session.max(1)),
                 ),
-                initial_interval,
             ),
             http2_streams_per_session: http2_streams_per_session.max(1),
             retry_wait: Duration::from_secs(retry_wait_secs),
@@ -171,13 +149,6 @@ impl HttpAdaptiveConcurrency {
             .target
             .min(self.split_budget)
             .max(1)
-    }
-
-    fn recovery_success_threshold(&self, is_http2: bool) -> usize {
-        self.protocol_target(is_http2).target.clamp(
-            self.settings.recovery_successes_min as usize,
-            self.settings.recovery_successes_max as usize,
-        )
     }
 
     fn reduce_target(target: usize, reduction_percent: u8) -> usize {
@@ -205,40 +176,7 @@ impl HttpAdaptiveConcurrency {
             }
             protocol.cooldown_until = None;
         }
-        protocol.last_request_started.is_none_or(|last_started| {
-            now.duration_since(last_started) >= protocol.request_start_interval
-        })
-    }
-
-    /// Record an admitted request so the next Range for this authority can be
-    /// paced independently from its concurrent-request ceiling.
-    pub(crate) fn record_request_start(&mut self, is_http2: bool) {
-        self.protocol_target_mut(is_http2).last_request_started = Some(Instant::now());
-    }
-
-    fn request_start_wait(&self, is_http2: bool) -> Option<Duration> {
-        let protocol = self.protocol_target(is_http2);
-        let last_started = protocol.last_request_started?;
-        let allowed_at = last_started.checked_add(protocol.request_start_interval)?;
-        let remaining = allowed_at.saturating_duration_since(Instant::now());
-        (!remaining.is_zero()).then_some(remaining)
-    }
-
-    fn note_capacity_feedback(&mut self, is_http2: bool) {
-        let settings = self.settings;
-        let protocol = self.protocol_target_mut(is_http2);
-        protocol.request_start_interval = if !protocol.capacity_feedback_received {
-            Duration::from_millis(settings.capacity_start_interval_ms)
-        } else {
-            protocol
-                .request_start_interval
-                .saturating_mul(2)
-                .min(Duration::from_millis(
-                    settings.capacity_start_interval_max_ms,
-                ))
-        };
-        protocol.capacity_feedback_received = true;
-        protocol.successful_ranges_since_rate_adjustment = 0;
+        true
     }
 
     /// Freeze new admissions after an explicit server capacity rejection.
@@ -262,15 +200,15 @@ impl HttpAdaptiveConcurrency {
         protocol.accepting_new_work = false;
         protocol.successful_ranges_since_adjustment = 0;
         if new_episode {
-            if self.last_capacity_rejection.is_some_and(|last| {
-                now.duration_since(last) >= Duration::from_secs(settings.backoff_reset_after_secs)
-            }) {
+            if self
+                .last_capacity_rejection
+                .is_some_and(|last| now.duration_since(last) >= BACKOFF_RESET_AFTER)
+            {
                 self.backoff_steps = 0;
             }
             self.last_capacity_rejection = Some(now);
             let wait = if settings.enabled {
                 self.backoff_steps = self.backoff_steps.saturating_add(1);
-                self.note_capacity_feedback(is_http2);
                 self.retry_wait
                     .max(capacity_backoff_with(self.backoff_steps, &settings))
             } else {
@@ -285,9 +223,9 @@ impl HttpAdaptiveConcurrency {
         }
     }
 
-    /// With adaptive mode enabled, a 429/503 lowers concurrency by about 25%
-    /// per rejection episode and slows subsequent request starts. With it
-    /// disabled, the target stays fixed and only explicit Retry-After applies.
+    /// With adaptive mode enabled, a 429/503 lowers concurrency by the
+    /// configured percentage per rejection episode. With it disabled, the
+    /// target stays fixed and only explicit Retry-After applies.
     /// Returns the required wait.
     pub(crate) fn record_capacity_rejection(
         &mut self,
@@ -296,9 +234,10 @@ impl HttpAdaptiveConcurrency {
     ) -> Duration {
         let settings = self.settings;
         let now = Instant::now();
-        if self.last_capacity_rejection.is_some_and(|last| {
-            now.duration_since(last) >= Duration::from_secs(settings.backoff_reset_after_secs)
-        }) {
+        if self
+            .last_capacity_rejection
+            .is_some_and(|last| now.duration_since(last) >= BACKOFF_RESET_AFTER)
+        {
             self.backoff_steps = 0;
         }
         self.last_capacity_rejection = Some(now);
@@ -307,17 +246,12 @@ impl HttpAdaptiveConcurrency {
         if !in_cooldown && settings.enabled {
             protocol.target = Self::reduce_target(protocol.target, settings.reduction_percent);
         }
-        if !in_cooldown && settings.enabled {
-            self.note_capacity_feedback(is_http2);
-        }
         let protocol = self.protocol_target_mut(is_http2);
         protocol.drain_after_capacity_rejection = true;
         if settings.enabled {
             protocol.accepting_new_work = false;
         }
         protocol.successful_ranges_since_adjustment = 0;
-        protocol.successful_ranges_since_rate_adjustment = 0;
-        protocol.last_target_adjustment = now;
         // One backoff step per episode: the other ranges of the same burst
         // are rejected inside the cooldown it started.
         if !in_cooldown && settings.enabled {
@@ -346,33 +280,17 @@ impl HttpAdaptiveConcurrency {
         let protocol = self.protocol_target_mut(is_http2);
         if !settings.enabled {
             protocol.successful_ranges_since_adjustment = 0;
-            protocol.successful_ranges_since_rate_adjustment = 0;
             return;
         }
         protocol.successful_ranges_since_adjustment = protocol
             .successful_ranges_since_adjustment
             .saturating_add(1);
-        protocol.successful_ranges_since_rate_adjustment = protocol
-            .successful_ranges_since_rate_adjustment
-            .saturating_add(1);
-        if protocol.successful_ranges_since_rate_adjustment
-            >= settings.rate_recovery_successes as usize
-            && !protocol.request_start_interval.is_zero()
-        {
-            protocol.request_start_interval = protocol
-                .request_start_interval
-                .mul_f64(0.9)
-                .max(Duration::from_millis(settings.rate_min_interval_ms));
-            protocol.successful_ranges_since_rate_adjustment = 0;
-        }
     }
 
     /// Reset the recovery window after any failed Range request.
     pub(crate) fn record_failure(&mut self, is_http2: bool) {
         self.protocol_target_mut(is_http2)
             .successful_ranges_since_adjustment = 0;
-        self.protocol_target_mut(is_http2)
-            .successful_ranges_since_rate_adjustment = 0;
     }
 
     /// Backoff episodes since the last sustained 429-free interval.
@@ -390,7 +308,6 @@ impl HttpAdaptiveConcurrency {
     pub(crate) fn finish_round(&mut self, is_http2: bool) -> AdaptiveUpdate {
         let retry_wait = self.retry_wait;
         let settings = self.settings;
-        let success_threshold = self.recovery_success_threshold(is_http2);
         let protocol = self.protocol_target_mut(is_http2);
         let now = Instant::now();
         let (changed, increased) = if protocol.capacity_rejected {
@@ -406,7 +323,6 @@ impl HttpAdaptiveConcurrency {
             } else {
                 None
             };
-            protocol.last_target_adjustment = now;
             protocol.successful_ranges_since_adjustment = 0;
             if !retry_wait.is_zero() {
                 let until = now + retry_wait;
@@ -416,14 +332,11 @@ impl HttpAdaptiveConcurrency {
             (changed, false)
         } else if settings.enabled
             && protocol.target < protocol.ceiling
-            && protocol.successful_ranges_since_adjustment >= success_threshold
+            && protocol.successful_ranges_since_adjustment >= RECOVERY_SUCCESS_THRESHOLD
             && protocol.cooldown_until.is_none_or(|until| now >= until)
-            && now.duration_since(protocol.last_target_adjustment)
-                >= Duration::from_secs(settings.recovery_interval_secs)
         {
             protocol.target += 1;
             protocol.successful_ranges_since_adjustment = 0;
-            protocol.last_target_adjustment = now;
             (Some(protocol.target), true)
         } else {
             (None, false)
@@ -445,12 +358,10 @@ impl HttpAdaptiveConcurrency {
     }
 
     pub(crate) fn cooldown_remaining_for(&self, is_http2: bool) -> Option<Duration> {
-        [
-            self.protocol_target(is_http2)
-                .cooldown_until
-                .map(|until| until.saturating_duration_since(Instant::now())),
-            self.request_start_wait(is_http2),
-        ]
+        [self
+            .protocol_target(is_http2)
+            .cooldown_until
+            .map(|until| until.saturating_duration_since(Instant::now()))]
         .into_iter()
         .flatten()
         .filter(|remaining| !remaining.is_zero())

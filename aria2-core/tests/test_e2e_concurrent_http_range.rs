@@ -1783,11 +1783,8 @@ async fn test_engine_resumed_ranges_exhaust_capacity_retries_instead_of_stalling
     options.continue_download = true;
     options.allow_overwrite = true;
     options.max_retries = 1;
-    options.http_adaptive.start_interval_ms = 0;
     options.http_adaptive.backoff_base_secs = 1;
     options.http_adaptive.backoff_max_secs = 1;
-    options.http_adaptive.capacity_start_interval_ms = 1;
-    options.http_adaptive.capacity_start_interval_max_ms = 1;
 
     let gid = GroupId::new(413);
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
@@ -2191,7 +2188,6 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
     options.retry_wait = 0;
     // This test verifies overload feedback, so remove normal request pacing
     // to make the initial four-request burst deterministic.
-    options.http_adaptive.start_interval_ms = 0;
     let mut cmd = make_concurrent_command(
         GroupId::new(5),
         &url,

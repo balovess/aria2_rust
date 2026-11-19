@@ -27,40 +27,59 @@ fn capacity_rejection_lowers_only_the_affected_protocol_target() {
     let mut controller = controller();
     controller.record_capacity_failure(false, None);
     assert!(!controller.can_start(0, false));
-    assert_eq!(controller.finish_round(false).range_target, Some(12));
-    assert_eq!(controller.connection_target(false), 12);
+    assert_eq!(controller.finish_round(false).range_target, Some(8));
+    assert_eq!(controller.connection_target(false), 8);
     assert_eq!(controller.connection_target(true), 4);
 
     controller.record_capacity_failure(true, None);
-    assert_eq!(controller.finish_round(true).range_target, Some(12));
-    assert_eq!(controller.range_target(true), 12);
+    assert_eq!(controller.finish_round(true).range_target, Some(8));
+    assert_eq!(controller.range_target(true), 8);
 }
 
 #[test]
 fn repeated_capacity_rejections_reduce_each_protocol_target_to_one() {
     let mut controller = controller();
-    for expected in [12, 9, 7, 6, 5, 4, 3, 2, 1] {
+    for expected in [
+        Some(8),
+        Some(4),
+        Some(2),
+        Some(1),
+        None,
+        None,
+        None,
+        None,
+        None,
+    ] {
         controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
         controller.record_capacity_failure(false, None);
-        assert_eq!(controller.finish_round(false).range_target, Some(expected));
+        assert_eq!(controller.finish_round(false).range_target, expected);
     }
     assert_eq!(controller.connection_target(false), 1);
 
-    for expected in [12, 9, 7, 6, 5, 4, 3, 2, 1] {
+    for expected in [
+        Some(8),
+        Some(4),
+        Some(2),
+        Some(1),
+        None,
+        None,
+        None,
+        None,
+        None,
+    ] {
         controller.http2.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
         controller.record_capacity_failure(true, None);
-        controller.finish_round(true);
-        assert_eq!(controller.range_target(true), expected);
+        assert_eq!(controller.finish_round(true).range_target, expected);
     }
     assert_eq!(controller.connection_target(true), 1);
     assert_eq!(controller.range_target(true), 1);
 }
 
 #[test]
-fn capacity_rejection_reduces_target_and_paces_future_starts() {
+fn capacity_rejection_reduces_target_and_applies_cooldown() {
     let mut controller = controller();
     let wait = controller.record_capacity_rejection(false, None);
-    assert_eq!(controller.connection_target(false), 12);
+    assert_eq!(controller.connection_target(false), 8);
     assert!(wait >= Duration::from_secs(20) && wait <= CAPACITY_BACKOFF_MAX);
     assert!(
         !controller.can_start(0, false),
@@ -69,7 +88,7 @@ fn capacity_rejection_reduces_target_and_paces_future_starts() {
     assert!(controller.cooldown_remaining().is_some());
 
     controller.record_capacity_rejection(false, None);
-    assert_eq!(controller.connection_target(false), 12);
+    assert_eq!(controller.connection_target(false), 8);
     assert_eq!(controller.backoff_steps(), 1);
 
     assert_eq!(
@@ -77,7 +96,7 @@ fn capacity_rejection_reduces_target_and_paces_future_starts() {
         Duration::from_secs(90),
         "a longer Retry-After is honored"
     );
-    assert_eq!(controller.connection_target(false), 12);
+    assert_eq!(controller.connection_target(false), 8);
     assert_eq!(controller.connection_target(true), 4);
 }
 
@@ -127,13 +146,20 @@ fn disabled_adaptive_mode_keeps_target_fixed_without_adaptive_backoff() {
     assert!(controller.can_start(0, false));
 
     controller.record_failure(false);
-    controller.http1.last_target_adjustment =
-        Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);
     for _ in 0..64 {
         controller.record_success(false);
     }
     assert_eq!(controller.finish_round(false), AdaptiveUpdate::default());
     assert_eq!(controller.connection_target(false), 16);
+}
+
+#[test]
+fn healthy_range_starts_are_immediate() {
+    let settings = HttpAdaptiveOptions::default();
+    let mut controller = HttpAdaptiveConcurrency::new_with_settings(16, 16, 4, 4, 0, settings);
+
+    assert!(controller.can_start(0, false));
+    assert!(controller.can_start(1, false));
 }
 
 #[test]
@@ -183,7 +209,7 @@ fn backoff_persists_across_successes_and_resets_after_a_quiet_window() {
     }
 
     controller.last_capacity_rejection =
-        Some(Instant::now() - CAPACITY_BACKOFF_RESET_AFTER - Duration::from_millis(1));
+        Some(Instant::now() - BACKOFF_RESET_AFTER - Duration::from_millis(1));
     controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
     let wait = controller.record_capacity_rejection(false, None);
     assert_eq!(controller.backoff_steps(), 1);
@@ -193,32 +219,24 @@ fn backoff_persists_across_successes_and_resets_after_a_quiet_window() {
 }
 
 #[test]
-fn recovery_probe_waits_for_stability_and_cooldown_then_adds_one_range() {
+fn recovery_waits_for_eight_successful_ranges_then_adds_one_range() {
     let mut controller = controller();
     controller.record_capacity_failure(false, None);
-    assert_eq!(controller.finish_round(false).range_target, Some(12));
-    controller.http1.last_target_adjustment =
-        Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);
-    controller.http1.cooldown_until = Some(Instant::now() + Duration::from_secs(1));
+    assert_eq!(controller.finish_round(false).range_target, Some(8));
+    controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
 
-    for _ in 0..15 {
+    for _ in 0..7 {
         controller.record_success(false);
     }
     assert_eq!(controller.finish_round(false), AdaptiveUpdate::default());
-    assert_eq!(controller.range_target(false), 12);
+    assert_eq!(controller.range_target(false), 8);
 
-    controller.record_failure(false);
-    controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
-    controller.http1.last_target_adjustment =
-        Instant::now() - RECOVERY_PROBE_INTERVAL - Duration::from_millis(1);
-    for _ in 0..15 {
-        controller.record_success(false);
-    }
+    controller.record_success(false);
 
     let update = controller.finish_round(false);
-    assert_eq!(update.range_target, Some(13));
+    assert_eq!(update.range_target, Some(9));
     assert!(update.increased);
-    assert_eq!(controller.range_target(false), 13);
+    assert_eq!(controller.range_target(false), 9);
 }
 
 #[test]
@@ -246,61 +264,8 @@ fn split_budget_caps_ranges_without_changing_protocol_targets() {
 }
 
 #[test]
-fn recovery_threshold_scales_from_eight_to_thirty_two_and_caps() {
-    let mut controller = HttpAdaptiveConcurrency::new(256, 256, 4, 64, 0);
-    for (target, expected) in [
-        (5, 8),
-        (8, 8),
-        (10, 10),
-        (16, 16),
-        (32, 32),
-        (128, 32),
-        (256, 32),
-    ] {
-        controller.http1.target = target;
-        assert_eq!(controller.recovery_success_threshold(false), expected);
-    }
-}
-
-#[test]
 fn temporary_failure_does_not_lower_global_target() {
     let mut controller = controller();
     controller.record_failure(false);
     assert_eq!(controller.range_target(false), 16);
-    assert_eq!(
-        controller.http1.request_start_interval,
-        INITIAL_REQUEST_START_INTERVAL
-    );
-}
-
-#[test]
-fn capacity_feedback_paces_then_successes_gradually_relax_start_rate() {
-    let mut controller = controller();
-    controller.record_capacity_rejection(false, None);
-    assert_eq!(
-        controller.http1.request_start_interval,
-        CAPACITY_REQUEST_START_INTERVAL
-    );
-
-    for _ in 0..RATE_RECOVERY_SUCCESS_THRESHOLD {
-        controller.record_success(false);
-    }
-    assert_eq!(
-        controller.http1.request_start_interval,
-        Duration::from_millis(900)
-    );
-}
-
-#[test]
-fn request_starts_obey_the_feedback_interval() {
-    let mut controller = controller();
-    controller.record_capacity_rejection(false, None);
-    controller.http1.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
-    controller.finish_round(false);
-    controller.http1.last_request_started = Some(Instant::now());
-    assert!(!controller.can_start(0, false));
-
-    controller.http1.last_request_started =
-        Some(Instant::now() - CAPACITY_REQUEST_START_INTERVAL - Duration::from_millis(1));
-    assert!(controller.can_start(0, false));
 }

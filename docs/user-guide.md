@@ -252,6 +252,8 @@ different default file.
 | `--out`, `-o` | Output filename | `--out=archive.zip` |
 | `--split`, `-s` | Concurrent requests for one download | `--split=4` |
 | `--max-connection-per-server`, `-x` | Per-server request limit | `--max-connection-per-server=4` |
+| `--max-http2-sessions-per-server`, `--max-http2-streams-per-session` | HTTP/2 session and per-session stream ceilings | `--max-http2-sessions-per-server=2` |
+| `--http-adaptive-enabled` | Opt in to lowering concurrency after HTTP 429/503 capacity responses; disabled by default | `--http-adaptive-enabled=true` |
 | `--continue`, `-c` | Resume partial files | `--continue=true` |
 | `--max-download-limit` | Per-download speed limit | `--max-download-limit=2M` |
 | `--max-overall-download-limit` | Global speed limit | `--max-overall-download-limit=10M` |
@@ -263,3 +265,5 @@ different default file.
 | `--conf-path` | Select a configuration file | `--conf-path=aria2.conf` |
 
 Use `aria2c --help` for the complete option list.
+For HTTP Range limits, adaptive backoff settings, and configuration-file/RPC
+examples, see the [HTTP section of the configuration guide](configuration-guide-en.md#http-range-concurrency-and-adaptive-control).

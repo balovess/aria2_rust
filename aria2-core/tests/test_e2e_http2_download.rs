@@ -211,7 +211,6 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
         max_connection_per_server: Some(4),
         max_http2_sessions_per_server: Some(1),
         http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
-            start_interval_ms: 0,
             ..Default::default()
         },
         http_version: HttpVersion::Http2,
@@ -291,10 +290,10 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
         "one physical TCP connection should carry the four initial H2 streams"
     );
     assert!(
-        per_connection_peak
-            .iter()
-            .all(|peak| peak.load(Ordering::Relaxed) <= 4),
-        "the default four-stream limit must remain fixed on every H2 connection"
+        per_connection_peak.iter().all(|peak| {
+            peak.load(Ordering::Relaxed) <= aria2_core::constants::DEFAULT_HTTP2_STREAMS_PER_SESSION
+        }),
+        "the configured default stream limit must hold on every H2 connection"
     );
 
     drop(command);

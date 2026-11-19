@@ -15,17 +15,8 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
         "connect-timeout",
         "http-adaptive-enabled",
         "http-adaptive-reduction-percent",
-        "http-adaptive-recovery-interval",
-        "http-adaptive-recovery-successes-min",
-        "http-adaptive-recovery-successes-max",
-        "http-adaptive-start-interval-ms",
         "http-adaptive-backoff-base",
         "http-adaptive-backoff-max",
-        "http-adaptive-capacity-start-interval-ms",
-        "http-adaptive-capacity-start-interval-max-ms",
-        "http-adaptive-rate-recovery-successes",
-        "http-adaptive-rate-min-interval-ms",
-        "http-adaptive-backoff-reset-after",
     ];
     let options = option_names
         .iter()
@@ -66,17 +57,8 @@ fn c_api_http_adaptive_global_options_reach_new_downloads() {
     assert_eq!(group.options().connect_timeout, Some(1));
     assert!(!adaptive.enabled);
     assert_eq!(adaptive.reduction_percent, 1);
-    assert_eq!(adaptive.recovery_interval_secs, 1);
-    assert_eq!(adaptive.recovery_successes_min, 1);
-    assert_eq!(adaptive.recovery_successes_max, 1);
-    assert_eq!(adaptive.start_interval_ms, 1);
     assert_eq!(adaptive.backoff_base_secs, 1);
     assert_eq!(adaptive.backoff_max_secs, 1);
-    assert_eq!(adaptive.capacity_start_interval_ms, 1);
-    assert_eq!(adaptive.capacity_start_interval_max_ms, 1);
-    assert_eq!(adaptive.rate_recovery_successes, 1);
-    assert_eq!(adaptive.rate_min_interval_ms, 1);
-    assert_eq!(adaptive.backoff_reset_after_secs, 1);
     drop(group);
 
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
@@ -97,17 +79,8 @@ fn c_api_http_adaptive_task_options_override_global_defaults() {
     let options = [
         kv("http-adaptive-enabled", "true"),
         kv("http-adaptive-reduction-percent", "33"),
-        kv("http-adaptive-recovery-interval", "17"),
-        kv("http-adaptive-recovery-successes-min", "40"),
-        kv("http-adaptive-recovery-successes-max", "20"),
-        kv("http-adaptive-start-interval-ms", "250"),
         kv("http-adaptive-backoff-base", "30"),
         kv("http-adaptive-backoff-max", "10"),
-        kv("http-adaptive-capacity-start-interval-ms", "2500"),
-        kv("http-adaptive-capacity-start-interval-max-ms", "1500"),
-        kv("http-adaptive-rate-recovery-successes", "128"),
-        kv("http-adaptive-rate-min-interval-ms", "25"),
-        kv("http-adaptive-backoff-reset-after", "70"),
     ];
     let entries = options
         .iter()
@@ -137,17 +110,8 @@ fn c_api_http_adaptive_task_options_override_global_defaults() {
     let adaptive = group.options().http_adaptive;
     assert!(adaptive.enabled);
     assert_eq!(adaptive.reduction_percent, 33);
-    assert_eq!(adaptive.recovery_interval_secs, 17);
-    assert_eq!(adaptive.recovery_successes_min, 40);
-    assert_eq!(adaptive.recovery_successes_max, 40);
-    assert_eq!(adaptive.start_interval_ms, 250);
     assert_eq!(adaptive.backoff_base_secs, 30);
     assert_eq!(adaptive.backoff_max_secs, 30);
-    assert_eq!(adaptive.capacity_start_interval_ms, 2500);
-    assert_eq!(adaptive.capacity_start_interval_max_ms, 2500);
-    assert_eq!(adaptive.rate_recovery_successes, 128);
-    assert_eq!(adaptive.rate_min_interval_ms, 25);
-    assert_eq!(adaptive.backoff_reset_after_secs, 70);
     drop(group);
 
     assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);

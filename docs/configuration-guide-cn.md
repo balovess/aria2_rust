@@ -177,7 +177,10 @@ SSH/SFTP 选项（`ssh-host-key-md` 和下表中的 5 个 `sftp-*` 选项）在�
 | `proxy-method`, `user-agent`, `referer`, `header` | 代理方法、UA、Referer、自定义请求头 |
 | `load-cookies`, `save-cookies`, `http-user`, `http-passwd`, `ftp-user`, `ftp-passwd` | Cookie 和 HTTP/FTP 认证 |
 | `connect-timeout`, `timeout`, `max-tries`, `retry-wait` | 连接超时、总超时、尝试次数、重试等待（秒） |
-| `split`, `min-split-size`, `max-connection-per-server` | 分片、最小分片大小、每服务器连接上限 |
+| `split`, `min-split-size`, `max-connection-per-server` | 分片预算、最小分片大小、HTTP/1.1 每服务器连接上限 |
+| `http-version`, `max-http2-sessions-per-server`, `max-http2-streams-per-session` | HTTP 版本、每服务器 HTTP/2 会话数和每会话 Range 流上限 |
+| `min-http-range-size` | 服务器明确拒绝 Range 大小后使用的最小 Range 大小 |
+| `http-adaptive-enabled`, `http-adaptive-reduction-percent`, `http-adaptive-backoff-base`, `http-adaptive-backoff-max` | 自适应并发开关、容量错误后的并发降幅和退避时间 |
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS 校验、CA、客户端证书/私钥、最低 TLS 版本 |
 | `allow-overwrite`, `auto-file-renaming`, `continue`, `remote-time` | 覆盖、自动改名、续传、远端时间 |
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP 连接、流水线、压缩、认证和响应行为 |
@@ -188,16 +191,77 @@ SSH/SFTP 选项（`ssh-host-key-md` 和下表中的 5 个 `sftp-*` 选项）在�
 | `sftp-keepalive-interval` | SSH keepalive 间隔（秒，0..600；默认 60；0 禁用） |
 | `sftp-preferred-ciphers` | 逗号分隔的 SSH cipher 有序偏好列表；留空使用库默认值 |
 
-HTTP 下载中，`split` 是任务级分段预算，不再有固定的配置上限；实际生效值
-受文件大小、`min-split-size`（默认 `20M`）和运行时资源约束。`piece-length`
-（默认 `1M`）决定新下载用于构造 HTTP Range 请求的持久父分片边界；恢复下载
-时优先沿用兼容的 control file 布局。本实现当前默认 `split=16`，原始 aria2
-默认 `5`。
+HTTP 下载中，`split` 是任务级分段预算，没有固定配置上限；实际值受文件大小、
+`min-split-size` 和运行时资源约束。兼容的 control file 布局会在续传时优先沿用。
 
-`max-connection-per-server`（`-x`）限制单个下载对同一服务器的并发访问，取值范围
-仍为 `1..=16`，默认 `1`，与原始 aria2 一致。对 HTTP/1.1，
-即使 `split` 更大，`-x=1` 也只会允许一个活动 Range 请求。HTTP/2 中该上限作用于
-独立客户端会话池，会话内部仍可复用多个并发流。
+#### HTTP Range 并发和自适应
+
+| HTTP 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `split` | `16` | 单个下载的 Range 并发预算 |
+| `min-split-size` | `20M` | 文件较小时限制分段数量 |
+| `piece-length` | `1M` | 新下载的持久父分片边界；续传优先使用控制文件中的布局 |
+| `max-connection-per-server`（`-x`） | `16` | HTTP/1.1 每下载、每服务器连接上限，范围 `1..=16` |
+| `http-version` | `auto` | 优先 HTTP/2，必要时回退 HTTP/1.1 |
+| `max-http2-sessions-per-server` | `2` | 每下载、每服务器的 HTTP/2 会话数 |
+| `max-http2-streams-per-session` | `8` | 每个 HTTP/2 会话的并发 Range 流数 |
+| `min-http-range-size` | `64K` | 服务器明确拒绝 Range 大小后的最小请求大小 |
+
+HTTP/1.1 的活动 Range 数受 `split` 和 `-x` 两者中较小值限制；`-x=1` 即使在
+`split` 更大时也只允许一个活动 Range。HTTP/2 Range 并发受 `split` 与
+`max-http2-sessions-per-server × max-http2-streams-per-session` 的较小值限制。
+
+自适应并发默认关闭，因此默认情况下不会因自适应控制器降低 Range 并发。需要让程序在
+服务器返回 HTTP 429/503 等容量拒绝时自动降低并发，可显式启用：
+
+```text
+aria2c --http-adaptive-enabled=true https://example.com/large.iso
+```
+
+启用后，控制器从有效并发上限开始；容量拒绝时按降幅降低目标并退避，收到 `Retry-After`
+时遵循服务器给出的等待时间；冷却结束后，每累计 8 个成功 Range 增加 1 个并发。健康传输
+期间 Range 立即按并发目标启动，不做定时限速。退避连续计数在 60 秒没有新的容量拒绝后重置。
+
+| 自适应选项 | 默认值 | 取值/行为 |
+| --- | --- | --- |
+| `http-adaptive-enabled` | `false` | `true` 启用容量反馈驱动的并发调整和退避 |
+| `http-adaptive-reduction-percent` | `50` | 每次容量拒绝降低的并发百分比，`1..=90` |
+| `http-adaptive-backoff-base` | `20` 秒 | 指数退避起始值，`1..=3600` 秒 |
+| `http-adaptive-backoff-max` | `300` 秒 | 指数退避上限，`1..=86400` 秒，实际值不小于 base |
+
+常用并发设置示例：
+
+```text
+# 常规下载：采用默认并发上限，自适应仍关闭
+aria2c https://example.com/large.iso
+
+# 降低单个下载对服务器的并发压力
+aria2c --split=4 --max-connection-per-server=4 https://example.com/large.iso
+
+# 对会返回 429/503 的服务器启用自适应降并发和退避
+aria2c --http-adaptive-enabled=true https://example.com/large.iso
+```
+
+同样的设置可写入配置文件（每行一个选项，不带 `--`）：
+
+```ini
+split=4
+max-connection-per-server=4
+http-adaptive-enabled=true
+http-adaptive-reduction-percent=50
+http-adaptive-backoff-base=20
+http-adaptive-backoff-max=300
+```
+
+RPC 的 `aria2.addUri` 可在单个任务的 `options` 中覆盖这些配置：
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"aria2.addUri","params":[["https://example.com/large.iso"],{"split":"4","max-connection-per-server":"4","http-adaptive-enabled":"true"}]}
+```
+
+`split` 是单个下载的 Range 预算；`-x` 是该下载对单个服务器的 HTTP/1.1 连接上限，
+两者不是全进程的总并发限制。实际并发还受文件大小、`min-split-size`、HTTP 版本和服务器
+支持情况影响。提高这些上限不保证提高速度，应按服务器承载能力逐步调整。
 
 ### BitTorrent（启用 bittorrent feature 时）
 

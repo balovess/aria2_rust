@@ -279,7 +279,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "http-adaptive-enabled".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Enable adaptive HTTP Range concurrency target adjustments and adaptive capacity cooldown".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -287,38 +287,10 @@ impl crate::config::OptionRegistry {
         for (name, default, min, max, description) in [
             (
                 "http-adaptive-reduction-percent",
-                25,
+                50,
                 1,
                 90,
                 "Concurrency reduction percentage after an explicit capacity rejection",
-            ),
-            (
-                "http-adaptive-recovery-interval",
-                10,
-                1,
-                3600,
-                "Minimum seconds between adaptive concurrency recovery probes",
-            ),
-            (
-                "http-adaptive-recovery-successes-min",
-                8,
-                1,
-                100_000,
-                "Minimum successful Ranges before an adaptive concurrency probe",
-            ),
-            (
-                "http-adaptive-recovery-successes-max",
-                32,
-                1,
-                100_000,
-                "Maximum successful Ranges before an adaptive concurrency probe",
-            ),
-            (
-                "http-adaptive-start-interval-ms",
-                100,
-                0,
-                60_000,
-                "Initial delay in milliseconds between starting HTTP Ranges",
             ),
             (
                 "http-adaptive-backoff-base",
@@ -333,41 +305,6 @@ impl crate::config::OptionRegistry {
                 1,
                 86_400,
                 "Maximum capacity rejection backoff in seconds",
-            ),
-            (
-                "http-adaptive-capacity-start-interval-ms",
-                1000,
-                1,
-                60_000,
-                "Initial delay in milliseconds between Range starts after capacity rejection",
-            ),
-            (
-                "http-adaptive-capacity-start-interval-max-ms",
-                4000,
-                1,
-                60_000,
-                "Maximum delay in milliseconds between Range starts after repeated capacity rejection",
-            ),
-            (
-                "http-adaptive-rate-recovery-successes",
-                64,
-                1,
-                1_000_000,
-                "Successful Ranges required before easing request pacing",
-            ),
-            (
-                "http-adaptive-rate-min-interval-ms",
-                10,
-                0,
-                60_000,
-                "Minimum delay in milliseconds between Range starts after recovery",
-            ),
-            (
-                "http-adaptive-backoff-reset-after",
-                60,
-                1,
-                86_400,
-                "Quiet seconds without capacity rejection before resetting the backoff streak",
             ),
         ] {
             self.register(OptionDef {

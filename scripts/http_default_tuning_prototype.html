@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTP default tuning prototype</title>
+<style>
+    :root { --ink: #20242b; --muted: #667085; --accent: #1769aa; --line: #d7dce3; --warn: #b42318; --ok: #087443; --bg: #f7f8fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0 auto; max-width: 1060px; padding: 24px; color: var(--ink); background: var(--bg); font: 15px/1.5 system-ui, sans-serif; }
+    h1 { font-size: 24px; margin: 0 0 6px; }
+    h2 { font-size: 18px; margin: 24px 0 8px; }
+    h3 { font-size: 15px; margin: 16px 0 6px; }
+    p { margin: 0 0 12px; }
+    .prototype { border-left: 4px solid var(--accent); padding-left: 12px; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 12px 0; }
+    .panel { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    label { color: var(--muted); font-size: 13px; }
+    select, button { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); }
+    button { cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; font-variant-numeric: tabular-nums; }
+    .good { color: var(--ok); }
+    .bad { color: var(--warn); }
+    ol { margin: 8px 0; padding-left: 22px; }
+    .walkthrough { display: none; }
+    .walkthrough.active { display: block; }
+    code { font-family: ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<h1>HTTP default tuning prototype</h1>
+<p class="prototype">PROTOTYPE: this answers one question: can a single HTTP/1.1 or HTTP/2 default finish a download when the server allows fewer connections or streams than the client asks for? Drive the scenarios below and watch the target, refusals, bans, and elapsed time.</p>
+
+<h2>Current state</h2>
+<div class="panel">
+    <dl>
+        <dt>Protocol</dt><dd id="state-protocol">-</dd>
+        <dt>Client limits</dt><dd id="state-limits">-</dd>
+        <dt>Server environment</dt><dd id="state-env">-</dd>
+        <dt>Adaptive policy</dt><dd id="state-policy">-</dd>
+        <dt>Range target</dt><dd id="state-target">-</dd>
+        <dt>Downloaded ranges</dt><dd id="state-ranges">-</dd>
+        <dt>Server refusals</dt><dd id="state-refusals">-</dd>
+        <dt>Ban episodes</dt><dd id="state-bans">-</dd>
+        <dt>Elapsed time</dt><dd id="state-elapsed">-</dd>
+        <dt>Last change</dt><dd id="state-change">-</dd>
+    </dl>
+</div>
+
+<h2>Free play</h2>
+<div class="grid">
+    <div class="field">
+        <label for="protocol">Protocol</label>
+        <select id="protocol">
+            <option value="h1">HTTP/1.1</option>
+            <option value="h2">HTTP/2</option>
+        </select>
+    </div>
+    <div class="field">
+        <label for="limits">Client limits</label>
+        <select id="limits"></select>
+    </div>
+    <div class="field">
+        <label for="env">Server environment</label>
+        <select id="env"></select>
+    </div>
+    <div class="field">
+        <label for="policy">Adaptive policy</label>
+        <select id="policy"></select>
+    </div>
+</div>
+<div class="row">
+    <button id="run-one">Run one round</button>
+    <button id="run-all" class="primary">Run whole download</button>
+    <button id="apply-default">Load recommended defaults</button>
+    <button id="reset">Reset</button>
+</div>
+
+<h2>Guided walkthroughs</h2>
+<div class="row" id="tabs">
+    <button data-tab="generous" class="active">Generous origin</button>
+    <button data-tab="capped">Connection cap exceeded</button>
+    <button data-tab="h2streams">HTTP/2 stream starvation</button>
+</div>
+
+<section class="walkthrough active" id="generous">
+    <p>Start with a server that accepts every request. Watch the target stay at its ceiling and no capacity feedback appear.</p>
+    <ol>
+        <li><button data-step="generous-start">Set HTTP/1.1 recommended defaults</button></li>
+        <li><button data-step="generous-run">Run the whole download</button></li>
+    </ol>
+</section>
+
+<section class="walkthrough" id="capped">
+    <p>The origin accepts four connections. Compare a fixed target with the recommended backoff: the fixed target keeps asking for more than the server allows.</p>
+    <ol>
+        <li><button data-step="capped-current">Run current fixed defaults</button></li>
+        <li><button data-step="capped-recommended">Run recommended defaults</button></li>
+    </ol>
+</section>
+
+<section class="walkthrough" id="h2streams">
+    <p>The origin accepts two HTTP/2 sessions with eight streams each. Four configured streams leave half of that capacity unused and trigger refusals.</p>
+    <ol>
+        <li><button data-step="h2-current">Run four streams per session</button></li>
+        <li><button data-step="h2-recommended">Run eight streams per session</button></li>
+    </ol>
+</section>
+
+<script>
+// Pure model. No DOM access. This is intentionally coarse: it answers the
+// state-model question, not the exact timing of the batch simulator.
+const TuningModel = (() => {
+    const policies = {
+        off: { label: "Fixed target (adaptive off)", enabled: false, reduction: 0, recovery: 10, min: 8, max: 32, base: 0, maxBackoff: 0, startMs: 0, maxStartMs: 0, rate: 64 },
+        current: { label: "Current: 25% backoff", enabled: true, reduction: 25, recovery: 10, min: 8, max: 32, base: 20, maxBackoff: 300, startMs: 1000, maxStartMs: 4000, rate: 64 },
+        recommended: { label: "Recommended: 50% backoff", enabled: true, reduction: 50, recovery: 10, min: 8, max: 32, base: 20, maxBackoff: 300, startMs: 1000, maxStartMs: 4000, rate: 64 },
+    };
+
+    const limits = {
+        "h1-x10": { protocol: "h1", label: "10 connections", connections: 10, sessions: 1, streams: 1 },
+        "h1-x16": { protocol: "h1", label: "16 connections", connections: 16, sessions: 1, streams: 1 },
+        "h2-s4-n4": { protocol: "h2", label: "4 sessions x 4 streams", connections: 10, sessions: 4, streams: 4 },
+        "h2-s4-n8": { protocol: "h2", label: "4 sessions x 8 streams", connections: 10, sessions: 4, streams: 8 },
+    };
+
+    const environments = {
+        generous: { label: "Accepts all requests", capacity: 32, sessionCap: 8, service: 3, banAfter: 6 },
+        capped: { label: "Four connections only", capacity: 4, sessionCap: 4, service: 8, banAfter: 4 },
+        h2sessions: { label: "Two HTTP/2 sessions, eight streams each", capacity: 16, sessionCap: 2, service: 6, banAfter: 4 },
+    };
+
+    function ceiling(limit) {
+        return limit.protocol === "h1"
+            ? Math.min(16, limit.connections)
+            : Math.min(16, limit.sessions * limit.streams);
+    }
+
+    function capacityFor(limit, env) {
+        if (limit.protocol === "h1") {
+            return env.capacity;
+        }
+        return Math.min(env.capacity, env.sessionCap * limit.streams);
+    }
+
+    function create(limitKey, envKey, policyKey) {
+        const limit = limits[limitKey];
+        const ceilingValue = ceiling(limit);
+        return {
+            limitKey,
+            envKey,
+            policyKey,
+            target: ceilingValue,
+            ceiling: ceilingValue,
+            pending: 64,
+            completed: 0,
+            refusals: 0,
+            bans: 0,
+            cooldown: 0,
+            startInterval: 0,
+            capacityFeedback: false,
+            successes: 0,
+            elapsed: 0,
+            rounds: 0,
+            lastChange: "Initial state",
+        };
+    }
+
+    function step(state) {
+        const policy = policies[state.policyKey];
+        const limit = limits[state.limitKey];
+        const env = environments[state.envKey];
+        if (state.pending === 0 || state.rounds >= 80) {
+            return { ...state, lastChange: state.pending === 0 ? "Download complete" : "Round budget reached" };
+        }
+
+        const next = { ...state };
+        if (next.cooldown > 0) {
+            next.elapsed += next.cooldown;
+            next.cooldown = 0;
+            next.lastChange = "Waited out the cooldown";
+        }
+
+        const offered = Math.min(next.target, next.pending);
+        const capacity = capacityFor(limit, env);
+        const accepted = Math.min(offered, capacity);
+        const refused = offered - accepted;
+        next.elapsed += env.service + refused * next.startInterval;
+        next.rounds++;
+
+        if (refused > 0) {
+            next.refusals += refused;
+            if (policy.enabled) {
+                next.target = Math.max(1, Math.ceil(next.target * (100 - policy.reduction) / 100));
+                next.cooldown = Math.min(policy.maxBackoff, policy.base * 2 ** Math.min(next.bans, 4));
+                next.startInterval = !next.capacityFeedback
+                    ? policy.startMs / 1000
+                    : Math.min(policy.maxStartMs / 1000, Math.max(0.25, next.startInterval * 2));
+                next.capacityFeedback = true;
+                next.successes = 0;
+                next.lastChange = "Capacity feedback: target reduced and starts paced";
+            } else {
+                next.lastChange = "Fixed target kept asking beyond capacity";
+            }
+            if (next.refusals >= env.banAfter) {
+                next.bans++;
+                next.elapsed += 30;
+                next.refusals = 0;
+                next.lastChange = "Origin temporarily banned the client";
+            }
+        } else {
+            next.completed += accepted;
+            next.pending -= accepted;
+            next.successes += accepted;
+            const threshold = Math.min(policy.max, Math.max(policy.min, next.target));
+            if (policy.enabled && next.target < next.ceiling && next.successes >= threshold) {
+                next.target++;
+                next.successes = 0;
+                next.lastChange = "Stable success window: one range added";
+            } else {
+                next.lastChange = "Round completed without capacity feedback";
+            }
+        }
+        return next;
+    }
+
+    function run(state) {
+        let current = state;
+        while (current.pending > 0 && current.rounds < 80) {
+            current = step(current);
+        }
+        return current;
+    }
+
+    return { policies, limits, environments, create, step, run, ceiling };
+})();
+
+// Thin page shell.
+const ui = {
+    state: TuningModel.create("h1-x16", "generous", "recommended"),
+    stepIndex: 0,
+};
+
+const byId = (id) => document.getElementById(id);
+
+function populate(select, entries, selected) {
+    select.innerHTML = "";
+    for (const [key, value] of Object.entries(entries)) {
+        const option = document.createElement("option");
+        option.value = key;
+        option.textContent = value.label;
+        select.appendChild(option);
+    }
+    select.value = selected;
+}
+
+function render() {
+    const state = ui.state;
+    const limit = TuningModel.limits[state.limitKey];
+    const env = TuningModel.environments[state.envKey];
+    const policy = TuningModel.policies[state.policyKey];
+    byId("protocol").value = limit.protocol;
+    populate(byId("limits"), Object.fromEntries(
+        Object.entries(TuningModel.limits).filter(([, item]) => item.protocol === limit.protocol)), state.limitKey);
+    byId("env").value = state.envKey;
+    byId("policy").value = state.policyKey;
+    byId("state-protocol").textContent = limit.protocol === "h1" ? "HTTP/1.1" : "HTTP/2";
+    byId("state-limits").textContent = limit.label;
+    byId("state-env").textContent = env.label;
+    byId("state-policy").textContent = policy.label;
+    byId("state-target").textContent = String(state.target);
+    byId("state-ranges").textContent = `${state.completed} / ${state.completed + state.pending}`;
+    byId("state-refusals").textContent = String(state.refusals);
+    byId("state-refusals").className = state.refusals > 0 ? "bad" : "good";
+    byId("state-bans").textContent = String(state.bans);
+    byId("state-bans").className = state.bans > 0 ? "bad" : "good";
+    byId("state-elapsed").textContent = `${state.elapsed.toFixed(1)} s`;
+    byId("state-change").textContent = state.lastChange;
+}
+
+function setScenario(limitKey, envKey, policyKey, runToEnd) {
+    ui.state = TuningModel.create(limitKey, envKey, policyKey);
+    if (runToEnd) {
+        ui.state = TuningModel.run(ui.state);
+    }
+    render();
+}
+
+populate(byId("limits"), TuningModel.limits, ui.state.limitKey);
+populate(byId("env"), TuningModel.environments, ui.state.envKey);
+populate(byId("policy"), TuningModel.policies, ui.state.policyKey);
+render();
+
+byId("protocol").addEventListener("change", (event) => {
+    const protocol = event.target.value;
+    const limitKey = protocol === "h1" ? "h1-x16" : "h2-s4-n8";
+    ui.state = TuningModel.create(limitKey, ui.state.envKey, ui.state.policyKey);
+    render();
+});
+byId("limits").addEventListener("change", (event) => {
+    ui.state = TuningModel.create(event.target.value, ui.state.envKey, ui.state.policyKey);
+    render();
+});
+byId("env").addEventListener("change", (event) => {
+    ui.state = TuningModel.create(ui.state.limitKey, event.target.value, ui.state.policyKey);
+    render();
+});
+byId("policy").addEventListener("change", (event) => {
+    ui.state = TuningModel.create(ui.state.limitKey, ui.state.envKey, event.target.value);
+    render();
+});
+byId("run-one").addEventListener("click", () => {
+    ui.state = TuningModel.step(ui.state);
+    render();
+});
+byId("run-all").addEventListener("click", () => {
+    ui.state = TuningModel.run(ui.state);
+    render();
+});
+byId("apply-default").addEventListener("click", () => setScenario(
+    ui.state.limitKey.startsWith("h2") ? "h2-s4-n8" : "h1-x16",
+    ui.state.envKey,
+    "recommended",
+    false,
+));
+byId("reset").addEventListener("click", () => setScenario(
+    ui.state.limitKey, ui.state.envKey, ui.state.policyKey, false));
+
+for (const tab of byId("tabs").querySelectorAll("button")) {
+    tab.addEventListener("click", () => {
+        for (const item of byId("tabs").querySelectorAll("button")) {
+            item.classList.toggle("active", item === tab);
+        }
+        for (const panel of document.querySelectorAll(".walkthrough")) {
+            panel.classList.toggle("active", panel.id === tab.dataset.tab);
+        }
+    });
+}
+
+const steps = {
+    "generous-start": () => setScenario("h1-x16", "generous", "recommended", false),
+    "generous-run": () => setScenario("h1-x16", "generous", "recommended", true),
+    "capped-current": () => setScenario("h1-x10", "capped", "off", true),
+    "capped-recommended": () => setScenario("h1-x16", "capped", "recommended", true),
+    "h2-current": () => setScenario("h2-s4-n4", "h2sessions", "current", true),
+    "h2-recommended": () => setScenario("h2-s4-n8", "h2sessions", "recommended", true),
+};
+
+for (const button of document.querySelectorAll("[data-step]")) {
+    button.addEventListener("click", () => steps[button.dataset.step]());
+}
+</script>
+</body>
+</html>

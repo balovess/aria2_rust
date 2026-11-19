@@ -1,5 +1,5 @@
 use colored::Colorize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 pub struct ColorizedStream {
     use_color: bool,
@@ -52,6 +52,6 @@ impl ColorizedStream {
     }
 
     pub fn is_color_supported() -> bool {
-        atty::is(atty::Stream::Stdout)
+        io::stdout().is_terminal()
     }
 }

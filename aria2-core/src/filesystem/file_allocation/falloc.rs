@@ -29,9 +29,10 @@ use super::strategies;
 ///   may be exposed). `F_PREALLOCATE` does not extend the file size, so the
 ///   file is sized first via `ftruncate` (set_len). Falls back to the sparse
 ///   `set_len` result if the raw fd is unavailable.
-/// - **Windows**: Delegates to `windows::fallocate_windows` which attempts
-///   `SetFileValidData` to extend the valid data length and force allocation.
-///   See the `windows` module for details.
+/// - **Windows**: Used by explicit `falloc` and delegates to
+///   `windows::fallocate_windows`, which attempts `SetFileValidData` to extend
+///   the valid data length and force allocation. Default `prealloc` uses
+///   zero-fill instead. See the `windows` module for details.
 /// - **Other Unix (BSD, etc.)**: No portable preallocate syscall; uses `set_len`.
 #[cfg_attr(target_os = "linux", allow(unused_variables))]
 pub(crate) async fn fallocate(

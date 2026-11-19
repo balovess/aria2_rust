@@ -1032,17 +1032,8 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "http-version",
         "http-adaptive-enabled",
         "http-adaptive-reduction-percent",
-        "http-adaptive-recovery-interval",
-        "http-adaptive-recovery-successes-min",
-        "http-adaptive-recovery-successes-max",
-        "http-adaptive-start-interval-ms",
         "http-adaptive-backoff-base",
         "http-adaptive-backoff-max",
-        "http-adaptive-capacity-start-interval-ms",
-        "http-adaptive-capacity-start-interval-max-ms",
-        "http-adaptive-rate-recovery-successes",
-        "http-adaptive-rate-min-interval-ms",
-        "http-adaptive-backoff-reset-after",
         "mmap-threshold",
         "on-bt-download-error",
         "pid-file",
@@ -1092,7 +1083,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     );
     assert_eq!(
         registered.len(),
-        278,
+        269,
         "all-features registry inventory changed"
     );
 }
@@ -1263,7 +1254,7 @@ fn regression_registry_default_values() {
             .get("http-adaptive-enabled")
             .unwrap()
             .default_value(),
-        &OptionValue::Bool(false)
+        &OptionValue::Bool(true)
     );
     assert_eq!(
         registry.get("enable-rpc").unwrap().default_value(),

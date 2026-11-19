@@ -59,6 +59,8 @@ async fn test_preallocate_file_prealloc() {
 
     let metadata = tokio::fs::metadata(&path).await.unwrap();
     assert_eq!(metadata.len(), 1024 * 1024);
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert!(content.iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]
@@ -75,6 +77,7 @@ async fn test_preallocate_file_prealloc_preserves_existing_prefix() {
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(&content[..prefix.len()], prefix);
     assert_eq!(content.len(), 1024 * 1024);
+    assert!(content[prefix.len()..].iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]

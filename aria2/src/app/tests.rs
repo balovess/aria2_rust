@@ -427,7 +427,7 @@ async fn test_cli_connect_timeout_reaches_download_options() {
 }
 
 #[tokio::test]
-async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
+async fn test_cli_http_adaptive_defaults_to_enabled_and_accepts_override() {
     let cli = CliArgs::try_parse_from(["aria2"])
         .expect("CLI without an adaptive HTTP concurrency switch should parse");
 
@@ -437,23 +437,15 @@ async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
         .expect("CLI options should load into ConfigManager");
     let (options, _) = app.download_options_with_snapshot().await;
 
-    assert!(!options.http_adaptive.enabled);
+    assert!(options.http_adaptive.enabled);
+    assert_eq!(options.http_adaptive.reduction_percent, 50);
 
     let cli = CliArgs::try_parse_from([
         "aria2",
         "--http-adaptive-enabled=true",
         "--http-adaptive-reduction-percent=33",
-        "--http-adaptive-recovery-interval=17",
-        "--http-adaptive-recovery-successes-min=40",
-        "--http-adaptive-recovery-successes-max=20",
-        "--http-adaptive-start-interval-ms=250",
         "--http-adaptive-backoff-base=30",
         "--http-adaptive-backoff-max=10",
-        "--http-adaptive-capacity-start-interval-ms=2500",
-        "--http-adaptive-capacity-start-interval-max-ms=1500",
-        "--http-adaptive-rate-recovery-successes=128",
-        "--http-adaptive-rate-min-interval-ms=25",
-        "--http-adaptive-backoff-reset-after=70",
     ])
     .expect("adaptive HTTP concurrency override should parse");
 
@@ -465,17 +457,19 @@ async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
 
     assert!(options.http_adaptive.enabled);
     assert_eq!(options.http_adaptive.reduction_percent, 33);
-    assert_eq!(options.http_adaptive.recovery_interval_secs, 17);
-    assert_eq!(options.http_adaptive.recovery_successes_min, 40);
-    assert_eq!(options.http_adaptive.recovery_successes_max, 40);
-    assert_eq!(options.http_adaptive.start_interval_ms, 250);
     assert_eq!(options.http_adaptive.backoff_base_secs, 30);
     assert_eq!(options.http_adaptive.backoff_max_secs, 30);
-    assert_eq!(options.http_adaptive.capacity_start_interval_ms, 2500);
-    assert_eq!(options.http_adaptive.capacity_start_interval_max_ms, 2500);
-    assert_eq!(options.http_adaptive.rate_recovery_successes, 128);
-    assert_eq!(options.http_adaptive.rate_min_interval_ms, 25);
-    assert_eq!(options.http_adaptive.backoff_reset_after_secs, 70);
+
+    let cli = CliArgs::try_parse_from(["aria2", "--http-adaptive-enabled=false"])
+        .expect("explicit adaptive disable should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("explicit adaptive disable should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert!(!options.http_adaptive.enabled);
 }
 
 #[tokio::test]

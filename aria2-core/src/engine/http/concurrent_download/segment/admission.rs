@@ -98,9 +98,6 @@ pub(super) fn admit_pending_ranges(admission: Admission<'_>) -> Result<()> {
                         task_id,
                     },
                 );
-                admission
-                    .adaptive
-                    .record_request_start(admission.executor.is_http2(admission.authority_key));
                 admission.active_work.insert(segment_index, lease);
                 super::executor::update_connection_snapshot(
                     admission.executor,

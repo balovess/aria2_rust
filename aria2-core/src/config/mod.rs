@@ -492,12 +492,20 @@ mod tests {
         assert_eq!(mgr.get_global_bool("continue").await, Some(true));
         assert_eq!(
             mgr.get_global_bool("http-adaptive-enabled").await,
-            Some(false)
+            Some(true)
         );
         assert_eq!(mgr.get_global_i64("split").await, Some(16));
         assert_eq!(
             mgr.get_global_i64("max-connection-per-server").await,
-            Some(10)
+            Some(16)
+        );
+        assert_eq!(
+            mgr.get_global_i64("max-http2-sessions-per-server").await,
+            Some(2)
+        );
+        assert_eq!(
+            mgr.get_global_i64("max-http2-streams-per-session").await,
+            Some(8)
         );
         assert_eq!(
             mgr.get_global_i64("min-split-size").await,

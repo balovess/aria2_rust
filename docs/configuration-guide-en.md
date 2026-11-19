@@ -180,7 +180,10 @@ and ignored; explicit CLI or per-task values are rejected.
 | `proxy-method`, `user-agent`, `referer`, `header` | Proxy method, user agent, Referer, and custom headers |
 | `load-cookies`, `save-cookies`, `http-user`, `http-passwd`, `ftp-user`, `ftp-passwd` | Cookies and HTTP/FTP credentials |
 | `connect-timeout`, `timeout`, `max-tries`, `retry-wait` | Connect timeout, total timeout, attempts, and retry wait (seconds) |
-| `split`, `min-split-size`, `max-connection-per-server` | Splitting, minimum split size, and per-server connection limit |
+| `split`, `min-split-size`, `max-connection-per-server` | Range budget, minimum split size, and per-server HTTP/1.1 connection limit |
+| `http-version`, `max-http2-sessions-per-server`, `max-http2-streams-per-session` | HTTP version, per-server HTTP/2 sessions, and Range streams per session |
+| `min-http-range-size` | Minimum Range size used after an explicit server size rejection |
+| `http-adaptive-enabled`, `http-adaptive-reduction-percent`, `http-adaptive-backoff-base`, `http-adaptive-backoff-max` | Adaptive concurrency switch, reduction percentage, and capacity backoff bounds |
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS verification, CA, client certificate/key, and minimum TLS version |
 | `allow-overwrite`, `auto-file-renaming`, `continue`, `remote-time` | Overwrite, automatic renaming, resume, and remote timestamps |
 | `enable-http-keep-alive`, `enable-http-pipelining`, `max-http-pipelining`, `http-accept-gzip`, `http-auth-challenge`, `http-no-cache`, `content-disposition-default-utf8`, `use-head`, `no-want-digest-header` | HTTP connection, pipelining, compression, authentication, and response behavior |
@@ -193,18 +196,85 @@ and ignored; explicit CLI or per-task values are rejected.
 
 For HTTP downloads, `split` is the task-wide segment budget and has no fixed
 registry maximum. Its effective value is bounded by the payload,
-`min-split-size` (default `20M`), and runtime resources. `piece-length`
-(default `1M`) defines the durable parent-piece boundaries used to build HTTP
-Range requests for a new download; a compatible control-file layout is
-preserved on resume. This implementation currently defaults `split` to `16`;
-original aria2 defaults to `5`.
+`min-split-size`, and runtime resources. A compatible control-file layout is
+preserved on resume.
 
-`max-connection-per-server` (`-x`) limits concurrent access to one server for
-one download. It remains restricted to `1..=16` and defaults to `1`, matching
-original aria2. For HTTP/1.1, `-x=1` permits
-only one active Range request even if `split` is larger. HTTP/2 applies this
-limit to independent client session pools while allowing multiplexed streams
-within a session.
+#### HTTP Range concurrency and adaptive control
+
+| HTTP option | Default | Purpose |
+| --- | --- | --- |
+| `split` | `16` | Per-download Range concurrency budget |
+| `min-split-size` | `20M` | Limits the number of ranges for smaller files |
+| `piece-length` | `1M` | Durable parent-piece boundary for new downloads; resume prefers the control-file layout |
+| `max-connection-per-server` (`-x`) | `16` | Per-download, per-server HTTP/1.1 connection ceiling, `1..=16` |
+| `http-version` | `auto` | Prefer HTTP/2 and fall back to HTTP/1.1 when needed |
+| `max-http2-sessions-per-server` | `2` | HTTP/2 sessions per download and server |
+| `max-http2-streams-per-session` | `8` | Concurrent Range streams per HTTP/2 session |
+| `min-http-range-size` | `64K` | Minimum Range size after an explicit server size rejection |
+
+For HTTP/1.1, active Ranges are limited by the smaller of `split` and `-x`; `-x=1`
+allows only one active Range even if `split` is larger. HTTP/2 concurrency is
+limited by the smaller of `split` and
+`max-http2-sessions-per-server × max-http2-streams-per-session`.
+
+Adaptive concurrency is disabled by default, so the controller does not reduce
+the Range target unless enabled. To let aria2-rust respond to HTTP 429/503
+capacity rejections, enable it explicitly:
+
+```text
+aria2c --http-adaptive-enabled=true https://example.com/large.iso
+```
+
+When enabled, the controller starts at the effective concurrency ceiling,
+reduces its target after capacity rejection, and backs off while honoring
+`Retry-After`. After cooldown, it restores one Range of concurrency for every
+eight successful Ranges. Healthy requests start immediately up to the target;
+there is no timer-based start pacing. The backoff streak resets after 60 seconds
+without a new capacity rejection.
+
+| Adaptive option | Default | Range or behavior |
+| --- | --- | --- |
+| `http-adaptive-enabled` | `false` | Set to `true` to enable capacity-driven concurrency changes and backoff |
+| `http-adaptive-reduction-percent` | `50` | Concurrency reduction per rejection, `1..=90` |
+| `http-adaptive-backoff-base` | `20` seconds | Exponential backoff base, `1..=3600` seconds |
+| `http-adaptive-backoff-max` | `300` seconds | Exponential backoff cap, `1..=86400` seconds; at least the base |
+
+Common concurrency examples:
+
+```text
+# Normal download: use the configured concurrency limits; adaptive mode stays off
+aria2c https://example.com/large.iso
+
+# Reduce this download's connection pressure on the server
+aria2c --split=4 --max-connection-per-server=4 https://example.com/large.iso
+
+# Enable adaptive reduction and backoff for a server returning 429/503
+aria2c --http-adaptive-enabled=true https://example.com/large.iso
+```
+
+The same options can be placed in a configuration file, one per line without
+the `--` prefix:
+
+```ini
+split=4
+max-connection-per-server=4
+http-adaptive-enabled=true
+http-adaptive-reduction-percent=50
+http-adaptive-backoff-base=20
+http-adaptive-backoff-max=300
+```
+
+`aria2.addUri` can override these options for one RPC task:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"aria2.addUri","params":[["https://example.com/large.iso"],{"split":"4","max-connection-per-server":"4","http-adaptive-enabled":"true"}]}
+```
+
+`split` is a per-download Range budget. `-x` is that download's HTTP/1.1
+connection ceiling per server, not a process-wide total. Effective concurrency
+also depends on file size, `min-split-size`, HTTP version, and server support.
+Higher limits do not guarantee higher throughput; increase them gradually to
+match the server's capacity.
 
 ### BitTorrent (when the bittorrent feature is enabled)
 

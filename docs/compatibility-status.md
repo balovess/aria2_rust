@@ -53,7 +53,7 @@ behavior. An unlisted behavior has not been audited here.
   aria2. `piece-length` defaults to `1M` and defines durable HTTP parent-piece
   boundaries for new downloads. A compatible control-file layout wins on
   resume.
-- **User-directed difference:** `max-connection-per-server` defaults to `10`,
+- **User-directed difference:** `max-connection-per-server` defaults to `16`,
   while original aria2 defaults to `1`. It remains the per-download,
   per-authority HTTP/1.1 connection ceiling with the aria2-compatible range
   `1..=16`. `split` also has no registry ceiling but defaults to `16`, while
@@ -61,20 +61,25 @@ behavior. An unlisted behavior has not been audited here.
   With `-x=1`, an HTTP/1.1 source permits one active Range request even when
   `split` is larger. HTTP/2 session pools and multiplexed Range streams use
   their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
+  HTTP/2 defaults to two sessions with eight streams each, so its default
+  effective Range ceiling is also `16`.
   Adaptive HTTP Range concurrency target adjustment is disabled by default.
   When explicitly enabled, concurrency starts at the configured effective
   ceiling, backs off on explicit server capacity feedback, then probes upward
-  by one Range after a 10-second cooldown and a target-scaled 8..=32 successful
-  ranges without an intervening failure. Capacity feedback reduces the target
-  by 25%, starts subsequent Ranges at 1-second intervals (doubling to 4 seconds
-  on repeated feedback), and uses jittered exponential backoff from 20 seconds
-  to 300 seconds. These are Rust extension defaults and can be adjusted per
+  by one Range after the cooldown ends and eight successful ranges complete
+  without an intervening failure.
+  There is no time-based start or recovery pacing. Capacity feedback reduces
+  the target by 50% and uses jittered exponential backoff from 20 seconds to
+  300 seconds. The reduction percentage and backoff bounds can be adjusted per
   download with the `http-adaptive-*` options. The default
   `http-adaptive-enabled=false` fixes each protocol's Range target at its
   configured effective ceiling and disables the adaptive exponential
   capacity cooldown. Explicit `Retry-After` and ordinary `retry-wait` behavior
-  remain active.
-- **External configuration:** all adaptive controller parameters are available
+  remain active. Healthy Ranges are admitted immediately up to the target; a
+  server rejection causes a cooldown, not per-Range start pacing.
+- **External configuration:** `http-adaptive-enabled`,
+  `http-adaptive-reduction-percent`, `http-adaptive-backoff-base`, and
+  `http-adaptive-backoff-max` are available
   through CLI flags, configuration files, and JSON-RPC/XML-RPC option maps.
   `changeGlobalOption` changes the defaults used for future tasks;
   `changeOption` applies immediately to waiting tasks and is queued as pending
@@ -83,11 +88,12 @@ behavior. An unlisted behavior has not been audited here.
   `addUri`/`addTorrent` option maps may set `http-adaptive-enabled=true`
   without changing the process-wide default. These option names are Rust
   extensions and are not part of original aria2.
-- **Verification:** focused tests cover the `max-connection-per-server=10`
-  default in `ConfigManager` and `FileEntry`, and the `--init` generated
+- **Verification:** focused tests cover the `max-connection-per-server=16`
+  and HTTP/2 `2 x 8` defaults in `ConfigManager`, and the `--init` generated
   configuration. CLI help was checked manually. Additional focused tests cover
   values above the old `split=128` ceiling, the `20M` default, configured 4 MiB
-  HTTP Range boundaries, the adaptive-disabled default, and reuse of the
+  HTTP Range boundaries, the adaptive-disabled default and explicit CLI enable,
+  and reuse of the
   control-file piece layout ahead of a new configuration.
 
 ## HTTP Range capacity retries
@@ -104,12 +110,11 @@ behavior. An unlisted behavior has not been audited here.
   explicit `Retry-After` behavior remain active. A five-minute no-progress
   limit remains as the final bound for the probe and single-mirror retry
   paths.
-- **Configuration:** all `http-adaptive-*` controls are exposed through the
-  option registry, CLI, global RPC option updates, and C API global-option
+- **Configuration:** the four remaining `http-adaptive-*` controls are exposed
+  through the option registry, CLI, global RPC option updates, and C API global-option
   entry points. RPC `addUri` and C API `add_uri` option maps can override them
   for one task without changing global defaults. Session
-  snapshots retain the configured values even when execution normalizes paired
-  limits such as recovery successes or pacing intervals.
+  snapshots retain the configured values through task restore.
 - **Verification:** an engine-level pause/resume test lets a resumed range
   complete, then rate-limits subsequent ranges and verifies the command exits
   with an error instead of remaining active. The multi-mirror capacity and
@@ -117,8 +122,8 @@ behavior. An unlisted behavior has not been audited here.
   completed twice after the retry scheduling and output-reset fixes. Those
   loopback runs verify exact output bytes and that recovered servers receive
   no additional self-induced capacity rejections. CLI, RPC `addUri`, and C API
-  `add_uri` task-option tests now each cover all 13 adaptive controls and
-  verify normalization of paired recovery, backoff, and pacing limits.
+  `add_uri` task-option tests cover the four remaining adaptive controls and
+  verify backoff-bound normalization.
 
 ## HTTP mirror circuit-breaker recovery
 
@@ -128,7 +133,7 @@ behavior. An unlisted behavior has not been audited here.
   segment scheduler waits for an expired cooldown rather than reporting that no
   mirror is available while pending work remains.
 - **Capacity errors:** HTTP 429/503 remain owned by the adaptive Range
-  controller. They trigger its backoff and pacing policy but do not trip the
+  controller. They trigger its backoff policy but do not trip the
   independent mirror circuit breaker, avoiding two sequential 60-second waits.
 - **Verification:** focused segment-manager tests cover cooldown recovery,
   recovery after a successful in-flight Range, and the exclusion of 429/503
@@ -155,6 +160,17 @@ behavior. An unlisted behavior has not been audited here.
   The ordinary soak passed once and the extended soak passed eight repeated
   iterations after this fix. This is local loopback simulation; it does not
   establish behavior against arbitrary remote servers.
+
+## Windows file allocation semantics
+
+- **Compatibility:** default `prealloc` zero-fills the target before the
+  download, matching aria2's Windows behavior. Only explicit `falloc` uses
+  `SetFileValidData`, which requires `SE_MANAGE_VOLUME_PRIVILEGE`; if it is
+  unavailable, the file remains sparse and first writes may incur allocation
+  and zeroing work during transfer.
+- **Verification:** focused file-allocation tests assert that `prealloc`
+  initializes new bytes to zero and preserves existing prefixes. Windows
+  `falloc` remains a separate privilege-dependent path.
 
 ## HTTP/2 Range session and stream limits
 

@@ -55,9 +55,6 @@ impl SingleWorkAdapter for HttpRangeProbeWork<'_> {
                         self.retry_policy
                             .compute_wait(capacity_waits)
                             .unwrap_or_default()
-                            .max(Duration::from_millis(
-                                self.adaptive_options.start_interval_ms,
-                            ))
                     };
                     debug!(
                         waits = capacity_waits,
