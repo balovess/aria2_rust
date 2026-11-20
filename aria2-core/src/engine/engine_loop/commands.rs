@@ -8,6 +8,7 @@ use super::*;
 pub(super) fn promote_reserved_groups(
     ctx: &EngineLoopContext,
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
+    timeout_heap: &mut TimeoutHeap,
     halt_requested: bool,
     force_halt_requested: bool,
     next_generation: &mut CommandGeneration,
@@ -42,14 +43,24 @@ pub(super) fn promote_reserved_groups(
         ) {
             Some((handle, shutdown_tx)) => {
                 let timeout = group.recover().timeout();
+                let timeout_state = Arc::new(TimeoutState::active());
+                let last_activity = Instant::now();
+                schedule_timeout(
+                    timeout_heap,
+                    generation,
+                    last_activity,
+                    timeout,
+                    Arc::clone(&timeout_state),
+                );
                 running_downloads.push((
                     gid,
                     RunningDownload {
                         _handle: handle,
                         shutdown: Some(shutdown_tx),
                         generation,
-                        last_activity: Instant::now(),
+                        last_activity,
                         timeout,
+                        timeout_state,
                     },
                 ));
                 debug!(

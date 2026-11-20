@@ -1,20 +1,41 @@
 use super::*;
 
+/// Queue a timeout deadline. `state` is shared with the running download so
+/// stale heap entries can be recognized after activity advances or the task
+/// completes.
+pub(super) fn schedule_timeout(
+    timeout_heap: &mut TimeoutHeap,
+    generation: CommandGeneration,
+    last_activity: Instant,
+    timeout: Option<Duration>,
+    state: Arc<TimeoutState>,
+) {
+    let Some(timeout) = timeout else { return };
+    let Some(deadline) = last_activity.checked_add(timeout) else {
+        return;
+    };
+    timeout_heap.push(Reverse(TimeoutDeadline {
+        deadline,
+        generation,
+        state,
+    }));
+}
+
 /// Return the earliest maintenance deadline that can be derived from live
 /// engine state. With no inactivity timeout and no pending save, the engine has
 /// no maintenance timer and waits only for notifications.
 pub(super) async fn next_maintenance_deadline(
     ctx: &EngineLoopContext,
     running_downloads: &[(GroupId, RunningDownload)],
+    timeout_heap: &mut TimeoutHeap,
 ) -> Option<Instant> {
-    let timeout_deadline = running_downloads
-        .iter()
-        .filter_map(|(_, running)| {
-            running
-                .timeout
-                .and_then(|timeout| running.last_activity.checked_add(timeout))
-        })
-        .min();
+    while let Some(candidate) = timeout_heap.peek() {
+        if candidate.0.state.is_active() {
+            break;
+        }
+        timeout_heap.pop();
+    }
+    let timeout_deadline = timeout_heap.peek().map(|candidate| candidate.0.deadline);
 
     let has_pending_downloads = !ctx.group_man.download_finished() || !running_downloads.is_empty();
     let save_deadline = if let Some(auto_save) = &ctx.auto_save {
@@ -48,6 +69,7 @@ pub(super) async fn wait_for_deadline(deadline: Option<Instant>) {
 pub(super) async fn run_deadline_maintenance(
     ctx: &mut EngineLoopContext,
     running_downloads: &mut [(GroupId, RunningDownload)],
+    timeout_heap: &mut TimeoutHeap,
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
     // Abort tasks whose configured inactivity timeout has elapsed. The
@@ -64,6 +86,15 @@ pub(super) async fn run_deadline_maintenance(
             && last_network_activity > rd.last_activity
         {
             rd.last_activity = last_network_activity;
+            rd.timeout_state.deactivate();
+            rd.timeout_state = Arc::new(TimeoutState::active());
+            schedule_timeout(
+                timeout_heap,
+                rd.generation,
+                rd.last_activity,
+                rd.timeout,
+                Arc::clone(&rd.timeout_state),
+            );
         }
 
         if let Some(timeout) = rd.timeout
@@ -73,6 +104,7 @@ pub(super) async fn run_deadline_maintenance(
             // deadline so a slow cleanup cannot turn the event loop into a
             // tight retry loop while the task winds down.
             rd.timeout = None;
+            rd.timeout_state.deactivate();
             timed_out.push(*gid);
         }
     }

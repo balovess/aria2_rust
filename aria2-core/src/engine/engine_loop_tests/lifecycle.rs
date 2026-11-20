@@ -117,6 +117,7 @@ async fn force_halt_wakes_file_allocation_waiter_before_protocol_timeout() {
             generation: 1,
             last_activity: Instant::now(),
             timeout: None,
+            timeout_state: Arc::new(TimeoutState::active()),
         },
     )];
     let mut halt_requested = false;
@@ -187,6 +188,7 @@ async fn force_halt_joins_aborted_running_task_before_accounting_completion() {
             generation: 41,
             last_activity: Instant::now(),
             timeout: None,
+            timeout_state: Arc::new(TimeoutState::active()),
         },
     )];
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
@@ -351,6 +353,7 @@ async fn engine_cleanup_cancels_only_its_running_gids() {
             generation: 1,
             last_activity: Instant::now(),
             timeout: None,
+            timeout_state: Arc::new(TimeoutState::active()),
         },
     )];
 

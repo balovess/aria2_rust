@@ -313,7 +313,13 @@ pub(super) async fn process_task_completions<R: CompletionQueue>(
         // Remove only this command instance. A RequestGroup may have several
         // active commands, just as C++ tracks several AbstractCommand objects
         // under one RequestGroup.
-        running_downloads.retain(|(id, running)| *id != gid || running.generation != generation);
+        running_downloads.retain(|(id, running)| {
+            let keep = *id != gid || running.generation != generation;
+            if !keep {
+                running.timeout_state.deactivate();
+            }
+            keep
+        });
 
         // Decrement num_commands and update group status.
         let man = &ctx.group_man;
