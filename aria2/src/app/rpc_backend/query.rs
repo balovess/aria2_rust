@@ -15,6 +15,16 @@ mod files;
 
 use files::{build_file_infos, build_file_infos_from_result};
 
+fn encode_bitfield_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 impl CoreRpcBackend {
     pub(super) fn status_from_group(group: &RequestGroup, gid: &str) -> StatusInfo {
         let snapshot = group.status_snapshot();
@@ -85,12 +95,7 @@ impl CoreRpcBackend {
                 .with_missing_pieces(bt.missing_pieces)
                 .with_seeder(if bt.is_complete() { "true" } else { "false" });
             if let Some(bitfield) = &bt.bitfield {
-                info = info.with_bitfield(
-                    bitfield
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>(),
-                );
+                info = info.with_bitfield(encode_bitfield_hex(bitfield));
             }
 
             #[cfg(feature = "bittorrent")]

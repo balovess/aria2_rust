@@ -1,6 +1,12 @@
 use super::*;
 use std::path::PathBuf;
 
+#[test]
+fn bitfield_hex_encoding_preserves_lowercase_wire_format() {
+    assert_eq!(encode_bitfield_hex(&[]), "");
+    assert_eq!(encode_bitfield_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn pending_magnet_status_and_get_files_use_the_resolved_output_path() {

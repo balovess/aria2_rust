@@ -352,6 +352,24 @@ async fn test_publisher_multiple_subscribers() {
     assert_eq!(publisher.subscriber_count().await, 3);
 }
 
+#[tokio::test]
+async fn serialized_event_json_is_shared_across_subscribers() {
+    let publisher = EventPublisher::new(16);
+    let mut first = publisher.subscribe_scoped("ws-1", None);
+    let mut second = publisher.subscribe_scoped("ws-2", None);
+    let event = DownloadEvent::download_start("shared-gid");
+    let expected = event.to_json().expect("event serializes");
+
+    publisher
+        .publish(EventType::DownloadStart, event)
+        .expect("both subscriptions must receive the event");
+
+    let first_json = first.recv_serialized().await.expect("first event");
+    let second_json = second.recv_serialized().await.expect("second event");
+    assert_eq!(first_json.as_ref(), expected);
+    assert!(Arc::ptr_eq(&first_json, &second_json));
+}
+
 // =========================================================================
 // WsSession Tests
 // =========================================================================

@@ -32,7 +32,7 @@ pub(super) enum CompletionAction {
 
 pub(super) struct CompletionContext<'a> {
     pub(super) downloader: &'a mut ConcurrentDownloader,
-    pub(super) uris: &'a [String],
+    pub(super) uri_authorities: &'a [String],
     pub(super) split: usize,
     pub(super) fixed_piece_size: u64,
     pub(super) minimum_range_size_limit: u64,
@@ -186,7 +186,7 @@ pub(super) async fn handle(
             tracing::warn!(segment_index, mirror_idx, error = %error, "Pooled segment download failed");
 
             let current_limit = scheduler::current_authority_range_size_limit(
-                context.uris,
+                context.uri_authorities,
                 context.range_size_limits,
                 &authority_key,
             );
@@ -196,7 +196,7 @@ pub(super) async fn handle(
                 && current_limit.is_some_and(|current| rejected_limit >= current);
             let reduced_limit = if current_limit == Some(rejected_limit) {
                 scheduler::lower_authority_range_size_limit(
-                    context.uris,
+                    context.uri_authorities,
                     context.range_size_limits,
                     &authority_key,
                     rejected_limit,
