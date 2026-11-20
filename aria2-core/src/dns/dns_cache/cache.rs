@@ -41,11 +41,12 @@ pub struct DnsCache {
     dns_timeout: Duration,
     /// Explicit DNS servers, or an empty list when system defaults are used.
     dns_server_addresses: Arc<[SocketAddr]>,
-    /// Fully-async Hickory DNS resolver. When system DNS is in use, an unavailable
-    /// resolver or lookup error falls back to `tokio::net::lookup_host`. Explicit
-    /// nameserver configuration never falls back to the system resolver. `TokioResolver`
-    /// is `Arc`-backed internally, so cloning is cheap and no outer `Arc` is required.
-    resolver: Option<Arc<TokioResolver>>,
+    /// Fully-async Hickory resolvers tried in configured order. Each explicit nameserver gets
+    /// its own resolver so a primary timeout cannot consume the whole lookup deadline before
+    /// backup servers are tried. When system DNS is in use this contains at most one resolver,
+    /// and an unavailable resolver or lookup error falls back to `tokio::net::lookup_host`.
+    /// Explicit nameserver configuration never falls back to the system resolver.
+    resolvers: Vec<Arc<TokioResolver>>,
 }
 
 #[derive(Default)]
@@ -105,7 +106,11 @@ impl DnsCache {
     /// Create a cache using explicit UDP DNS servers.
     pub fn with_dns_servers(timeout: Duration, servers: Vec<SocketAddr>) -> Self {
         let mut cache = Self::with_dns_timeout(timeout);
-        cache.resolver = build_resolver(timeout, Some(&servers)).map(Arc::new);
+        let per_server_timeout = timeout / servers.len().max(1) as u32;
+        cache.resolvers = servers
+            .iter()
+            .filter_map(|address| build_resolver(per_server_timeout, Some(*address)).map(Arc::new))
+            .collect();
         cache.dns_server_addresses = Arc::from(servers);
         cache
     }
@@ -138,7 +143,10 @@ impl DnsCache {
             ipv4_preference: Arc::new(AtomicBool::new(true)), // Like C++ aria2.
             dns_timeout,
             dns_server_addresses: Arc::from([]),
-            resolver: build_resolver(dns_timeout, None).map(Arc::new),
+            resolvers: build_resolver(dns_timeout, None)
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
         }
     }
 
@@ -173,7 +181,7 @@ impl DnsCache {
     /// This replaces the default resolver built during construction. The TTL settings and
     /// IPv4 preference are preserved.
     pub fn with_resolver(mut self, resolver: TokioResolver) -> Self {
-        self.resolver = Some(Arc::new(resolver));
+        self.resolvers = vec![Arc::new(resolver)];
         self
     }
 
@@ -266,13 +274,24 @@ impl DnsCache {
     ) -> Result<(Vec<SocketAddr>, Duration), Aria2Error> {
         let lookup_started = Instant::now();
         let mut hickory_failure = None;
-        if let Some(resolver) = self.resolver.as_ref() {
-            match tokio::time::timeout(self.dns_timeout, resolver.lookup_ip(hostname)).await {
+        let per_server_timeout = self.dns_timeout / self.resolvers.len().max(1) as u32;
+        for resolver in &self.resolvers {
+            let remaining_timeout = self.dns_timeout.saturating_sub(lookup_started.elapsed());
+            if remaining_timeout.is_zero() {
+                hickory_failure = Some("DNS lookup deadline elapsed".to_string());
+                break;
+            }
+            match tokio::time::timeout(
+                remaining_timeout.min(per_server_timeout),
+                resolver.lookup_ip(hostname),
+            )
+            .await
+            {
                 Err(error) => {
                     hickory_failure = Some(format!("Hickory lookup timed out: {error}"));
                     tracing::debug!(
                         hostname = hostname,
-                        timeout = ?self.dns_timeout,
+                        timeout = ?per_server_timeout,
                         error = %error,
                         "Hickory DNS lookup timed out"
                     );
@@ -581,7 +600,8 @@ impl DnsCache {
     }
 }
 
-/// Build the default hickory async resolver.
+/// Build a hickory async resolver for one nameserver, or for system configuration when no
+/// explicit server is supplied.
 ///
 /// Uses the operating system's DNS configuration unless explicit servers are provided, and
 /// enables `use_hosts_file` so that names present in the system hosts file (e.g. `localhost`)
@@ -591,35 +611,24 @@ impl DnsCache {
 /// construction time and captures no runtime handle), so this is safe to call outside of an
 /// async context. The returned value is wrapped in `Some`; callers fall back to
 /// `tokio::net::lookup_host` whenever the resolver is `None`.
-fn build_resolver(dns_timeout: Duration, servers: Option<&[SocketAddr]>) -> Option<TokioResolver> {
-    let (config, mut opts) = match servers {
-        Some(servers) => {
-            let nameservers = servers
-                .iter()
-                .copied()
-                .map(|address| {
-                    let mut config = NameServerConfig::udp(address.ip());
-                    config.connections[0].port = address.port();
-                    config
-                })
-                .collect::<Vec<_>>();
+fn build_resolver(timeout: Duration, server: Option<SocketAddr>) -> Option<TokioResolver> {
+    let (config, mut opts) = match server {
+        Some(address) => {
+            let mut name_server = NameServerConfig::udp(address.ip());
+            name_server.connections[0].port = address.port();
             (
-                ResolverConfig::from_parts(None, Vec::new(), nameservers),
+                ResolverConfig::from_parts(None, Vec::new(), vec![name_server]),
                 ResolverOpts::default(),
             )
         }
         None => hickory_resolver::system_conf::read_system_conf().ok()?,
     };
     opts.use_hosts_file = ResolveHosts::Always;
-    // aria2's configured DNS list is primary/backup. Hickory defaults to
-    // querying two name servers concurrently, which duplicates every A/AAAA
-    // query when two servers are configured.
+    // Each resolver owns one nameserver, so Hickory never duplicates A/AAAA queries across
+    // configured primary/backup servers. DnsCache tries these resolvers in order.
     opts.num_concurrent_reqs = 1;
     opts.server_ordering_strategy = ServerOrderingStrategy::UserProvidedOrder;
-    // Bound an individual Hickory request while leaving time for backup servers. Hickory can
-    // spend the full per-request timeout before trying the next configured server, so using
-    // the whole lookup deadline here leaves no room for primary/backup failover.
-    opts.timeout = dns_timeout.min(Duration::from_secs(5)).min(dns_timeout / 2);
+    opts.timeout = timeout.min(Duration::from_secs(5));
     TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
         .build()
