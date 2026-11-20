@@ -9,11 +9,9 @@
 //! 5. Run deadline-driven maintenance (timeouts and session auto-save)
 //! 6. Check exit condition
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -152,61 +150,6 @@ pub struct EngineLoopContext {
 /// Tracks a spawned download task for timeout enforcement and cleanup.
 type CommandGeneration = u64;
 
-/// Shared validity token for one queued timeout deadline. Activity updates and
-/// task completion invalidate the old token so stale heap entries can be
-/// discarded without rescanning every running download.
-#[derive(Debug)]
-struct TimeoutState {
-    active: AtomicBool,
-}
-
-impl TimeoutState {
-    fn active() -> Self {
-        Self {
-            active: AtomicBool::new(true),
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
-    }
-
-    fn deactivate(&self) {
-        self.active.store(false, Ordering::Release);
-    }
-}
-
-#[derive(Clone)]
-struct TimeoutDeadline {
-    deadline: Instant,
-    generation: CommandGeneration,
-    state: Arc<TimeoutState>,
-}
-
-impl PartialEq for TimeoutDeadline {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline && self.generation == other.generation
-    }
-}
-
-impl Eq for TimeoutDeadline {}
-
-impl PartialOrd for TimeoutDeadline {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TimeoutDeadline {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.deadline
-            .cmp(&other.deadline)
-            .then_with(|| self.generation.cmp(&other.generation))
-    }
-}
-
-type TimeoutHeap = BinaryHeap<Reverse<TimeoutDeadline>>;
-
 struct RunningDownload {
     /// JoinHandle for the spawned tokio task.
     _handle: JoinHandle<()>,
@@ -217,8 +160,6 @@ struct RunningDownload {
     last_activity: Instant,
     /// Inactivity timeout. `None` means the task never times out.
     timeout: Option<Duration>,
-    /// Validity token for this command's current queued timeout deadline.
-    timeout_state: Arc<TimeoutState>,
 }
 
 /// Mark the auto-save session as dirty so the next configured save deadline
@@ -242,7 +183,6 @@ pub(crate) async fn run_engine_loop(
     info!("Engine loop started (event-driven dispatch)");
 
     let mut running_downloads: Vec<(GroupId, RunningDownload)> = Vec::new();
-    let mut timeout_heap: TimeoutHeap = BinaryHeap::new();
     let mut completed_generations: HashSet<CommandGeneration> = HashSet::new();
     let mut next_generation: CommandGeneration = 1;
     let mut halt_requested = false;
@@ -279,7 +219,6 @@ pub(crate) async fn run_engine_loop(
             promote_reserved_groups(
                 &ctx,
                 &mut running_downloads,
-                &mut timeout_heap,
                 halt_requested,
                 force_halt_requested,
                 &mut next_generation,
@@ -322,7 +261,6 @@ pub(crate) async fn run_engine_loop(
             promote_reserved_groups(
                 &ctx,
                 &mut running_downloads,
-                &mut timeout_heap,
                 halt_requested,
                 force_halt_requested,
                 &mut next_generation,
@@ -361,9 +299,8 @@ pub(crate) async fn run_engine_loop(
         // ── 6. Wait for a command, task completion, a real maintenance
         // deadline,
         // or shutdown signal. The engine stays parked while idle.
-        let maintenance_wait = wait_for_deadline(
-            next_maintenance_deadline(&ctx, &running_downloads, &mut timeout_heap).await,
-        );
+        let maintenance_wait =
+            wait_for_deadline(next_maintenance_deadline(&ctx, &running_downloads).await);
         tokio::pin!(maintenance_wait);
         tokio::select! {
             command = cmd_rx.recv(), if !command_closed => {
@@ -408,7 +345,7 @@ pub(crate) async fn run_engine_loop(
                 }
             }
             _ = &mut maintenance_wait => {
-                run_deadline_maintenance(&mut ctx, &mut running_downloads, &mut timeout_heap).await;
+                run_deadline_maintenance(&mut ctx, &mut running_downloads).await;
             }
             Ok(_) = &mut shutdown_rx, if !shutdown_received => {
                 shutdown_received = true;
@@ -440,8 +377,7 @@ use commands::{PrefetchedEngineCommand, process_engine_commands, promote_reserve
 use completions::{PrefetchedCompletion, process_task_completions};
 use maintenance::{
     cancel_running_file_allocations, next_maintenance_deadline, on_end_of_run,
-    request_shutdown_and_wait, run_deadline_maintenance, run_event_cleanup, schedule_timeout,
-    wait_for_deadline,
+    request_shutdown_and_wait, run_deadline_maintenance, run_event_cleanup, wait_for_deadline,
 };
 
 #[cfg(test)]

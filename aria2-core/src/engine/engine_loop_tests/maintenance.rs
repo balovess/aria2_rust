@@ -12,7 +12,7 @@ async fn server_stat_interval_persists_through_engine_maintenance() {
     ctx.server_stat_save_interval = Some(Duration::from_secs(60));
     ctx.server_stat_next_save = Some(Instant::now() - Duration::from_secs(1));
 
-    run_deadline_maintenance(&mut ctx, &mut [], &mut TimeoutHeap::new()).await;
+    run_deadline_maintenance(&mut ctx, &mut []).await;
 
     let content = tokio::fs::read_to_string(&path)
         .await
@@ -22,38 +22,6 @@ async fn server_stat_interval_persists_through_engine_maintenance() {
         ctx.server_stat_next_save
             .is_some_and(|deadline| deadline > Instant::now()),
         "server-stat interval must schedule its next save"
-    );
-}
-
-#[tokio::test]
-async fn timeout_heap_skips_deadlines_invalidated_by_activity_updates() {
-    let ctx = test_ctx(false);
-    let mut heap = TimeoutHeap::new();
-    let now = Instant::now();
-
-    let stale_state = Arc::new(TimeoutState::active());
-    schedule_timeout(
-        &mut heap,
-        1,
-        now,
-        Some(Duration::from_secs(10)),
-        Arc::clone(&stale_state),
-    );
-    stale_state.deactivate();
-
-    let active_state = Arc::new(TimeoutState::active());
-    let expected = now + Duration::from_secs(6);
-    schedule_timeout(
-        &mut heap,
-        2,
-        now + Duration::from_secs(5),
-        Some(Duration::from_secs(1)),
-        active_state,
-    );
-
-    assert_eq!(
-        next_maintenance_deadline(&ctx, &[], &mut heap).await,
-        Some(expected)
     );
 }
 
