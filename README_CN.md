@@ -96,6 +96,8 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
 - **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 42 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
 - **Python SDK（客户端 API 已完善）**: 异步 HTTP/WebSocket JSON-RPC 客户端，覆盖任务、状态、选项、会话、系统方法和事件订阅；未包装方法可通过 `call()` 调用。它不是本地 Rust FFI 绑定，也不直接下载，需要连接运行中的 aria2-rust RPC 服务。原版客户端互操作状态仍按兼容性矩阵跟踪。
+- **Node.js SDK（客户端 API 已完善）**: TypeScript 异步 HTTP/WebSocket JSON-RPC 客户端，覆盖任务、状态、选项、会话、系统方法和事件订阅；未包装方法可通过 `call()` 调用。它同样通过运行中的 aria2 RPC 服务工作，不是 Rust FFI 绑定，也不直接下载文件。
+- **终端界面（可选）**: `tui` feature 提供本地模式与远程 RPC 模式，支持新建任务、筛选、分页、详情、暂停/继续、移除和多语言资源；自动化 feature 构建覆盖编译，交互式跨平台验收矩阵仍未完成。详见 [TUI 使用指南](docs/tui-guide-cn.md)。
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -574,6 +576,8 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 | JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/41/42）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
 | XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
 | WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
+| 终端界面（`tui` feature） | 已实现路径 | 本地与远程 RPC 模式、任务新建/筛选/分页/详情/暂停/继续/移除及内置翻译；交互式跨平台验收仍未完成 |
+| Python / Node.js SDK | 已实现路径 | 异步 HTTP/WebSocket JSON-RPC 客户端调用运行中的 aria2 服务；不是 Rust FFI 绑定，也不直接下载文件 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
 | NetRC 认证            | ✅     | machine/default/macdef 解析       |
 | 会话保存/加载             | ✅     | 往返一致                            |

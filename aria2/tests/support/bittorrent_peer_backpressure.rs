@@ -7,6 +7,7 @@ use aria2_protocol::bittorrent::message::handshake::Handshake;
 use aria2_protocol::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 use serde_json::{Value, json};
+use socket2::SockRef;
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -87,7 +88,7 @@ pub fn torrent_with_piece_length(
 pub enum PeerMode {
     Idle,
     StopReadingAfterRequestFlood,
-    ReadOneUpload,
+    ReadRepeatedUploads,
     ServePiece {
         payload: Arc<Vec<u8>>,
         piece_count: usize,
@@ -174,6 +175,14 @@ async fn serve_peer(
     mode: PeerMode,
     counters: Arc<FixturePeerCounters>,
 ) {
+    // Bound the receive window so a few Piece messages fill it after this
+    // fixture stops reading. That makes upload-side backpressure deterministic
+    // instead of dependent on the host kernel's autotuned buffer size.
+    if matches!(mode, PeerMode::StopReadingAfterRequestFlood) {
+        SockRef::from(&stream)
+            .set_recv_buffer_size(1024 * 1024)
+            .expect("set a bounded receive buffer on the stalled BitTorrent peer");
+    }
     let mut held_piece_requests = Vec::new();
     let mut held_corrupt_batch_released = false;
     let mut request_handshake = [0u8; 68];
@@ -239,16 +248,17 @@ async fn serve_peer(
                 }
                 std::future::pending::<()>().await;
             }
-            (PeerMode::ReadOneUpload, BtMessage::Unchoke) => {
-                let request = PieceBlockRequest::new(0, 0, BLOCK_LENGTH as u32);
-                if peer
-                    .send_message(&BtMessage::Request { request })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
+            (PeerMode::ReadRepeatedUploads, BtMessage::Unchoke) => {
+                let mut begin = 0u32;
                 loop {
+                    let request = PieceBlockRequest::new(0, begin, BLOCK_LENGTH as u32);
+                    if peer
+                        .send_message(&BtMessage::Request { request })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     let Ok(Ok(Some(BtMessage::Piece { data, .. }))) =
                         tokio::time::timeout(Duration::from_secs(10), peer.read_message()).await
                     else {
@@ -257,7 +267,7 @@ async fn serve_peer(
                     counters
                         .uploaded_bytes
                         .fetch_add(data.len(), Ordering::SeqCst);
-                    std::future::pending::<()>().await;
+                    begin = (begin + BLOCK_LENGTH as u32) % (PIECE_LENGTH as u32);
                 }
             }
             (
