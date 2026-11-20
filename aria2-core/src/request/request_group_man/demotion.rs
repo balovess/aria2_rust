@@ -80,7 +80,6 @@ impl super::RequestGroupMan {
     ) -> bool {
         let _lifecycle = self.lifecycle_guard();
         if let Some((_, group)) = self.active.remove(&gid) {
-            self.unregister_group(gid);
             // Release runtime resources (C++ `releaseRuntimeResource()`).
             // In Rust, this means clearing the download context and
             // releasing the rate limiter handle.
@@ -91,6 +90,7 @@ impl super::RequestGroupMan {
             }
 
             self.record_stopped_result(result);
+            self.unregister_group(gid);
 
             info!(gid = gid.value(), "Demoted group from active to stopped");
             true

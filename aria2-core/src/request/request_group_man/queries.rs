@@ -321,6 +321,9 @@ impl RequestGroupMan {
     }
 
     /// Remove a group from the canonical index after it has left the manager.
+    ///
+    /// Terminal callers must publish the stopped result before this method so waiters woken by
+    /// `download_finished` can immediately read the result for the vanished GID.
     pub(super) fn unregister_group(&self, gid: GroupId) {
         self.groups.remove(&gid);
         self.download_finished_notify.notify_waiters();

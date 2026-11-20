@@ -3,8 +3,6 @@ use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 #[cfg(unix)]
 use crate::error::Aria2Error;
-#[cfg(unix)]
-use crate::filesystem::disk_writer::SeekableDiskWriter;
 
 #[cfg(unix)]
 use super::strategies;

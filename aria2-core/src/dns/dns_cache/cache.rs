@@ -616,8 +616,10 @@ fn build_resolver(dns_timeout: Duration, servers: Option<&[SocketAddr]>) -> Opti
     // query when two servers are configured.
     opts.num_concurrent_reqs = 1;
     opts.server_ordering_strategy = ServerOrderingStrategy::UserProvidedOrder;
-    // Bound an individual Hickory request while preserving the overall lookup deadline below.
-    opts.timeout = dns_timeout.min(Duration::from_secs(5));
+    // Bound an individual Hickory request while leaving time for backup servers. Hickory can
+    // spend the full per-request timeout before trying the next configured server, so using
+    // the whole lookup deadline here leaves no room for primary/backup failover.
+    opts.timeout = dns_timeout.min(Duration::from_secs(5)).min(dns_timeout / 2);
     TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
         .build()

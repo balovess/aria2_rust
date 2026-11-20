@@ -406,9 +406,10 @@ async fn explicit_dns_uses_backup_after_primary_times_out() {
     let backup_task = tokio::spawn(async move {
         let mut packet = [0u8; 512];
         let mut query_count = 0;
-        while query_count < 4 {
+        let mut answered_a = false;
+        while !answered_a {
             let Ok(Ok((length, peer))) =
-                tokio::time::timeout(Duration::from_secs(7), backup.recv_from(&mut packet)).await
+                tokio::time::timeout(Duration::from_secs(8), backup.recv_from(&mut packet)).await
             else {
                 break;
             };
@@ -426,17 +427,19 @@ async fn explicit_dns_uses_backup_after_primary_times_out() {
             let qtype = u16::from_be_bytes([packet[question_end - 4], packet[question_end - 3]]);
             let mut response = Vec::with_capacity(question_end + 16);
             response.extend_from_slice(&packet[..2]);
-            let answer_count = u16::from(qtype == 1);
+            let is_a_query = qtype == 1;
+            let answer_count = u16::from(is_a_query);
             response.extend_from_slice(&[0x81, 0x80, 0, 1]);
             response.extend_from_slice(&answer_count.to_be_bytes());
             response.extend_from_slice(&[0, 0, 0, 0]);
             response.extend_from_slice(&packet[12..question_end]);
-            if qtype == 1 {
+            if is_a_query {
                 response.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4]);
                 response.extend_from_slice(&[127, 0, 0, 1]);
             }
             assert!(length >= question_end);
             backup.send_to(&response, peer).await.unwrap();
+            answered_a = is_a_query;
         }
         query_count
     });
