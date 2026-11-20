@@ -35,12 +35,15 @@ pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
         .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
         as usize;
-    // Auto must provision both possibilities before ALPN reveals the protocol.
-    // The executor enforces the selected protocol's independent concurrency cap.
+    // A reqwest client already keeps multiple HTTP/1.1 connections alive, so
+    // one client is only needed for each pool's worth of connections. HTTP/2
+    // still needs independent clients to create independent TCP sessions.
+    let connections_per_client = constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST.max(1);
+    let http1_clients = max_connections.div_ceil(connections_per_client).max(1);
     match options.http_version {
         crate::http::HttpVersion::Http2 => requested_sessions,
-        crate::http::HttpVersion::Auto => max_connections.max(requested_sessions),
-        crate::http::HttpVersion::Http11 => max_connections,
+        crate::http::HttpVersion::Auto => requested_sessions.max(http1_clients),
+        crate::http::HttpVersion::Http11 => http1_clients,
     }
 }
 

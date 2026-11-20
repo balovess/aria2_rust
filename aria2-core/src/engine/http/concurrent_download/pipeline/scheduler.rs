@@ -11,7 +11,7 @@ use crate::engine::http::concurrent_download::range_size_limit::lower_rejected_r
 use crate::engine::http::concurrent_download::slow_range::SlowRangeRecovery;
 use crate::engine::http::request_executor::{HttpSegmentRequestExecutor, authority_key};
 use crate::engine::http::segment_downloader::{
-    SegmentProgress, SegmentProgressTracker, WriteChunk,
+    QueuedWriteChunk, SegmentProgress, SegmentProgressTracker,
 };
 use crate::engine::retry_policy::RetryPolicy;
 use crate::engine::work_scheduler::WorkLease;
@@ -29,8 +29,8 @@ pub(super) struct RangeScheduler {
     pub(super) range_size_limits: Vec<u64>,
     pub(super) executor: HttpSegmentRequestExecutor,
     pub(super) connection_guard: ActiveConnectionGuard,
-    pub(super) write_tx: mpsc::Sender<WriteChunk>,
-    pub(super) write_rx: mpsc::Receiver<WriteChunk>,
+    pub(super) write_tx: mpsc::Sender<QueuedWriteChunk>,
+    pub(super) write_rx: mpsc::Receiver<QueuedWriteChunk>,
     pub(super) active: HashMap<u32, ActiveRangeWork>,
     pub(super) progress_tracker: Arc<SegmentProgressTracker>,
     pub(super) segment_progress: HashMap<u32, Arc<SegmentProgress>>,
@@ -100,7 +100,7 @@ pub(super) fn create(
         executor.set_protocol(known_authority, *version);
     }
     let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
-    let (write_tx, write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
+    let (write_tx, write_rx) = mpsc::channel::<QueuedWriteChunk>(WRITE_CHANNEL_CAPACITY);
     let active = HashMap::new();
     let progress_tracker =
         SegmentProgressTracker::new(coordinator.completed_bytes(), Arc::clone(&dl.progress));

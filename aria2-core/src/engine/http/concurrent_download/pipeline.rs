@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use crate::constants;
 use crate::engine::http::request_executor::{HttpSegmentRequest, authority_key};
-use crate::engine::http::segment_downloader::WriteChunk;
 use crate::engine::work_scheduler::{WorkId, WorkItem, WorkScheduler};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::resume_helper::ResumeState;
@@ -411,7 +410,7 @@ pub async fn execute_with_coordinator(
                 )
                 .await?;
             }
-            Some(WriteChunk { offset, data }) = write_rx.recv() => {
+            Some(chunk) = write_rx.recv() => {
                 write_http_range_chunk(
                     dl,
                     &mut writer,
@@ -423,7 +422,7 @@ pub async fn execute_with_coordinator(
                         error_context: "",
                         in_flight: Some(&mut in_flight_progress),
                     },
-                    WriteChunk { offset, data },
+                    chunk,
                 )
                 .await?;
             }

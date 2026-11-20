@@ -120,7 +120,7 @@ impl WrDiskCache {
 
         // Normalize before eviction so the size accounting is based on the
         // actual disjoint representation.
-        if self.total_cached_bytes.load(Ordering::Relaxed) > self.max_size_bytes {
+        if self.total_cached_bytes.load(Ordering::Relaxed) > self.max_size_bytes() {
             self.evict_clean_entries_locked(&mut entries, 0);
         }
 
@@ -129,7 +129,7 @@ impl WrDiskCache {
             offset,
             entry_size,
             self.total_cached_bytes.load(Ordering::Relaxed),
-            self.max_size_bytes
+            self.max_size_bytes()
         );
 
         Ok(())
@@ -163,7 +163,7 @@ impl WrDiskCache {
         entries: &mut std::collections::BTreeMap<u64, CacheEntry>,
         needed_size: usize,
     ) {
-        let target = ((self.max_size_bytes as f64) * EVICTION_TARGET_RATIO) as usize;
+        let target = ((self.max_size_bytes() as f64) * EVICTION_TARGET_RATIO) as usize;
         let mut evicted_count = 0usize;
         let mut evicted_bytes = 0usize;
 

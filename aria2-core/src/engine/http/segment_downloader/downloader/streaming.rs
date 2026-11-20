@@ -9,8 +9,8 @@ use crate::engine::http::segment_downloader::progress::SegmentProgress;
 use crate::error::{Aria2Error, RecoverableError, Result};
 
 use super::{
-    HttpSegmentDownloader, RangeDownloadFailure, WriteChunk, classify_range_status,
-    validate_content_range,
+    HttpSegmentDownloader, QueuedWriteChunk, RangeDownloadFailure, WRITE_QUEUE_BUDGET_BYTES,
+    WriteBudget, classify_range_status, validate_content_range,
 };
 
 impl HttpSegmentDownloader {
@@ -30,9 +30,10 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
         progress_tx: Option<&mpsc::Sender<ProgressUpdate>>,
-        write_tx: &mpsc::Sender<WriteChunk>,
+        write_tx: &mpsc::Sender<QueuedWriteChunk>,
         expected_entity_length: u64,
     ) -> Result<u64> {
+        let write_budget = WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES);
         self.download_range_streaming_inner(
             url,
             offset,
@@ -41,6 +42,7 @@ impl HttpSegmentDownloader {
             headers,
             progress_tx.map(StreamingProgress::Channel),
             write_tx,
+            &write_budget,
             expected_entity_length,
         )
         .await
@@ -58,7 +60,8 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
         progress: Option<&SegmentProgress>,
-        write_tx: &mpsc::Sender<WriteChunk>,
+        write_tx: &mpsc::Sender<QueuedWriteChunk>,
+        write_budget: &WriteBudget,
         expected_entity_length: u64,
     ) -> std::result::Result<u64, RangeDownloadFailure> {
         self.download_range_streaming_inner(
@@ -69,6 +72,7 @@ impl HttpSegmentDownloader {
             headers,
             progress.map(StreamingProgress::Segment),
             write_tx,
+            write_budget,
             expected_entity_length,
         )
         .await
@@ -83,7 +87,8 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
         progress: Option<StreamingProgress<'_>>,
-        write_tx: &mpsc::Sender<WriteChunk>,
+        write_tx: &mpsc::Sender<QueuedWriteChunk>,
+        write_budget: &WriteBudget,
         expected_entity_length: u64,
     ) -> std::result::Result<u64, RangeDownloadFailure> {
         if length == 0 {
@@ -168,11 +173,9 @@ impl HttpSegmentDownloader {
 
             // Send chunk to writer immediately — no accumulation
             let write_started = collect_timing.then(Instant::now);
+            let permit = write_budget.acquire(bytes.len()).await;
             let write_result = write_tx
-                .send(WriteChunk {
-                    offset: current_offset,
-                    data: bytes,
-                })
+                .send(QueuedWriteChunk::new(current_offset, bytes, permit))
                 .await;
             if let Some(started) = write_started {
                 write_queue_wait = write_queue_wait.saturating_add(started.elapsed());
@@ -280,7 +283,10 @@ fn is_explicit_range_size_rejection(
 
 #[cfg(test)]
 mod range_size_rejection_tests {
-    use super::{HttpSegmentDownloader, is_explicit_range_size_rejection};
+    use super::{
+        HttpSegmentDownloader, WRITE_QUEUE_BUDGET_BYTES, WriteBudget,
+        is_explicit_range_size_rejection,
+    };
     use reqwest::header::{CONTENT_RANGE, HeaderMap, HeaderValue};
     use tokio::sync::mpsc;
 
@@ -394,6 +400,7 @@ mod range_size_rejection_tests {
                 &[],
                 None,
                 &write_tx,
+                &WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
                 64 * 1024 * 1024,
             )
             .await

@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
@@ -85,6 +86,7 @@ fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
 // Sub-modules implementing write-path and read-path operations
 // ---------------------------------------------------------------------------
 
+mod budget;
 pub(crate) mod read_path;
 pub(crate) mod write_path;
 
@@ -165,8 +167,10 @@ pub struct WrDiskCache {
     /// overwritten by a stale flush snapshot without holding the map lock
     /// across disk I/O.
     pub(crate) flush_gate: Mutex<()>,
-    /// Maximum allowed cache size in bytes
-    pub(crate) max_size_bytes: usize,
+    /// Maximum allowed cache size in bytes, adjusted by the process budget.
+    pub(crate) max_size_bytes: AtomicUsize,
+    /// Registration id in the process-wide cache budget, or 0 if unregistered.
+    budget_id: AtomicU64,
     /// Current total cached data size in bytes (atomic for lock-free reads)
     pub(crate) total_cached_bytes: AtomicUsize,
     /// Monotonic counter assigning insertion sequence numbers for LRU ordering.
@@ -209,7 +213,8 @@ impl WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
             clean_lru: StdMutex::new(BinaryHeap::new()),
             flush_gate: Mutex::new(()),
-            max_size_bytes,
+            max_size_bytes: AtomicUsize::new(max_size_bytes),
+            budget_id: AtomicU64::new(0),
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
@@ -239,7 +244,8 @@ impl WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
             clean_lru: StdMutex::new(BinaryHeap::new()),
             flush_gate: Mutex::new(()),
-            max_size_bytes,
+            max_size_bytes: AtomicUsize::new(max_size_bytes),
+            budget_id: AtomicU64::new(0),
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
@@ -255,7 +261,21 @@ impl WrDiskCache {
 
     /// Returns the maximum cache size in bytes.
     pub fn max_size_bytes(&self) -> usize {
-        self.max_size_bytes
+        self.max_size_bytes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_budget_limit(&self, bytes: usize) {
+        self.max_size_bytes.store(bytes.max(1), Ordering::Relaxed);
+    }
+
+    /// Register this cache with the process-wide write-back cache budget.
+    ///
+    /// This must be called once after the cache is wrapped in an `Arc`.
+    pub(crate) fn register(cache: &Arc<Self>) {
+        let budget = budget::disk_cache_budget();
+        let id = budget.next_id();
+        cache.budget_id.store(id, Ordering::Release);
+        budget.register(id, cache, cache.max_size_bytes());
     }
 
     /// Returns the current approximate cache size in bytes (lock-free).
@@ -399,4 +419,13 @@ impl WrDiskCache {
     // Rust allows multiple impl blocks for the same type across modules
     // within the same crate, so write(), read(), flush() etc. are
     // still available on WrDiskCache instances as if they were defined here.
+}
+
+impl Drop for WrDiskCache {
+    fn drop(&mut self) {
+        let id = self.budget_id.swap(0, Ordering::AcqRel);
+        if id != 0 {
+            budget::disk_cache_budget().unregister(id);
+        }
+    }
 }

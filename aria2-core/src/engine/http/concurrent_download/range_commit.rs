@@ -1,4 +1,4 @@
-use crate::engine::http::segment_downloader::WriteChunk;
+use crate::engine::http::segment_downloader::QueuedWriteChunk;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -26,9 +26,11 @@ pub(super) async fn write_http_range_chunk(
     limiter: Option<&RateLimiter>,
     control_file: &mut Option<ControlFile>,
     mut options: HttpRangeCommitOptions<'_>,
-    chunk: WriteChunk,
+    chunk: QueuedWriteChunk,
 ) -> Result<()> {
-    let WriteChunk { offset, data } = chunk;
+    let (chunk, _permit) = chunk.into_parts();
+    let offset = chunk.offset;
+    let data = chunk.data;
     let data_length = data.len() as u64;
     super::acquire_download_tokens(limiter, downloader.global_limiter.as_ref(), data.len()).await;
     writer.write_bytes_at(offset, data).await.map_err(|error| {

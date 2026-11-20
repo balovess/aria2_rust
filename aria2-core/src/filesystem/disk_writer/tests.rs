@@ -573,6 +573,30 @@ async fn test_cached_writer_stats_separate_cache_and_direct_writes() {
     writer.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn test_cached_writer_keeps_write_back_cache_within_hard_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hard-limit.bin");
+    let mut writer = CachedDiskWriter::new_with_mmap_bytes(&path, Some(64), Some(24), false);
+    writer.open().await.unwrap();
+    let cache = writer.cache_handle().expect("cache is configured");
+
+    for index in 0..8 {
+        writer
+            .write_bytes_at(index * 4, bytes::Bytes::from_static(b"abcd"))
+            .await
+            .unwrap();
+        assert!(
+            cache.current_size_bytes() <= cache.max_size_bytes(),
+            "cache exceeded its hard limit after write {index}"
+        );
+    }
+
+    writer.close().await.unwrap();
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&content[..32], b"abcdabcdabcdabcdabcdabcdabcdabcd");
+}
+
 /// Sequential DefaultDiskWriter is the control: appending out of order
 /// corrupts the file — this documents why BT must not use it.
 #[tokio::test]

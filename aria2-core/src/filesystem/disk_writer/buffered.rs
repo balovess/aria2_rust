@@ -90,6 +90,9 @@ impl CachedDiskWriter {
             .filter(|size| *size > 0)
             .and_then(|size| usize::try_from(size).ok())
             .map(|size| Arc::new(WrDiskCache::with_max_size_bytes(size)));
+        if let Some(cache) = &cache {
+            WrDiskCache::register(cache);
+        }
         Self {
             writer,
             cache,
@@ -138,6 +141,22 @@ impl CachedDiskWriter {
         self.direct_write_count += 1;
         self.direct_write_bytes += bytes as u64;
     }
+
+    /// Keep the write-back cache within its configured byte limit.
+    ///
+    /// Dirty entries cannot be evicted safely, so flush them to disk before
+    /// accepting another small write when the next entry would exceed the
+    /// limit. This mirrors aria2's hard `disk-cache` bound without changing
+    /// the cache's public write contract.
+    async fn ensure_cache_room(&mut self, additional_bytes: usize) -> Result<()> {
+        let Some(cache) = self.cache.clone() else {
+            return Ok(());
+        };
+        if cache.current_size_bytes().saturating_add(additional_bytes) > cache.max_size_bytes() {
+            self.flush_cache().await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -169,11 +188,14 @@ impl SeekableDiskWriter for CachedDiskWriter {
             self.flush_cache().await?;
             self.writer.write_at(offset, data).await?;
             self.record_direct_write(data.len());
-        } else if let Some(ref cache) = self.cache {
+        } else if self.cache.is_some() {
+            self.ensure_cache_room(data.len()).await?;
             // Small writes go to the write-back cache.
             // copy_from_slice is unavoidable here: we only have a &[u8],
             // and the cache stores Bytes (Arc-backed).
-            cache
+            self.cache
+                .as_ref()
+                .expect("cache presence checked above")
                 .write(offset, bytes::Bytes::copy_from_slice(data))
                 .await?;
         } else {
@@ -203,9 +225,14 @@ impl SeekableDiskWriter for CachedDiskWriter {
             self.flush_cache().await?;
             self.writer.write_bytes_at(offset, data).await?;
             self.record_direct_write(data_len);
-        } else if let Some(ref cache) = self.cache {
+        } else if self.cache.is_some() {
+            self.ensure_cache_room(data_len).await?;
             // Small writes go to the cache - zero-copy (move Bytes).
-            cache.write(offset, data).await?;
+            self.cache
+                .as_ref()
+                .expect("cache presence checked above")
+                .write(offset, data)
+                .await?;
         } else {
             // No cache configured - zero-copy to pwrite.
             self.writer.write_bytes_at(offset, data).await?;

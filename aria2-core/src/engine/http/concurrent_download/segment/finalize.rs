@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};
 use crate::engine::http::request_executor::HttpSegmentRequestExecutor;
-use crate::engine::http::segment_downloader::{SegmentProgressTracker, WriteChunk};
+use crate::engine::http::segment_downloader::{QueuedWriteChunk, SegmentProgressTracker};
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -21,7 +21,7 @@ pub(super) async fn finish(
     should_fallback: bool,
     executor: HttpSegmentRequestExecutor,
     manager: &ConcurrentSegmentManager,
-    write_rx: &mut mpsc::Receiver<WriteChunk>,
+    write_rx: &mut mpsc::Receiver<QueuedWriteChunk>,
     writer: &mut CachedDiskWriter,
     limiter: Option<&RateLimiter>,
     ctrl_file: &mut Option<ControlFile>,

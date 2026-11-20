@@ -3,15 +3,15 @@ use tokio::sync::mpsc;
 use crate::engine::command::WRITE_CHANNEL_CAPACITY;
 use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http::request_executor::HttpSegmentRequestExecutor;
-use crate::engine::http::segment_downloader::WriteChunk;
+use crate::engine::http::segment_downloader::QueuedWriteChunk;
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::ConcurrentDownloader;
 
 pub(super) struct SegmentRequests {
-    pub(super) write_tx: mpsc::Sender<WriteChunk>,
-    pub(super) write_rx: mpsc::Receiver<WriteChunk>,
+    pub(super) write_tx: mpsc::Sender<QueuedWriteChunk>,
+    pub(super) write_rx: mpsc::Receiver<QueuedWriteChunk>,
     pub(super) executor: HttpSegmentRequestExecutor,
     pub(super) connection_guard: ActiveConnectionGuard,
     pub(super) lifecycle_notify: std::sync::Arc<tokio::sync::Notify>,
@@ -24,7 +24,7 @@ pub(super) fn create(
     authority_key: &str,
     adaptive: &HttpAdaptiveConcurrency,
 ) -> SegmentRequests {
-    let (write_tx, write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
+    let (write_tx, write_rx) = mpsc::channel::<QueuedWriteChunk>(WRITE_CHANNEL_CAPACITY);
     let authorities = [authority_key.to_owned()];
     let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,

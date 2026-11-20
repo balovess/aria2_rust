@@ -2115,3 +2115,32 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** `cargo check -p aria2-core`, rustfmt, and rustdoc were run
   for the interface and call-site changes. The focused storage and download
   behavior tests have not been run for this change.
+
+## HTTP write-back cache memory bound
+
+- **Status:** implemented with boundary. The write-back cache now has a hard
+  per-cache byte limit: a small write that would exceed the active quota
+  forces dirty entries to disk before the new entry is accepted. A process-wide
+  budget shares the configured `disk-cache` capacity among live caches and
+  keeps a 4 MiB per-cache fairness floor so high task counts do not flush on
+  every network chunk.
+- **Compatibility impact:** CLI/RPC parsing, defaults, session serialization,
+  and protocol behavior are unchanged. The effective aggregate cache usage
+  under multiple concurrent downloads is now bounded by this internal budget;
+  real proxy/TLS and multi-task downloads have not been A/B measured yet.
+- **Verification:** focused cache budget, dirty-entry eviction, hard-limit
+  flush, write-queue backpressure, and HTTP client-pool tests pass. The
+  client-pool regression test confirms that two provisioned clients still
+  admit 16 concurrent HTTP/1.1 connections when `-x` is 16. The
+  `engine_loop_benchmark.rs` workload was sampled three times per checkout on
+  the current Windows host: median throughput 74.115 -> 78.555 MiB/s and RSS
+  peak 25,554,944 -> 23,085,056 bytes. This is a Rust-internal before/after
+  sample, not an `aria2_original` comparison. The full core library run has
+  2690 passes and two pre-existing config/request-group contract failures that
+  also reproduce on HEAD.
+- **Isolated client-count sample:** restoring the old `auto` client-count
+  formula while keeping all other changes produced median throughput
+  64.468 MiB/s and peak RSS 24,428,544 bytes over three runs; the final
+  formula produced 78.555 MiB/s and 23,085,056 bytes. Samples were noisy and
+  used a loopback, no-TLS workload, so this is supporting evidence only, not
+  a general performance claim.

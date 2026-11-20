@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 #[cfg(test)]
 use crate::engine::http::cookie_helper::CookieHelper;
-use crate::engine::http::segment_downloader::{SegmentProgress, WriteChunk};
+use crate::engine::http::segment_downloader::{QueuedWriteChunk, SegmentProgress};
 use crate::error::Result;
 #[cfg(test)]
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
@@ -49,7 +49,7 @@ pub struct HttpSegmentRequest {
     pub range_size_limit: u64,
     pub cookie_header: Option<String>,
     pub(crate) progress: Arc<SegmentProgress>,
-    pub write_tx: mpsc::Sender<WriteChunk>,
+    pub write_tx: mpsc::Sender<QueuedWriteChunk>,
     pub expected_entity_length: u64,
 }
 

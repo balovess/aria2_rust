@@ -26,8 +26,10 @@ fn http2_session_pool_count_uses_its_own_limit() {
 
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&DownloadOptions::default()),
-        crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
-            .max(crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER)
+        crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER.max(
+            crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+                .div_ceil(crate::constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
+        )
     );
 }
 
@@ -41,7 +43,7 @@ fn http11_and_auto_pools_cover_their_protocol_limits() {
     };
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&http11),
-        7
+        1
     );
 
     let auto = DownloadOptions {

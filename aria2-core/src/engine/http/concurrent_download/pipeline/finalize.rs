@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::engine::http::request_executor::HttpSegmentRequestExecutor;
-use crate::engine::http::segment_downloader::{SegmentProgressTracker, WriteChunk};
+use crate::engine::http::segment_downloader::{QueuedWriteChunk, SegmentProgressTracker};
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -17,7 +17,7 @@ pub(super) async fn finish(
     dl: &mut ConcurrentDownloader,
     should_fallback: bool,
     executor: HttpSegmentRequestExecutor,
-    write_rx: &mut tokio::sync::mpsc::Receiver<WriteChunk>,
+    write_rx: &mut tokio::sync::mpsc::Receiver<QueuedWriteChunk>,
     writer: &mut CachedDiskWriter,
     limiter: Option<&RateLimiter>,
     coordinator: &MirrorCoordinator,
@@ -41,7 +41,7 @@ pub(super) async fn finish(
     } else {
         executor.shutdown().await;
     }
-    while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+    while let Ok(chunk) = write_rx.try_recv() {
         super::super::range_commit::write_http_range_chunk(
             dl,
             writer,
@@ -53,7 +53,7 @@ pub(super) async fn finish(
                 error_context: "",
                 in_flight: Some(in_flight_progress),
             },
-            WriteChunk { offset, data },
+            chunk,
         )
         .await?;
     }
