@@ -79,6 +79,33 @@ fn client_pool_size_does_not_reduce_http1_connection_capacity() {
 }
 
 #[test]
+fn two_h2_sessions_preserve_the_full_range_limit() {
+    let state = Arc::new(ExecutorState::new(
+        &["http://example.test:80".into()],
+        16,
+        16,
+        2,
+    ));
+    let authority = state.authority("http://example.test:80").unwrap();
+    authority.protocol.store(2, Ordering::Release);
+    authority.active_h2_sessions.store(2, Ordering::Release);
+
+    assert_eq!(authority.client_in_flight.len(), 2);
+
+    let mut leases = Vec::with_capacity(16);
+    for _ in 0..16 {
+        leases.push(
+            state
+                .try_acquire(&authority, 16)
+                .expect("two H2 sessions must preserve the full range limit"),
+        );
+    }
+    assert!(state.try_acquire(&authority, 16).is_none());
+    assert_eq!(authority.client_in_flight[0].load(Ordering::Acquire), 8);
+    assert_eq!(authority.client_in_flight[1].load(Ordering::Acquire), 8);
+}
+
+#[test]
 fn h1_admission_uses_the_registered_per_server_connection_cap() {
     let state = ExecutorState::new(&["http://cap.test:80".into()], 64, usize::MAX, 1);
     let authority = state.authority("http://cap.test:80").unwrap();

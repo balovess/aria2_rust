@@ -2131,7 +2131,9 @@ behavior. An unlisted behavior has not been audited here.
 - **Verification:** focused cache budget, dirty-entry eviction, hard-limit
   flush, write-queue backpressure, and HTTP client-pool tests pass. The
   client-pool regression test confirms that two provisioned clients still
-  admit 16 concurrent HTTP/1.1 connections when `-x` is 16. The
+  admit 16 concurrent HTTP/1.1 connections when `-x` is 16. A second test
+  confirms that the default H2 path keeps two provisioned sessions and the
+  full 16-range admission limit. The
   `engine_loop_benchmark.rs` workload was sampled three times per checkout on
   the current Windows host: median throughput 74.115 -> 78.555 MiB/s and RSS
   peak 25,554,944 -> 23,085,056 bytes. This is a Rust-internal before/after

@@ -59,6 +59,42 @@ fn http11_and_auto_pools_cover_their_protocol_limits() {
 }
 
 #[test]
+fn range_client_pool_count_preserves_h2_session_limit() {
+    let h2 = DownloadOptions {
+        http_version: crate::http::HttpVersion::Http2,
+        max_http2_sessions_per_server: Some(2),
+        max_connection_per_server: Some(16),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&h2),
+        2
+    );
+
+    let auto = DownloadOptions {
+        http_version: crate::http::HttpVersion::Auto,
+        max_http2_sessions_per_server: Some(2),
+        max_connection_per_server: Some(16),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&auto),
+        2
+    );
+
+    let auto_with_more_sessions = DownloadOptions {
+        http_version: crate::http::HttpVersion::Auto,
+        max_http2_sessions_per_server: Some(4),
+        max_connection_per_server: Some(16),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&auto_with_more_sessions),
+        4
+    );
+}
+
+#[test]
 fn candidate_uris_follow_runtime_change_uri_updates() {
     let old_uri = "http://example.test/old";
     let new_uri = "http://example.test/new";
