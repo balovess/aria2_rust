@@ -14,7 +14,7 @@ use mock_tracker::MockTrackerServer;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::RunningAria2;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
@@ -25,13 +25,18 @@ const PAYLOAD: &[u8] = b"abc";
 const SLOW_BLOCK_DELAY: Duration = Duration::from_secs(4);
 
 fn rpc(client: &RunningAria2, id: u64, method: &str, params: Value) -> Value {
+    rpc_by_port(client.port(), id, method, params)
+}
+
+fn rpc_by_port(port: u16, id: u64, method: &str, params: Value) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": method,
         "params": params,
     });
-    let response = client.post(
+    let response = RunningAria2::post_to_port(
+        port,
         "/jsonrpc",
         "application/json",
         request.to_string().as_bytes(),
@@ -52,6 +57,40 @@ fn reserve_loopback_port() -> u16 {
         .local_addr()
         .expect("bound socket has a local address")
         .port()
+}
+
+async fn wait_for_tracker_status(
+    client: &RunningAria2,
+    gid: &str,
+    uri: &str,
+    expected: &str,
+    timeout: Duration,
+) -> Value {
+    let port = client.port();
+    let gid = gid.to_owned();
+    let deadline = Instant::now() + timeout;
+    loop {
+        let params = json!([gid]);
+        let method = "aria2.getTrackers".to_owned();
+        let trackers = tokio::task::spawn_blocking(move || rpc_by_port(port, 2, &method, params))
+            .await
+            .expect("tracker status RPC task must complete");
+        let tracker = trackers
+            .as_array()
+            .expect("getTrackers returns a list")
+            .iter()
+            .find(|tracker| tracker["uri"] == uri)
+            .expect("tracker remains visible through RPC");
+        if tracker["status"] == expected {
+            return tracker.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tracker {uri} status stayed {:?}, expected {expected}",
+            tracker["status"]
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn torrent_bytes(tracker_url: &str) -> Vec<u8> {
@@ -463,13 +502,14 @@ async fn cli_uses_tracker_tier_returned_by_http_announce_and_reports_it_over_rpc
         "the dynamically returned tracker tier was not used after failover"
     );
 
-    let trackers = rpc(&client, 2, "aria2.getTrackers", json!([gid]));
-    let dynamic_tracker = trackers
-        .as_array()
-        .expect("getTrackers returns a list")
-        .iter()
-        .find(|tracker| tracker["uri"] == discovered_tracker.announce_url())
-        .expect("the dynamically returned tracker is visible through RPC");
+    let dynamic_tracker = wait_for_tracker_status(
+        &client,
+        &gid,
+        &discovered_tracker.announce_url(),
+        "succeeded",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(dynamic_tracker["tier"], 2);
     assert_eq!(dynamic_tracker["status"], "succeeded");
     let status = rpc(
@@ -541,18 +581,17 @@ async fn cli_fails_over_from_silent_udp_tracker_to_http_tracker_and_reports_rpc_
         started.elapsed()
     );
 
-    let trackers = rpc(&client, 2, "aria2.getTrackers", json!([gid]));
-    let trackers = trackers.as_array().expect("getTrackers returns a list");
-    let udp_state = trackers
-        .iter()
-        .find(|tracker| tracker["uri"] == udp_url)
-        .expect("silent UDP tracker remains visible in RPC");
-    assert_eq!(udp_state["status"], "failed");
+    let udp_state =
+        wait_for_tracker_status(&client, &gid, &udp_url, "failed", Duration::from_secs(5)).await;
     assert_eq!(udp_state["lastFailureKind"], "timeout");
-    let http_state = trackers
-        .iter()
-        .find(|tracker| tracker["uri"] == http_tracker.announce_url())
-        .expect("fallback HTTP tracker remains visible in RPC");
+    let http_state = wait_for_tracker_status(
+        &client,
+        &gid,
+        &http_tracker.announce_url(),
+        "succeeded",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(http_state["status"], "succeeded");
 
     peer.wait_for_request().await;
