@@ -2056,6 +2056,12 @@ behavior. An unlisted behavior has not been audited here.
   `aria2.updateBrowserContext`, and `aria2.clearBrowserContext` are additional
   entries in `system.listMethods`. Extra status fields are additive; no
   original field is renamed or removed.
+- **Feature catalog:** `system.listMethods` advertises the eight BitTorrent
+  methods only when the `bittorrent` feature is enabled, and
+  `aria2.addMetalink` only when `metalink` is enabled. The 36-method baseline
+  is always present. This replaces the previous behavior where BitTorrent
+  methods were advertised even in feature-off builds; discovery now matches
+  the methods actually available at runtime.
 - **Verification:** `cargo test -p aria2-rpc --lib --tests` passes the full
   RPC unit and integration suite, including fixed JSON/XML wire fixtures,
   HTTP/TLS/WebSocket transports, authentication, multicall, lifecycle methods,

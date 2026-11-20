@@ -50,6 +50,25 @@ impl BackendMetadata {
         self.enabled_features.insert(1, "BitTorrent".to_string());
         self.notifications
             .push("aria2.onBtDownloadComplete".to_string());
+        let insert_at = self
+            .methods
+            .iter()
+            .position(|method| method == "aria2.remove")
+            .unwrap_or(1);
+        self.methods.splice(
+            insert_at..insert_at,
+            [
+                "aria2.addTorrent",
+                "aria2.getPeers",
+                "aria2.getPeerStats",
+                "aria2.getPeerDetails",
+                "aria2.getTrackers",
+                "aria2.getDhtStatus",
+                "aria2.saveDhtState",
+                "aria2.evictDhtNodes",
+            ]
+            .map(str::to_string),
+        );
         self
     }
 
@@ -82,14 +101,6 @@ impl BackendMetadata {
 fn base_method_names() -> Vec<String> {
     [
         "aria2.addUri",
-        "aria2.addTorrent",
-        "aria2.getPeers",
-        "aria2.getPeerStats",
-        "aria2.getPeerDetails",
-        "aria2.getTrackers",
-        "aria2.getDhtStatus",
-        "aria2.saveDhtState",
-        "aria2.evictDhtNodes",
         "aria2.remove",
         "aria2.pause",
         "aria2.forcePause",
@@ -419,5 +430,27 @@ impl RpcBackend for UnsupportedBackend {
 
     async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
         Err(BackendError::Unsupported(format!("{request:?}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn method_catalog_is_feature_specific() {
+        let base = BackendMetadata::base("test");
+        assert_eq!(base.methods.len(), 36);
+        assert!(
+            !base
+                .methods
+                .iter()
+                .any(|method| method == "aria2.addTorrent")
+        );
+
+        let bittorrent = base.with_bittorrent();
+        assert_eq!(bittorrent.methods.len(), 44);
+        assert_eq!(bittorrent.methods[1], "aria2.addTorrent");
+        assert_eq!(bittorrent.methods[9], "aria2.remove");
     }
 }
