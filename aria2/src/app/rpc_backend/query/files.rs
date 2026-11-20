@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
@@ -95,6 +96,15 @@ impl CoreRpcBackend {
 }
 
 pub(super) fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
+    let bt_bitfield = group.get_bt_bitfield();
+    build_file_infos_with_bitfield(group, completed, bt_bitfield.as_deref())
+}
+
+pub(super) fn build_file_infos_with_bitfield(
+    group: &RequestGroup,
+    completed: u64,
+    bt_bitfield: Option<&[u8]>,
+) -> Vec<FileInfo> {
     let resolved_path = group.resolved_output_path();
     let fallback_path = || {
         if let Some(path) = &resolved_path {
@@ -119,7 +129,11 @@ pub(super) fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<File
     };
 
     if let Some(context) = group.get_download_context() {
-        let completion = bt_completion_bitfield(group);
+        let completion = bt_completion_bitfield(
+            group.get_bt_piece_length(),
+            group.get_total_length_atomic(),
+            bt_bitfield,
+        );
         return context
             .get_file_entries()
             .iter()
@@ -172,23 +186,28 @@ fn completed_length_for_file(
         .unwrap_or_else(|| total_completed.saturating_sub(offset).min(length))
 }
 
-fn bt_completion_bitfield(group: &RequestGroup) -> Option<BitfieldMan> {
-    let piece_length = group.get_bt_piece_length() as u64;
-    let bitfield = group.get_bt_bitfield()?;
+fn bt_completion_bitfield(
+    piece_length: u32,
+    total_length: u64,
+    bitfield: Option<&[u8]>,
+) -> Option<BitfieldMan> {
+    let bitfield = bitfield?;
+    let piece_length = piece_length as u64;
     if piece_length == 0 || bitfield.is_empty() {
         return None;
     }
-    let mut completion = BitfieldMan::new(piece_length, group.get_total_length_atomic());
-    completion.set_bitfield(&bitfield);
+    let mut completion = BitfieldMan::new(piece_length, total_length);
+    completion.set_bitfield(bitfield);
     Some(completion)
 }
 
 fn build_uri_entries(file: &aria2_core::download::file_entry::FileEntry) -> Vec<UriEntry> {
     let remaining = file.remaining_uris();
+    let remaining: HashSet<&str> = remaining.iter().map(String::as_str).collect();
     file.uris()
         .into_iter()
         .map(|uri| UriEntry {
-            status: if remaining.iter().any(|candidate| candidate == &uri) {
+            status: if remaining.contains(uri.as_str()) {
                 UriStatus::Waiting
             } else {
                 UriStatus::Used

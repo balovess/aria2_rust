@@ -13,7 +13,7 @@ use super::CoreRpcBackend;
 mod bittorrent;
 mod files;
 
-use files::{build_file_infos, build_file_infos_from_result};
+use files::{build_file_infos_from_result, build_file_infos_with_bitfield};
 
 fn encode_bitfield_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -44,7 +44,11 @@ impl CoreRpcBackend {
                 snapshot.http2_streams,
             )
             .with_dir(group.options().dir.clone().unwrap_or_default())
-            .with_files(build_file_infos(group, snapshot.completed_length));
+            .with_files(build_file_infos_with_bitfield(
+                group,
+                snapshot.completed_length,
+                bt.and_then(|bt| bt.bitfield.as_deref()),
+            ));
 
         if let Some(http_version) = group.negotiated_http_version() {
             info = info.with_http_version(http_version);

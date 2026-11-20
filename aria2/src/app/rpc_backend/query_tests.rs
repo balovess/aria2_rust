@@ -1,3 +1,4 @@
+use super::files::build_file_infos;
 use super::*;
 use std::path::PathBuf;
 
