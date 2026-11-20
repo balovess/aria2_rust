@@ -94,6 +94,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
 - **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 42 methods and 6 notifications)
+- **Python SDK (complete client API)**: An async HTTP/WebSocket JSON-RPC client covering task, status, option, session, system, and event methods; unwrapped methods are available through `call()`. It is not a native Rust FFI binding and does not download directly; it controls a running aria2-rust RPC service. Original-client interoperability remains tracked in the compatibility matrix.
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -625,7 +626,7 @@ cross-platform evidence is incomplete.
 
 | Feature | Path state | Notes |
 |---------|--------|-------|
-| CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
+| CLI arguments | Implemented path | 213 canonical public options plus Rust extensions are covered; parsing, boolean semantics, config merging, and help grouping have regression tests; runtime parity is still under comparison |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
 | JSON-RPC API | Implemented path | Feature-dependent method set (up to 42 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, DHT runtime counters, and manual DHT maintenance are available |
