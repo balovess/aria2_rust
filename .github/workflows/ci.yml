@@ -78,6 +78,8 @@ jobs:
             features: metalink
           - name: bittorrent
             features: bittorrent
+          - name: sftp
+            features: sftp
           - name: all-protocols
             features: bittorrent metalink sftp
     steps:

@@ -126,6 +126,7 @@ async fn read_http_response(port: u16, request: &str) -> String {
     String::from_utf8(response).expect("RPC response should be UTF-8")
 }
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn test_cli_metalink_options_reach_download_options() {
     let cli = CliArgs::try_parse_from([

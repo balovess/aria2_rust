@@ -53,7 +53,7 @@ behavior. An unlisted behavior has not been audited here.
   treat feature-gated keys according to their existing unknown/unsupported
   rules. `select-file` is supported when either Metalink or BitTorrent is
   enabled. The core library suite is verified with default, Metalink-only,
-  BitTorrent-only, and all protocol features enabled.
+  BitTorrent-only, SFTP-only, and all protocol features enabled.
 - **Verification:** source cfg inspection found no `http` or `rpc` feature
   gates for the RPC server or method parsing. Cargo feature-tree inspection
   confirms the minimal and standard artifacts both include `aria2-rpc`; the
@@ -1747,10 +1747,12 @@ behavior. An unlisted behavior has not been audited here.
   either Metalink or BitTorrent is enabled, matching its shared registry
   definition. The `--no-default-features --features bittorrent` tier also
   passes its full `aria2` (155/155) and `aria2-core` (3573 passed, 1 ignored)
-  library suites. With all three protocol features enabled, the full protocol
-  crate suite passes 1380 tests (2 ignored), the core suite passes 3681 (1
-  ignored), and the application suite passes 170. No remote-server
-  interoperability is implied by these local tests.
+  library suites. The `--no-default-features --features sftp` tier passes its
+  `aria2` (122/122) and `aria2-core` (2732/2732) library suites. With all three
+  protocol features enabled, the full protocol crate suite passes 1380 tests
+  (2 ignored), the core suite passes 3681 (1 ignored), and the application
+  suite passes 170. No remote-server interoperability is implied by these
+  local tests.
 
 ## Pause and unpause lifecycle status
 
