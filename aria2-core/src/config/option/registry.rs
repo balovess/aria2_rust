@@ -4,6 +4,87 @@ use std::collections::{HashMap, hash_map::Entry};
 
 use super::types::{OptionCategory, OptionDef, OptionOwner, OptionValue};
 
+/// BitTorrent option names retained as compatibility keys when the feature is
+/// disabled. They are registered as unsupported so adapters can reject them
+/// explicitly instead of treating them as unknown and skipping value checks.
+#[cfg(not(feature = "bittorrent"))]
+const UNSUPPORTED_BITTORRENT_OPTIONS: &[(&str, Option<char>)] = &[
+    ("bt-detach-seed-only", None),
+    ("bt-enable-hook-after-hash-check", None),
+    ("bt-enable-lpd", None),
+    ("bt-enable-web-seed", None),
+    ("bt-endgame-threshold", None),
+    ("bt-exclude-tracker", None),
+    ("bt-external-ip", None),
+    ("bt-force-encryption", Some('X')),
+    ("bt-hash-check-seed", None),
+    ("bt-incoming-peer-handshake-timeout", None),
+    ("bt-keep-alive-interval", None),
+    ("bt-load-saved-metadata", None),
+    ("bt-lpd-interface", None),
+    ("bt-max-open-files", None),
+    ("bt-max-peers", Some('B')),
+    ("bt-max-upload-slots", None),
+    ("bt-metadata-only", None),
+    ("bt-min-crypto-level", None),
+    ("bt-optimistic-unchoke-interval", None),
+    ("bt-peer-blocklist", None),
+    ("bt-piece-selection-strategy", None),
+    ("bt-prioritize-piece", None),
+    ("bt-remove-unselected-file", None),
+    ("bt-request-peer-speed-limit", None),
+    ("bt-request-timeout", None),
+    ("bt-require-crypto", None),
+    ("bt-save-metadata", None),
+    ("bt-seed-unverified", None),
+    ("bt-snubbed-timeout", None),
+    ("bt-stop-timeout", None),
+    ("bt-timeout", None),
+    ("bt-tracker", None),
+    ("bt-tracker-connect-timeout", None),
+    ("bt-tracker-interval", None),
+    ("bt-tracker-source", None),
+    ("bt-tracker-source-concurrency", None),
+    ("bt-tracker-source-timeout", None),
+    ("bt-tracker-stopped-timeout", None),
+    ("bt-tracker-timeout", None),
+    ("bt-tracker-update-interval", None),
+    ("bt-utp-max-connections", None),
+    ("dht-entry-point", None),
+    ("dht-entry-point-host", None),
+    ("dht-entry-point-host6", None),
+    ("dht-entry-point-port", None),
+    ("dht-entry-point-port6", None),
+    ("dht-entry-point6", None),
+    ("dht-file-path", None),
+    ("dht-file-path6", None),
+    ("dht-listen-addr", None),
+    ("dht-listen-addr6", None),
+    ("dht-listen-port", None),
+    ("dht-max-concurrent-lookups", None),
+    ("dht-max-items", None),
+    ("dht-max-peer-info-hashes", None),
+    ("dht-max-peers-per-info-hash", None),
+    ("dht-message-timeout", None),
+    ("enable-dht", None),
+    ("enable-dht6", None),
+    ("enable-peer-exchange", None),
+    ("enable-public-trackers", None),
+    ("enable-utp", None),
+    ("follow-torrent", None),
+    ("index-out", Some('O')),
+    ("listen-port", Some('L')),
+    ("lpd-listen-port", None),
+    ("on-bt-download-complete", None),
+    ("on-bt-download-error", None),
+    ("peer-agent", None),
+    ("peer-connection-timeout", None),
+    ("peer-id-prefix", None),
+    ("seed-ratio", Some('g')),
+    ("seed-time", Some('G')),
+    ("utp-listen-port", None),
+];
+
 /// Registry of all known configuration options.
 #[derive(Clone)]
 pub struct OptionRegistry {
@@ -20,9 +101,24 @@ impl OptionRegistry {
         reg.register_sftp_options();
         #[cfg(feature = "bittorrent")]
         reg.register_bt_options();
+        #[cfg(not(feature = "bittorrent"))]
+        reg.register_unsupported_bittorrent_options();
         reg.register_rpc_options();
         reg.register_advanced_options();
         reg
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
+    fn register_unsupported_bittorrent_options(&mut self) {
+        for (name, short_name) in UNSUPPORTED_BITTORRENT_OPTIONS {
+            self.register(OptionDef {
+                name: (*name).into(),
+                short_name: *short_name,
+                category: OptionCategory::BitTorrent,
+                supported: false,
+                ..Default::default()
+            });
+        }
     }
 
     pub fn register(&mut self, def: OptionDef) {

@@ -754,68 +754,79 @@ fn test_try_update_option_new_runtime_changeable() {
     );
     assert_eq!(group.options().max_connection_per_server, Some(4));
 
-    // bt-max-upload-slots
+    #[cfg(feature = "bittorrent")]
+    {
+        // bt-max-upload-slots
+        assert!(
+            group
+                .try_update_option("bt-max-upload-slots", serde_json::json!(8))
+                .unwrap()
+        );
+        assert_eq!(group.options().bt_max_upload_slots, Some(8));
+
+        // bt-snubbed-timeout
+        assert!(
+            group
+                .try_update_option("bt-snubbed-timeout", serde_json::json!(120))
+                .unwrap()
+        );
+        assert_eq!(group.options().bt_snubbed_timeout, Some(120));
+
+        // bt-optimistic-unchoke-interval
+        assert!(
+            group
+                .try_update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
+                .unwrap()
+        );
+        assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
+
+        // bt-endgame-threshold
+        assert!(
+            group
+                .try_update_option("bt-endgame-threshold", serde_json::json!(50))
+                .unwrap()
+        );
+        assert_eq!(group.options().bt_endgame_threshold, 50);
+
+        assert!(
+            group
+                .try_update_option(
+                    "bt-piece-selection-strategy",
+                    serde_json::json!("sequential")
+                )
+                .unwrap()
+        );
+        assert_eq!(group.options().bt_piece_selection_strategy, "sequential");
+        assert!(
+            group
+                .try_update_option("bt-piece-selection-strategy", serde_json::json!("unknown"))
+                .is_err()
+        );
+
+        // seed-time
+        assert!(
+            group
+                .try_update_option("seed-time", serde_json::json!(3600))
+                .unwrap()
+        );
+        assert_eq!(group.options().seed_time, Some(3600.0));
+
+        // seed-ratio
+        assert!(
+            group
+                .try_update_option("seed-ratio", serde_json::json!(2.0))
+                .unwrap()
+        );
+        assert_eq!(group.options().seed_ratio, Some(2.0));
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
     assert!(
         group
             .try_update_option("bt-max-upload-slots", serde_json::json!(8))
-            .unwrap()
+            .is_err(),
+        "BitTorrent runtime options must be rejected in a non-BitTorrent build"
     );
-    assert_eq!(group.options().bt_max_upload_slots, Some(8));
-
-    // bt-snubbed-timeout
-    assert!(
-        group
-            .try_update_option("bt-snubbed-timeout", serde_json::json!(120))
-            .unwrap()
-    );
-    assert_eq!(group.options().bt_snubbed_timeout, Some(120));
-
-    // bt-optimistic-unchoke-interval
-    assert!(
-        group
-            .try_update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
-            .unwrap()
-    );
-    assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
-
-    // bt-endgame-threshold
-    assert!(
-        group
-            .try_update_option("bt-endgame-threshold", serde_json::json!(50))
-            .unwrap()
-    );
-    assert_eq!(group.options().bt_endgame_threshold, 50);
-
-    assert!(
-        group
-            .try_update_option(
-                "bt-piece-selection-strategy",
-                serde_json::json!("sequential")
-            )
-            .unwrap()
-    );
-    assert_eq!(group.options().bt_piece_selection_strategy, "sequential");
-    assert!(
-        group
-            .try_update_option("bt-piece-selection-strategy", serde_json::json!("unknown"))
-            .is_err()
-    );
-
-    // seed-time
-    assert!(
-        group
-            .try_update_option("seed-time", serde_json::json!(3600))
-            .unwrap()
-    );
-    assert_eq!(group.options().seed_time, Some(3600.0));
-
-    // seed-ratio
-    assert!(
-        group
-            .try_update_option("seed-ratio", serde_json::json!(2.0))
-            .unwrap()
-    );
-    assert_eq!(group.options().seed_ratio, Some(2.0));
 
     // RPC clients send option values as strings, including aria2 size suffixes.
     assert!(
@@ -830,20 +841,23 @@ fn test_try_update_option_new_runtime_changeable() {
             .unwrap()
     );
     assert_eq!(group.options().max_retries, 7);
-    assert!(
-        group
-            .try_update_option("bt-force-encrypt", serde_json::json!("true"))
-            .unwrap()
-    );
-    assert!(group.options().bt_force_encrypt);
+    #[cfg(feature = "bittorrent")]
+    {
+        assert!(
+            group
+                .try_update_option("bt-force-encrypt", serde_json::json!("true"))
+                .unwrap()
+        );
+        assert!(group.options().bt_force_encrypt);
 
-    // bt-seed-unverified
-    assert!(
-        group
-            .try_update_option("bt-seed-unverified", serde_json::json!("true"))
-            .unwrap()
-    );
-    assert!(group.options().bt_seed_unverified);
+        // bt-seed-unverified
+        assert!(
+            group
+                .try_update_option("bt-seed-unverified", serde_json::json!("true"))
+                .unwrap()
+        );
+        assert!(group.options().bt_seed_unverified);
+    }
 
     // Canonical reserved options without a dedicated execution field still
     // use the shared registry validator and remain visible after applying.
@@ -1163,6 +1177,7 @@ fn test_runtime_option_updates_populate_execution_fields() {
             .try_update_option("follow-metalink", serde_json::json!("mem"))
             .unwrap()
     );
+    #[cfg(feature = "bittorrent")]
     assert!(
         group
             .try_update_option(
@@ -1188,6 +1203,7 @@ fn test_runtime_option_updates_populate_execution_fields() {
     assert_eq!(options.metalink_location.as_deref(), Some("JP"));
     assert_eq!(options.metalink_version.as_deref(), Some("4.0"));
     assert_eq!(options.follow_metalink, Some(super::FollowMode::Memory));
+    #[cfg(feature = "bittorrent")]
     assert_eq!(
         options
             .bt_tracker
@@ -1198,6 +1214,7 @@ fn test_runtime_option_updates_populate_execution_fields() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn peer_exchange_runtime_option_updates_the_live_actor_signal() {
     let mut group = RequestGroup::new(GroupId::new(3), Vec::new(), DownloadOptions::default());

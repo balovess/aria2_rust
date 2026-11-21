@@ -106,6 +106,7 @@ impl crate::config::OptionRegistry {
             description:
                 "Comma-separated list of file indices to download (BT/Metalink, 1-indexed)".into(),
             category: OptionCategory::BitTorrent,
+            supported: cfg!(any(feature = "bittorrent", feature = "metalink")),
             ..Default::default()
         });
     }
