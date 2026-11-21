@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 ///
 /// Renders a visual progress indicator: `[=====>     ] 45% (12.3MiB/s) ETA: 02:15`
 ///
-/// Automatically detects terminal width (via `crossterm`) and adapts
+/// Automatically detects terminal width and adapts
 /// the bar width accordingly. Falls back to simple text on non-TTY output.
 ///
 /// # Example
@@ -264,8 +264,8 @@ impl StatusPanel {
 }
 
 pub fn terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
+    terminal_size::terminal_size()
+        .map(|(width, _)| width.0 as usize)
         .unwrap_or(80)
         .saturating_sub(10)
 }

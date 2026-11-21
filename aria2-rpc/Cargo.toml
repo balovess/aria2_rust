@@ -23,8 +23,8 @@ tracing.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.7", features = ["cors"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
 base64.workspace = true
 quick-xml = "0.42"
 url = "2.5"
