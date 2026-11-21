@@ -6,7 +6,7 @@ impl OptionRegistry {
     /// Return the explicit production owner for a canonical built-in option.
     ///
     /// This list is deliberately exhaustive rather than derived from
-    /// [`OptionCategory`]. Adding a built-in option without adding it here
+    /// `OptionCategory`. Adding a built-in option without adding it here
     /// makes registry construction fail immediately.
     pub fn owner_for_name(name: &str) -> Option<OptionOwner> {
         let name = Self::canonical_name(name);
@@ -44,17 +44,8 @@ impl OptionRegistry {
             | "http-version"
             | "http-adaptive-enabled"
             | "http-adaptive-reduction-percent"
-            | "http-adaptive-recovery-interval"
-            | "http-adaptive-recovery-successes-min"
-            | "http-adaptive-recovery-successes-max"
-            | "http-adaptive-start-interval-ms"
             | "http-adaptive-backoff-base"
             | "http-adaptive-backoff-max"
-            | "http-adaptive-capacity-start-interval-ms"
-            | "http-adaptive-capacity-start-interval-max-ms"
-            | "http-adaptive-rate-recovery-successes"
-            | "http-adaptive-rate-min-interval-ms"
-            | "http-adaptive-backoff-reset-after"
             | "check-certificate"
             | "ca-certificate"
             | "allow-overwrite"

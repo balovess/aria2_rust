@@ -59,6 +59,8 @@ async fn test_preallocate_file_prealloc() {
 
     let metadata = tokio::fs::metadata(&path).await.unwrap();
     assert_eq!(metadata.len(), 1024 * 1024);
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert!(content.iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]
@@ -75,6 +77,7 @@ async fn test_preallocate_file_prealloc_preserves_existing_prefix() {
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(&content[..prefix.len()], prefix);
     assert_eq!(content.len(), 1024 * 1024);
+    assert!(content[prefix.len()..].iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]
@@ -135,10 +138,13 @@ async fn test_allocate_file_cross_platform_prealloc() {
     // Verify size is correct
     let metadata = tokio::fs::metadata(&path).await.unwrap();
     assert_eq!(metadata.len(), 10 * 1024 * 1024);
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&content[..5], b"hello");
+    assert!(content[5..].iter().all(|byte| *byte == 0));
 }
 
 /// Test cross-platform file allocation with Falloc strategy.
-/// Verifies that Falloc works on Windows (using set_len fallback) and Unix (using posix_fallocate).
+/// Verifies that Falloc produces the requested logical file size.
 #[tokio::test]
 async fn test_allocate_file_cross_platform_falloc() {
     let dir = tempfile::tempdir().unwrap();
@@ -159,13 +165,10 @@ async fn test_allocate_file_cross_platform_falloc() {
 
 /// Test that the Falloc strategy produces a file of the correct logical size.
 ///
-/// On Windows the file is sparse unless `SetFileValidData` succeeds (which
-/// requires `SE_MANAGE_VOLUME_PRIVILEGE`, typically absent in test runs).
-/// On Unix, `posix_fallocate`/`F_PREALLOCATE` allocate real blocks when
-/// supported. This test only asserts the logical size, keeping it
-/// cross-platform and independent of privilege state.
+/// Windows may use `SetFileValidData` when its privilege is available. This
+/// test asserts only the logical size, independent of privilege state.
 #[tokio::test]
-async fn test_fallocate_creates_sparse_file_of_correct_size() {
+async fn test_fallocate_creates_file_of_correct_size() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_falloc_sparse.bin");
 
@@ -398,8 +401,7 @@ async fn test_async_zero_fill_from_preserves_existing_prefix() {
 
     let mut writer = PositionedDiskWriter::new(&path, None);
     writer.open().await.unwrap();
-    writer.truncate(8192).await.unwrap();
-    strategies::async_zero_fill_from(&mut writer, 4096, 8192)
+    strategies::zero_fill_allocation(&mut writer, 8192)
         .await
         .unwrap();
     writer.close_without_sync("test close").await.unwrap();

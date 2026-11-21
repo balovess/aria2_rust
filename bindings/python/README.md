@@ -1,8 +1,11 @@
 # aria2-rust
 
-Python SDK for the aria2-rust JSON-RPC and WebSocket interface. The client
-surface has complete type annotations and current binding coverage; full
-original-client compatibility remains tracked in the repository matrix.
+Python SDK for the aria2-rust JSON-RPC and WebSocket interface. The client API
+is complete: it provides async task, status, option, session, system, and event
+methods with full type annotations, and unwrapped methods are available through
+`call()`. It is not a native Rust FFI binding and does not download directly;
+it controls a running aria2-rust RPC service. Full original-client
+compatibility remains tracked in the repository matrix.
 
 ## Features
 

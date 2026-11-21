@@ -259,6 +259,10 @@ impl MagnetDownloadCommand {
                         options,
                     },
                     &self.outbound_network_policy,
+                    Some(&crate::dns::DnsResolver::new(
+                        Arc::clone(&self.dns_cache),
+                        options.async_dns,
+                    )),
                 )
                 .await
                 {
@@ -293,6 +297,10 @@ impl MagnetDownloadCommand {
             let tracker_tiers = vec![vec![tracker_url.clone()]];
             let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
             announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
+            announcer.set_dns_resolver(crate::dns::DnsResolver::new(
+                Arc::clone(&self.dns_cache),
+                options.async_dns,
+            ));
             announcer.set_http_tls_config(tracker_tls.clone());
             announcer.set_websocket_options(options);
             announcer.set_timeouts(max_tracker_timeout, connect_timeout);

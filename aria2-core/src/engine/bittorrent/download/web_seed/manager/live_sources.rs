@@ -172,8 +172,22 @@ impl WebSeedManager {
             .as_ref()
             .map(|(host, port)| (host.as_str(), *port))
             .unwrap_or((host, port));
+        let resolved_addresses = if let Some(resolver) = &self.dns_resolver {
+            Some(
+                resolver
+                    .resolve(network_host, network_port)
+                    .await
+                    .map_err(|error| format!("WebSeed DNS resolution failed: {error}"))?,
+            )
+        } else {
+            None
+        };
         let local_address = if policy.is_direct() {
             None
+        } else if let Some(addresses) = resolved_addresses.as_deref() {
+            policy
+                .source_for_addresses(addresses)
+                .map_err(|error| format!("WebSeed first-hop source selection failed: {error}"))?
         } else {
             policy
                 .source_for_host(network_host, network_port)
@@ -186,11 +200,16 @@ impl WebSeedManager {
             if let Some(client) = clients.get(&origin) {
                 client.clone()
             } else {
-                let client = super::super::client::build_client(
+                let dns_adapter = self
+                    .dns_resolver
+                    .as_ref()
+                    .map(|resolver| resolver.reqwest_resolver(Arc::clone(policy)));
+                let client = super::super::client::build_client_with_resolver(
                     &self.tls,
                     local_address,
                     self.connect_timeout,
                     &self.proxy_options,
+                    dns_adapter,
                 )?;
                 clients.insert(origin, client.clone());
                 client

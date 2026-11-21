@@ -57,7 +57,15 @@ impl RunningAria2 {
 
     /// Post a complete request through an aria2 HTTP RPC adapter.
     pub fn post(&self, path: &str, content_type: &str, body: &[u8]) -> HttpResponse {
-        let address = SocketAddr::from(([127, 0, 0, 1], self.port));
+        Self::post_to_port(self.port, path, content_type, body)
+    }
+
+    /// Send a request to an RPC listener identified only by port.
+    ///
+    /// This is usable from `spawn_blocking` without borrowing the process
+    /// handle while an async test continues driving its mock servers.
+    pub fn post_to_port(port: u16, path: &str, content_type: &str, body: &[u8]) -> HttpResponse {
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
         let mut stream = TcpStream::connect_timeout(&address, REQUEST_TIMEOUT)
             .expect("failed to connect to aria2c RPC listener");
         stream
@@ -66,7 +74,7 @@ impl RunningAria2 {
 
         let request_head = format!(
             "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.port,
+            port,
             body.len()
         );
         stream

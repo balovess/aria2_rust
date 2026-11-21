@@ -56,6 +56,7 @@ pub struct SequentialDownloader {
     pub(crate) global_limiter: Option<RateLimiter>,
     pub(crate) origin_sensitive_headers_allowed: bool,
     pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    pub(crate) dns_resolver: crate::dns::DnsResolver,
     /// The first GET response, when filename metadata had to be read before
     /// collision resolution and resume inspection.
     pub(crate) prepared_response: Option<PreparedHttpResponse>,
@@ -94,6 +95,7 @@ impl SequentialDownloader {
             global_limiter,
             origin_sensitive_headers_allowed: true,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_resolver: crate::dns::DnsResolver::system(),
             prepared_response: None,
             auth_factory: None,
             auth_options: None,
@@ -106,6 +108,11 @@ impl SequentialDownloader {
         policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
         self.outbound_network_policy = policy;
+        self
+    }
+
+    pub(crate) fn with_dns_resolver(mut self, resolver: crate::dns::DnsResolver) -> Self {
+        self.dns_resolver = resolver;
         self
     }
 
@@ -455,6 +462,7 @@ impl SequentialDownloader {
             &file,
             0,
             &self.outbound_network_policy,
+            &self.dns_resolver,
         )
         .await
         .map_err(|e| Aria2Error::Io(format!("splice download failed: {e}")))?;

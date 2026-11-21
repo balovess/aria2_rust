@@ -138,8 +138,8 @@ impl DiskWriter for DefaultDiskWriter {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        self.sync_file(true).await?;
-        self.finish_namespace_sync().await
+        // `std::fs::File` is unbuffered; writes already reach the OS cache.
+        Ok(())
     }
 
     async fn sync_data(&mut self) -> Result<()> {
@@ -147,9 +147,14 @@ impl DiskWriter for DefaultDiskWriter {
         self.finish_namespace_sync().await
     }
 
+    async fn sync_all(&mut self) -> Result<()> {
+        self.sync_file(true).await?;
+        self.finish_namespace_sync().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         if self.file.is_some() {
-            self.sync_file(true).await?;
+            self.sync_all().await?;
         }
         self.file.take();
         self.finish_namespace_sync().await?;
@@ -201,6 +206,10 @@ impl DiskWriter for ByteArrayDiskWriter {
     }
 
     async fn sync_data(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn sync_all(&mut self) -> Result<()> {
         Ok(())
     }
 

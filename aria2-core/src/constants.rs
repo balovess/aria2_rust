@@ -103,15 +103,15 @@ pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
 /// Default HTTP/1.1 per-download, per-authority connection ceiling.
 ///
 /// This is a user-directed difference from aria2's default of 1.
-pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 10;
+pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
 /// Maximum accepted HTTP/1.1 per-download, per-authority connection ceiling.
 pub const MAX_CONNECTION_PER_SERVER: usize = 16;
 /// Default count of independent HTTP/2 client pools for concurrent Range traffic.
-pub const DEFAULT_HTTP2_SESSIONS_PER_SERVER: usize = 4;
+pub const DEFAULT_HTTP2_SESSIONS_PER_SERVER: usize = 2;
 /// Maximum configured HTTP/2 sessions per server for one download.
 pub const MAX_HTTP2_SESSIONS_PER_SERVER: usize = 16;
 /// Default simultaneous HTTP/2 Range streams allowed on each physical session.
-pub const DEFAULT_HTTP2_STREAMS_PER_SESSION: usize = 4;
+pub const DEFAULT_HTTP2_STREAMS_PER_SESSION: usize = 8;
 /// Default durable HTTP parent piece length.
 pub const DEFAULT_PIECE_LENGTH: u64 = 1024 * 1024;
 /// Allowed range and default for the adaptive HTTP Range size floor. This is

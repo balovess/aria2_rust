@@ -909,18 +909,14 @@ async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() 
     wait_for_http_engine_status(&group, DownloadStatus::Active).await;
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            if tokio::fs::metadata(&output_path)
-                .await
-                .map(|metadata| metadata.len() > 0)
-                .unwrap_or(false)
-            {
+            if group.read().unwrap().get_completed_length() > 0 {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("sequential HTTP engine did not make progress");
+    .expect("sequential HTTP engine did not report completed payload bytes");
 
     command_tx
         .send(EngineCommand::Pause { gid })

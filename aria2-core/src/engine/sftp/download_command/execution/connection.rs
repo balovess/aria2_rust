@@ -24,8 +24,16 @@ pub(super) async fn connect_sftp_host(
     }
 
     let Some(dns_cache) = dns_cache else {
+        let addresses = crate::dns::DnsResolver::system()
+            .resolve(host, port)
+            .await
+            .map_err(|error| SshError::ConnectFailed {
+                host: host.to_string(),
+                port,
+                message: error.to_string(),
+            })?;
         return network_policy
-            .connect_host(host, port)
+            .connect_candidates(&addresses)
             .await
             .map_err(|error| SshError::ConnectFailed {
                 host: host.to_string(),
@@ -34,30 +42,22 @@ pub(super) async fn connect_sftp_host(
             });
     };
 
-    let dns_cache = dns_cache.lock().await.clone();
-    let addresses = dns_cache
-        .resolve_with_refresh(host, port)
+    let addresses = crate::dns::DnsResolver::from_cache(dns_cache.lock().await.clone(), true)
+        .resolve(host, port)
         .await
         .map_err(|error| SshError::ConnectFailed {
             host: host.to_string(),
             port,
             message: error.to_string(),
         })?;
-    let mut last_error = None;
-    for address in addresses {
-        match network_policy.connect(address).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    Err(SshError::ConnectFailed {
-        host: host.to_string(),
-        port,
-        message: last_error
-            .map(|error| error.to_string())
-            .unwrap_or_else(|| "DNS lookup returned no addresses".to_string()),
-    })
+    network_policy
+        .connect_candidates(&addresses)
+        .await
+        .map_err(|error| SshError::ConnectFailed {
+            host: host.to_string(),
+            port,
+            message: error.to_string(),
+        })
 }
 
 pub(super) async fn connect_with_timeout<T, F>(

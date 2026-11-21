@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
 use crate::engine::http::cookie_helper::CookieHelper;
-use crate::engine::http::segment_downloader::HttpSegmentDownloader;
+use crate::engine::http::segment_downloader::{
+    HttpSegmentDownloader, WRITE_QUEUE_BUDGET_BYTES, WriteBudget,
+};
 use crate::http::auth::AuthConfigFactory;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
@@ -29,6 +31,7 @@ pub struct HttpSegmentRequestExecutor {
     pub(super) total_limit: usize,
     pub(super) tasks: Vec<RunningTask>,
     pub(super) next_task_id: u64,
+    pub(super) write_budget: WriteBudget,
 }
 
 impl HttpSegmentRequestExecutor {
@@ -112,6 +115,7 @@ impl HttpSegmentRequestExecutor {
             total_limit,
             tasks: Vec::new(),
             next_task_id: 1,
+            write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
         }
     }
 
@@ -159,6 +163,7 @@ impl HttpSegmentRequestExecutor {
         let origin_sensitive_headers_allowed = self.origin_sensitive_headers_allowed;
         let result_tx = self.result_tx.clone();
         let authority_key = request.authority_key.clone();
+        let write_budget = self.write_budget.clone();
         let task_id = self.next_task_id;
         self.next_task_id = self.next_task_id.wrapping_add(1).max(1);
 
@@ -248,6 +253,7 @@ impl HttpSegmentRequestExecutor {
                             &[],
                             Some(&request.progress),
                             &request.write_tx,
+                            &write_budget,
                             request.expected_entity_length,
                         )
                         .await

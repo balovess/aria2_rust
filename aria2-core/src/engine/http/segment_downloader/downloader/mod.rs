@@ -4,6 +4,11 @@
 //! probing range support, downloading byte ranges (buffered and streaming),
 //! and the `WriteChunk` type used to pipeline data to disk writers.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tokio::sync::Notify;
+
 use crate::constants;
 use crate::engine::http::cookie_helper::CookieHelper;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -31,6 +36,104 @@ pub(crate) struct RangeProbeResult {
 pub struct WriteChunk {
     pub offset: u64,
     pub data: bytes::Bytes,
+}
+
+/// Default byte budget for queued HTTP write chunks per download task.
+pub(crate) const WRITE_QUEUE_BUDGET_BYTES: usize = 4 * 1024 * 1024;
+
+/// Byte-based backpressure for the internal write queue.
+///
+/// The public `WriteChunk` shape stays unchanged. Producers acquire a permit
+/// for the chunk length before enqueueing it, and the permit is released only
+/// after the consumer has written that chunk to disk.
+#[derive(Clone)]
+pub(crate) struct WriteBudget {
+    inner: Arc<WriteBudgetInner>,
+}
+
+struct WriteBudgetInner {
+    limit: usize,
+    used: AtomicUsize,
+    changed: Notify,
+}
+
+pub(crate) struct WriteBudgetPermit {
+    budget: WriteBudget,
+    bytes: usize,
+}
+
+impl Drop for WriteBudgetPermit {
+    fn drop(&mut self) {
+        self.budget
+            .inner
+            .used
+            .fetch_sub(self.bytes, Ordering::Release);
+        self.budget.inner.changed.notify_waiters();
+    }
+}
+
+impl WriteBudget {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            inner: Arc::new(WriteBudgetInner {
+                limit: limit.max(1),
+                used: AtomicUsize::new(0),
+                changed: Notify::new(),
+            }),
+        }
+    }
+
+    pub(crate) async fn acquire(&self, bytes: usize) -> WriteBudgetPermit {
+        let bytes = bytes.max(1);
+        loop {
+            let notified = self.inner.changed.notified();
+            let used = self.inner.used.load(Ordering::Acquire);
+            let next = used.saturating_add(bytes);
+            // An oversized chunk cannot be split here; admit it alone so the
+            // write path cannot deadlock on its own budget.
+            if (next <= self.inner.limit || bytes > self.inner.limit)
+                && self
+                    .inner
+                    .used
+                    .compare_exchange(used, next, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                return WriteBudgetPermit {
+                    budget: self.clone(),
+                    bytes,
+                };
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Queue item that carries the byte-budget permit with the payload.
+#[doc(hidden)]
+pub struct QueuedWriteChunk {
+    pub(crate) offset: u64,
+    pub(crate) data: bytes::Bytes,
+    permit: WriteBudgetPermit,
+}
+
+impl QueuedWriteChunk {
+    pub(crate) fn new(offset: u64, data: bytes::Bytes, permit: WriteBudgetPermit) -> Self {
+        Self {
+            offset,
+            data,
+            permit,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (WriteChunk, WriteBudgetPermit) {
+        (
+            WriteChunk {
+                offset: self.offset,
+                data: self.data,
+            },
+            self.permit,
+        )
+    }
 }
 
 /// Internal failure metadata used by the concurrent scheduler. The public
@@ -70,6 +173,38 @@ pub(crate) fn parse_retry_after(
         .as_secs();
     let now = i64::try_from(now).ok()?;
     aria2_protocol::http::parse_retry_after(value, now).map(|delay| delay.min(MAX_RETRY_AFTER))
+}
+
+#[cfg(test)]
+mod write_budget_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn write_budget_waits_until_queued_permits_are_released() {
+        let budget = WriteBudget::new(10);
+        let first = budget.acquire(6).await;
+        let second = budget.acquire(4).await;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(QueuedWriteChunk::new(
+            0,
+            bytes::Bytes::from_static(b"123456"),
+            first,
+        ))
+        .await
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), budget.acquire(1))
+                .await
+                .is_err()
+        );
+
+        drop(rx);
+        let third = budget.acquire(1).await;
+        drop(second);
+        drop(third);
+    }
 }
 
 pub struct HttpSegmentDownloader {

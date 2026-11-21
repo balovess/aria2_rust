@@ -7,6 +7,7 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_rpc::{BackendError, BackendResponse, BackendResult, PeerInfo};
 
 use super::super::{CoreRpcBackend, rpc_peer_id, rpc_peer_port};
+use super::encode_bitfield_hex;
 
 impl CoreRpcBackend {
     pub(in crate::app::rpc_backend) fn get_peers(
@@ -32,7 +33,8 @@ impl CoreRpcBackend {
                 port: rpc_peer_port(peer.addr, peer.is_incoming),
                 bitfield: Some(
                     peer.bitfield
-                        .map(|bitfield| bitfield.iter().map(|byte| format!("{byte:02x}")).collect())
+                        .as_deref()
+                        .map(encode_bitfield_hex)
                         .unwrap_or_default(),
                 ),
                 am_choking: peer.am_choking,
@@ -101,10 +103,7 @@ impl CoreRpcBackend {
                 source: peer.source.as_str().to_string(),
                 port: rpc_peer_port(peer.addr, peer.is_incoming),
                 client: peer.client,
-                bitfield: peer
-                    .bitfield
-                    .as_ref()
-                    .map(|bits| bits.iter().map(|byte| format!("{byte:02x}")).collect()),
+                bitfield: peer.bitfield.as_ref().map(|bits| encode_bitfield_hex(bits)),
                 progress_percent: peer_progress_percent(
                     peer.seeder,
                     peer.bitfield.as_deref(),

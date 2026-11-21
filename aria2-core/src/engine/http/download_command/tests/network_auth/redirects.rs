@@ -69,7 +69,8 @@ async fn cross_origin_redirect_drops_origin_credentials_and_sensitive_custom_hea
                 stream
                     .write_all(
                         format!(
-                            "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/target.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            "HTTP/1.1 302 Found\r\nLocation: http://localhost:{}/target.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            target_address.port()
                         )
                         .as_bytes(),
                     )
@@ -95,12 +96,26 @@ async fn cross_origin_redirect_drops_origin_credentials_and_sensitive_custom_hea
         ..DownloadOptions::default()
     };
     let uri = format!("http://{source_address}/source.bin");
-    let mut command = DownloadCommand::new(
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         GroupId::new(151),
+        vec![uri.clone()],
+        options.clone(),
+    )));
+    let mut command = DownloadCommand::new_with_group_and_resolved_network_addresses(
+        group,
         &uri,
         &options,
         Some(directory.path().to_string_lossy().as_ref()),
         Some("redirect.bin"),
+        crate::engine::http::client_config::ResolvedNetworkAddresses {
+            target: Some(vec![source_address]),
+            proxy: None,
+            resolver: Some(
+                crate::dns::DnsResolver::system()
+                    .reqwest_resolver(Arc::new(crate::network::OutboundNetworkPolicy::direct())),
+            ),
+        },
+        Arc::new(crate::network::OutboundNetworkPolicy::direct()),
     )
     .expect("create cross-origin redirect command");
 

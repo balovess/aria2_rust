@@ -318,17 +318,8 @@ async fn global_http_and_connection_options_are_stored_from_rpc_updates() {
         "connect-timeout",
         "http-adaptive-enabled",
         "http-adaptive-reduction-percent",
-        "http-adaptive-recovery-interval",
-        "http-adaptive-recovery-successes-min",
-        "http-adaptive-recovery-successes-max",
-        "http-adaptive-start-interval-ms",
         "http-adaptive-backoff-base",
         "http-adaptive-backoff-max",
-        "http-adaptive-capacity-start-interval-ms",
-        "http-adaptive-capacity-start-interval-max-ms",
-        "http-adaptive-rate-recovery-successes",
-        "http-adaptive-rate-min-interval-ms",
-        "http-adaptive-backoff-reset-after",
     ];
     let changes = option_names
         .iter()

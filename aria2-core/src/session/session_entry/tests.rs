@@ -862,6 +862,7 @@ fn test_download_options_to_map_preserves_disabled_default_true_options() {
         "bt-save-metadata",
         "enable-http-pipelining",
         "use-head",
+        "http-adaptive-enabled",
     ] {
         assert_eq!(map.get(name), Some(&"false".to_string()), "{name}");
     }
@@ -877,7 +878,7 @@ fn test_download_options_to_map_preserves_disabled_default_true_options() {
 }
 
 #[test]
-fn test_download_options_to_map_roundtrips_http_adaptive_setting() {
+fn test_download_options_to_map_omits_default_enabled_http_adaptive_setting() {
     let opts = DownloadOptions {
         http_adaptive: crate::request::request_group::HttpAdaptiveOptions {
             enabled: true,
@@ -887,7 +888,7 @@ fn test_download_options_to_map_roundtrips_http_adaptive_setting() {
     };
     let map = download_options_to_map(&opts);
 
-    assert_eq!(map.get("http-adaptive-enabled"), Some(&"true".to_string()));
+    assert_eq!(map.get("http-adaptive-enabled"), None);
     let restored = DownloadOptions::from_option_strings(&map);
     assert!(restored.http_adaptive.enabled);
 }

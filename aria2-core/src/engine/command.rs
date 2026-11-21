@@ -62,18 +62,18 @@ pub trait Command: Send + Sync {
     }
 
     /// Returns the instant at which this command started executing, if the
-    /// engine has informed the command via [`set_started_at`].
+    /// engine has informed the command via `set_started_at`.
     ///
     /// The default implementation reports `None`; commands that wish to
     /// self-report elapsed time (e.g. for `status()` queries) may override
-    /// this together with [`set_started_at`].
+    /// this together with `set_started_at`.
     fn started_at(&self) -> Option<Instant> {
         None
     }
 
     /// Called by the engine immediately before the command is spawned onto a
     /// background task. The default implementation is a no-op; commands that
-    /// store the instant can expose it through [`started_at`].
+    /// store the instant can expose it through `started_at`.
     fn set_started_at(&mut self, _instant: Instant) {}
 
     /// Returns the `GroupId` of the `RequestGroup` this command belongs to.

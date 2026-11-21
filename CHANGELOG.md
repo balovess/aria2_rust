@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Performance
+- Bound the HTTP write-back cache by flushing dirty entries before a write
+  would exceed the configured `disk-cache` limit.
+- Added a process-wide write-back cache budget with a per-cache fairness floor
+  so multiple active downloads share cache memory without excessive flushing.
+- Added byte-based backpressure to the internal HTTP range write queue so a
+  variable chunk size cannot create an unbounded in-memory backlog.
+- Provision HTTP range clients from connection-pool capacity instead of
+  pre-creating one client per configured connection in `auto` mode.
 - Replaced fixed-sleep uTP receive retries with Tokio UDP readiness and
   persistent fragmented-frame buffering.
 - Added bounded event-driven BitTorrent block scheduling, concurrent endgame

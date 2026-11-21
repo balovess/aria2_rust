@@ -133,6 +133,10 @@ where
         self.inner.sync_data().await
     }
 
+    async fn sync_all(&mut self) -> Result<()> {
+        self.inner.sync_all().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         self.inner.finalize().await
     }

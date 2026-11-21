@@ -59,18 +59,6 @@ fn adaptive_http_options_parse_and_normalize_external_values() {
             "http-adaptive-reduction-percent".to_string(),
             "30".to_string(),
         ),
-        (
-            "http-adaptive-recovery-successes-min".to_string(),
-            "40".to_string(),
-        ),
-        (
-            "http-adaptive-recovery-successes-max".to_string(),
-            "12".to_string(),
-        ),
-        (
-            "http-adaptive-start-interval-ms".to_string(),
-            "250".to_string(),
-        ),
         ("http-adaptive-backoff-base".to_string(), "15".to_string()),
         ("http-adaptive-backoff-max".to_string(), "10".to_string()),
     ]);
@@ -78,18 +66,17 @@ fn adaptive_http_options_parse_and_normalize_external_values() {
     let options = DownloadOptions::from_option_strings(&values).http_adaptive;
     assert!(!options.enabled);
     assert_eq!(options.reduction_percent, 30);
-    assert_eq!(options.recovery_successes_min, 40);
-    assert_eq!(options.recovery_successes_max, 40);
-    assert_eq!(options.start_interval_ms, 250);
     assert_eq!(options.backoff_base_secs, 15);
     assert_eq!(options.backoff_max_secs, 15);
 }
 
 #[test]
-fn adaptive_http_concurrency_defaults_to_disabled() {
-    assert!(!HttpAdaptiveOptions::default().enabled);
+fn adaptive_http_concurrency_defaults_to_enabled_with_half_reduction() {
+    let defaults = HttpAdaptiveOptions::default();
+    assert!(defaults.enabled);
+    assert_eq!(defaults.reduction_percent, 50);
     assert!(
-        !DownloadOptions::from_option_strings(&HashMap::new())
+        DownloadOptions::from_option_strings(&HashMap::new())
             .http_adaptive
             .enabled
     );

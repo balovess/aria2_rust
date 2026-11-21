@@ -8,7 +8,7 @@ use crate::engine::concurrent_segment_manager::{ConcurrentSegmentManager, Segmen
 use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http::request_executor::{HttpSegmentRequest, HttpSegmentRequestExecutor};
 use crate::engine::http::segment_downloader::{
-    SegmentProgress, SegmentProgressTracker, WriteChunk,
+    QueuedWriteChunk, SegmentProgress, SegmentProgressTracker,
 };
 use crate::engine::work_scheduler::{WorkLease, WorkScheduler};
 use crate::error::Result;
@@ -31,7 +31,7 @@ pub(super) struct Admission<'a> {
     pub(super) active_segments: &'a mut HashMap<u32, ActiveSegment>,
     pub(super) active_work: &'a mut HashMap<u32, WorkLease<u32>>,
     pub(super) work_queue: &'a mut WorkScheduler<u32>,
-    pub(super) write_tx: &'a mpsc::Sender<WriteChunk>,
+    pub(super) write_tx: &'a mpsc::Sender<QueuedWriteChunk>,
     pub(super) connection_guard: &'a ActiveConnectionGuard,
 }
 
@@ -98,9 +98,6 @@ pub(super) fn admit_pending_ranges(admission: Admission<'_>) -> Result<()> {
                         task_id,
                     },
                 );
-                admission
-                    .adaptive
-                    .record_request_start(admission.executor.is_http2(admission.authority_key));
                 admission.active_work.insert(segment_index, lease);
                 super::executor::update_connection_snapshot(
                     admission.executor,

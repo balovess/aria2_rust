@@ -46,7 +46,7 @@ impl MagnetDownloadCommand {
             .iter()
             .any(|(_, url)| matches!(url.scheme(), "http" | "https"))
         {
-            match Self::build_magnet_exact_source_client(
+            match self.build_magnet_exact_source_client(
                 options,
                 request_timeout,
                 connect_timeout,
@@ -122,6 +122,7 @@ impl MagnetDownloadCommand {
     }
 
     pub(super) fn build_magnet_exact_source_client(
+        &self,
         options: &DownloadOptions,
         request_timeout: u64,
         connect_timeout: u64,
@@ -141,6 +142,10 @@ impl MagnetDownloadCommand {
         if let Some(address) = policy.addresses().into_iter().next() {
             builder = builder.local_address(address);
         }
+        builder = builder.dns_resolver(
+            crate::dns::DnsResolver::new(Arc::clone(&self.dns_cache), options.async_dns)
+                .reqwest_resolver(Arc::new(policy.clone())),
+        );
         let no_proxy = options.no_proxy.as_deref();
 
         if let Some(proxy) = options

@@ -176,6 +176,7 @@ mod linux_tests {
             &file,
             0,
             &policy,
+            &crate::dns::DnsResolver::system(),
         )
         .await
         .expect("policy-bound splice download should succeed");

@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 /// Single-task progress bar with speed estimation.
 ///
@@ -271,7 +271,7 @@ pub fn terminal_width() -> usize {
 }
 
 pub fn is_tty() -> bool {
-    atty::is(atty::Stream::Stdout)
+    io::stdout().is_terminal()
 }
 
 fn format_size(bytes: u64) -> String {

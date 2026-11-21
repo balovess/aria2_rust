@@ -309,14 +309,8 @@ fn options(split: u64, max_connection_per_server: u16) -> DownloadOptions {
         max_connection_per_server: Some(max_connection_per_server),
         http_adaptive: aria2_core::request::request_group::HttpAdaptiveOptions {
             enabled: true,
-            recovery_interval_secs: 1,
-            recovery_successes_min: 1,
-            recovery_successes_max: 1,
-            start_interval_ms: 0,
             backoff_base_secs: 1,
             backoff_max_secs: 1,
-            capacity_start_interval_ms: 1,
-            capacity_start_interval_max_ms: 1,
             ..Default::default()
         },
         file_allocation: Some("none".into()),

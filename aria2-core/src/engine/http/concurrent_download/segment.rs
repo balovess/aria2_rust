@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use crate::constants;
 use crate::engine::concurrent_segment_manager::SegmentStatus;
-use crate::engine::http::segment_downloader::{
-    SegmentProgress, SegmentProgressTracker, WriteChunk,
-};
+use crate::engine::http::segment_downloader::{SegmentProgress, SegmentProgressTracker};
 use crate::engine::work_scheduler::{
     RetryOutcome, WorkId, WorkItem, WorkLease, WorkScheduleError, WorkScheduler,
 };
@@ -414,7 +412,7 @@ pub async fn execute(
                 Some(action)
             }
             // A write chunk arrived while segments are still running
-            Some(WriteChunk { offset, data }) = write_rx.recv() => {
+            Some(chunk) = write_rx.recv() => {
                 write_http_range_chunk(
                     dl,
                     &mut writer,
@@ -426,7 +424,7 @@ pub async fn execute(
                         error_context: "",
                         in_flight: Some(&mut in_flight_progress),
                     },
-                    WriteChunk { offset, data },
+                    chunk,
                 )
                 .await?;
                 None

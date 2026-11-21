@@ -7,8 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::constants;
-use crate::engine::http::request_executor::{HttpSegmentRequest, authority_key};
-use crate::engine::http::segment_downloader::WriteChunk;
+use crate::engine::http::request_executor::HttpSegmentRequest;
 use crate::engine::work_scheduler::{WorkId, WorkItem, WorkScheduler};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::resume_helper::ResumeState;
@@ -63,6 +62,7 @@ pub async fn execute_with_coordinator(
         retry_policy,
         mut adaptive,
         mut range_size_limits,
+        uri_authorities,
         mut executor,
         connection_guard,
         write_tx,
@@ -162,10 +162,10 @@ pub async fn execute_with_coordinator(
             let excluded_mirrors: Vec<usize> = uris
                 .iter()
                 .enumerate()
-                .filter_map(|(mirror_idx, uri)| {
-                    let key = authority_key(uri).unwrap_or_else(|| uri.clone());
-                    let controller = adaptive.get_mut(&key)?;
-                    (!controller.can_start(executor.in_flight_for(&key), executor.is_http2(&key)))
+                .filter_map(|(mirror_idx, _)| {
+                    let key = &uri_authorities[mirror_idx];
+                    let controller = adaptive.get_mut(key)?;
+                    (!controller.can_start(executor.in_flight_for(key), executor.is_http2(key)))
                         .then_some(mirror_idx)
                 })
                 .collect();
@@ -188,7 +188,7 @@ pub async fn execute_with_coordinator(
                 break;
             };
             scheduling_attempts += 1;
-            let key = authority_key(&mirror_url).unwrap_or_else(|| mirror_url.clone());
+            let key = uri_authorities[mirror_idx].clone();
 
             let progress = progress_tracker.new_segment();
 
@@ -213,9 +213,6 @@ pub async fn execute_with_coordinator(
                 break;
             };
 
-            if let Some(controller) = adaptive.get_mut(&key) {
-                controller.record_request_start(executor.is_http2(&key));
-            }
             connection_guard.set(executor.in_flight());
             let counts = executor.active_connection_counts();
             connection_guard.set_http_counts(
@@ -348,7 +345,7 @@ pub async fn execute_with_coordinator(
                 let action = completion::handle(
                     completion::CompletionContext {
                         downloader: dl,
-                        uris,
+                        uri_authorities: &uri_authorities,
                         split,
                         fixed_piece_size,
                         minimum_range_size_limit,
@@ -414,7 +411,7 @@ pub async fn execute_with_coordinator(
                 )
                 .await?;
             }
-            Some(WriteChunk { offset, data }) = write_rx.recv() => {
+            Some(chunk) = write_rx.recv() => {
                 write_http_range_chunk(
                     dl,
                     &mut writer,
@@ -426,7 +423,7 @@ pub async fn execute_with_coordinator(
                         error_context: "",
                         in_flight: Some(&mut in_flight_progress),
                     },
-                    WriteChunk { offset, data },
+                    chunk,
                 )
                 .await?;
             }
@@ -497,12 +494,10 @@ pub async fn execute_with_coordinator(
                     let slow_outlier = active.iter().find_map(
                         |(seg_idx, active_work)| {
                             let progress = segment_progress.get(seg_idx)?;
-                            let mirror_url = uris.get(active_work.mirror_idx)?;
-                            let key = authority_key(mirror_url)
-                                .unwrap_or_else(|| mirror_url.clone());
+                            let key = uri_authorities.get(active_work.mirror_idx)?;
                             slow_range_recovery
                                 .slow_outlier(
-                                    &key,
+                                    key.as_str(),
                                     *seg_idx,
                                     progress.downloaded_bytes(),
                                     progress.recent_throughput_bps(),

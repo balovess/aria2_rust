@@ -319,8 +319,14 @@ mod tests {
         assert!(config.contains("continue=true"));
         assert!(config.contains("disk-cache=256M"));
         assert!(config.contains("split=16"));
-        assert!(config.contains("max-connection-per-server=10"));
-        assert!(config.contains("max-http2-sessions-per-server=4"));
+        assert!(config.contains(&format!(
+            "max-connection-per-server={}",
+            aria2_core::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+        )));
+        assert!(config.contains(&format!(
+            "max-http2-sessions-per-server={}",
+            aria2_core::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER
+        )));
         assert!(config.contains("max-concurrent-downloads=5"));
         assert!(!config.contains("save-session="));
         assert!(!config.contains("log="));

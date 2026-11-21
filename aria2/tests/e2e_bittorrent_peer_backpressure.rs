@@ -57,8 +57,12 @@ async fn cli_isolates_a_backpressured_peer_and_force_removes_the_swarm() {
         peer_id[0] = 0xC0 + index;
         idle_peers.push(FixturePeer::start(meta.info_hash.bytes, peer_id, PeerMode::Idle).await);
     }
-    let healthy_peer =
-        FixturePeer::start(meta.info_hash.bytes, [0xB2; 20], PeerMode::ReadOneUpload).await;
+    let healthy_peer = FixturePeer::start(
+        meta.info_hash.bytes,
+        [0xB2; 20],
+        PeerMode::ReadRepeatedUploads,
+    )
+    .await;
     let tracker = MockTrackerServer::start_with_peers(
         stalled_peers
             .iter()
@@ -179,28 +183,80 @@ async fn cli_isolates_a_backpressured_peer_and_force_removes_the_swarm() {
         .iter()
         .map(|peer| u64::from(peer.addr.port()))
         .collect::<Vec<_>>();
-    let peer_details_deadline = Instant::now() + Duration::from_secs(2);
+    let healthy_port = u64::from(healthy_peer.addr.port());
+    let uploaded_bytes = |details: &serde_json::Value, port: u64| -> u64 {
+        details
+            .as_array()
+            .and_then(|peers| {
+                peers
+                    .iter()
+                    .find(|peer| peer["port"].as_u64() == Some(port))
+            })
+            .and_then(|peer| peer["uploadedBytes"].as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+
+    // The bounded receive window makes each stalled peer stop accepting Piece
+    // data after a few blocks. Wait until that saturation is observable over
+    // two samples, then check that it does not stop the remaining peer.
+    let saturation_deadline = Instant::now() + Duration::from_secs(15);
+    let mut previous = vec![0u64; stalled_ports.len()];
+    let mut stable_samples = 0;
     loop {
         let details = rpc(&client, 4, "aria2.getPeerDetails", json!([gid]));
-        let all_stalled_have_pending_uploads = details.as_array().is_some_and(|peers| {
-            stalled_ports.iter().all(|port| {
-                peers.iter().any(|peer| {
-                    peer["port"].as_u64() == Some(*port)
-                        && peer["outstandingRequestsFromPeer"]
-                            .as_u64()
-                            .is_some_and(|count| count >= 32)
-                })
-            })
-        });
-        if all_stalled_have_pending_uploads {
-            break;
+        let current = stalled_ports
+            .iter()
+            .map(|port| uploaded_bytes(&details, *port))
+            .collect::<Vec<_>>();
+        let healthy = uploaded_bytes(&details, healthy_port);
+        if current.iter().all(|bytes| *bytes > 0) && current == previous && healthy > 0 {
+            stable_samples += 1;
+            if stable_samples >= 2 {
+                break;
+            }
+        } else {
+            stable_samples = 0;
         }
+        previous = current;
         assert!(
-            Instant::now() < peer_details_deadline,
-            "each stalled peer must retain at least 32 queued upload requests while another actor makes progress: {details}"
+            Instant::now() < saturation_deadline,
+            "stalled peers did not reach a stable backpressured state: {details}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    let before = rpc(&client, 41, "aria2.getPeerDetails", json!([gid]));
+    let stalled_before = stalled_ports
+        .iter()
+        .map(|port| uploaded_bytes(&before, *port))
+        .collect::<Vec<_>>();
+    let healthy_before = uploaded_bytes(&before, healthy_port);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = rpc(&client, 42, "aria2.getPeerDetails", json!([gid]));
+    let stalled_after = stalled_ports
+        .iter()
+        .map(|port| uploaded_bytes(&after, *port))
+        .collect::<Vec<_>>();
+    let healthy_after = uploaded_bytes(&after, healthy_port);
+    assert_eq!(
+        stalled_after, stalled_before,
+        "backpressured peers must stop uploading while another peer remains active"
+    );
+    assert!(
+        healthy_after > healthy_before,
+        "a backpressured peer must not stop uploads to another peer: {healthy_before} -> {healthy_after}"
+    );
+    assert!(
+        after.as_array().is_some_and(|peers| {
+            stalled_ports.iter().all(|port| {
+                peers
+                    .iter()
+                    .any(|peer| peer["port"].as_u64() == Some(*port))
+            })
+        }),
+        "backpressured peers must remain connected: {after}"
+    );
     assert_eq!(
         stalled_peers
             .iter()

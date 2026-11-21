@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 ///
 /// Tracks download/upload byte counters and speed. The speed fields are
 /// updated externally (e.g. by the download engine's rolling-window
-/// calculator); the counters are incremented via [`DownloadContext::update_download`]
-/// and [`DownloadContext::update_upload_length`].
+/// calculator); the counters are incremented via `DownloadContext::update_download`
+/// and `DownloadContext::update_upload_length`.
 #[derive(Debug, Default)]
 pub struct NetStat {
     /// Cumulative bytes downloaded in the current session.

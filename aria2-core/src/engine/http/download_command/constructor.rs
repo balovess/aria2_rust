@@ -21,6 +21,10 @@ use crate::validation::uri::sanitize_filename_from_uri;
 
 use super::DownloadCommand;
 impl DownloadCommand {
+    pub(crate) fn set_dns_resolver(&mut self, resolver: crate::dns::DnsResolver) {
+        self.dns_resolver = resolver;
+    }
+
     pub fn new(
         gid: GroupId,
         uri: &str,
@@ -128,6 +132,7 @@ impl DownloadCommand {
             ResolvedNetworkAddresses {
                 target: resolved_addresses,
                 proxy: None,
+                resolver: None,
             },
             Arc::new(OutboundNetworkPolicy::direct()),
         )
@@ -151,6 +156,7 @@ impl DownloadCommand {
             ResolvedNetworkAddresses {
                 target: resolved_addresses,
                 proxy: None,
+                resolver: None,
             },
             outbound_network_policy,
         )
@@ -217,6 +223,7 @@ impl DownloadCommand {
             client,
             range_clients,
             outbound_network_policy,
+            dns_resolver: crate::dns::DnsResolver::system(),
             output_path: path,
             output_name_explicit: output_name.is_some(),
             output_path_resolved: false,
@@ -342,6 +349,7 @@ impl DownloadCommand {
             range_clients: Arc::new(vec![client.as_ref().clone()]),
             client,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            dns_resolver: crate::dns::DnsResolver::system(),
             output_path: path,
             output_name_explicit: output_name.is_some(),
             output_path_resolved: false,

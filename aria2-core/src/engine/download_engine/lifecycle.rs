@@ -89,9 +89,6 @@ impl DownloadEngine {
             open_file_budget: Arc::clone(&self.open_file_budget),
         };
 
-        #[cfg(feature = "bittorrent")]
-        self.public_tracker_catalog.start_catalog_update();
-
         super::super::engine_loop::run_engine_loop(ctx, engine_cmd_rx, shutdown_rx).await;
 
         ftp_connection_pool.clear().await;

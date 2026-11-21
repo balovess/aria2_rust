@@ -2,41 +2,20 @@
 
 English: [`README.md`](README.md)
 
-> **项目状态：** aria2-rust 当前已具备可用能力，并将持续迭代完善。后续工作重点是
-> 完善库的使用体验与文档、修复问题、改善整体体验并优化性能。
-
-<p align="center">
-  <img src="https://img.shields.io/badge/状态-可用，持续完善-brightgreen?style=for-the-badge" alt="当前可用，持续完善中" />
-</p>
-
 <p align="center">
   <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/v/aria2-core?label=aria2-core" alt="aria2-core crates.io 版本" /></a>
-  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/dr/aria2-core?label=aria2-core%20downloads%20%2890%20days%29" alt="aria2-core 近 90 天下载量" /></a>
   <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/d/aria2-core?label=aria2-core%20downloads%20%28total%29" alt="aria2-core 累计下载量" /></a>
-  <br />
   <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/v/aria2-protocol?label=aria2-protocol" alt="aria2-protocol crates.io 版本" /></a>
-  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/dr/aria2-protocol?label=aria2-protocol%20downloads%20%2890%20days%29" alt="aria2-protocol 近 90 天下载量" /></a>
   <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/d/aria2-protocol?label=aria2-protocol%20downloads%20%28total%29" alt="aria2-protocol 累计下载量" /></a>
-  <br />
   <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/v/aria2-rpc?label=aria2-rpc" alt="aria2-rpc crates.io 版本" /></a>
-  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/dr/aria2-rpc?label=aria2-rpc%20downloads%20%2890%20days%29" alt="aria2-rpc 近 90 天下载量" /></a>
   <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/d/aria2-rpc?label=aria2-rpc%20downloads%20%28total%29" alt="aria2-rpc 累计下载量" /></a>
   <br />
   <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/v/aria2-rust?label=Python%20SDK" alt="PyPI 上的 Python SDK 版本" /></a>
-  <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/dm/aria2-rust?label=PyPI%20downloads%20%28monthly%29" alt="Python SDK 在 PyPI 的月下载量" /></a>
-  <br />
   <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/v/@aria2-rust/aria2-rust?label=Node.js%20SDK" alt="npm 上的 Node.js SDK 版本" /></a>
-  <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/dm/@aria2-rust/aria2-rust?label=npm%20downloads%20%28monthly%29" alt="Node.js SDK 在 npm 的月下载量" /></a>
   <br />
-  <a href="https://github.com/balovess/aria2_rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/balovess/aria2_rust/ci.yml?branch=dev&label=CI%20%28manual%20workflow%29" alt="dev 分支上的手动 CI 工作流状态" /></a>
-  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/v/release/balovess/aria2_rust?label=latest%20release" alt="GitHub 最新 Release" /></a>
-  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/downloads/balovess/aria2_rust/total?label=release%20downloads" alt="GitHub 最新 Release 附件下载量" /></a>
-  <a href="https://github.com/balovess/aria2_rust"><img src="https://img.shields.io/github/stars/balovess/aria2_rust?style=social" alt="GitHub Stars 数" /></a>
-  <a href="https://github.com/balovess/aria2_rust/blob/dev/LICENSE"><img src="https://img.shields.io/github/license/balovess/aria2_rust" alt="项目许可证" /></a>
-  <br />
-  <a href="https://docs.rs/aria2-core"><img src="https://docs.rs/aria2-core/badge.svg" alt="aria2-core 的 docs.rs 文档状态" /></a>
-  <a href="https://docs.rs/aria2-protocol"><img src="https://docs.rs/aria2-protocol/badge.svg" alt="aria2-protocol 的 docs.rs 文档状态" /></a>
-  <a href="https://docs.rs/aria2-rpc"><img src="https://docs.rs/aria2-rpc/badge.svg" alt="aria2-rpc 的 docs.rs 文档状态" /></a>
+  <a href="https://github.com/balovess/aria2_rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/balovess/aria2_rust/ci.yml?branch=dev&label=CI" alt="CI 状态" /></a>
+  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/v/release/balovess/aria2_rust?label=Release" alt="最新版本" /></a>
+  <a href="https://github.com/balovess/aria2_rust/blob/dev/LICENSE"><img src="https://img.shields.io/github/license/balovess/aria2_rust" alt="许可证" /></a>
 </p>
 
 ## 文档导览
@@ -116,6 +95,9 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
 - **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 42 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
+- **Python SDK（客户端 API 已完善）**: 异步 HTTP/WebSocket JSON-RPC 客户端，覆盖任务、状态、选项、会话、系统方法和事件订阅；未包装方法可通过 `call()` 调用。它不是本地 Rust FFI 绑定，也不直接下载，需要连接运行中的 aria2-rust RPC 服务。原版客户端互操作状态仍按兼容性矩阵跟踪。
+- **Node.js SDK（客户端 API 已完善）**: TypeScript 异步 HTTP/WebSocket JSON-RPC 客户端，覆盖任务、状态、选项、会话、系统方法和事件订阅；未包装方法可通过 `call()` 调用。它同样通过运行中的 aria2 RPC 服务工作，不是 Rust FFI 绑定，也不直接下载文件。
+- **终端界面（可选）**: `tui` feature 提供本地模式与远程 RPC 模式，支持新建任务、筛选、分页、详情、暂停/继续、移除和多语言资源；自动化 feature 构建覆盖编译，交互式跨平台验收矩阵仍未完成。详见 [TUI 使用指南](docs/tui-guide-cn.md)。
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -588,12 +570,14 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 
 | 功能                  | 状态    | 说明                              |
 | ------------------- | ----- | ------------------------------- |
-| CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
+| CLI 参数              | ✅ 核心  | 已覆盖 213 个规范化公开选项及 Rust 扩展；解析、布尔语义、配置合并和帮助分组有回归测试，运行时行为仍逐项对齐 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
 | JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/41/42）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
 | XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
 | WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
+| 终端界面（`tui` feature） | 已实现路径 | 本地与远程 RPC 模式、任务新建/筛选/分页/详情/暂停/继续/移除及内置翻译；交互式跨平台验收仍未完成 |
+| Python / Node.js SDK | 已实现路径 | 异步 HTTP/WebSocket JSON-RPC 客户端调用运行中的 aria2 服务；不是 Rust FFI 绑定，也不直接下载文件 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
 | NetRC 认证            | ✅     | machine/default/macdef 解析       |
 | 会话保存/加载             | ✅     | 往返一致                            |

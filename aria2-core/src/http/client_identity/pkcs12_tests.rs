@@ -7,6 +7,7 @@ use super::test_support::{
     start_https_fixture, test_client_builder,
 };
 use super::{ClientTlsConfig, apply};
+use yasna_compat as yasna;
 
 fn passwordless_pkcs12_identity(password: &p12_q3::BmpString) -> Vec<u8> {
     let certificates = pem_certificates(TEST_CHAIN_PEM);

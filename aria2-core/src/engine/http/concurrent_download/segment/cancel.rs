@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::engine::http::request_executor::HttpSegmentRequestExecutor;
-use crate::engine::http::segment_downloader::WriteChunk;
+use crate::engine::http::segment_downloader::QueuedWriteChunk;
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -15,7 +15,7 @@ use super::io::{DrainWriteChunksOptions, drain_write_chunks};
 pub(in crate::engine::http::concurrent_download) async fn cancel_and_persist(
     downloader: &ConcurrentDownloader,
     executor: HttpSegmentRequestExecutor,
-    write_rx: &mut mpsc::Receiver<WriteChunk>,
+    write_rx: &mut mpsc::Receiver<QueuedWriteChunk>,
     writer: &mut CachedDiskWriter,
     limiter: Option<&RateLimiter>,
     ctrl_file: &mut Option<ControlFile>,

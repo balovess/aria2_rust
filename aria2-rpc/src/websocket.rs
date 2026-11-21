@@ -177,15 +177,22 @@ impl DownloadEvent {
     }
 }
 
+#[derive(Clone)]
+struct PublishedEvent {
+    event_type: EventType,
+    event: Arc<DownloadEvent>,
+    json: Arc<str>,
+}
+
 struct Subscriber {
     filter: Option<Vec<EventType>>,
-    sender: broadcast::Sender<(EventType, DownloadEvent)>,
+    sender: broadcast::Sender<PublishedEvent>,
 }
 
 /// Receiver registration whose lifetime is tied to the broadcast receiver.
 pub struct ScopedSubscription {
     id: String,
-    receiver: broadcast::Receiver<(EventType, DownloadEvent)>,
+    receiver: broadcast::Receiver<PublishedEvent>,
     subscribers: Arc<RwLock<HashMap<String, Subscriber>>>,
 }
 
@@ -199,7 +206,16 @@ impl ScopedSubscription {
     pub async fn recv(
         &mut self,
     ) -> Result<(EventType, DownloadEvent), broadcast::error::RecvError> {
-        self.receiver.recv().await
+        let published = self.receiver.recv().await?;
+        Ok((published.event_type, (*published.event).clone()))
+    }
+
+    /// Receive the already-serialized notification payload for one publisher
+    /// event. The JSON string is shared across all accepting subscriptions.
+    pub(crate) async fn recv_serialized(
+        &mut self,
+    ) -> Result<Arc<str>, broadcast::error::RecvError> {
+        Ok(self.receiver.recv().await?.json)
     }
 }
 
@@ -220,7 +236,7 @@ impl EventPublisher {
     pub fn new(capacity: usize) -> Self {
         // Preserve tokio::broadcast's validation for zero-capacity channels at
         // construction time, even though each subscriber owns its channel.
-        let (_tx, _) = broadcast::channel::<(EventType, DownloadEvent)>(capacity);
+        let (_tx, _) = broadcast::channel::<PublishedEvent>(capacity);
         Self {
             capacity,
             subscribers: Arc::new(RwLock::new(HashMap::new())),
@@ -231,7 +247,7 @@ impl EventPublisher {
         &self,
         id: String,
         filter: Option<Vec<EventType>>,
-        sender: broadcast::Sender<(EventType, DownloadEvent)>,
+        sender: broadcast::Sender<PublishedEvent>,
     ) {
         let mut subscribers = self
             .subscribers
@@ -297,18 +313,39 @@ impl EventPublisher {
         if subscribers.is_empty() {
             return Err("No subscribers".to_string());
         }
-
-        let mut delivered = 0;
-        for subscriber in subscribers.values() {
-            let accepts = subscriber
+        let accepts = |subscriber: &Subscriber| {
+            subscriber
                 .filter
                 .as_ref()
-                .is_none_or(|filter| filter.contains(&event_type));
-            if accepts
-                && subscriber
-                    .sender
-                    .send((event_type.clone(), event.clone()))
-                    .is_ok()
+                .is_none_or(|filter| filter.contains(&event_type))
+        };
+        if !subscribers.values().any(accepts) {
+            return Ok(0);
+        }
+
+        // Serialize once per event and share the result with every accepting
+        // subscription. WebSocket senders still own their own frame copy.
+        let json = Arc::<str>::from(
+            event
+                .to_json()
+                .map_err(|error| format!("serialize download event: {error}"))?
+                .into_boxed_str(),
+        );
+        let event = Arc::new(event);
+
+        let mut delivered = 0;
+        for subscriber in subscribers
+            .values()
+            .filter(|subscriber| accepts(subscriber))
+        {
+            if subscriber
+                .sender
+                .send(PublishedEvent {
+                    event_type: event_type.clone(),
+                    event: Arc::clone(&event),
+                    json: Arc::clone(&json),
+                })
+                .is_ok()
             {
                 delivered += 1;
             }

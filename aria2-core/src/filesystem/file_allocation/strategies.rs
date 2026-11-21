@@ -19,6 +19,16 @@ pub(crate) async fn truncate(writer: &mut PositionedDiskWriter, length: u64) -> 
     writer.truncate(length).await
 }
 
+/// Extend a file and initialize newly added bytes before transfer.
+pub(crate) async fn zero_fill_allocation(
+    writer: &mut PositionedDiskWriter,
+    length: u64,
+) -> Result<()> {
+    let existing_length = writer.len().await?.min(length);
+    writer.truncate(length).await?;
+    async_zero_fill_from(writer, existing_length, length).await
+}
+
 /// Zero-fill a file region in async 1 MiB chunks.
 ///
 /// This is used as a fallback when `fallocate(2)` returns `EOPNOTSUPP`

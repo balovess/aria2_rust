@@ -2,7 +2,7 @@
 //!
 //! `SegmentMan` is the Rust equivalent of the C++ `SegmentMan` class. It
 //! coordinates segment checkout/cancellation/completion with the underlying
-//! [`PieceStorage`], tracks in-flight segments per CUID, remembers written
+//! `PieceStorage`, tracks in-flight segments per CUID, remembers written
 //! lengths for resume support, and manages peer statistics.
 //!
 //! # Architecture

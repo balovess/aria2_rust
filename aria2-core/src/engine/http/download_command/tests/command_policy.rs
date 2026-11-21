@@ -26,8 +26,10 @@ fn http2_session_pool_count_uses_its_own_limit() {
 
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&DownloadOptions::default()),
-        crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
-            .max(crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER)
+        crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER.max(
+            crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+                .div_ceil(crate::constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
+        )
     );
 }
 
@@ -41,7 +43,7 @@ fn http11_and_auto_pools_cover_their_protocol_limits() {
     };
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&http11),
-        7
+        1
     );
 
     let auto = DownloadOptions {
@@ -52,6 +54,42 @@ fn http11_and_auto_pools_cover_their_protocol_limits() {
     };
     assert_eq!(
         crate::engine::http::client_config::range_client_pool_count(&auto),
+        4
+    );
+}
+
+#[test]
+fn range_client_pool_count_preserves_h2_session_limit() {
+    let h2 = DownloadOptions {
+        http_version: crate::http::HttpVersion::Http2,
+        max_http2_sessions_per_server: Some(2),
+        max_connection_per_server: Some(16),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&h2),
+        2
+    );
+
+    let auto = DownloadOptions {
+        http_version: crate::http::HttpVersion::Auto,
+        max_http2_sessions_per_server: Some(2),
+        max_connection_per_server: Some(16),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&auto),
+        2
+    );
+
+    let auto_with_more_sessions = DownloadOptions {
+        http_version: crate::http::HttpVersion::Auto,
+        max_http2_sessions_per_server: Some(4),
+        max_connection_per_server: Some(16),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(
+        crate::engine::http::client_config::range_client_pool_count(&auto_with_more_sessions),
         4
     );
 }

@@ -78,6 +78,7 @@ pub(crate) async fn announce_with_policy(
     tracker_url: &str,
     announce: AnnounceRequest<'_>,
     policy: &OutboundNetworkPolicy,
+    resolver: Option<&crate::dns::DnsResolver>,
 ) -> Result<AnnounceResponse, AnnounceError> {
     let url = parse_tracker_url(tracker_url).map_err(classify_websocket_announce_error)?;
     let host = url.host_str().ok_or_else(|| {
@@ -106,8 +107,16 @@ pub(crate) async fn announce_with_policy(
         None
     };
 
-    let stream =
-        connect_socket(&url, host, port, announce.options, connect_timeout, policy).await?;
+    let stream = connect_socket(
+        &url,
+        host,
+        port,
+        announce.options,
+        connect_timeout,
+        policy,
+        resolver,
+    )
+    .await?;
     let event = announce.event.as_event_string();
     let response = announce_over_stream_with_connector(
         stream,
@@ -171,6 +180,7 @@ async fn connect_socket(
     options: &DownloadOptions,
     timeout: Duration,
     policy: &OutboundNetworkPolicy,
+    resolver: Option<&crate::dns::DnsResolver>,
 ) -> Result<TcpStream, AnnounceError> {
     let no_proxy = options
         .no_proxy
@@ -205,7 +215,18 @@ async fn connect_socket(
     };
 
     let Some(proxy_url) = proxy else {
-        return tokio::time::timeout(timeout, policy.connect_host(target_host, target_port))
+        let connection = async {
+            if let Some(resolver) = resolver {
+                let addresses = resolver
+                    .resolve(target_host, target_port)
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                policy.connect_candidates(&addresses).await
+            } else {
+                policy.connect_host(target_host, target_port).await
+            }
+        };
+        return tokio::time::timeout(timeout, connection)
             .await
             .map_err(|_| {
                 AnnounceError::new(
@@ -395,6 +416,7 @@ mod tests {
                 options: &options,
             },
             &OutboundNetworkPolicy::direct(),
+            None,
         )
         .await
         .unwrap();

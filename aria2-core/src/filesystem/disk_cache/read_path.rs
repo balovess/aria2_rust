@@ -16,7 +16,7 @@ impl WrDiskCache {
     /// assembled into one contiguous `Bytes` value.
     ///
     /// # Zero-Copy
-    /// Returns bytes::Bytes slice instead of Vec<u8>, avoiding memory allocation.
+    /// Returns a `bytes::Bytes` slice instead of `Vec<u8>`, avoiding allocation.
     pub async fn read(&self, offset: u64, length: u64) -> Result<Option<bytes::Bytes>> {
         let entries = self.entries.lock().await;
 

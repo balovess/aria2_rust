@@ -200,7 +200,6 @@ async fn test_multi_mirror_pause_persists_durable_inflight_blocks_and_reassigns_
     options.continue_download = true;
     options.allow_overwrite = true;
     options.uri_selector = "inorder".to_string();
-    options.http_adaptive.start_interval_ms = 0;
     let gid = GroupId::new(478);
     let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
         gid,

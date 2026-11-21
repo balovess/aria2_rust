@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::http::segment_downloader::{WRITE_QUEUE_BUDGET_BYTES, WriteBudget};
 
 #[test]
 fn authority_key_includes_scheme_and_ignores_path() {
@@ -52,6 +53,56 @@ fn total_and_authority_limits_are_independent() {
     drop(first);
     drop(second);
     assert!(state.try_acquire(&two, 2).is_some());
+}
+
+#[test]
+fn client_pool_size_does_not_reduce_http1_connection_capacity() {
+    let state = Arc::new(ExecutorState::new(
+        &["http://example.test:80".into()],
+        16,
+        16,
+        2,
+    ));
+    let authority = state.authority("http://example.test:80").unwrap();
+
+    let mut leases = Vec::with_capacity(16);
+    for _ in 0..16 {
+        leases.push(
+            state
+                .try_acquire(&authority, 16)
+                .expect("two client pools must still admit 16 HTTP/1.1 connections"),
+        );
+    }
+    assert!(state.try_acquire(&authority, 16).is_none());
+    assert_eq!(authority.client_in_flight[0].load(Ordering::Acquire), 8);
+    assert_eq!(authority.client_in_flight[1].load(Ordering::Acquire), 8);
+}
+
+#[test]
+fn two_h2_sessions_preserve_the_full_range_limit() {
+    let state = Arc::new(ExecutorState::new(
+        &["http://example.test:80".into()],
+        16,
+        16,
+        2,
+    ));
+    let authority = state.authority("http://example.test:80").unwrap();
+    authority.protocol.store(2, Ordering::Release);
+    authority.active_h2_sessions.store(2, Ordering::Release);
+
+    assert_eq!(authority.client_in_flight.len(), 2);
+
+    let mut leases = Vec::with_capacity(16);
+    for _ in 0..16 {
+        leases.push(
+            state
+                .try_acquire(&authority, 16)
+                .expect("two H2 sessions must preserve the full range limit"),
+        );
+    }
+    assert!(state.try_acquire(&authority, 16).is_none());
+    assert_eq!(authority.client_in_flight[0].load(Ordering::Acquire), 8);
+    assert_eq!(authority.client_in_flight[1].load(Ordering::Acquire), 8);
 }
 
 #[test]
@@ -139,6 +190,7 @@ fn live_connection_counts_separate_h1_connections_from_h2_sessions_and_streams()
         total_limit: 16,
         tasks: Vec::new(),
         next_task_id: 1,
+        write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
     };
 
     assert_eq!(
@@ -209,6 +261,7 @@ async fn completion_event_reclaims_only_its_task() {
         origin_sensitive_headers_allowed: true,
         state: Arc::new(ExecutorState::new(&[], 1, 1, 1)),
         total_limit: 1,
+        write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
         tasks: vec![
             RunningTask {
                 id: 1,
@@ -278,6 +331,7 @@ async fn selecting_next_result_does_not_drop_a_received_completion() {
         origin_sensitive_headers_allowed: true,
         state: Arc::clone(&state),
         total_limit: 1,
+        write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
         tasks: vec![RunningTask {
             id: 1,
             segment_index: 0,

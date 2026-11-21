@@ -103,6 +103,7 @@ pub(crate) fn build_tracker_client_with_source(
         local_address,
         None,
         None,
+        None,
     )
 }
 
@@ -114,6 +115,7 @@ pub(crate) fn build_tracker_client_with_source_and_resolution(
     local_address: Option<IpAddr>,
     resolved_destination: Option<(&str, &[std::net::SocketAddr])>,
     proxy: Option<reqwest::Proxy>,
+    resolver: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
 ) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
     let mut builder = reqwest::Client::builder()
@@ -127,6 +129,9 @@ pub(crate) fn build_tracker_client_with_source_and_resolution(
     }
     if let Some((host, addresses)) = resolved_destination {
         builder = builder.resolve_to_addrs(host, addresses);
+    }
+    if let Some(resolver) = resolver {
+        builder = builder.dns_resolver(resolver);
     }
     if let Some(proxy) = proxy {
         builder = builder.proxy(proxy);

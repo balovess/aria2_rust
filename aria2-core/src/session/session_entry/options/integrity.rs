@@ -76,26 +76,6 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
             adaptive_defaults.reduction_percent as u64,
         ),
         (
-            "http-adaptive-recovery-interval",
-            adaptive.recovery_interval_secs,
-            adaptive_defaults.recovery_interval_secs,
-        ),
-        (
-            "http-adaptive-recovery-successes-min",
-            adaptive.recovery_successes_min as u64,
-            adaptive_defaults.recovery_successes_min as u64,
-        ),
-        (
-            "http-adaptive-recovery-successes-max",
-            adaptive.recovery_successes_max as u64,
-            adaptive_defaults.recovery_successes_max as u64,
-        ),
-        (
-            "http-adaptive-start-interval-ms",
-            adaptive.start_interval_ms,
-            adaptive_defaults.start_interval_ms,
-        ),
-        (
             "http-adaptive-backoff-base",
             adaptive.backoff_base_secs,
             adaptive_defaults.backoff_base_secs,
@@ -104,31 +84,6 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
             "http-adaptive-backoff-max",
             adaptive.backoff_max_secs,
             adaptive_defaults.backoff_max_secs,
-        ),
-        (
-            "http-adaptive-capacity-start-interval-ms",
-            adaptive.capacity_start_interval_ms,
-            adaptive_defaults.capacity_start_interval_ms,
-        ),
-        (
-            "http-adaptive-capacity-start-interval-max-ms",
-            adaptive.capacity_start_interval_max_ms,
-            adaptive_defaults.capacity_start_interval_max_ms,
-        ),
-        (
-            "http-adaptive-rate-recovery-successes",
-            adaptive.rate_recovery_successes as u64,
-            adaptive_defaults.rate_recovery_successes as u64,
-        ),
-        (
-            "http-adaptive-rate-min-interval-ms",
-            adaptive.rate_min_interval_ms,
-            adaptive_defaults.rate_min_interval_ms,
-        ),
-        (
-            "http-adaptive-backoff-reset-after",
-            adaptive.backoff_reset_after_secs,
-            adaptive_defaults.backoff_reset_after_secs,
         ),
     ] {
         if value != default {

@@ -11,9 +11,9 @@
 //!   (C++ `FallocFileAllocationIterator`)
 //! - [`TruncFileAllocationIterator`] — `ftruncate`/`SetEndOfFile`
 //!   (C++ `TruncFileAllocationIterator`)
-//! - [`AdaptiveFileAllocationIterator`] — try `fallocate`, fall back to
-//!   zero-fill (C++ `AdaptiveFileAllocationIterator`, default for
-//!   `--file-allocation=prealloc`)
+//! - [`AdaptiveFileAllocationIterator`] — use native allocation where its
+//!   semantics match `prealloc`, otherwise zero-fill (C++ equivalent; default
+//!   for `--file-allocation=prealloc`)
 
 use async_trait::async_trait;
 
@@ -27,8 +27,8 @@ const BUF_SIZE: usize = 256 * 1024;
 
 /// Async trait for incremental file allocation.
 ///
-/// Callers invoke [`allocate_chunk`] repeatedly until [`finished`] returns
-/// `true`. After each call, [`current_length`] and [`total_length`] report
+/// Callers invoke `allocate_chunk` repeatedly until `finished` returns
+/// `true`. After each call, `current_length` and `total_length` report
 /// progress. This mirrors the C++ `FileAllocationIterator` interface.
 ///
 /// # C++ Reference
@@ -40,7 +40,7 @@ const BUF_SIZE: usize = 256 * 1024;
 pub trait FileAllocationIterator: Send {
     /// Allocate one chunk of disk space.
     ///
-    /// On return, [`current_length`] will have advanced by at most one chunk
+    /// On return, `current_length` will have advanced by at most one chunk
     /// worth of bytes.
     async fn allocate_chunk(&mut self) -> Result<()>;
 
@@ -186,6 +186,8 @@ impl FallocFileAllocationIterator {
         total_length: u64,
         secure_falloc: bool,
     ) -> Self {
+        #[cfg(windows)]
+        let _ = secure_falloc;
         Self {
             writer,
             offset,
@@ -288,8 +290,8 @@ impl FileAllocationIterator for TruncFileAllocationIterator {
         // C++ TruncFileAllocationIterator calls stream->allocate(0, totalLength_, true)
         // which maps to ftruncate. In Rust we use set_len via truncate().
         self.writer.truncate(self.total_length).await?;
-        // Flush to ensure metadata is persisted before the caller checks file size.
-        self.writer.flush().await?;
+        // Persist the new length before the caller checks file size.
+        self.writer.sync_all().await?;
         self.offset = self.total_length;
         self.done = true;
         Ok(())
@@ -312,8 +314,8 @@ impl FileAllocationIterator for TruncFileAllocationIterator {
 // AdaptiveFileAllocationIterator
 // =========================================================================
 
-/// Adaptive allocation iterator that tries `fallocate` first, then falls back
-/// to zero-fill.
+/// Adaptive allocation iterator that uses native allocation where supported
+/// and compatible with `prealloc`, otherwise zero-fills.
 ///
 /// This is the Rust equivalent of C++ `AdaptiveFileAllocationIterator` and is
 /// the default iterator for `--file-allocation=prealloc`.
@@ -330,6 +332,7 @@ pub struct AdaptiveFileAllocationIterator {
     writer: Option<PositionedDiskWriter>,
     offset: u64,
     total_length: u64,
+    #[cfg(not(windows))]
     secure_falloc: bool,
     /// Inner iterator selected after the fallocate probe.
     inner: Option<AdaptiveInner>,
@@ -337,6 +340,7 @@ pub struct AdaptiveFileAllocationIterator {
 
 /// Inner iterator variant after the adaptive probe decides the strategy.
 enum AdaptiveInner {
+    #[cfg(not(windows))]
     Falloc(FallocFileAllocationIterator),
     Single(SingleFileAllocationIterator),
 }
@@ -360,10 +364,13 @@ impl AdaptiveFileAllocationIterator {
         total_length: u64,
         secure_falloc: bool,
     ) -> Self {
+        #[cfg(windows)]
+        let _ = secure_falloc;
         Self {
             writer: Some(writer),
             offset,
             total_length,
+            #[cfg(not(windows))]
             secure_falloc,
             inner: None,
         }
@@ -376,63 +383,81 @@ impl AdaptiveFileAllocationIterator {
     /// `FallocFileAllocationIterator`. If it returns `EOPNOTSUPP`,
     /// we fall back to `SingleFileAllocationIterator` (zero-fill).
     ///
-    /// On non-Linux platforms where fallocate is not available or
-    /// the raw fd is missing, we go directly to zero-fill.
+    /// On Windows, preallocation always zero-fills, matching aria2's default
+    /// behavior. `SetFileValidData` is reserved for the explicit `falloc` mode.
     async fn probe_and_select(&mut self) -> Result<()> {
-        // Probe: try a small fallocate (4 KiB).
-        let probe_len = 4 * 1024u64;
-        let remaining = self.total_length.saturating_sub(self.offset);
-        let probe_len = probe_len.min(remaining);
-
-        if probe_len == 0 {
-            // Nothing to allocate.
-            return Ok(());
+        #[cfg(windows)]
+        {
+            // Windows has no safe, unprivileged equivalent to the native
+            // fallocate probe. `SetFileValidData` is the explicit `falloc`
+            // mode; default `prealloc` must zero-fill before downloading.
+            let mut single = SingleFileAllocationIterator::new(
+                self.writer.take().expect("adaptive writer is present"),
+                self.offset,
+                self.total_length,
+            );
+            single.init();
+            self.inner = Some(AdaptiveInner::Single(single));
+            Ok(())
         }
 
-        // Try the fallocate path. We use the file_allocation::allocate_file
-        // function which handles platform-specific fallocate with EOPNOTSUPP
-        // fallback.
-        let probe_result = crate::filesystem::file_allocation::allocate_file(
-            self.writer.as_mut().expect("adaptive writer is present"),
-            self.offset + probe_len,
-            crate::filesystem::file_allocation::AllocationStrategy::Falloc,
-            self.secure_falloc,
-        )
-        .await;
+        #[cfg(not(windows))]
+        {
+            // Probe: try a small fallocate (4 KiB).
+            let probe_len = 4 * 1024u64;
+            let remaining = self.total_length.saturating_sub(self.offset);
+            let probe_len = probe_len.min(remaining);
 
-        match probe_result {
-            Ok(()) => {
-                // fallocate succeeded — filesystem supports it.
-                // The probe already allocated up to offset + probe_len.
-                self.offset += probe_len;
-                if self.offset >= self.total_length {
-                    // Small file, fully allocated by the probe.
-                    return Ok(());
+            if probe_len == 0 {
+                // Nothing to allocate.
+                return Ok(());
+            }
+
+            // Try the fallocate path. We use the file_allocation::allocate_file
+            // function which handles platform-specific fallocate with EOPNOTSUPP
+            // fallback.
+            let probe_result = crate::filesystem::file_allocation::allocate_file(
+                self.writer.as_mut().expect("adaptive writer is present"),
+                self.offset + probe_len,
+                crate::filesystem::file_allocation::AllocationStrategy::Falloc,
+                self.secure_falloc,
+            )
+            .await;
+
+            match probe_result {
+                Ok(()) => {
+                    // fallocate succeeded — filesystem supports it.
+                    // The probe already allocated up to offset + probe_len.
+                    self.offset += probe_len;
+                    if self.offset >= self.total_length {
+                        // Small file, fully allocated by the probe.
+                        return Ok(());
+                    }
+                    // Continue with fallocate for the remaining region.
+                    self.inner = Some(AdaptiveInner::Falloc(
+                        FallocFileAllocationIterator::new_with_secure_falloc(
+                            self.writer.take().expect("adaptive writer is present"),
+                            self.offset,
+                            self.total_length,
+                            self.secure_falloc,
+                        ),
+                    ));
                 }
-                // Continue with fallocate for the remaining region.
-                self.inner = Some(AdaptiveInner::Falloc(
-                    FallocFileAllocationIterator::new_with_secure_falloc(
+                Err(_) => {
+                    // fallocate failed — fall back to zero-fill.
+                    tracing::debug!("Adaptive: fallocate probe failed, falling back to zero-fill");
+                    let mut single = SingleFileAllocationIterator::new(
                         self.writer.take().expect("adaptive writer is present"),
                         self.offset,
                         self.total_length,
-                        self.secure_falloc,
-                    ),
-                ));
+                    );
+                    single.init();
+                    self.inner = Some(AdaptiveInner::Single(single));
+                }
             }
-            Err(_) => {
-                // fallocate failed — fall back to zero-fill.
-                tracing::debug!("Adaptive: fallocate probe failed, falling back to zero-fill");
-                let mut single = SingleFileAllocationIterator::new(
-                    self.writer.take().expect("adaptive writer is present"),
-                    self.offset,
-                    self.total_length,
-                );
-                single.init();
-                self.inner = Some(AdaptiveInner::Single(single));
-            }
-        }
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 
@@ -444,6 +469,7 @@ impl FileAllocationIterator for AdaptiveFileAllocationIterator {
         }
 
         match &mut self.inner {
+            #[cfg(not(windows))]
             Some(AdaptiveInner::Falloc(falloc)) => falloc.allocate_chunk().await,
             Some(AdaptiveInner::Single(single)) => single.allocate_chunk().await,
             None => {
@@ -455,6 +481,7 @@ impl FileAllocationIterator for AdaptiveFileAllocationIterator {
 
     fn finished(&self) -> bool {
         match &self.inner {
+            #[cfg(not(windows))]
             Some(AdaptiveInner::Falloc(falloc)) => falloc.finished(),
             Some(AdaptiveInner::Single(single)) => single.finished(),
             None => self.offset >= self.total_length,
@@ -463,6 +490,7 @@ impl FileAllocationIterator for AdaptiveFileAllocationIterator {
 
     fn current_length(&self) -> u64 {
         match &self.inner {
+            #[cfg(not(windows))]
             Some(AdaptiveInner::Falloc(falloc)) => falloc.current_length(),
             Some(AdaptiveInner::Single(single)) => single.current_length(),
             None => self.offset,
@@ -478,6 +506,7 @@ impl AdaptiveFileAllocationIterator {
     /// Recover the owned writer after allocation has completed.
     pub fn into_inner(self) -> PositionedDiskWriter {
         match self.inner {
+            #[cfg(not(windows))]
             Some(AdaptiveInner::Falloc(iterator)) => iterator.into_inner(),
             Some(AdaptiveInner::Single(iterator)) => iterator.into_inner(),
             None => self.writer.expect("adaptive writer is present"),
@@ -487,6 +516,7 @@ impl AdaptiveFileAllocationIterator {
     /// Close the file held by the selected inner iterator.
     pub async fn close(&mut self) -> Result<()> {
         match &mut self.inner {
+            #[cfg(not(windows))]
             Some(AdaptiveInner::Falloc(iterator)) => {
                 iterator
                     .writer_mut()
@@ -595,6 +625,8 @@ mod tests {
         }
 
         assert_eq!(iter.current_length(), 1024 * 1024);
+        let content = tokio::fs::read(&path).await.unwrap();
+        assert!(content.iter().all(|byte| *byte == 0));
     }
 
     #[tokio::test]

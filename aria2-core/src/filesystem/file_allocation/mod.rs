@@ -54,8 +54,10 @@ impl AllocationStrategy {
 
 /// Allocate file space using the specified strategy.
 /// This function provides cross-platform support for file preallocation:
-/// - `prealloc`/`falloc`: use the platform-native allocation path with its
-///   Rust-owned fallback behavior
+/// - `prealloc`: use native allocation where supported, zero-filling new bytes
+///   before transfer when native allocation is unavailable
+/// - `falloc`: use the platform-native allocation path with its Rust-owned
+///   fallback behavior
 /// - `trunc`: use `set_len()` without attempting physical allocation
 /// - `mmap`: use native allocation before the memory-mapped writer opens
 ///
@@ -63,9 +65,9 @@ impl AllocationStrategy {
 /// * `writer` - Open positioned writer for the file
 /// * `length` - Desired file length in bytes
 /// * `strategy` - Allocation strategy to use
-/// * `secure` - When `true`, zero-fill allocated blocks on platforms that
-///   don't zero-fill (macOS, Windows). No-op on Linux where `fallocate(2)`
-///   always returns zeroed blocks.
+/// * `secure` - When `true`, zero-fill blocks after native allocation on
+///   platforms that may expose prior disk contents (macOS, Windows). Fallback
+///   zero-filling is always performed regardless of this flag.
 pub async fn allocate_file(
     writer: &mut PositionedDiskWriter,
     length: u64,
@@ -74,9 +76,20 @@ pub async fn allocate_file(
 ) -> Result<()> {
     match strategy {
         AllocationStrategy::None => Ok(()),
-        AllocationStrategy::Prealloc | AllocationStrategy::Falloc => {
-            falloc::fallocate(writer, length, secure).await
+        AllocationStrategy::Prealloc => {
+            #[cfg(windows)]
+            {
+                // aria2's Windows prealloc strategy writes zeroes before the
+                // download. Keep that work out of the HTTP write path; only
+                // explicit `falloc` may use SetFileValidData.
+                strategies::zero_fill_allocation(writer, length).await
+            }
+            #[cfg(not(windows))]
+            {
+                falloc::fallocate(writer, length, secure).await
+            }
         }
+        AllocationStrategy::Falloc => falloc::fallocate(writer, length, secure).await,
         AllocationStrategy::Trunc => strategies::truncate(writer, length).await,
         // Mmap uses fallocate to ensure blocks are allocated before mapping;
         // the actual mmap is performed by MmapDiskWriter at open time.

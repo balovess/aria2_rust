@@ -11,7 +11,7 @@ use crate::engine::http::concurrent_download::range_size_limit::lower_rejected_r
 use crate::engine::http::concurrent_download::slow_range::SlowRangeRecovery;
 use crate::engine::http::request_executor::{HttpSegmentRequestExecutor, authority_key};
 use crate::engine::http::segment_downloader::{
-    SegmentProgress, SegmentProgressTracker, WriteChunk,
+    QueuedWriteChunk, SegmentProgress, SegmentProgressTracker,
 };
 use crate::engine::retry_policy::RetryPolicy;
 use crate::engine::work_scheduler::WorkLease;
@@ -27,10 +27,12 @@ pub(super) struct RangeScheduler {
     pub(super) adaptive: HashMap<String, HttpAdaptiveConcurrency>,
     /// In-memory per-mirror ceilings; aliases for one authority are lowered together.
     pub(super) range_size_limits: Vec<u64>,
+    /// Authority key for each URI, precomputed once during scheduler creation.
+    pub(super) uri_authorities: Vec<String>,
     pub(super) executor: HttpSegmentRequestExecutor,
     pub(super) connection_guard: ActiveConnectionGuard,
-    pub(super) write_tx: mpsc::Sender<WriteChunk>,
-    pub(super) write_rx: mpsc::Receiver<WriteChunk>,
+    pub(super) write_tx: mpsc::Sender<QueuedWriteChunk>,
+    pub(super) write_rx: mpsc::Receiver<QueuedWriteChunk>,
     pub(super) active: HashMap<u32, ActiveRangeWork>,
     pub(super) progress_tracker: Arc<SegmentProgressTracker>,
     pub(super) segment_progress: HashMap<u32, Arc<SegmentProgress>>,
@@ -60,9 +62,13 @@ pub(super) fn create(
     initial_range_size_limit: u64,
     coordinator: &MirrorCoordinator,
 ) -> RangeScheduler {
-    let server_keys: Vec<String> = uris
+    let uri_authorities: Vec<String> = uris
         .iter()
         .map(|uri| authority_key(uri).unwrap_or_else(|| uri.clone()))
+        .collect();
+    let server_keys: Vec<String> = uri_authorities
+        .iter()
+        .cloned()
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -100,7 +106,7 @@ pub(super) fn create(
         executor.set_protocol(known_authority, *version);
     }
     let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
-    let (write_tx, write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
+    let (write_tx, write_rx) = mpsc::channel::<QueuedWriteChunk>(WRITE_CHANNEL_CAPACITY);
     let active = HashMap::new();
     let progress_tracker =
         SegmentProgressTracker::new(coordinator.completed_bytes(), Arc::clone(&dl.progress));
@@ -119,6 +125,7 @@ pub(super) fn create(
         retry_policy,
         adaptive,
         range_size_limits,
+        uri_authorities,
         executor,
         connection_guard,
         write_tx,
@@ -134,29 +141,31 @@ pub(super) fn create(
 }
 
 pub(super) fn current_authority_range_size_limit(
-    uris: &[String],
+    uri_authorities: &[String],
     range_size_limits: &[u64],
     authority: &str,
 ) -> Option<u64> {
-    uris.iter()
+    uri_authorities
+        .iter()
         .zip(range_size_limits)
-        .find(|(uri, _)| authority_key(uri).unwrap_or_else(|| (*uri).clone()) == authority)
+        .find(|(candidate, _)| candidate.as_str() == authority)
         .map(|(_, limit)| *limit)
 }
 
 pub(super) fn lower_authority_range_size_limit(
-    uris: &[String],
+    uri_authorities: &[String],
     range_size_limits: &mut [u64],
     authority: &str,
     rejected_limit: u64,
     configured_floor: u64,
 ) -> Option<u64> {
-    let current_limit = current_authority_range_size_limit(uris, range_size_limits, authority)?;
+    let current_limit =
+        current_authority_range_size_limit(uri_authorities, range_size_limits, authority)?;
     let next_limit =
         lower_rejected_range_size_limit(current_limit, rejected_limit, configured_floor)?;
 
-    for (uri, limit) in uris.iter().zip(range_size_limits) {
-        if authority_key(uri).unwrap_or_else(|| uri.clone()) == authority {
+    for (candidate, limit) in uri_authorities.iter().zip(range_size_limits.iter_mut()) {
+        if candidate == authority {
             *limit = next_limit;
         }
     }
@@ -169,16 +178,16 @@ mod tests {
 
     #[test]
     fn range_limit_downshift_is_shared_by_same_authority_only() {
-        let uris = vec![
-            "https://example.test/a".to_string(),
-            "https://example.test/b".to_string(),
-            "https://other.test/file".to_string(),
+        let uri_authorities = vec![
+            "https://example.test:443".to_string(),
+            "https://example.test:443".to_string(),
+            "https://other.test:443".to_string(),
         ];
         let mut limits = vec![32 * 1024 * 1024, 32 * 1024 * 1024, 32 * 1024 * 1024];
 
         assert_eq!(
             lower_authority_range_size_limit(
-                &uris,
+                &uri_authorities,
                 &mut limits,
                 "https://example.test:443",
                 32 * 1024 * 1024,
@@ -191,13 +200,17 @@ mod tests {
             vec![16 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024]
         );
         assert_eq!(
-            current_authority_range_size_limit(&uris, &limits, "https://example.test:443"),
+            current_authority_range_size_limit(
+                &uri_authorities,
+                &limits,
+                "https://example.test:443"
+            ),
             Some(16 * 1024 * 1024)
         );
 
         assert_eq!(
             lower_authority_range_size_limit(
-                &uris,
+                &uri_authorities,
                 &mut limits,
                 "https://example.test:443",
                 32 * 1024 * 1024,

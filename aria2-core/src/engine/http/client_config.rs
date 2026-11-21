@@ -22,6 +22,7 @@ use aria2_protocol::proxy::{ProxyProtocol, ProxyUrl};
 pub(crate) struct ResolvedNetworkAddresses {
     pub(crate) target: Option<Vec<std::net::SocketAddr>>,
     pub(crate) proxy: Option<Vec<std::net::SocketAddr>>,
+    pub(crate) resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
 }
 
 pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
@@ -34,12 +35,15 @@ pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
         .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
         .clamp(1, constants::MAX_HTTP2_SESSIONS_PER_SERVER as u16)
         as usize;
-    // Auto must provision both possibilities before ALPN reveals the protocol.
-    // The executor enforces the selected protocol's independent concurrency cap.
+    // A reqwest client already keeps multiple HTTP/1.1 connections alive, so
+    // one client is only needed for each pool's worth of connections. HTTP/2
+    // still needs independent clients to create independent TCP sessions.
+    let connections_per_client = constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST.max(1);
+    let http1_clients = max_connections.div_ceil(connections_per_client).max(1);
     match options.http_version {
         crate::http::HttpVersion::Http2 => requested_sessions,
-        crate::http::HttpVersion::Auto => max_connections.max(requested_sessions),
-        crate::http::HttpVersion::Http11 => max_connections,
+        crate::http::HttpVersion::Auto => requested_sessions.max(http1_clients),
+        crate::http::HttpVersion::Http11 => http1_clients,
     }
 }
 
@@ -299,6 +303,7 @@ pub(super) fn build_download_client(
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve_to_addrs(&host, addresses);
+            let builder = apply_dns_resolver(builder, resolved_addresses.resolver.as_ref());
             let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, client_tls)?;
             return options
@@ -315,7 +320,7 @@ pub(super) fn build_download_client(
                 });
         }
 
-        if has_custom_tls {
+        if has_custom_tls || resolved_addresses.resolver.is_some() {
             let builder = reqwest::Client::builder()
                 .connect_timeout(connect_timeout)
                 .gzip(options.http_accept_gzip)
@@ -328,6 +333,7 @@ pub(super) fn build_download_client(
                 .tcp_keepalive(Some(Duration::from_secs(
                     constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
                 )));
+            let builder = apply_dns_resolver(builder, resolved_addresses.resolver.as_ref());
             let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, client_tls)?;
             return options
@@ -344,14 +350,16 @@ pub(super) fn build_download_client(
                 });
         }
 
-        return Ok(
-            crate::http::client_pool::get_bound_client_with_version_and_timeout(
-                local_address,
-                options.http_accept_gzip,
-                options.http_version,
-                connect_timeout,
-            ),
-        );
+        if resolved_addresses.resolver.is_none() {
+            return Ok(
+                crate::http::client_pool::get_bound_client_with_version_and_timeout(
+                    local_address,
+                    options.http_accept_gzip,
+                    options.http_version,
+                    connect_timeout,
+                ),
+            );
+        }
     }
 
     let mut builder = reqwest::Client::builder()
@@ -370,6 +378,7 @@ pub(super) fn build_download_client(
         )));
 
     builder = apply_proxy_options(builder, &options.http_proxy_options());
+    builder = apply_dns_resolver(builder, resolved_addresses.resolver.as_ref());
 
     if let (Some((proxy_host, _)), Some(proxy_addresses)) = (
         http_proxy_origin(uri, options),
@@ -395,6 +404,16 @@ pub(super) fn build_download_client(
                 "Failed to build HTTP client: {error}"
             )))
         })
+}
+
+fn apply_dns_resolver(
+    builder: reqwest::ClientBuilder,
+    resolver: Option<&Arc<dyn reqwest::dns::Resolve>>,
+) -> reqwest::ClientBuilder {
+    match resolver {
+        Some(resolver) => builder.dns_resolver(Arc::clone(resolver)),
+        None => builder,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -24,32 +24,13 @@ pub(super) fn apply(
             Ok(true)
         }
         "http-adaptive-reduction-percent"
-        | "http-adaptive-recovery-interval"
-        | "http-adaptive-recovery-successes-min"
-        | "http-adaptive-recovery-successes-max"
-        | "http-adaptive-start-interval-ms"
         | "http-adaptive-backoff-base"
-        | "http-adaptive-backoff-max"
-        | "http-adaptive-capacity-start-interval-ms"
-        | "http-adaptive-capacity-start-interval-max-ms"
-        | "http-adaptive-rate-recovery-successes"
-        | "http-adaptive-rate-min-interval-ms"
-        | "http-adaptive-backoff-reset-after" => {
+        | "http-adaptive-backoff-max" => {
             let value = rpc_option_u64(value, key)?;
             let (min, max) = match key {
                 "http-adaptive-reduction-percent" => (1, 90),
-                "http-adaptive-recovery-interval" => (1, 3600),
-                "http-adaptive-recovery-successes-min" | "http-adaptive-recovery-successes-max" => {
-                    (1, 100_000)
-                }
-                "http-adaptive-start-interval-ms" | "http-adaptive-rate-min-interval-ms" => {
-                    (0, 60_000)
-                }
                 "http-adaptive-backoff-base" => (1, 3600),
-                "http-adaptive-backoff-max" | "http-adaptive-backoff-reset-after" => (1, 86_400),
-                "http-adaptive-capacity-start-interval-ms"
-                | "http-adaptive-capacity-start-interval-max-ms" => (1, 60_000),
-                "http-adaptive-rate-recovery-successes" => (1, 1_000_000),
+                "http-adaptive-backoff-max" => (1, 86_400),
                 _ => unreachable!("adaptive option handled above"),
             };
             if !(min..=max).contains(&value) {
@@ -61,27 +42,8 @@ pub(super) fn apply(
             let adaptive = &mut options.http_adaptive;
             match key {
                 "http-adaptive-reduction-percent" => adaptive.reduction_percent = value as u8,
-                "http-adaptive-recovery-interval" => adaptive.recovery_interval_secs = value,
-                "http-adaptive-recovery-successes-min" => {
-                    adaptive.recovery_successes_min = value as u32
-                }
-                "http-adaptive-recovery-successes-max" => {
-                    adaptive.recovery_successes_max = value as u32
-                }
-                "http-adaptive-start-interval-ms" => adaptive.start_interval_ms = value,
                 "http-adaptive-backoff-base" => adaptive.backoff_base_secs = value,
                 "http-adaptive-backoff-max" => adaptive.backoff_max_secs = value,
-                "http-adaptive-capacity-start-interval-ms" => {
-                    adaptive.capacity_start_interval_ms = value
-                }
-                "http-adaptive-capacity-start-interval-max-ms" => {
-                    adaptive.capacity_start_interval_max_ms = value
-                }
-                "http-adaptive-rate-recovery-successes" => {
-                    adaptive.rate_recovery_successes = value as u32
-                }
-                "http-adaptive-rate-min-interval-ms" => adaptive.rate_min_interval_ms = value,
-                "http-adaptive-backoff-reset-after" => adaptive.backoff_reset_after_secs = value,
                 _ => unreachable!("adaptive option handled above"),
             }
             options.http_adaptive = adaptive.normalized();

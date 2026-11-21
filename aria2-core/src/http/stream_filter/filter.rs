@@ -113,7 +113,7 @@ fn map_protocol_error(error: HttpStreamFilterError) -> Aria2Error {
 /// Examines the first few bytes of data to identify known compression formats:
 /// - Gzip: bytes [0x1f, 0x8b]
 /// - BZ2: bytes [0x42, 0x5a] ("BZ")
-/// - Zlib/Deflate: byte [0x78] followed by valid flag byte
+/// - Zlib/Deflate: byte `0x78` followed by valid flag byte
 ///
 /// # Arguments
 ///

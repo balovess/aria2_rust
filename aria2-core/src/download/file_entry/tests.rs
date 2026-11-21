@@ -28,7 +28,10 @@ fn test_default_construction() {
     assert!(entry.content_type().is_empty());
     assert!(entry.original_name().is_empty());
     assert!(entry.suffix_path().is_empty());
-    assert_eq!(entry.max_connection_per_server(), 10);
+    assert_eq!(
+        entry.max_connection_per_server(),
+        crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+    );
 }
 
 #[test]
@@ -396,7 +399,10 @@ fn test_remove_request_not_found() {
 #[test]
 fn test_max_connection_per_server() {
     let mut entry = FileEntry::default();
-    assert_eq!(entry.max_connection_per_server(), 10);
+    assert_eq!(
+        entry.max_connection_per_server(),
+        crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER
+    );
     entry.set_max_connection_per_server(4);
     assert_eq!(entry.max_connection_per_server(), 4);
 }

@@ -15,7 +15,7 @@
 //! # Key Types
 //!
 //! - [`BitfieldMan`] — Manages completion/usage/filter bitfields for piece tracking
-//! - [`Piece`] — Represents a single downloadable piece with block-level tracking
+//! - `Piece` — Represents a single downloadable piece with block-level tracking
 //! - [`PieceStorage`] — Trait interface for piece storage operations
 //! - [`DefaultPieceStorage`] — Default implementation suitable for HTTP/FTP and BT
 

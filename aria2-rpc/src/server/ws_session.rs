@@ -39,15 +39,16 @@ pub async fn handle_ws_socket(
     loop {
         tokio::select! {
             // Wait for events from the engine (outbound notifications)
-            result = subscription.recv() => {
+            result = subscription.recv_serialized() => {
                 match result {
-                    Ok((_event_type, event)) => {
-                        if let Ok(json_str) = event.to_json()
-                            && socket
-                                .send(axum::extract::ws::Message::Text(json_str.into()))
-                                .await
-                                .is_err()
-                            {
+                    Ok(json) => {
+                        if socket
+                            .send(axum::extract::ws::Message::Text(
+                                json.as_ref().to_owned().into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
                                 break; // Client disconnected
                             }
                     }

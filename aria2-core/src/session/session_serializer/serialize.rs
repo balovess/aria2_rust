@@ -319,7 +319,7 @@ fn encode_descriptor<T: serde::Serialize>(value: &T) -> std::result::Result<Stri
 ///
 /// # Arguments
 ///
-/// * `groups` - Slice of Arc<std::sync::RwLock<RequestGroup>> references
+/// * `groups` - Slice of `Arc<std::sync::RwLock<RequestGroup>>` references
 ///
 /// # Returns
 ///

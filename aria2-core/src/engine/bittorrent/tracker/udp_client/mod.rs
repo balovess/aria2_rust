@@ -83,9 +83,18 @@ impl UdpTrackerClient {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_udp_tracker_addr(
     url: &str,
     policy: &OutboundNetworkPolicy,
+) -> Result<SocketAddr, String> {
+    resolve_udp_tracker_addr_with_resolver(url, policy, None).await
+}
+
+pub(crate) async fn resolve_udp_tracker_addr_with_resolver(
+    url: &str,
+    policy: &OutboundNetworkPolicy,
+    resolver: Option<&crate::dns::DnsResolver>,
 ) -> Result<SocketAddr, String> {
     let tracker = aria2_protocol::bittorrent::tracker::udp_url::UdpTrackerUrl::parse(url).map_err(
         |error| match error {
@@ -101,8 +110,23 @@ pub(crate) async fn resolve_udp_tracker_addr(
         },
     )?;
 
-    policy
-        .resolve_udp_host(tracker.host(), tracker.port())
-        .await
-        .map_err(|error| format!("failed to resolve UDP tracker {url}: {error}"))
+    let addresses = match resolver {
+        Some(resolver) => resolver.resolve(tracker.host(), tracker.port()).await,
+        None => policy
+            .resolve_udp_host(tracker.host(), tracker.port())
+            .await
+            .map(|address| vec![address]),
+    }
+    .map_err(|error| format!("failed to resolve UDP tracker {url}: {error}"))?;
+    if !policy.is_direct() {
+        policy
+            .source_for_addresses(&addresses)
+            .map_err(|error| error.to_string())?;
+    }
+    addresses
+        .into_iter()
+        .find(|address| policy.is_direct() || policy.source_for(*address).is_ok())
+        .ok_or_else(|| {
+            "DNS returned no UDP tracker address compatible with outbound policy".to_string()
+        })
 }

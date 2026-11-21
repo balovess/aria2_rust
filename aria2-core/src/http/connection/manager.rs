@@ -500,10 +500,9 @@ impl HttpConnectionManager {
         let port = url
             .port_or_known_default()
             .ok_or_else(|| Aria2Error::Parse("Unable to determine port number".to_string()))?;
-        let host_port = format!("{}:{}", host, port);
-        tokio::net::lookup_host(&host_port)
+        crate::dns::DnsResolver::system()
+            .resolve(host, port)
             .await
-            .map(|addresses| addresses.collect())
             .map_err(|error| Aria2Error::Parse(format!("Failed to resolve address: {}", error)))
     }
 

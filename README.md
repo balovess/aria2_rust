@@ -2,42 +2,20 @@
 
 中文：[`README_CN.md`](README_CN.md)
 
-> **Project Status:** aria2-rust is currently usable and continues to evolve.
-> Upcoming work focuses on improving library usability and documentation,
-> fixing bugs, improving the overall experience, and optimizing performance.
-
-<p align="center">
-  <img src="https://img.shields.io/badge/STATUS-USABLE%2C%20ONGOING%20IMPROVEMENTS-brightgreen?style=for-the-badge" alt="Usable, with ongoing improvements" />
-</p>
-
 <p align="center">
   <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/v/aria2-core?label=aria2-core" alt="aria2-core on crates.io" /></a>
-  <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/dr/aria2-core?label=aria2-core%20downloads%20%2890%20days%29" alt="aria2-core downloads in the last 90 days" /></a>
   <a href="https://crates.io/crates/aria2-core"><img src="https://img.shields.io/crates/d/aria2-core?label=aria2-core%20downloads%20%28total%29" alt="aria2-core total downloads" /></a>
-  <br />
   <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/v/aria2-protocol?label=aria2-protocol" alt="aria2-protocol on crates.io" /></a>
-  <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/dr/aria2-protocol?label=aria2-protocol%20downloads%20%2890%20days%29" alt="aria2-protocol downloads in the last 90 days" /></a>
   <a href="https://crates.io/crates/aria2-protocol"><img src="https://img.shields.io/crates/d/aria2-protocol?label=aria2-protocol%20downloads%20%28total%29" alt="aria2-protocol total downloads" /></a>
-  <br />
   <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/v/aria2-rpc?label=aria2-rpc" alt="aria2-rpc on crates.io" /></a>
-  <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/dr/aria2-rpc?label=aria2-rpc%20downloads%20%2890%20days%29" alt="aria2-rpc downloads in the last 90 days" /></a>
   <a href="https://crates.io/crates/aria2-rpc"><img src="https://img.shields.io/crates/d/aria2-rpc?label=aria2-rpc%20downloads%20%28total%29" alt="aria2-rpc total downloads" /></a>
   <br />
   <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/v/aria2-rust?label=Python%20SDK" alt="Python SDK on PyPI" /></a>
-  <a href="https://pypi.org/project/aria2-rust/"><img src="https://img.shields.io/pypi/dm/aria2-rust?label=PyPI%20downloads%20%28monthly%29" alt="Python SDK monthly downloads on PyPI" /></a>
-  <br />
   <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/v/@aria2-rust/aria2-rust?label=Node.js%20SDK" alt="Node.js SDK on npm" /></a>
-  <a href="https://www.npmjs.com/package/@aria2-rust/aria2-rust"><img src="https://img.shields.io/npm/dm/@aria2-rust/aria2-rust?label=npm%20downloads%20%28monthly%29" alt="Node.js SDK monthly downloads on npm" /></a>
   <br />
-  <a href="https://github.com/balovess/aria2_rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/balovess/aria2_rust/ci.yml?branch=dev&label=CI%20%28manual%20workflow%29" alt="GitHub CI workflow status on dev" /></a>
-  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/v/release/balovess/aria2_rust?label=latest%20release" alt="Latest GitHub release" /></a>
-  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/downloads/balovess/aria2_rust/total?label=release%20downloads" alt="Downloads of assets in the latest GitHub release" /></a>
-  <a href="https://github.com/balovess/aria2_rust"><img src="https://img.shields.io/github/stars/balovess/aria2_rust?style=social" alt="GitHub stars" /></a>
-  <a href="https://github.com/balovess/aria2_rust/blob/dev/LICENSE"><img src="https://img.shields.io/github/license/balovess/aria2_rust" alt="Project license" /></a>
-  <br />
-  <a href="https://docs.rs/aria2-core"><img src="https://docs.rs/aria2-core/badge.svg" alt="aria2-core documentation on docs.rs" /></a>
-  <a href="https://docs.rs/aria2-protocol"><img src="https://docs.rs/aria2-protocol/badge.svg" alt="aria2-protocol documentation on docs.rs" /></a>
-  <a href="https://docs.rs/aria2-rpc"><img src="https://docs.rs/aria2-rpc/badge.svg" alt="aria2-rpc documentation on docs.rs" /></a>
+  <a href="https://github.com/balovess/aria2_rust/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/balovess/aria2_rust/ci.yml?branch=dev&label=CI" alt="CI status" /></a>
+  <a href="https://github.com/balovess/aria2_rust/releases"><img src="https://img.shields.io/github/v/release/balovess/aria2_rust?label=release" alt="Latest release" /></a>
+  <a href="https://github.com/balovess/aria2_rust/blob/dev/LICENSE"><img src="https://img.shields.io/github/license/balovess/aria2_rust" alt="License" /></a>
 </p>
 
 ## Documentation
@@ -116,6 +94,9 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
 - **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 42 methods and 6 notifications)
+- **Python SDK (complete client API)**: An async HTTP/WebSocket JSON-RPC client covering task, status, option, session, system, and event methods; unwrapped methods are available through `call()`. It is not a native Rust FFI binding and does not download directly; it controls a running aria2-rust RPC service. Original-client interoperability remains tracked in the compatibility matrix.
+- **Node.js SDK (complete client API)**: An async TypeScript HTTP/WebSocket JSON-RPC client covering task, status, option, session, system, and event methods; unwrapped methods are available through `call()`. It also controls a running aria2-rust RPC service rather than linking to Rust or downloading files itself.
+- **Terminal UI (optional)**: The `tui` feature provides local and remote-RPC modes with task creation, filtering, paging, details, pause/resume, removal, and translated interface resources; automated feature builds cover compilation, while the interactive cross-platform matrix remains open. See the [TUI Guide](docs/tui-guide-en.md).
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -647,12 +628,14 @@ cross-platform evidence is incomplete.
 
 | Feature | Path state | Notes |
 |---------|--------|-------|
-| CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
+| CLI arguments | Implemented path | 213 canonical public options plus Rust extensions are covered; parsing, boolean semantics, config merging, and help grouping have regression tests; runtime parity is still under comparison |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
 | JSON-RPC API | Implemented path | Feature-dependent method set (up to 42 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, DHT runtime counters, and manual DHT maintenance are available |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
+| Terminal UI (`tui` feature) | Implemented path | Local and remote-RPC modes, task creation/filtering/paging/details/pause/remove, and embedded translations; interactive cross-platform acceptance remains open |
+| Python and Node.js SDKs | Implemented path | Async HTTP/WebSocket JSON-RPC clients call a running aria2 service; they are not Rust FFI bindings or direct download engines |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |
 | NetRC auth | Implemented path | machine/default/macdef parsing |
 | Session save/load | Implemented path | Round-trip tests exist; complete control-file parity remains open |

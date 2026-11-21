@@ -53,7 +53,7 @@ behavior. An unlisted behavior has not been audited here.
   aria2. `piece-length` defaults to `1M` and defines durable HTTP parent-piece
   boundaries for new downloads. A compatible control-file layout wins on
   resume.
-- **User-directed difference:** `max-connection-per-server` defaults to `10`,
+- **User-directed difference:** `max-connection-per-server` defaults to `16`,
   while original aria2 defaults to `1`. It remains the per-download,
   per-authority HTTP/1.1 connection ceiling with the aria2-compatible range
   `1..=16`. `split` also has no registry ceiling but defaults to `16`, while
@@ -61,20 +61,25 @@ behavior. An unlisted behavior has not been audited here.
   With `-x=1`, an HTTP/1.1 source permits one active Range request even when
   `split` is larger. HTTP/2 session pools and multiplexed Range streams use
   their dedicated session and stream limits; `-x` does not cap HTTP/2 sessions.
+  HTTP/2 defaults to two sessions with eight streams each, so its default
+  effective Range ceiling is also `16`.
   Adaptive HTTP Range concurrency target adjustment is disabled by default.
   When explicitly enabled, concurrency starts at the configured effective
   ceiling, backs off on explicit server capacity feedback, then probes upward
-  by one Range after a 10-second cooldown and a target-scaled 8..=32 successful
-  ranges without an intervening failure. Capacity feedback reduces the target
-  by 25%, starts subsequent Ranges at 1-second intervals (doubling to 4 seconds
-  on repeated feedback), and uses jittered exponential backoff from 20 seconds
-  to 300 seconds. These are Rust extension defaults and can be adjusted per
+  by one Range after the cooldown ends and eight successful ranges complete
+  without an intervening failure.
+  There is no time-based start or recovery pacing. Capacity feedback reduces
+  the target by 50% and uses jittered exponential backoff from 20 seconds to
+  300 seconds. The reduction percentage and backoff bounds can be adjusted per
   download with the `http-adaptive-*` options. The default
   `http-adaptive-enabled=false` fixes each protocol's Range target at its
   configured effective ceiling and disables the adaptive exponential
   capacity cooldown. Explicit `Retry-After` and ordinary `retry-wait` behavior
-  remain active.
-- **External configuration:** all adaptive controller parameters are available
+  remain active. Healthy Ranges are admitted immediately up to the target; a
+  server rejection causes a cooldown, not per-Range start pacing.
+- **External configuration:** `http-adaptive-enabled`,
+  `http-adaptive-reduction-percent`, `http-adaptive-backoff-base`, and
+  `http-adaptive-backoff-max` are available
   through CLI flags, configuration files, and JSON-RPC/XML-RPC option maps.
   `changeGlobalOption` changes the defaults used for future tasks;
   `changeOption` applies immediately to waiting tasks and is queued as pending
@@ -83,11 +88,12 @@ behavior. An unlisted behavior has not been audited here.
   `addUri`/`addTorrent` option maps may set `http-adaptive-enabled=true`
   without changing the process-wide default. These option names are Rust
   extensions and are not part of original aria2.
-- **Verification:** focused tests cover the `max-connection-per-server=10`
-  default in `ConfigManager` and `FileEntry`, and the `--init` generated
+- **Verification:** focused tests cover the `max-connection-per-server=16`
+  and HTTP/2 `2 x 8` defaults in `ConfigManager`, and the `--init` generated
   configuration. CLI help was checked manually. Additional focused tests cover
   values above the old `split=128` ceiling, the `20M` default, configured 4 MiB
-  HTTP Range boundaries, the adaptive-disabled default, and reuse of the
+  HTTP Range boundaries, the adaptive-disabled default and explicit CLI enable,
+  and reuse of the
   control-file piece layout ahead of a new configuration.
 
 ## HTTP Range capacity retries
@@ -104,12 +110,11 @@ behavior. An unlisted behavior has not been audited here.
   explicit `Retry-After` behavior remain active. A five-minute no-progress
   limit remains as the final bound for the probe and single-mirror retry
   paths.
-- **Configuration:** all `http-adaptive-*` controls are exposed through the
-  option registry, CLI, global RPC option updates, and C API global-option
+- **Configuration:** the four remaining `http-adaptive-*` controls are exposed
+  through the option registry, CLI, global RPC option updates, and C API global-option
   entry points. RPC `addUri` and C API `add_uri` option maps can override them
   for one task without changing global defaults. Session
-  snapshots retain the configured values even when execution normalizes paired
-  limits such as recovery successes or pacing intervals.
+  snapshots retain the configured values through task restore.
 - **Verification:** an engine-level pause/resume test lets a resumed range
   complete, then rate-limits subsequent ranges and verifies the command exits
   with an error instead of remaining active. The multi-mirror capacity and
@@ -117,8 +122,8 @@ behavior. An unlisted behavior has not been audited here.
   completed twice after the retry scheduling and output-reset fixes. Those
   loopback runs verify exact output bytes and that recovered servers receive
   no additional self-induced capacity rejections. CLI, RPC `addUri`, and C API
-  `add_uri` task-option tests now each cover all 13 adaptive controls and
-  verify normalization of paired recovery, backoff, and pacing limits.
+  `add_uri` task-option tests cover the four remaining adaptive controls and
+  verify backoff-bound normalization.
 
 ## HTTP mirror circuit-breaker recovery
 
@@ -128,7 +133,7 @@ behavior. An unlisted behavior has not been audited here.
   segment scheduler waits for an expired cooldown rather than reporting that no
   mirror is available while pending work remains.
 - **Capacity errors:** HTTP 429/503 remain owned by the adaptive Range
-  controller. They trigger its backoff and pacing policy but do not trip the
+  controller. They trigger its backoff policy but do not trip the
   independent mirror circuit breaker, avoiding two sequential 60-second waits.
 - **Verification:** focused segment-manager tests cover cooldown recovery,
   recovery after a successful in-flight Range, and the exclusion of 429/503
@@ -155,6 +160,24 @@ behavior. An unlisted behavior has not been audited here.
   The ordinary soak passed once and the extended soak passed eight repeated
   iterations after this fix. This is local loopback simulation; it does not
   establish behavior against arbitrary remote servers.
+
+## Cross-platform file allocation semantics
+
+- **Compatibility:** default `prealloc` uses native allocation when available,
+  like aria2's adaptive iterator, and writes zeroes before transfer when the
+  native operation is unavailable. Linux `fallocate(2)` and macOS
+  `F_PREALLOCATE` remain the fast paths. Windows default `prealloc` uses the
+  same zero-fill path as aria2. Explicit Windows `falloc` still attempts
+  `SetFileValidData`; if its privilege/API call fails, it now zero-fills the
+  new region before transfer rather than leaving it sparse. `trunc` remains
+  intentionally sparse.
+- **Verification:** focused allocation tests assert that `prealloc`
+  initializes new bytes to zero and preserves existing prefixes. Native
+  runtime coverage is included in `.github/workflows/ci.yml` for Linux x86_64,
+  Windows x86_64, and macOS ARM64; those jobs run the workspace library tests
+  containing these checks. BSD is not in the current CI matrix, and the
+  platform-specific native-allocation failure branches still need explicit
+  failure injection to guarantee they execute on each runner.
 
 ## HTTP/2 Range session and stream limits
 
@@ -783,6 +806,12 @@ behavior. An unlisted behavior has not been audited here.
   `bt-tracker` remains a per-download option for that download's announce
   tiers. Runtime changes to the catalog options are projected to the shared
   catalog through the engine command path.
+- **Refresh lifecycle:** the process engine does not start the catalog refresh
+  loop at startup. It starts on the first non-private BitTorrent task that has
+  public trackers enabled. Ordinary HTTP/FTP downloads, private torrents, and
+  BitTorrent tasks with public trackers disabled do not trigger source fetches.
+  The first refresh is immediate; the default subsequent interval is 604800
+  seconds (7 days).
 - **Transport ownership:** `PublicTrackerList` accepts an injected source
   fetcher. The process engine supplies one using its DNS cache, configured
   outbound source-address policy, and TLS verification/identity options;
@@ -1744,6 +1773,11 @@ behavior. An unlisted behavior has not been audited here.
   that error instead of allowing reqwest to retry with system DNS. Each Hickory
   request has a 5-second timeout; Hickory and the fallback share the configured
   30-second default total lookup deadline.
+- **HTTP redirect path:** the HTTP client uses the task DNS resolver for every
+  hostname it needs to connect to, including cross-origin redirect targets.
+  Explicit DNS-server failures remain errors; when using system DNS, failed
+  Hickory resolution can fall back to Tokio system lookup. Candidate addresses
+  are filtered through the outbound source-address policy before connection.
 - **Proxy path:** HTTP assembly resolves the proxy as the first hop and lets
   reqwest use those resolved addresses. It does not separately resolve the
   origin when a proxy handles the request. Numeric origin and proxy addresses
@@ -1761,7 +1795,10 @@ behavior. An unlisted behavior has not been audited here.
   custom bootstrap hostnames and leaves default bootstrap resolution to the
   protocol engine. The `async-dns-server` list does not replace system DNS on
   this path, matching original aria2.
-- **Verification:** on this Windows host, a focused async test starts a local
+- **Verification:** a cross-origin HTTP redirect test maps a synthetic target
+  hostname through the injected client resolver to a loopback server, proving
+  the redirect does not rely on Windows system DNS. On this Windows host, a
+  focused async test starts a local
   UDP DNS fixture, configures it as the explicit server, and resolves a
   synthetic hostname through `DnsCache`. This confirms explicit-server
   runtime wiring. A second fixture returns NXDOMAIN and verifies the error stays
@@ -1788,6 +1825,18 @@ behavior. An unlisted behavior has not been audited here.
   lookup and explicit-DNS resolution through to the selected TCP peer. The
   explicit-server fixture stops at TCP accept; SSH negotiation/authentication
   against a remote SFTP server remains unverified.
+- **Shared resolver:** HTTP, FTP, SFTP, DHT bootstrap, BitTorrent trackers,
+  public tracker source fetches, magnet exact sources, WebSeed, and the Linux
+  HTTP splice path use `DnsResolver` for task hostname resolution. Reqwest
+  redirect targets use the same resolver. The cache-backed mode and system
+  mode preserve all returned A/AAAA candidates; route policy filters candidates
+  by source address, and TCP adapters try candidates until one connects.
+  Hickory DNS nameservers are queried serially in configured order. Resolver
+  unit tests verify dual-stack candidate retention and system mode. HTTP
+  redirect coverage uses the shared resolver adapter. Local DNS fixtures verify
+  that a successful primary prevents duplicate standby queries and that a
+  timed-out primary falls through to the backup. Packet-captured dual-stack
+  connection attempts remain unverified.
 
 ## C API process-engine option setup
 
@@ -2007,6 +2056,12 @@ behavior. An unlisted behavior has not been audited here.
   `aria2.updateBrowserContext`, and `aria2.clearBrowserContext` are additional
   entries in `system.listMethods`. Extra status fields are additive; no
   original field is renamed or removed.
+- **Feature catalog:** `system.listMethods` advertises the eight BitTorrent
+  methods only when the `bittorrent` feature is enabled, and
+  `aria2.addMetalink` only when `metalink` is enabled. The 36-method baseline
+  is always present. This replaces the previous behavior where BitTorrent
+  methods were advertised even in feature-off builds; discovery now matches
+  the methods actually available at runtime.
 - **Verification:** `cargo test -p aria2-rpc --lib --tests` passes the full
   RPC unit and integration suite, including fixed JSON/XML wire fixtures,
   HTTP/TLS/WebSocket transports, authentication, multicall, lifecycle methods,
@@ -2049,3 +2104,51 @@ behavior. An unlisted behavior has not been audited here.
   budget, startup option initialization, runtime command handling, global
   option projection, and RPC/C API command dispatch. Full original-aria2
   runtime comparison and OS-level descriptor instrumentation have not been run.
+
+## Disk writer flush and durability contract
+
+- **Library contract:** `DiskWriter::flush` and `SeekableDiskWriter::flush`
+  both drain software buffers to the underlying file or operating-system cache;
+  neither promises stable-storage durability. `sync_data` and `sync_all` are
+  the explicit persistence barriers, and file-backed `DiskWriter::finalize`
+  synchronizes before successful completion. Implementations without durable
+  synchronization support return an error from the sync methods.
+- **Compatibility impact:** callers that relied on sequential
+  `DiskWriter::flush` to persist data must now call `sync_data` or `sync_all`.
+  This aligns the two writer interfaces and avoids forcing disk barriers into
+  the normal flush path. Checkpoint and finalization paths use explicit sync
+  operations.
+- **Verification:** `cargo check -p aria2-core`, rustfmt, and rustdoc were run
+  for the interface and call-site changes. The focused storage and download
+  behavior tests have not been run for this change.
+
+## HTTP write-back cache memory bound
+
+- **Status:** implemented with boundary. The write-back cache now has a hard
+  per-cache byte limit: a small write that would exceed the active quota
+  forces dirty entries to disk before the new entry is accepted. A process-wide
+  budget shares the configured `disk-cache` capacity among live caches and
+  keeps a 4 MiB per-cache fairness floor so high task counts do not flush on
+  every network chunk.
+- **Compatibility impact:** CLI/RPC parsing, defaults, session serialization,
+  and protocol behavior are unchanged. The effective aggregate cache usage
+  under multiple concurrent downloads is now bounded by this internal budget;
+  real proxy/TLS and multi-task downloads have not been A/B measured yet.
+- **Verification:** focused cache budget, dirty-entry eviction, hard-limit
+  flush, write-queue backpressure, and HTTP client-pool tests pass. The
+  client-pool regression test confirms that two provisioned clients still
+  admit 16 concurrent HTTP/1.1 connections when `-x` is 16. A second test
+  confirms that the default H2 path keeps two provisioned sessions and the
+  full 16-range admission limit. The
+  `engine_loop_benchmark.rs` workload was sampled three times per checkout on
+  the current Windows host: median throughput 74.115 -> 78.555 MiB/s and RSS
+  peak 25,554,944 -> 23,085,056 bytes. This is a Rust-internal before/after
+  sample, not an `aria2_original` comparison. The full core library run has
+  2690 passes and two pre-existing config/request-group contract failures that
+  also reproduce on HEAD.
+- **Isolated client-count sample:** restoring the old `auto` client-count
+  formula while keeping all other changes produced median throughput
+  64.468 MiB/s and peak RSS 24,428,544 bytes over three runs; the final
+  formula produced 78.555 MiB/s and 23,085,056 bytes. Samples were noisy and
+  used a loopback, no-TLS workload, so this is supporting evidence only, not
+  a general performance claim.

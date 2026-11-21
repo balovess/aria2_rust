@@ -73,7 +73,7 @@ pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
 /// # Arguments
 ///
 /// * `path` - Target path for the session file
-/// * `groups` - Slice of Arc<std::sync::RwLock<RequestGroup>> references to serialize
+/// * `groups` - Slice of `Arc<std::sync::RwLock<RequestGroup>>` references to serialize
 ///
 /// # Returns
 ///

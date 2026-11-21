@@ -6,7 +6,7 @@ use crate::engine::http::adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http::concurrent_download::pipeline::scheduler::{self, ActiveRangeWork};
 use crate::engine::http::concurrent_download::slow_range::SlowRangeRecovery;
 use crate::engine::http::request_executor::{HttpSegmentRequestExecutor, HttpSegmentRequestResult};
-use crate::engine::http::segment_downloader::{SegmentProgress, WriteChunk};
+use crate::engine::http::segment_downloader::{QueuedWriteChunk, SegmentProgress};
 use crate::engine::mirror_coordinator::MirrorCoordinator;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::engine::work_scheduler::{RetryOutcome, WorkScheduler};
@@ -32,7 +32,7 @@ pub(super) enum CompletionAction {
 
 pub(super) struct CompletionContext<'a> {
     pub(super) downloader: &'a mut ConcurrentDownloader,
-    pub(super) uris: &'a [String],
+    pub(super) uri_authorities: &'a [String],
     pub(super) split: usize,
     pub(super) fixed_piece_size: u64,
     pub(super) minimum_range_size_limit: u64,
@@ -40,7 +40,7 @@ pub(super) struct CompletionContext<'a> {
     pub(super) adaptive: &'a mut HashMap<String, HttpAdaptiveConcurrency>,
     pub(super) range_size_limits: &'a mut [u64],
     pub(super) executor: &'a HttpSegmentRequestExecutor,
-    pub(super) write_rx: &'a mut tokio::sync::mpsc::Receiver<WriteChunk>,
+    pub(super) write_rx: &'a mut tokio::sync::mpsc::Receiver<QueuedWriteChunk>,
     pub(super) writer: &'a mut CachedDiskWriter,
     pub(super) limiter: Option<&'a RateLimiter>,
     pub(super) coordinator: &'a mut MirrorCoordinator,
@@ -82,7 +82,7 @@ pub(super) async fn handle(
 
             // The result is sent after its chunks enter the channel. Commit
             // them before the coordinator marks the range complete.
-            while let Ok(WriteChunk { offset, data }) = context.write_rx.try_recv() {
+            while let Ok(chunk) = context.write_rx.try_recv() {
                 write_http_range_chunk(
                     context.downloader,
                     context.writer,
@@ -94,7 +94,7 @@ pub(super) async fn handle(
                         error_context: "",
                         in_flight: Some(context.in_flight_progress),
                     },
-                    WriteChunk { offset, data },
+                    chunk,
                 )
                 .await?;
             }
@@ -186,7 +186,7 @@ pub(super) async fn handle(
             tracing::warn!(segment_index, mirror_idx, error = %error, "Pooled segment download failed");
 
             let current_limit = scheduler::current_authority_range_size_limit(
-                context.uris,
+                context.uri_authorities,
                 context.range_size_limits,
                 &authority_key,
             );
@@ -196,7 +196,7 @@ pub(super) async fn handle(
                 && current_limit.is_some_and(|current| rejected_limit >= current);
             let reduced_limit = if current_limit == Some(rejected_limit) {
                 scheduler::lower_authority_range_size_limit(
-                    context.uris,
+                    context.uri_authorities,
                     context.range_size_limits,
                     &authority_key,
                     rejected_limit,

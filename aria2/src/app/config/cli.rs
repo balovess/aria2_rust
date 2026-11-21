@@ -274,44 +274,8 @@ impl App {
             "http-adaptive-reduction-percent",
             h.http_adaptive_reduction_percent
         );
-        set_u64!(
-            "http-adaptive-recovery-interval",
-            h.http_adaptive_recovery_interval
-        );
-        set_u64!(
-            "http-adaptive-recovery-successes-min",
-            h.http_adaptive_recovery_successes_min
-        );
-        set_u64!(
-            "http-adaptive-recovery-successes-max",
-            h.http_adaptive_recovery_successes_max
-        );
-        set_u64!(
-            "http-adaptive-start-interval-ms",
-            h.http_adaptive_start_interval_ms
-        );
         set_u64!("http-adaptive-backoff-base", h.http_adaptive_backoff_base);
         set_u64!("http-adaptive-backoff-max", h.http_adaptive_backoff_max);
-        set_u64!(
-            "http-adaptive-capacity-start-interval-ms",
-            h.http_adaptive_capacity_start_interval_ms
-        );
-        set_u64!(
-            "http-adaptive-capacity-start-interval-max-ms",
-            h.http_adaptive_capacity_start_interval_max_ms
-        );
-        set_u64!(
-            "http-adaptive-rate-recovery-successes",
-            h.http_adaptive_rate_recovery_successes
-        );
-        set_u64!(
-            "http-adaptive-rate-min-interval-ms",
-            h.http_adaptive_rate_min_interval_ms
-        );
-        set_u64!(
-            "http-adaptive-backoff-reset-after",
-            h.http_adaptive_backoff_reset_after
-        );
         set_str!("http-version", h.http_version);
         set_u64!("max-http-pipelining", h.max_http_pipelining);
         // Negation: --no-check-certificate takes precedence over --check-certificate

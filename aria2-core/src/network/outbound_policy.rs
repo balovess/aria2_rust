@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use tokio::net::TcpStream;
 
+use crate::dns::DnsResolver;
+
 use super::connect_from;
 
 /// The process-wide policy used by every outbound TCP adapter.
@@ -125,10 +127,11 @@ impl OutboundNetworkPolicy {
                 continue;
             }
 
-            let resolved = tokio::net::lookup_host((value, 0))
+            let resolved = DnsResolver::system()
+                .resolve(value, 0)
                 .await
                 .map_err(|error| format!("cannot resolve '{value}': {error}"))?;
-            for address in resolved.map(|address| address.ip()) {
+            for address in resolved.into_iter().map(|address| address.ip()) {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -149,6 +152,19 @@ impl OutboundNetworkPolicy {
         Ok(Some(source.address))
     }
 
+    /// Select a source compatible with any DNS candidate returned by the shared resolver.
+    pub fn source_for_addresses(&self, addresses: &[SocketAddr]) -> io::Result<Option<IpAddr>> {
+        for remote in addresses {
+            if let Ok(source) = self.source_for(*remote) {
+                return Ok(source);
+            }
+        }
+        Err(family_mismatch(SocketAddr::new(
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            addresses.first().map_or(0, SocketAddr::port),
+        )))
+    }
+
     /// Select a compatible local source for a client-owned connection pool.
     /// The direct policy returns `None` without resolving the host, leaving
     /// DNS and proxy routing to that client.
@@ -161,7 +177,7 @@ impl OutboundNetworkPolicy {
             return Ok(None);
         }
 
-        let addresses = tokio::net::lookup_host((host, port)).await?;
+        let addresses = DnsResolver::system().resolve(host, port).await?;
         for remote in addresses {
             if let Ok(source) = self.source_for(remote) {
                 return Ok(source);
@@ -188,7 +204,7 @@ impl OutboundNetworkPolicy {
             return Err(family_mismatch(remote));
         }
 
-        let addresses = tokio::net::lookup_host((host, port)).await?;
+        let addresses = DnsResolver::system().resolve(host, port).await?;
         for remote in addresses {
             if self.is_direct() || self.best_source(remote).is_some() {
                 return Ok(remote);
@@ -202,9 +218,15 @@ impl OutboundNetworkPolicy {
 
     /// Establish a TCP connection to a hostname through the policy.
     pub async fn connect_host(&self, host: &str, port: u16) -> io::Result<TcpStream> {
-        let addresses = tokio::net::lookup_host((host, port)).await?;
+        let addresses = DnsResolver::system().resolve(host, port).await?;
+        self.connect_candidates(&addresses).await
+    }
+
+    /// Try resolved candidates in resolver order, skipping addresses that
+    /// cannot use the configured source interface.
+    pub async fn connect_candidates(&self, addresses: &[SocketAddr]) -> io::Result<TcpStream> {
         let mut last_error = None;
-        for remote in addresses {
+        for remote in addresses.iter().copied() {
             if !self.is_direct() && self.best_source(remote).is_none() {
                 continue;
             }
@@ -308,6 +330,28 @@ impl OutboundNetworkPolicy {
             .iter()
             .filter(|source| source.address.is_ipv4() == remote.is_ipv4())
             .min_by_key(|source| source.score())
+    }
+}
+
+#[cfg(test)]
+mod dns_candidate_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn connect_candidates_falls_through_after_a_failed_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reachable = listener.local_addr().unwrap();
+        let unreachable = SocketAddr::from(([127, 0, 0, 1], 1));
+        let policy = OutboundNetworkPolicy::direct();
+        let accepting = tokio::spawn(async move { listener.accept().await.unwrap() });
+
+        let stream = policy
+            .connect_candidates(&[unreachable, reachable])
+            .await
+            .expect("second candidate should be tried after the first fails");
+        assert_eq!(stream.peer_addr().unwrap(), reachable);
+        accepting.await.unwrap();
     }
 }
 

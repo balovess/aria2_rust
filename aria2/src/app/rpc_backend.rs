@@ -743,22 +743,6 @@ mod tests {
                     serde_json::json!(33),
                 ),
                 (
-                    "http-adaptive-recovery-interval".to_string(),
-                    serde_json::json!(17),
-                ),
-                (
-                    "http-adaptive-recovery-successes-min".to_string(),
-                    serde_json::json!(40),
-                ),
-                (
-                    "http-adaptive-recovery-successes-max".to_string(),
-                    serde_json::json!(20),
-                ),
-                (
-                    "http-adaptive-start-interval-ms".to_string(),
-                    serde_json::json!(250),
-                ),
-                (
                     "http-adaptive-backoff-base".to_string(),
                     serde_json::json!(30),
                 ),
@@ -766,43 +750,14 @@ mod tests {
                     "http-adaptive-backoff-max".to_string(),
                     serde_json::json!(10),
                 ),
-                (
-                    "http-adaptive-capacity-start-interval-ms".to_string(),
-                    serde_json::json!(2500),
-                ),
-                (
-                    "http-adaptive-capacity-start-interval-max-ms".to_string(),
-                    serde_json::json!(1500),
-                ),
-                (
-                    "http-adaptive-rate-recovery-successes".to_string(),
-                    serde_json::json!(128),
-                ),
-                (
-                    "http-adaptive-rate-min-interval-ms".to_string(),
-                    serde_json::json!(25),
-                ),
-                (
-                    "http-adaptive-backoff-reset-after".to_string(),
-                    serde_json::json!(70),
-                ),
             ]))
             .await
             .expect("RPC task options should accept per-download adaptive settings");
 
         assert!(options.http_adaptive.enabled);
         assert_eq!(options.http_adaptive.reduction_percent, 33);
-        assert_eq!(options.http_adaptive.recovery_interval_secs, 17);
-        assert_eq!(options.http_adaptive.recovery_successes_min, 40);
-        assert_eq!(options.http_adaptive.recovery_successes_max, 40);
-        assert_eq!(options.http_adaptive.start_interval_ms, 250);
         assert_eq!(options.http_adaptive.backoff_base_secs, 30);
         assert_eq!(options.http_adaptive.backoff_max_secs, 30);
-        assert_eq!(options.http_adaptive.capacity_start_interval_ms, 2500);
-        assert_eq!(options.http_adaptive.capacity_start_interval_max_ms, 2500);
-        assert_eq!(options.http_adaptive.rate_recovery_successes, 128);
-        assert_eq!(options.http_adaptive.rate_min_interval_ms, 25);
-        assert_eq!(options.http_adaptive.backoff_reset_after_secs, 70);
     }
 
     #[test]

@@ -42,6 +42,7 @@ pub struct WebSeedManager {
     request_timeout: Duration,
     connect_timeout: Duration,
     network_policy: Option<Arc<OutboundNetworkPolicy>>,
+    dns_resolver: Option<crate::dns::DnsResolver>,
     /// HTTP pools are shared by origin, not by file URL, so multi-file
     /// torrents do not allocate one connection pool per file.
     http_clients: tokio::sync::Mutex<HashMap<String, reqwest::Client>>,
@@ -116,6 +117,7 @@ impl WebSeedManager {
             request_timeout,
             connect_timeout,
             network_policy: None,
+            dns_resolver: None,
             http_clients: tokio::sync::Mutex::new(HashMap::new()),
             uri_state: WebSeedUriState::default(),
         })
@@ -178,9 +180,14 @@ impl WebSeedManager {
             request_timeout,
             connect_timeout,
             network_policy: Some(policy),
+            dns_resolver: None,
             http_clients: tokio::sync::Mutex::new(HashMap::new()),
             uri_state: WebSeedUriState::default(),
         }
+    }
+
+    pub(crate) fn set_dns_resolver(&mut self, resolver: crate::dns::DnsResolver) {
+        self.dns_resolver = Some(resolver);
     }
 
     /// Whether all file-backed bytes in a piece currently have a WebSeed.

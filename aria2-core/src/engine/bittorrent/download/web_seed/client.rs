@@ -392,6 +392,16 @@ pub(crate) fn build_client(
     connect_timeout: Duration,
     proxy_options: &HttpProxyOptions,
 ) -> Result<reqwest::Client, String> {
+    build_client_with_resolver(tls, local_address, connect_timeout, proxy_options, None)
+}
+
+pub(crate) fn build_client_with_resolver(
+    tls: &ClientTlsConfig,
+    local_address: Option<std::net::IpAddr>,
+    connect_timeout: Duration,
+    proxy_options: &HttpProxyOptions,
+    resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
+) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
     let mut builder = reqwest::Client::builder()
         .connect_timeout(connect_timeout)
@@ -400,6 +410,9 @@ pub(crate) fn build_client(
         .redirect(reqwest::redirect::Policy::none());
     if let Some(address) = local_address {
         builder = builder.local_address(address);
+    }
+    if let Some(resolver) = resolver {
+        builder = builder.dns_resolver(resolver);
     }
     builder = crate::engine::http::client_config::apply_proxy_options(builder, proxy_options);
     let builder =

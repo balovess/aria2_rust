@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +7,7 @@ use aria2_protocol::bittorrent::tracker::public_list::TrackerSourceFetcher;
 use aria2_protocol::bittorrent::tracker::public_list::read_tracker_source_body;
 use futures::StreamExt;
 
-use crate::dns::dns_cache::DnsCache;
+use crate::dns::{DnsResolver, dns_cache::DnsCache};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
@@ -48,15 +47,11 @@ impl CoreTrackerSourceFetcher {
             .as_ref()
             .map(|(host, port, _)| (host.clone(), *port))
             .unwrap_or_else(|| (origin_host.to_string(), origin_port));
-        let addresses = if let Ok(address) = host.parse::<IpAddr>() {
-            vec![SocketAddr::new(address, port)]
-        } else {
-            let dns_cache = self.dns_cache.lock().await.clone();
-            dns_cache
-                .resolve_with_refresh(&host, port)
-                .await
-                .map_err(|error| format!("Tracker source DNS lookup failed: {error}"))?
-        };
+        let resolver = DnsResolver::new(Arc::clone(&self.dns_cache), self.options.async_dns);
+        let addresses = resolver
+            .resolve(&host, port)
+            .await
+            .map_err(|error| format!("Tracker source DNS lookup failed: {error}"))?;
         if addresses.is_empty() {
             return Err("Tracker source DNS lookup returned no addresses".to_string());
         }
@@ -84,6 +79,7 @@ impl CoreTrackerSourceFetcher {
             local_address,
             Some((&host, &addresses)),
             proxy.map(|(_, _, proxy)| proxy),
+            Some(resolver.reqwest_resolver(Arc::clone(&self.outbound_network_policy))),
         )?;
         let response = client
             .get(url)
