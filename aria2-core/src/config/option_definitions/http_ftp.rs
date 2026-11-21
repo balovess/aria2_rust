@@ -279,7 +279,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "http-adaptive-enabled".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(true),
+            default_value: OptionValue::Bool(false),
             description: "Enable adaptive HTTP Range concurrency target adjustments and adaptive capacity cooldown".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -287,7 +287,7 @@ impl crate::config::OptionRegistry {
         for (name, default, min, max, description) in [
             (
                 "http-adaptive-reduction-percent",
-                50,
+                25,
                 1,
                 90,
                 "Concurrency reduction percentage after an explicit capacity rejection",

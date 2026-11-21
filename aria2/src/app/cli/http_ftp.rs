@@ -136,7 +136,7 @@ pub struct HttpFtpArgs {
     )]
     pub http_adaptive_enabled: Option<bool>,
 
-    /// Reduce Range concurrency by this percentage after server capacity rejection
+    /// Reduce Range concurrency by this percentage after server capacity rejection (default: 25)
     #[arg(long = "http-adaptive-reduction-percent")]
     pub http_adaptive_reduction_percent: Option<u64>,
 

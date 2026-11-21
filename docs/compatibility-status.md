@@ -98,7 +98,7 @@ behavior. An unlisted behavior has not been audited here.
   by one Range after the cooldown ends and eight successful ranges complete
   without an intervening failure.
   There is no time-based start or recovery pacing. Capacity feedback reduces
-  the target by 50% and uses jittered exponential backoff from 20 seconds to
+  the target by 25% and uses jittered exponential backoff from 20 seconds to
   300 seconds. The reduction percentage and backoff bounds can be adjusted per
   download with the `http-adaptive-*` options. The default
   `http-adaptive-enabled=false` fixes each protocol's Range target at its

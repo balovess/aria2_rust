@@ -1254,7 +1254,7 @@ fn regression_registry_default_values() {
             .get("http-adaptive-enabled")
             .unwrap()
             .default_value(),
-        &OptionValue::Bool(true)
+        &OptionValue::Bool(false)
     );
     assert_eq!(
         registry.get("enable-rpc").unwrap().default_value(),

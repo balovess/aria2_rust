@@ -427,7 +427,7 @@ async fn test_cli_connect_timeout_reaches_download_options() {
 }
 
 #[tokio::test]
-async fn test_cli_http_adaptive_defaults_to_enabled_and_accepts_override() {
+async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
     let cli = CliArgs::try_parse_from(["aria2"])
         .expect("CLI without an adaptive HTTP concurrency switch should parse");
 
@@ -437,8 +437,8 @@ async fn test_cli_http_adaptive_defaults_to_enabled_and_accepts_override() {
         .expect("CLI options should load into ConfigManager");
     let (options, _) = app.download_options_with_snapshot().await;
 
-    assert!(options.http_adaptive.enabled);
-    assert_eq!(options.http_adaptive.reduction_percent, 50);
+    assert!(!options.http_adaptive.enabled);
+    assert_eq!(options.http_adaptive.reduction_percent, 25);
 
     let cli = CliArgs::try_parse_from([
         "aria2",
