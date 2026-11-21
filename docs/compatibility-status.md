@@ -3,6 +3,35 @@
 This file records compatibility evidence for externally observable download
 behavior. An unlisted behavior has not been audited here.
 
+## HTTP Live Streaming (HLS)
+
+- **Supported extension:** HTTP(S) URLs whose path ends in `.m3u8` are parsed
+  with `aria2_protocol::hls`. A master playlist selects the variant with the
+  highest `AVERAGE-BANDWIDTH` (falling back to `BANDWIDTH`). The engine then
+  delegates media retrieval, decryption, segment handling, and muxing to a
+  user-installed FFmpeg executable. The final output is written through a
+  staging file and renamed only after FFmpeg exits successfully.
+- **External dependency:** aria2 does not bundle, download, or install FFmpeg.
+  The executable must be on `PATH`, or `ARIA2C_FFMPEG` must point to it. A
+  missing executable is a fatal task error with setup instructions.
+- **Compatibility:** original aria2 documents HTTP(S), FTP, SFTP, BitTorrent,
+  and Metalink, without native HLS support. HLS is an intentional Rust
+  extension; ordinary non-M3U8 HTTP behavior remains on the existing path.
+- **Known limits:** HLS output cannot resume from an arbitrary byte offset;
+  variant/rendition choice is not user-selectable; video and audio are copied
+  without transcoding; FFmpeg's default rendition selection is retained;
+  neither per-task nor process-wide aria2 download limits can govern FFmpeg's
+  sockets; detection requires a `.m3u8` URL path; live playlists need
+  `--timeout` or manual cancellation to stop.
+- **Verification:** `cargo test -p aria2-protocol --lib hls` passes 4 parser
+  tests; `cargo test -p aria2-core --lib hls` passes 6 adapter tests. The E2E
+  test `test_e2e_hls_download` covers clear TS, AES-128 encrypted TS, and fMP4
+  playlists: each fixture is served over HTTP, downloaded through
+  `DownloadCommand`, and decoded from the resulting MP4 with FFmpeg. All three
+  passed with a portable FFmpeg 9.1 build supplied only to the test
+  environment. Live playlists are captured to MPEG-TS and remuxed after the
+  `--timeout` limit, but have no committed E2E fixture.
+
 ## CLI build-tier feature behavior
 
 - **External behavior:** the minimal artifact (`--no-default-features

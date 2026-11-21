@@ -11,6 +11,7 @@
 - [TUI Guide](tui-guide-en.md): local and remote modes, paging, filtering, details, and controls
 - [Release Artifacts](release-artifacts-en.md): platforms, minimal/TUI variants, checksums, and selection guidance
 - [Troubleshooting](troubleshooting-en.md): startup, configuration, RPC, feature, and recovery issues
+- [HLS/M3U8 Guide](hls-guide-en.md): playlist support, output, and current limitations
 - [0.3.4 Binary Release Notes](binary-release-0.3.4-en.md): artifacts, checksums, installation, upgrade, and compatibility boundaries
 
 ## Developer documentation

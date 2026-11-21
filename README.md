@@ -49,7 +49,8 @@ Start with the [documentation index](docs/README-en.md). The main user paths are
 compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
 users and tools can migrate easily, while its architecture, safety,
 performance, and product direction are its own. The default build supports
-HTTP/HTTPS, FTP, BitTorrent, and JSON-RPC/XML-RPC/WebSocket paths;
+HTTP/HTTPS (including HLS/M3U8 downloads), FTP, BitTorrent, and
+JSON-RPC/XML-RPC/WebSocket paths;
 Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
@@ -76,7 +77,7 @@ The capability inventory below describes code paths, not a claim that every
 feature has passed the complete cross-platform E2E matrix. See the
 [compatibility status](docs/compatibility-status.md) for the current gate.
 
-- **Multi-Protocol Download**: HTTP/HTTPS, FTP, and BitTorrent by default; SFTP and Metalink are feature-gated
+- **Multi-Protocol Download**: HTTP/HTTPS, HLS/M3U8 (requires a user-installed FFmpeg), FTP, and BitTorrent by default; SFTP and Metalink are feature-gated. See the [HLS guide](docs/hls-guide-en.md) for the supported scope.
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
 - **Resume Support**: Checkpoint-based resume for the main download paths; protocol-specific compatibility is tracked in the matrix
 - **BitTorrent**:
@@ -640,6 +641,7 @@ cross-platform evidence is incomplete.
 | NetRC auth | Implemented path | machine/default/macdef parsing |
 | Session save/load | Implemented path | Round-trip tests exist; complete control-file parity remains open |
 | Metalink V3/V4 | Implemented path | Parsing and downloads exist; torrent metaurl lifecycle is partial |
+| HLS / M3U8 | Supported extension | User-supplied FFmpeg handles media retrieval and muxing; see the HLS guide for limits |
 | BitTorrent DHT | Implemented path | KRPC + routing table + bootstrap; live interoperability remains open |
 | FTP/SFTP | Implemented path | Passive mode + auth; live-server evidence remains open |
 | Rate limiting | Implemented path | Shared token bucket and runtime updates are tested |

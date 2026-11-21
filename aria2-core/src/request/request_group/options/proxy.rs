@@ -2,6 +2,7 @@ use crate::http::socks_connector::NoProxyMatcher;
 use aria2_protocol::proxy::ProxyUrl;
 
 struct SelectedProxy<'a> {
+    raw: &'a str,
     parsed: ProxyUrl,
     username: Option<&'a str>,
     password: Option<&'a str>,
@@ -47,13 +48,30 @@ impl HttpProxyOptions {
     pub(crate) fn proxy_for_uri(&self, uri: &str) -> Option<(String, u16)> {
         let parsed_uri = url::Url::parse(uri).ok()?;
         let host = parsed_uri.host_str()?;
-        if self.no_proxy.as_deref().is_some_and(|no_proxy| {
-            NoProxyMatcher::from_env_value(no_proxy).should_bypass_hostname(host)
-        }) {
+        if self.bypasses_no_proxy(host) {
             return None;
         }
         let proxy = self.selected_proxy(parsed_uri.scheme())?;
         Some((proxy.parsed.host, proxy.parsed.port))
+    }
+
+    /// Return the configured proxy as a URL suitable for external HTTP
+    /// clients, including credentials and protocol-specific selection.
+    pub(crate) fn proxy_url_for_uri(&self, uri: &str) -> Option<String> {
+        let parsed_uri = url::Url::parse(uri).ok()?;
+        let host = parsed_uri.host_str()?;
+        if self.bypasses_no_proxy(host) {
+            return None;
+        }
+        let selected = self.selected_proxy(parsed_uri.scheme())?;
+        let mut proxy_url = url::Url::parse(selected.raw).ok()?;
+        if let Some(username) = selected.username.or(selected.parsed.username.as_deref()) {
+            proxy_url.set_username(username).ok()?;
+        }
+        if let Some(password) = selected.password.or(selected.parsed.password.as_deref()) {
+            proxy_url.set_password(Some(password)).ok()?;
+        }
+        Some(proxy_url.to_string())
     }
 
     pub(crate) fn credentials_for_scheme(&self, scheme: &str) -> (Option<String>, Option<String>) {
@@ -64,6 +82,12 @@ impl HttpProxyOptions {
             proxy.username.map(str::to_owned).or(proxy.parsed.username),
             proxy.password.map(str::to_owned).or(proxy.parsed.password),
         )
+    }
+
+    fn bypasses_no_proxy(&self, host: &str) -> bool {
+        self.no_proxy.as_deref().is_some_and(|no_proxy| {
+            NoProxyMatcher::from_env_value(no_proxy).should_bypass_hostname(host)
+        })
     }
 
     fn selected_proxy(&self, scheme: &str) -> Option<SelectedProxy<'_>> {
@@ -91,6 +115,7 @@ impl HttpProxyOptions {
             && let Ok(parsed) = ProxyUrl::parse(proxy_url)
         {
             return Some(SelectedProxy {
+                raw: proxy_url,
                 parsed,
                 username,
                 password,
@@ -103,6 +128,7 @@ impl HttpProxyOptions {
             .filter(|value| !value.is_empty())?;
         let parsed = ProxyUrl::parse(proxy_url).ok()?;
         Some(SelectedProxy {
+            raw: proxy_url,
             parsed,
             username: self.all_proxy_user.as_deref(),
             password: self.all_proxy_passwd.as_deref(),

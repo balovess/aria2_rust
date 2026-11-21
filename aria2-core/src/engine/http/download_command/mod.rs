@@ -1,6 +1,7 @@
 mod constructor;
 mod execute;
 mod finalize;
+mod hls;
 mod in_memory;
 mod integrity;
 mod lifecycle;

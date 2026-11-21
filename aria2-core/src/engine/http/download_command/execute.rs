@@ -30,6 +30,11 @@ impl DownloadCommand {
         // so a remove issued before execution is honoured immediately.
         self.check_cancelled()?;
 
+        if is_hls_playlist_uri(uri) {
+            let result = self.execute_hls_playlist(uri).await;
+            return self.finalize_attempt(result).await;
+        }
+
         let options = self.group.recover().options_arc();
         self.publish_output_path();
         let known_total_length = self.group.recover().total_length();
@@ -557,9 +562,16 @@ impl DownloadCommand {
         self.finalize_attempt(download_result).await
     }
 
-    fn publish_output_path(&self) {
+    pub(super) fn publish_output_path(&self) {
         self.group
             .recover()
             .set_resolved_output_path(self.output_path.to_string_lossy());
     }
+}
+
+pub(super) fn is_hls_playlist_uri(uri: &str) -> bool {
+    url::Url::parse(uri).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.path().to_ascii_lowercase().ends_with(".m3u8")
+    })
 }

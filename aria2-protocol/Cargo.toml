@@ -1,15 +1,15 @@
 [package]
 name = "aria2-protocol"
-version = "0.3.10"
+version = "0.3.11"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Multi-protocol networking stack for aria2-rust: HTTP/HTTPS client, FTP/SFTP, full BitTorrent (DHT/PEX/MSE), and Metalink V3/V4 parser"
+description = "Multi-protocol networking stack for aria2-rust: HTTP/HTTPS, HLS playlist parsing, FTP/SFTP, BitTorrent, and Metalink"
 documentation = "https://docs.rs/aria2-protocol"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
-keywords = ["http", "ftp", "bittorrent", "metalink", "dht"]
+keywords = ["http", "hls", "m3u8", "ftp", "bittorrent"]
 categories = ["network-programming", "web-programming::http-client"]
 include = ["src/**/*", "../README.md", "../LICENSE"]
 
