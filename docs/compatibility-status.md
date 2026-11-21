@@ -32,6 +32,43 @@ behavior. An unlisted behavior has not been audited here.
   environment. Live playlists are captured to MPEG-TS and remuxed after the
   `--timeout` limit, but have no committed E2E fixture.
 
+## Empty-password PKCS#12 client identity dependency
+
+- **Decision:** keep the existing `p12_q3` + `pkcs5` + `yasna` adapter. The
+  duplicate legacy RustCrypto stack is a known cost, but no lighter replacement
+  preserves the current compatibility surface and pure-Rust portability.
+- **Evaluation:** RustCrypto `pkcs12 0.2.0-rc.0` is parser-only and still marks
+  decryption and RC2 support as TODO; `keystore-pkcs12 1.0.0` adds a larger
+  keystore/crypto stack; upstream `p12 0.6.3` uses the same old crypto versions
+  as `p12_q3`; `openssl` requires either a system library or a vendored native
+  build, changing deployment assumptions.
+- **Compatibility impact:** none from this decision. The supported empty-password
+  PKCS#12 variants, certificate-chain selection, error messages, and mutual-TLS
+  behavior remain unchanged. No new dependency was added.
+- **Verification:** the PKCS#12 adapter tests, including AES-CBC, AES-GCM,
+  alternative PBKDF2 PRFs, plaintext key bags, unknown bags, and live mTLS,
+  remain covered by the all-features `aria2-core` library suite.
+
+## Async DNS resolver dependency
+
+- **Decision:** keep `hickory-resolver`. It remains part of the public library
+  surface through `DnsCache::with_resolver(TokioResolver)` and owns the system
+  resolver configuration, hosts-file handling, explicit `--async-dns-server`
+  behavior, and record TTL needed by `DnsCache`.
+- **Evaluation:** replacing it with `tokio::net::lookup_host` would make the
+  default path blocking and remove explicit nameserver support; moving to
+  `hickory-proto` would require reimplementing system resolver configuration,
+  search rules, hosts files, and the public injection API. Neither is a
+  behavior-preserving dependency reduction.
+- **Runtime reduction:** Hickory's internal response cache is disabled because
+  `DnsCache` already owns positive TTL caching, negative caching, and
+  single-flight lookup coordination. No resolver, TTL, or fallback behavior
+  changes; the `moka` crate remains compiled because it is a non-optional
+  dependency of `hickory-resolver`.
+- **Verification:** the DNS cache suite passes 28/28 with default and
+  all-protocol features; the full `aria2-core` library suites remain at 2702
+  passed (default) and 3681 passed + 1 ignored (all protocols).
+
 ## CLI build-tier feature behavior
 
 - **External behavior:** the minimal artifact (`--no-default-features
