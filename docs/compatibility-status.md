@@ -46,6 +46,14 @@ behavior. An unlisted behavior has not been audited here.
   of the RPC crate. The CLI `http`/`rpc` features and `aria2-protocol/http` are
   retained tier markers, not source-code gates. BitTorrent, Metalink, and SFTP
   are actual optional features propagated to the crates that own their code.
+- **Feature-gated options:** with BitTorrent disabled, BitTorrent definitions
+  are absent from the core option registry, and runtime updates reject those
+  names through the feature-availability policy before registry parsing instead
+  of silently accepting an unvalidated value. CLI and configuration continue to
+  treat feature-gated keys according to their existing unknown/unsupported
+  rules. `select-file` is supported when either Metalink or BitTorrent is
+  enabled. The core library suite is verified with default, Metalink-only,
+  BitTorrent-only, and all protocol features enabled.
 - **Verification:** source cfg inspection found no `http` or `rpc` feature
   gates for the RPC server or method parsing. Cargo feature-tree inspection
   confirms the minimal and standard artifacts both include `aria2-rpc`; the
@@ -266,7 +274,7 @@ behavior. An unlisted behavior has not been audited here.
   use `bt-tracker-timeout`. Rustls only negotiates TLS 1.2 or newer, so a
   configured TLS 1.1 minimum is enforced as TLS 1.2.
 - **Response resource bound:** `announce_over_stream_with_connector` passes no
-  explicit WebSocket config, so the locked Tungstenite 0.30.0 defaults apply:
+  explicit WebSocket config, so the locked Tungstenite 0.29.0 defaults apply:
   64 MiB per complete message and 16 MiB per frame. This bounds the text/binary
   response copied into the JSON decoder, but the bound currently follows the
   dependency default rather than a protocol-owned constant.
@@ -1731,16 +1739,17 @@ behavior. An unlisted behavior has not been audited here.
   BitTorrent-only RPC peer-port and peer-ID tests also pass with that feature
   enabled. These checks establish configuration and unit behavior, not remote
   server interoperability.
-  The full `aria2` library suite with `--no-default-features --features
-  metalink` passes 122/122; DHT and BitTorrent-only CLI tests are gated by the
-  feature they exercise. The matching `aria2-core` library suite passes
-  2734/2734. Runtime availability treats `select-file` as supported when
+  The default `aria2-core` library suite passes 2702/2702. The full `aria2`
+  library suite with `--no-default-features --features metalink` passes
+  123/123; DHT and BitTorrent-only CLI tests are gated by the feature they
+  exercise. The matching `aria2-core` library suite passes 2757/2757.
+  Runtime availability treats `select-file` as supported when
   either Metalink or BitTorrent is enabled, matching its shared registry
   definition. The `--no-default-features --features bittorrent` tier also
-  passes its full `aria2` (153/153) and `aria2-core` (3547 passed, 1 ignored)
+  passes its full `aria2` (155/155) and `aria2-core` (3573 passed, 1 ignored)
   library suites. With all three protocol features enabled, the full protocol
-  crate suite passes 1357 tests (2 ignored), the core suite passes 3652 (1
-  ignored), and the application suite passes 162. No remote-server
+  crate suite passes 1380 tests (2 ignored), the core suite passes 3681 (1
+  ignored), and the application suite passes 170. No remote-server
   interoperability is implied by these local tests.
 
 ## Pause and unpause lifecycle status

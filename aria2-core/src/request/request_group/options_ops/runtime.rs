@@ -120,6 +120,9 @@ impl super::super::RequestGroup {
     /// `RateLimiter` (if any) is also updated so the change takes effect
     /// immediately on the live download.
     pub fn validate_option_update(key: &str, value: &serde_json::Value) -> Result<bool, String> {
+        if !crate::config::runtime::is_option_available(key) {
+            return Err(format!("Option '{}' is not supported by this runtime", key));
+        }
         let registry = crate::config::OptionRegistry::new();
         if registry.get(key).is_some() {
             registry
