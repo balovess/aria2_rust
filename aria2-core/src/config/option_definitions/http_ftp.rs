@@ -274,6 +274,15 @@ impl crate::config::OptionRegistry {
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });
+        self.register(OptionDef {
+            name: "use-multiple-ips".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Distribute direct HTTP Range connections across usable DNS answers"
+                .into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
 
         // --- Adaptive HTTP Range concurrency ---
         self.register(OptionDef {

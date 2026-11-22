@@ -79,6 +79,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 
 - **Multi-Protocol Download**: HTTP/HTTPS, HLS/M3U8 (requires a user-installed FFmpeg), FTP, and BitTorrent by default; SFTP and Metalink are feature-gated. See the [HLS guide](docs/hls-guide-en.md) for the supported scope.
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
+- **CDN Multi-Address Distribution**: Enabled by default; direct HTTP/HTTPS Range requests prefer different usable DNS answers when a CDN hostname resolves to multiple addresses. Set `use-multiple-ips=false` to restore single-address selection.
 - **Resume Support**: Checkpoint-based resume for the main download paths; protocol-specific compatibility is tracked in the matrix
 - **BitTorrent**:
   - ✅ DHT network (KRPC + routing table + bootstrap)
@@ -407,6 +408,15 @@ Rust-specific differences are:
 | BitTorrent/DHT | Hash-based peer lifecycle, incremental piece-frequency tracking, shared HAVE frame encoding with bounded concurrent sends, bucket-tree/top-K routing, and bounded UDP workers. |
 | File allocation | Platform-aware Linux `fallocate`, Windows `SetFileValidData`, macOS `F_PREALLOCATE`, and cooperative fallbacks that keep long allocation work off the reactor. |
 | RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
+
+For CDN downloads, the measured median-based throughput change was about
+**+22.1%** on Cloudflare/jsDelivr, **+5.5%** on Fastly/Mozilla, and **-1.1%** on
+Google; the geometric mean across the three edge paths was **+8.4%**. The option
+was faster in 12 of 15 paired blocks. Measurements used Release 0.3.15, 10
+trials per state in ABBA x5 order, `split=-x=4`, real CDN A records, and a fixed
+client region, so this is an observed CDN edge-path result rather than a
+universal guarantee. See the [configuration guide](docs/configuration-guide-en.md)
+and [compatibility status](docs/compatibility-status.md) for the full matrix.
 
 ### Current Version Compared with Original
 

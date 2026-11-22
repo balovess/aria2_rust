@@ -179,6 +179,7 @@ SSH/SFTP 选项（`ssh-host-key-md` 和下表中的 5 个 `sftp-*` 选项）在�
 | `connect-timeout`, `timeout`, `max-tries`, `retry-wait` | 连接超时、总超时、尝试次数、重试等待（秒） |
 | `split`, `min-split-size`, `max-connection-per-server` | 分片预算、最小分片大小、HTTP/1.1 每服务器连接上限 |
 | `http-version`, `max-http2-sessions-per-server`, `max-http2-streams-per-session` | HTTP 版本、每服务器 HTTP/2 会话数和每会话 Range 流上限 |
+| `use-multiple-ips` | 将直连 HTTP Range 连接分散到可用 DNS 地址（默认 `true`） |
 | `min-http-range-size` | 服务器明确拒绝 Range 大小后使用的最小 Range 大小 |
 | `http-adaptive-enabled`, `http-adaptive-reduction-percent`, `http-adaptive-backoff-base`, `http-adaptive-backoff-max` | 自适应并发开关、容量错误后的并发降幅和退避时间 |
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS 校验、CA、客户端证书/私钥、最低 TLS 版本 |
@@ -203,6 +204,7 @@ HTTP 下载中，`split` 是任务级分段预算，没有固定配置上限；�
 | `piece-length` | `1M` | 新下载的持久父分片边界；续传优先使用控制文件中的布局 |
 | `max-connection-per-server`（`-x`） | `16` | HTTP/1.1 每下载、每服务器连接上限，范围 `1..=16` |
 | `http-version` | `auto` | 优先 HTTP/2，必要时回退 HTTP/1.1 |
+| `use-multiple-ips` | `true` | 让并发 Range 客户端优先使用不同的可用 DNS 地址 |
 | `max-http2-sessions-per-server` | `2` | 每下载、每服务器的 HTTP/2 会话数 |
 | `max-http2-streams-per-session` | `8` | 每个 HTTP/2 会话的并发 Range 流数 |
 | `min-http-range-size` | `64K` | 服务器明确拒绝 Range 大小后的最小请求大小 |
@@ -210,6 +212,31 @@ HTTP 下载中，`split` 是任务级分段预算，没有固定配置上限；�
 HTTP/1.1 的活动 Range 数受 `split` 和 `-x` 两者中较小值限制；`-x=1` 即使在
 `split` 更大时也只允许一个活动 Range。HTTP/2 Range 并发受 `split` 与
 `max-http2-sessions-per-server × max-http2-streams-per-session` 的较小值限制。
+
+`use-multiple-ips` 是默认开启的 CDN 场景 Rust 扩展；设为 `false` 可恢复单地址连接选择。
+它面向直连 HTTP/HTTPS 且域名解析到多个可用地址的下载，按有效 Range
+并发数为每个可用 DNS 地址创建一个 Range 客户端，并让每个客户端优先使用不同地址。
+原始 URL 不变，因此 `Host`、TLS SNI、证书校验、认证和重定向仍使用配置中的域名。
+配置任何 HTTP/HTTPS 或 all-proxy 时由代理解析域名，该选项不生效。直连任务即使设置了
+`async-dns=false`，也会为此功能解析一次目标域名。
+DNS 同时返回 A 和 AAAA 时，如果优先地址族已有至少两个地址，就只使用该地址族；
+只有优先地址族不足两个地址时才混入另一地址族。
+
+CDN 实测使用 Release 0.3.15，每种状态 10 次、ABBA x5 顺序，`split=-x=4`，
+并由临时本地 DNS 返回真实公网 A 记录：
+
+| CDN / 边缘运营商 | 文件大小 | 关闭均值 / 中位数 | 开启均值 / 中位数 | 配对区块开启更快 |
+| --- | ---: | ---: | ---: | ---: |
+| jsDelivr / Cloudflare | 32,129,114 字节 | 14,616 / 11,263 ms | 11,912 / 9,226 ms | 5/5 |
+| Mozilla / Fastly | 80,269,118 字节 | 28,348 / 23,780 ms | 23,384 / 22,545 ms | 4/5 |
+| Google | 152,702,276 字节 | 64,512 / 39,447 ms | 41,235 / 39,883 ms | 3/5 |
+
+按中位数计算，三条 CDN 路径的吞吐变化分别为 +22.1%、+5.5% 和 -1.1%，
+几何平均约 +8.4%；15 个配对区块中有 12 个开启更快。
+
+每个 CDN 的 20 次下载 SHA-256 完全一致。Google 关闭组有一次 249,214 ms 异常值，
+其中位数几乎没有变化。测试期间客户端地区固定，因此这些是不同 CDN 边缘路径的结果，
+不是多地区性能保证。
 
 自适应并发默认关闭，因此默认情况下不会因自适应控制器降低 Range 并发。需要让程序在
 服务器返回 HTTP 429/503 等容量拒绝时自动降低并发，可显式启用：

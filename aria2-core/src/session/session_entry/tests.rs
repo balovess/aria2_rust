@@ -898,6 +898,22 @@ fn test_download_options_to_map_serializes_http_adaptive_enabled_setting() {
 }
 
 #[test]
+fn test_download_options_to_map_serializes_use_multiple_ips_setting() {
+    let defaults = DownloadOptions::default();
+    let default_map = download_options_to_map(&defaults);
+    assert_eq!(default_map.get("use-multiple-ips"), None);
+    assert!(DownloadOptions::from_option_strings(&default_map).use_multiple_ips);
+
+    let opts = DownloadOptions {
+        use_multiple_ips: false,
+        ..DownloadOptions::default()
+    };
+    let map = download_options_to_map(&opts);
+    assert_eq!(map.get("use-multiple-ips"), Some(&"false".to_string()));
+    assert!(!DownloadOptions::from_option_strings(&map).use_multiple_ips);
+}
+
+#[test]
 fn test_download_options_to_map_preserves_disabled_continue_option() {
     let opts = DownloadOptions {
         continue_download: false,

@@ -240,6 +240,30 @@ fn adaptive_http_parameters_can_be_updated_through_task_rpc_options() {
     );
 }
 
+#[test]
+fn use_multiple_ips_can_be_updated_through_task_rpc_options() {
+    let mut options = DownloadOptions::default();
+    assert!(options.use_multiple_ips);
+    assert!(
+        apply_runtime_option_value(
+            &mut options,
+            "use-multiple-ips",
+            &serde_json::json!("false")
+        )
+        .unwrap()
+    );
+    assert!(!options.use_multiple_ips);
+    assert!(
+        apply_runtime_option_value(&mut options, "use-multiple-ips", &serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(options.use_multiple_ips);
+    assert!(
+        apply_runtime_option_value(&mut options, "use-multiple-ips", &serde_json::json!("yes"))
+            .is_err()
+    );
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn utp_task_options_follow_reserved_and_pending_change_policy() {

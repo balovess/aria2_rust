@@ -24,6 +24,9 @@ pub(super) fn apply(opts: &DownloadOptions, map: &mut HashMap<String, String>) {
             opts.http_version.option_value().to_string(),
         );
     }
+    if !opts.use_multiple_ips {
+        map.insert("use-multiple-ips".to_string(), "false".to_string());
+    }
     if let Some(v) = opts.max_download_limit {
         map.insert("max-download-limit".to_string(), v.to_string());
     }

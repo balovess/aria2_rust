@@ -99,3 +99,84 @@ fn download_connect_timeout_has_a_fallback_for_direct_core_callers() {
         Duration::from_secs(constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS)
     );
 }
+
+#[test]
+fn multi_ip_client_count_is_opt_in_and_respects_request_concurrency() {
+    let mut options = DownloadOptions {
+        split: Some(8),
+        max_connection_per_server: Some(4),
+        http_version: crate::http::HttpVersion::Http11,
+        use_multiple_ips: false,
+        ..DownloadOptions::default()
+    };
+    assert_eq!(multi_ip_client_count(&options, 8), 0);
+
+    options.use_multiple_ips = true;
+    assert_eq!(multi_ip_client_count(&options, 8), 4);
+    assert_eq!(multi_ip_client_count(&options, 2), 2);
+    assert_eq!(multi_ip_client_count(&options, 1), 0);
+
+    options.http_version = crate::http::HttpVersion::Http2;
+    assert_eq!(
+        multi_ip_client_count(&options, 8),
+        constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER
+    );
+}
+
+#[test]
+fn rotated_addresses_prefers_each_client_address_and_retains_fallback_order() {
+    let addresses: Vec<SocketAddr> = ["127.0.0.1:443", "127.0.0.2:443", "127.0.0.3:443"]
+        .into_iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+
+    assert_eq!(rotated_addresses(&addresses, 0), addresses);
+    assert_eq!(
+        rotated_addresses(&addresses, 1),
+        vec![addresses[1], addresses[2], addresses[0]]
+    );
+    assert_eq!(rotated_addresses(&addresses, 3), addresses);
+    assert!(rotated_addresses(&[], 1).is_empty());
+}
+
+#[test]
+fn mixed_address_family_uses_preferred_family_when_it_has_enough_addresses() {
+    let options = DownloadOptions {
+        split: Some(8),
+        max_connection_per_server: Some(8),
+        use_multiple_ips: true,
+        ..DownloadOptions::default()
+    };
+    let addresses: Vec<SocketAddr> = ["192.0.2.1:443", "192.0.2.2:443", "[2001:db8::1]:443"]
+        .into_iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+
+    let selected = select_multi_ip_addresses(
+        &options,
+        &addresses,
+        &crate::network::OutboundNetworkPolicy::direct(),
+    );
+    assert_eq!(selected, vec![addresses[0], addresses[1]]);
+}
+
+#[test]
+fn mixed_address_family_fills_from_other_family_when_preferred_has_one_address() {
+    let options = DownloadOptions {
+        split: Some(8),
+        max_connection_per_server: Some(8),
+        use_multiple_ips: true,
+        ..DownloadOptions::default()
+    };
+    let addresses: Vec<SocketAddr> = ["192.0.2.1:443", "[2001:db8::1]:443", "[2001:db8::2]:443"]
+        .into_iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+
+    let selected = select_multi_ip_addresses(
+        &options,
+        &addresses,
+        &crate::network::OutboundNetworkPolicy::direct(),
+    );
+    assert_eq!(selected, addresses);
+}

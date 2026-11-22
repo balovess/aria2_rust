@@ -83,6 +83,7 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 
 - **多协议下载**: 默认构建支持 HTTP/HTTPS、FTP、BitTorrent；SFTP 和 Metalink 由 feature 控制
 - **多源镜像**: 自动从多个 URI 分段并行下载，最大化带宽利用率
+- **CDN 多地址分发**: 默认启用；当 CDN 域名解析到多个可用地址时，直连 HTTP/HTTPS Range 请求优先连接不同地址。设置 `use-multiple-ips=false` 可恢复单地址连接选择。
 - **断点续传**: HTTP/HTTPS 等主要路径支持控制文件续传；不同协议、并发控制文件和多 URI 失败回退仍按兼容性矩阵逐项验证
 - **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
@@ -354,6 +355,14 @@ aria2-rust/
 | BT/DHT | Hash-based peer 生命周期、增量 Piece 频率、共享 HAVE frame 的有界并发发送、bucket tree/top-K 路由和有界 UDP worker。 |
 | 文件预分配 | Linux `fallocate`、Windows `SetFileValidData`、macOS `F_PREALLOCATE` 的平台适配，以及不会阻塞 reactor 的 fallback。 |
 | RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
+
+CDN 下载的中位数吞吐变化实测约为：Cloudflare/jsDelivr **+22.1%**、
+Fastly/Mozilla **+5.5%**、Google **-1.1%**，三类边缘路径的几何平均约
+**+8.4%**；15 个配对区块中有 12 个开启更快。测试使用 Release 0.3.15，
+每种状态 10 次、ABBA x5 顺序，`split=-x=4`，并由本地 DNS 返回真实 CDN A 记录，
+客户端地区保持不变。因此这是实测的 CDN 边缘路径结果，不是普遍性能保证。
+完整矩阵见[配置指南](docs/configuration-guide-cn.md)和
+[兼容性状态](docs/compatibility-status.md)。
 
 ### 当前版本与原版对比
 

@@ -12,6 +12,7 @@ impl Default for DownloadOptions {
             max_http2_sessions_per_server: None,
             max_http2_streams_per_session: None,
             http_version: crate::http::HttpVersion::default(),
+            use_multiple_ips: true,
             http_adaptive: super::HttpAdaptiveOptions::default(),
             max_download_limit: None,
             max_upload_limit: None,

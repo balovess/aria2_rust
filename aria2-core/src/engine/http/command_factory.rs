@@ -35,7 +35,7 @@ pub(crate) async fn create_download_command(
                 options
                     .async_dns
                     .then(|| vec![std::net::SocketAddr::new(address, port)])
-            } else if options.async_dns {
+            } else if options.async_dns || options.use_multiple_ips {
                 Some(dns_resolver.resolve(&hostname, port).await?)
             } else if !outbound_network_policy.is_direct() {
                 dns_resolver.resolve(&hostname, port).await.ok()

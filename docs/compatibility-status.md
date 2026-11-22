@@ -170,6 +170,72 @@ behavior. An unlisted behavior has not been audited here.
   and reuse of the
   control-file piece layout ahead of a new configuration.
 
+## CDN multi-address connection distribution
+
+- **Setting:** `use-multiple-ips` is a Rust extension, default `true`. It is
+  available through CLI flags, configuration files, JSON-RPC/XML-RPC option
+  maps, and session restore. `changeOption` marks an active task for restart
+  because its HTTP client pool is built when the task starts.
+- **Scope:** this is a CDN-oriented feature for direct HTTP/HTTPS downloads
+  whose hostname resolves to multiple usable addresses. It is not a mirror
+  mechanism, does not change the client source IP, and does not bypass
+  client-IP rate limits. Multiple DNS answers that reach the same edge or
+  backend provide no expected benefit.
+- **Behavior:** when enabled for a direct HTTP/HTTPS download with at least two
+  outbound-policy-compatible DNS answers, each concurrent Range client gets a
+  different preferred address. The full DNS answer list is retained in rotated
+  order so a failed first address can still fall through. The number of
+  clients is capped by `split`, `-x`, and the HTTP/2 session setting, and the
+  option is ignored for one address, sequential downloads, and proxied tasks.
+  It is also ignored when any proxy option is configured, including a URI that
+  would match `no-proxy`.
+  Direct tasks resolve the origin once for this feature even when
+  `async-dns=false`.
+  With mixed A/AAAA answers, the resolver-preferred family is used alone when
+  it has at least two addresses; the other family is only used when the
+  preferred family cannot provide two candidates.
+- **Compatibility impact:** the request URL and authority remain unchanged, so
+  `Host`, TLS SNI, certificate hostname verification, credentials, cookies,
+  redirects, URI selection, and session/control-file semantics are unchanged.
+  This distributes connections across DNS answers; it does not change the
+  client source IP or promise any bandwidth gain, and CDN answers that map to
+  the same backend receive no benefit. Original aria2 resolves all addresses
+  but prefers one per connection, so this is an intentional extension.
+- **Verification:** focused unit tests cover switch behavior, concurrency
+  bounds, and deterministic address rotation. A loopback regression binds two
+  distinct 127/8 addresses to the same port, injects them as DNS answers for a
+  synthetic hostname, verifies both addresses receive Range requests, and
+  compares the assembled output with the source bytes. That local test does not
+  cover external CDNs; the measured matrix is recorded below.
+- **TLS verification:** a local rustls regression binds the two addresses,
+  records the ClientHello SNI at both servers, enables certificate
+  verification against a test CA, and confirms both servers see the original
+  hostname `foobar.com` while the assembled output matches the source.
+- **Measured result:** a Release 0.3.15 binary ran 10 trials per switch state
+  for three CDN edge operators in ABBA x5 order, with `split=-x=4` and a
+  temporary local DNS server supplying each hostname's real public A records.
+  Mixed-family filtering was already active. Each CDN produced one unique byte
+  size and SHA-256 hash across all 20 runs.
+
+  | CDN / edge operator | Payload | Off mean / median | On mean / median | On faster in paired blocks |
+  | --- | ---: | ---: | ---: | ---: |
+  | jsDelivr / Cloudflare | 32,129,114 bytes | 14,616 / 11,263 ms | 11,912 / 9,226 ms | 5/5 |
+  | Mozilla / Fastly | 80,269,118 bytes | 28,348 / 23,780 ms | 23,384 / 22,545 ms | 4/5 |
+  | Google | 152,702,276 bytes | 64,512 / 39,447 ms | 41,235 / 39,883 ms | 3/5 |
+
+  The Google off state included one 249,214 ms outlier; its median was nearly
+  identical to the on state. Earlier unfiltered measurements included an AAAA
+  client and showed a repeatable regression in the four-connection case;
+  mixed-family filtering removed that client and the regression.
+- **Decision:** `use-multiple-ips` is enabled by default because two CDN edge
+  operators showed a repeatable benefit, the third was inconclusive rather than
+  consistently slower, and no correctness or byte-integrity regression was
+  observed. Median-based throughput changes were +22.1%, +5.5%, and -1.1% for
+  the three edge paths, with a geometric mean of +8.4% and 12/15 paired blocks
+  favoring the option. The client's physical region did not change, so this is not a
+  universal performance guarantee. Users can set `use-multiple-ips=false` to
+  restore original single-address connection selection.
+
 ## HTTP Range capacity retries
 
 - **Engine policy:** When adaptive concurrency is enabled, HTTP 429/503

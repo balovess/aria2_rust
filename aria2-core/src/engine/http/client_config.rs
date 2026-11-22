@@ -4,11 +4,12 @@
 //! TLS identity, and range-client pool configuration. The standalone
 //! `aria2_protocol::http::HttpClient` remains an independent public client.
 
-use std::net::IpAddr;
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::constants;
 use crate::error::{Aria2Error, Result};
@@ -45,6 +46,90 @@ pub(crate) fn range_client_pool_count(options: &DownloadOptions) -> usize {
         crate::http::HttpVersion::Auto => requested_sessions.max(http1_clients),
         crate::http::HttpVersion::Http11 => http1_clients,
     }
+}
+
+/// Number of independent clients needed to give each usable DNS answer its
+/// own preferred connection. Zero means the option is inactive.
+pub(crate) fn multi_ip_client_count(options: &DownloadOptions, address_count: usize) -> usize {
+    if !options.use_multiple_ips || address_count < 2 {
+        return 0;
+    }
+    let max_connections = options
+        .max_connection_per_server
+        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        .clamp(1, constants::MAX_CONNECTION_PER_SERVER as u16) as usize;
+    let split = options.split.unwrap_or(constants::DEFAULT_SPLIT).max(1) as usize;
+    let requested = match options.http_version {
+        crate::http::HttpVersion::Http2 => range_client_pool_count(options),
+        crate::http::HttpVersion::Http11 => split.min(max_connections),
+        crate::http::HttpVersion::Auto => {
+            range_client_pool_count(options).max(split.min(max_connections))
+        }
+    };
+    address_count.min(requested.max(1))
+}
+
+/// Return a stable rotation whose first address is the one preferred by this
+/// client. The original order is retained after the first address so failed
+/// connections can still fall through to the remaining DNS answers.
+pub(crate) fn rotated_addresses(addresses: &[SocketAddr], offset: usize) -> Vec<SocketAddr> {
+    if addresses.is_empty() {
+        return Vec::new();
+    }
+    let offset = offset % addresses.len();
+    addresses[offset..]
+        .iter()
+        .chain(addresses[..offset].iter())
+        .copied()
+        .collect()
+}
+
+fn usable_target_addresses(
+    addresses: &[SocketAddr],
+    outbound_network_policy: &OutboundNetworkPolicy,
+) -> Vec<SocketAddr> {
+    let mut seen = HashSet::new();
+    addresses
+        .iter()
+        .copied()
+        .filter(|address| {
+            outbound_network_policy.is_direct()
+                || outbound_network_policy.source_for(*address).is_ok()
+        })
+        .filter(|address| seen.insert(*address))
+        .collect()
+}
+
+/// Select the DNS answers that should receive their own range client.
+///
+/// A mixed A/AAAA answer set is reduced to the resolver-preferred family when
+/// that family already has enough addresses for multi-IP distribution. This
+/// avoids adding a slower or unused address-family path merely because DNS
+/// returned it. If the preferred family cannot provide two addresses, the
+/// remaining answers are allowed to fill the address budget.
+pub(crate) fn select_multi_ip_addresses(
+    options: &DownloadOptions,
+    addresses: &[SocketAddr],
+    outbound_network_policy: &OutboundNetworkPolicy,
+) -> Vec<SocketAddr> {
+    let mut usable = usable_target_addresses(addresses, outbound_network_policy);
+    let requested = multi_ip_client_count(options, usable.len());
+    if requested < 2 {
+        return Vec::new();
+    }
+    let Some(first) = usable.first() else {
+        return Vec::new();
+    };
+    let preferred_is_ipv4 = first.is_ipv4();
+    let preferred_count = usable
+        .iter()
+        .filter(|address| address.is_ipv4() == preferred_is_ipv4)
+        .count();
+    if preferred_count >= 2 {
+        usable.retain(|address| address.is_ipv4() == preferred_is_ipv4);
+    }
+    usable.truncate(requested);
+    usable
 }
 
 /// Build the default client and the independent clients used for concurrent
@@ -133,7 +218,44 @@ pub(super) fn build_download_clients(
         .as_deref()
         .is_some_and(|addresses| !addresses.is_empty());
     let session_count = range_client_pool_count(options);
-    let range_clients = if proxy_disabled && !has_resolved_target && !has_custom_tls {
+    let multi_ip_targets = if proxy_disabled && options.use_multiple_ips {
+        resolved_addresses
+            .target
+            .as_deref()
+            .map(|addresses| select_multi_ip_addresses(options, addresses, outbound_network_policy))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let multi_ip_session_count = multi_ip_client_count(options, multi_ip_targets.len());
+    let range_clients = if multi_ip_session_count > 1 {
+        info!(
+            uri = %uri,
+            addresses = multi_ip_session_count,
+            "Using multiple resolved IPs for concurrent HTTP ranges"
+        );
+        let mut clients = Vec::with_capacity(multi_ip_session_count);
+        for index in 0..multi_ip_session_count {
+            let per_client_addresses = ResolvedNetworkAddresses {
+                target: Some(rotated_addresses(&multi_ip_targets, index)),
+                proxy: resolved_addresses.proxy.clone(),
+                resolver: resolved_addresses.resolver.clone(),
+            };
+            clients.push(
+                build_download_client(
+                    uri,
+                    options,
+                    client_tls,
+                    proxy_disabled,
+                    local_address,
+                    &per_client_addresses,
+                )?
+                .as_ref()
+                .clone(),
+            );
+        }
+        Arc::new(clients)
+    } else if proxy_disabled && !has_resolved_target && !has_custom_tls {
         crate::http::client_pool::get_bound_download_clients_with_version_and_timeout(
             local_address,
             options.http_accept_gzip,

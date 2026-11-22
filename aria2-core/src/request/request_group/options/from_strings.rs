@@ -65,6 +65,10 @@ impl DownloadOptions {
                 .get("http-version")
                 .and_then(|value| crate::http::HttpVersion::parse_option(value))
                 .unwrap_or_default(),
+            use_multiple_ips: options
+                .get("use-multiple-ips")
+                .map(|value| value == "true")
+                .unwrap_or(true),
             http_adaptive: super::HttpAdaptiveOptions::from_option_strings(options),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),

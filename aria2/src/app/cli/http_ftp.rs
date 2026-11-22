@@ -152,6 +152,16 @@ pub struct HttpFtpArgs {
     #[arg(long = "http-version", value_parser = ["auto", "1.1", "2"])]
     pub http_version: Option<String>,
 
+    /// Distribute direct HTTP Range connections across usable DNS answers (default: true)
+    #[arg(
+        long = "use-multiple-ips",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub use_multiple_ips: Option<bool>,
+
     /// Max pipelined HTTP requests per connection
     #[arg(long = "max-http-pipelining", hide = true)]
     pub max_http_pipelining: Option<u64>,

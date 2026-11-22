@@ -474,6 +474,26 @@ async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
 }
 
 #[tokio::test]
+async fn test_cli_use_multiple_ips_defaults_to_enabled_and_accepts_override() {
+    let cli = CliArgs::try_parse_from(["aria2"]).expect("default CLI options should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(options.use_multiple_ips);
+
+    let cli = CliArgs::try_parse_from(["aria2", "--use-multiple-ips=false"])
+        .expect("multi-IP override should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI override should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(!options.use_multiple_ips);
+}
+
+#[tokio::test]
 async fn test_cli_continue_defaults_to_true_and_accepts_explicit_false() {
     let cli = CliArgs::try_parse_from(["aria2"]).expect("default CLI options should parse");
     let mut app = App::new();

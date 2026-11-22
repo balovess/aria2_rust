@@ -1034,6 +1034,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "http-adaptive-reduction-percent",
         "http-adaptive-backoff-base",
         "http-adaptive-backoff-max",
+        "use-multiple-ips",
         "mmap-threshold",
         "on-bt-download-error",
         "pid-file",
@@ -1083,7 +1084,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     );
     assert_eq!(
         registered.len(),
-        269,
+        270,
         "all-features registry inventory changed"
     );
 }

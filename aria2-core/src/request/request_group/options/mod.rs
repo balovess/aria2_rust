@@ -30,6 +30,9 @@ pub struct DownloadOptions {
     /// HTTP protocol selection: automatic negotiation, forced HTTP/1.1, or
     /// forced HTTP/2.
     pub http_version: crate::http::HttpVersion,
+    /// Spread concurrent direct HTTP Range connections across usable DNS
+    /// answers instead of always connecting to the first address.
+    pub use_multiple_ips: bool,
     /// Adaptive HTTP Range behavior for this download.
     pub http_adaptive: HttpAdaptiveOptions,
     pub max_download_limit: Option<u64>,

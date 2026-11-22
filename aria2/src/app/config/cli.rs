@@ -270,6 +270,7 @@ impl App {
             h.max_http2_streams_per_session
         );
         set_bool_true!("http-adaptive-enabled", h.http_adaptive_enabled);
+        set_bool_true!("use-multiple-ips", h.use_multiple_ips);
         set_u64!(
             "http-adaptive-reduction-percent",
             h.http_adaptive_reduction_percent

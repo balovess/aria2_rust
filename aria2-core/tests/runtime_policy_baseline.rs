@@ -34,6 +34,7 @@ const RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS: &[&str] = &[
     "http-adaptive-backoff-base",
     "http-adaptive-backoff-max",
 ];
+const RUST_MULTI_IP_POLICY_EXTENSIONS: &[&str] = &["use-multiple-ips"];
 
 const RUST_BITTORRENT_POLICY_EXTENSIONS: &[&str] = &[
     "bt-max-upload-slots",
@@ -149,6 +150,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     initial_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
     initial_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_MULTI_IP_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setInitialOption",
         compatibility_policy_names("setInitialOption"),
@@ -175,6 +177,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     global_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
     global_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_MULTI_IP_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeGlobalOption",
         compatibility_policy_names("setChangeGlobalOption"),
@@ -189,6 +192,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     reserved_extensions.extend_from_slice(RUST_SFTP_TIMEOUT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_SFTP_TRANSPORT_POLICY_EXTENSIONS);
     reserved_extensions.extend_from_slice(RUST_HTTP_ADAPTIVE_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_MULTI_IP_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeOptionForReserved",
         compatibility_policy_names("setChangeOptionForReserved"),

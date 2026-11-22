@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Added the CDN-oriented `use-multiple-ips` task option, enabled by default, to
+  spread direct HTTP Range connections across usable DNS answers while
+  preserving the request hostname, TLS identity, and mirror semantics. Set it to
+  `false` to restore the original single-address connection selection. Documented
+  measured results across Cloudflare, Fastly, and Google CDN edge paths.
+
 ### Performance
 - Bound the HTTP write-back cache by flushing dirty entries before a write
   would exceed the configured `disk-cache` limit.
