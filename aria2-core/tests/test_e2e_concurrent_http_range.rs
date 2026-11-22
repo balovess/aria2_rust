@@ -877,11 +877,11 @@ async fn multi_mirror_range_size_downshift_is_shared_by_same_authority() {
 }
 
 // ---------------------------------------------------------------------------
-// Redirected metadata must not suppress concurrent Range downloads
+// Redirected metadata should let concurrent Range requests reuse the final URL
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn head_redirect_with_zero_length_still_downloads_ranges_from_final_url() {
+async fn head_redirect_reuses_final_url_for_payload_ranges() {
     let server = MockHttpServer::start()
         .await
         .expect("Failed to start mock server");
@@ -961,7 +961,7 @@ async fn head_redirect_with_zero_length_still_downloads_ranges_from_final_url() 
         .collect();
     assert!(
         original_payload_ranges.is_empty(),
-        "Payload ranges must go directly to the final URL: {original_payload_ranges:?}; all requests: {log:?}"
+        "Payload ranges should reuse the final URL while it remains valid: {original_payload_ranges:?}; all requests: {log:?}"
     );
 
     let final_payload_ranges: Vec<_> = log

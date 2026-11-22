@@ -191,6 +191,7 @@ fn live_connection_counts_separate_h1_connections_from_h2_sessions_and_streams()
         tasks: Vec::new(),
         next_task_id: 1,
         write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
+        refresh_by_authority: std::collections::HashMap::new(),
     };
 
     assert_eq!(
@@ -262,6 +263,7 @@ async fn completion_event_reclaims_only_its_task() {
         state: Arc::new(ExecutorState::new(&[], 1, 1, 1)),
         total_limit: 1,
         write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
+        refresh_by_authority: std::collections::HashMap::new(),
         tasks: vec![
             RunningTask {
                 id: 1,
@@ -332,6 +334,7 @@ async fn selecting_next_result_does_not_drop_a_received_completion() {
         state: Arc::clone(&state),
         total_limit: 1,
         write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
+        refresh_by_authority: std::collections::HashMap::new(),
         tasks: vec![RunningTask {
             id: 1,
             segment_index: 0,

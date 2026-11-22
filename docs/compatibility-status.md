@@ -2360,7 +2360,7 @@ behavior. An unlisted behavior has not been audited here.
   itself (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:32-49`,
   `:250-266`). Thus a request that starts from the original stable URL can
   obtain a fresh signed URL.
-- **The active download does not start from the stable URL.** A metadata GET or
+- **Historical finding before the fix:** the active download did not start from the stable URL. A metadata GET or
   HEAD produces `effective_uri` (`aria2-core/src/engine/http/download_command/execute.rs:51-73`).
   The Range probe is sent to that URL and its final `effective_url` replaces the
   value (`aria2-core/src/engine/http/download_command/execute.rs:203-219`).
@@ -2383,12 +2383,50 @@ behavior. An unlisted behavior has not been audited here.
   (`aria2-core/src/download/request/request_impl.rs:76-129`). A static search
   found calls only in `aria2-core/src/download/request/tests.rs:117-125`, not
   in production code.
-- **Verdict:** present in the concurrent HTTP path. The implementation has the
-  primitives to refresh an expiring redirect, but the active attempt pins every
-  Range request to the signed URL captured at probe time. Multi-mirror
-  downloads may switch to another configured mirror, but no test or code path
-  was found that re-enters the original stable URL to obtain a new signed URL.
-  No time-dependent redirect-expiry regression test was found.
+- **Implemented fix:** `execute_with_retry` keeps the probed final URL as the
+  preferred request URL, so a valid redirect is reused without another round
+  trip per Range. When a Range receives HTTP 401 or 403, the streaming
+  downloader retries once from the original URL and follows its redirect again.
+  The original URL is configured once per download through an authority-keyed
+  map in `HttpSegmentRequestExecutor`, not copied into every
+  `HttpSegmentRequest`. User-supplied mirrors remain available. Metadata probe,
+  auth, cookie, and HTTP-version handling still use `effective_uri`. Parallel
+  authority and refresh URI lists keep per-server limits associated with the
+  host that actually serves the payload.
+- **Verdict:** fixed in the concurrent HTTP path with lower overhead than a
+  forced refresh per Range. The old behavior was reproducible: a loopback
+  fixture expired the probe-time signed URL and both payload Range requests
+  returned HTTP 403. With the fix, those requests refresh from the stable URL
+  and complete. A valid final URL is reused without re-entering the stable URL.
+- **Verification:** `expiring_redirect_target_is_refreshed_for_later_range_requests`
+  and `valid_redirect_target_is_reused_by_later_range_requests` in
+  `aria2-core/tests/test_e2e_http_request_policy.rs` cover both paths. The
+  multi-mirror configured test
+  `primary_redirect_refresh_with_secondary_mirror_configured` confirms that the
+  primary expired redirect refreshes from its own stable source. It also shows
+  that two mirrors resolving to the same authority are treated as one mirror by
+  the current coordinator, so the authority-keyed refresh map is sufficient for
+  the reachable paths. The
+  existing redirect test
+  `head_redirect_reuses_final_url_for_payload_ranges` in
+  `aria2-core/tests/test_e2e_concurrent_http_range.rs` covers normal reuse. The
+  unit test `active_uri_sets_prefer_final_requests_and_keep_refresh_targets`
+  pins the aligned request, authority, and refresh mapping.
+- **Local sample:** on this Windows host with a 64 MiB loopback payload, 16
+  split ranges, and a valid redirect, the stable URL was hit once and three
+  download samples were 592, 593, and 634 ms. The earlier forced-refresh
+  implementation hit the stable URL 65 times and sampled 632, 574, and 691 ms.
+  This is a directional loopback sample, not a production CDN benchmark.
+- **Real CDN validation status:** not completed. Direct HTTPS from local
+  processes failed for both `api.github.com` and `github.com` in this
+  environment, and the browser channel blocked the release-asset download URL.
+  After network escalation, a real GitHub release asset was resolved and a
+  16-segment throttled download was started. The signed URL carried
+  `se=2026-11-22T06:22:03Z`, roughly 54 minutes after the probe, not the
+  300-second expiry described in the 2024 issue. The run was stopped before
+  expiry because forcing a long wait was not representative of ordinary
+  downloads. No real CDN expiry status code was observed, so no additional
+  refresh status codes were added without evidence.
 
 ### #2051: Metalink `<size>` causing Range requests for a whole file
 
@@ -2433,9 +2471,10 @@ behavior. An unlisted behavior has not been audited here.
 
 ### Follow-up evidence needed
 
-1. Add a loopback test with a stable URL that returns a short-lived signed
-   redirect, expire it after the probe, and assert later Range requests re-enter
-   the stable URL and succeed.
+1. Regression coverage for expiring signed redirects is now in place. Remaining
+   work is to decide whether the sequential gap-fill path needs the same
+   freshness policy for URLs that expire during long single-connection
+   downloads.
 2. Add a Metalink `<size>` test against a chunked server that rejects Range,
    asserting that a plain whole-file GET completes or that the probe failure is
    explicitly classified as a compatibility decision.

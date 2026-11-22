@@ -23,6 +23,7 @@ pub(super) fn create(
     max_conn: usize,
     authority_key: &str,
     adaptive: &HttpAdaptiveConcurrency,
+    refresh_url: Option<&str>,
 ) -> SegmentRequests {
     let (write_tx, write_rx) = mpsc::channel::<QueuedWriteChunk>(WRITE_CHANNEL_CAPACITY);
     let authorities = [authority_key.to_owned()];
@@ -39,6 +40,12 @@ pub(super) fn create(
     );
     executor.set_shared_auth_factory(std::sync::Arc::clone(&dl.auth_factory));
     executor.set_origin_sensitive_headers_allowed(dl.origin_sensitive_headers_allowed);
+    if let Some(refresh_url) = refresh_url {
+        executor.set_refresh_urls(std::collections::HashMap::from([(
+            authority_key.to_owned(),
+            refresh_url.to_owned(),
+        )]));
+    }
     if let Some((known_authority, version)) = &dl.initial_http_protocol
         && known_authority == authority_key
     {
