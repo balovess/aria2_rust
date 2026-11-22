@@ -410,13 +410,14 @@ Rust-specific differences are:
 | RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
 
 For CDN downloads, the measured median-based throughput change was about
-**+22.1%** on Cloudflare/jsDelivr, **+5.5%** on Fastly/Mozilla, and **-1.1%** on
-Google; the geometric mean across the three edge paths was **+8.4%**. The option
-was faster in 12 of 15 paired blocks. Measurements used Release 0.3.15, 10
-trials per state in ABBA x5 order, `split=-x=4`, real CDN A records, and a fixed
-client region, so this is an observed CDN edge-path result rather than a
-universal guarantee. See the [configuration guide](docs/configuration-guide-en.md)
-and [compatibility status](docs/compatibility-status.md) for the full matrix.
+**+22.1%** on Cloudflare/jsDelivr, **+5.5%** on Fastly/Mozilla, and **+27.7%**
+on Google. The geometric mean across the
+three edge paths was **+18.0%**, and the option was faster in 13 of 15 paired
+blocks. Measurements used Release 0.3.15, 10 trials per state in ABBA x5 order,
+`split=-x=4`, real CDN A records, and a fixed client region, so this is an
+observed CDN edge-path result rather than a universal guarantee. See the
+[configuration guide](docs/configuration-guide-en.md) and
+[compatibility status](docs/compatibility-status.md) for the full matrix.
 
 ### Current Version Compared with Original
 

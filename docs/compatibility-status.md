@@ -221,20 +221,18 @@ behavior. An unlisted behavior has not been audited here.
   | --- | ---: | ---: | ---: | ---: |
   | jsDelivr / Cloudflare | 32,129,114 bytes | 14,616 / 11,263 ms | 11,912 / 9,226 ms | 5/5 |
   | Mozilla / Fastly | 80,269,118 bytes | 28,348 / 23,780 ms | 23,384 / 22,545 ms | 4/5 |
-  | Google | 152,702,276 bytes | 64,512 / 39,447 ms | 41,235 / 39,883 ms | 3/5 |
+  | Google | 152,702,276 bytes | 59,382 / 49,363 ms | 47,200 / 42,056 ms | 4/5 |
 
-  The Google off state included one 249,214 ms outlier; its median was nearly
-  identical to the on state. Earlier unfiltered measurements included an AAAA
-  client and showed a repeatable regression in the four-connection case;
-  mixed-family filtering removed that client and the regression.
-- **Decision:** `use-multiple-ips` is enabled by default because two CDN edge
-  operators showed a repeatable benefit, the third was inconclusive rather than
-  consistently slower, and no correctness or byte-integrity regression was
-  observed. Median-based throughput changes were +22.1%, +5.5%, and -1.1% for
-  the three edge paths, with a geometric mean of +8.4% and 12/15 paired blocks
-  favoring the option. The client's physical region did not change, so this is not a
-  universal performance guarantee. Users can set `use-multiple-ips=false` to
-  restore original single-address connection selection.
+  Google showed the largest run-to-run variance; all 20 outputs had identical
+  SHA-256 hashes.
+- **Decision:** `use-multiple-ips` is enabled by default because all three CDN
+  edge operators showed a median throughput benefit after family filtering, and
+  no correctness or byte-integrity regression was observed. Median-based changes
+  were +22.1%, +5.5%, and +27.7% for the three edge paths, with a geometric mean
+  of +18.0% and 13/15 paired blocks favoring the option. The client's physical
+  region did not change, so this is not a universal performance guarantee. Users
+  can set `use-multiple-ips=false` to restore original single-address connection
+  selection.
 
 ## HTTP Range capacity retries
 
@@ -2295,3 +2293,153 @@ behavior. An unlisted behavior has not been audited here.
   formula produced 78.555 MiB/s and 23,085,056 bytes. Samples were noisy and
   used a loopback, no-TLS workload, so this is supporting evidence only, not
   a general performance claim.
+
+## Upstream issues 2402, 2197, and 2051: static source audit
+
+- **Scope:** read-only audit on `dev` at `7205cfed9fdd382adc939968dbebccee662c87d1`.
+  Upstream facts come from the issue bodies and comments for
+  [aria2/aria2#2402](https://github.com/aria2/aria2/issues/2402),
+  [aria2/aria2#2197](https://github.com/aria2/aria2/issues/2197), and
+  [aria2/aria2#2051](https://github.com/aria2/aria2/issues/2051), retrieved on
+  2026-11-22. No runtime reproduction, `aria2_original` comparison, or test run
+  was performed for this audit. The shell runner repeatedly failed with Windows
+  error 8, so the evidence below is source-only.
+
+### #2402: unauthenticated RPC and arbitrary file write
+
+- **Upstream claim:** JSON-RPC on port 6800 has no authentication by default;
+  `aria2.addUri` with attacker-controlled `dir` and `out` can write anywhere,
+  with a cron file used to claim RCE. The issue is open, has no comments, and
+  contains no maintainer-confirmed CVE or patch.
+- **Default posture: not reproduced.** RPC is disabled by default
+  (`aria2-core/src/config/option_definitions/rpc.rs:9-14`). When enabled, the
+  default address is `127.0.0.1:6800` and `rpc-listen-all` is false
+  (`aria2-core/src/config/option_definitions/rpc.rs:18-44`,
+  `aria2-rpc/src/server/config.rs:23-33`). RPC dispatch only starts from an
+  explicit startup plan (`aria2/src/app/rpc.rs:205-207`). `rpc-listen-all`
+  deliberately changes the host to `0.0.0.0`
+  (`aria2/src/app/rpc.rs:217-222`), and the documentation warns not to expose
+  unauthenticated RPC publicly (`docs/rpc-guide-en.md:13-47`).
+- **Authentication: optional by design.** If `rpc-secret` is absent, the app
+  constructs an empty `AuthConfig` (`aria2/src/app/rpc.rs:225-238`), and
+  `RpcAuthMiddleware::validate` accepts every request when its secret is empty
+  (`aria2-rpc/src/server/auth.rs:171-192`). When a secret exists, every method
+  except `system.listMethods` and `system.listNotifications` must present it,
+  including nested `system.multicall` entries
+  (`aria2-rpc/src/engine/policy.rs:1-3`, `aria2-rpc/src/engine.rs:173-178`,
+  `aria2-rpc/src/engine.rs:420-429`). HTTP Basic Auth, when configured, is
+  enforced at the transport seam (`aria2-rpc/src/server/http_handlers.rs:87-105`).
+- **Destination confinement: absent.** RPC options flow into the same
+  `DownloadOptions` as CLI options. The HTTP command builds its target with a
+  plain `PathBuf::from(dir).join(filename)` and uses an explicit `out` value
+  without path sanitization (`aria2-core/src/engine/http/download_command/constructor.rs:181-193`).
+  An absolute `out` replaces the base directory under Rust `Path::join` semantics,
+  and `../` components are not confined. `ActiveOutputRegistry` only prevents
+  collisions and chooses numbered names; it is not a security boundary
+  (`aria2-core/src/engine/active_output_registry.rs:18-47`, `:180-217`).
+  The `dir`/`out` option definitions contain no path validator
+  (`aria2-core/src/config/option_definitions/general/basic.rs:8-25`).
+- **Verdict:** the upstream "reachable by default" premise does not apply, but
+  an operator who enables remote RPC without a secret retains an arbitrary
+  write primitive within the process user's permissions. RCE is deployment
+  dependent, for example writing a cron or startup file, not a built-in
+  command-execution primitive. Forcing `rpc-secret` would break the documented
+  aria2 compatibility contract, so a secure default change needs explicit user
+  direction; a directory allowlist would likewise be an intentional deviation.
+
+### #2197: expiring CDN redirect URLs reused by later pieces
+
+- **Upstream claim:** a stable URL redirects to a signed URL with a short
+  expiry. The final signed URL is resolved once, cached, and reused for later
+  pieces. A slow or large download then receives authorization failures after
+  expiry. The issue is open with no comments.
+- **Per-request redirect handling exists.** The standalone protocol client
+  starts a fresh bounded redirect loop for every request
+  (`aria2-protocol/src/http/client.rs:197-275`). The core segment downloader
+  also starts from the URL passed to `send_range_request` and follows redirects
+  itself (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:32-49`,
+  `:250-266`). Thus a request that starts from the original stable URL can
+  obtain a fresh signed URL.
+- **The active download does not start from the stable URL.** A metadata GET or
+  HEAD produces `effective_uri` (`aria2-core/src/engine/http/download_command/execute.rs:51-73`).
+  The Range probe is sent to that URL and its final `effective_url` replaces the
+  value (`aria2-core/src/engine/http/download_command/execute.rs:203-219`).
+  The redirect target is added to the group URI pool
+  (`aria2-core/src/engine/http/download_command/execute.rs:220-224`).
+  `execute_with_retry` then replaces the source URI with that already-probed
+  final URL for the current attempt and deduplicates the pool
+  (`aria2-core/src/engine/http/concurrent_download/mod.rs:336-358`); a single
+  mirror passes `effective_uri` directly (`:373-381`). Segment requests copy
+  that string into `HttpSegmentRequest.url`
+  (`aria2-core/src/engine/http/concurrent_download/pipeline.rs:172-199`,
+  `aria2-core/src/engine/http/concurrent_download/segment/admission.rs:58-79`)
+  and send each Range request to it
+  (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:32-40`,
+  `:335-340`). Failed segments are rescheduled, but the audited retry path
+  chooses from the same URI strings rather than re-resolving the stable source
+  (`aria2-core/src/engine/http/concurrent_download/segment/completion.rs:321-339`).
+- **Unused reset seam.** `Request` keeps `uri` separate from `current_uri` and
+  has `reset_uri()` specifically to return to the original URI
+  (`aria2-core/src/download/request/request_impl.rs:76-129`). A static search
+  found calls only in `aria2-core/src/download/request/tests.rs:117-125`, not
+  in production code.
+- **Verdict:** present in the concurrent HTTP path. The implementation has the
+  primitives to refresh an expiring redirect, but the active attempt pins every
+  Range request to the signed URL captured at probe time. Multi-mirror
+  downloads may switch to another configured mirror, but no test or code path
+  was found that re-enters the original stable URL to obtain a new signed URL.
+  No time-dependent redirect-expiry regression test was found.
+
+### #2051: Metalink `<size>` causing Range requests for a whole file
+
+- **Upstream claim:** Metalink `<size>` makes aria2 send
+  `Range: bytes=0-(size-1)` for a whole-file download. Some servers reject any
+  Range request, especially with chunked encoding. Removing `<size>` avoids
+  the failure. One comment identifies `aria2c https://httpbin.org/anything` as
+  a failing server. The issue is open.
+- **Declared size reaches the engine.** `<size>` parsing stores `file.size`
+  (`aria2-protocol/src/metalink/parser/parse.rs:263`,
+  `aria2-protocol/src/metalink/parser/model.rs:225` and `:283`). The Metalink
+  HTTP command writes it into the request group and passes the file name as an
+  explicit output name (`aria2-core/src/engine/http/download_command/constructor.rs:82-98`),
+  so the initial metadata GET is skipped for that path
+  (`aria2-core/src/engine/http/download_command/execute.rs:51-59`).
+- **A declared size triggers a Range probe.** `known_total_length` becomes the
+  download total when no response length is available
+  (`aria2-core/src/engine/http/download_command/execute.rs:40-45`, `:115-128`),
+  and a positive known length satisfies the probe condition
+  (`:164-169`). The probe itself is a one-byte `Range: bytes=0-0` request
+  (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:270-317`),
+  not the exact full-file header in the upstream report. If the server responds
+  200, the engine treats Range as unsupported and can continue sequentially;
+  if it rejects the probe with 401, 403, 416, or 5xx, `classify_range_status`
+  turns that into an error
+  (`aria2-core/src/engine/http/segment_downloader/downloader/mod.rs:247-272`).
+  Concurrent mode additionally requires a successful probe and `split > 1`
+  (`aria2-core/src/engine/http/download_command/constructor.rs:476-492`), so
+  the Rust engine does not normally emit `Range: bytes=0-(size-1)` for a
+  whole-file single-segment download.
+- **Size verification remains.** Actual range responses are checked against
+  expected totals and offsets
+  (`aria2-core/src/engine/http/segment_downloader/downloader/mod.rs:235-244`),
+  and a later mismatch is treated as `CannotResume` rather than silently
+  accepted. This preserves the integrity rationale for keeping `<size>`.
+- **Verdict:** partially present, with a different wire-level symptom. The
+  exact upstream full-file header was not found, but a Metalink-declared size
+  does cause a Range probe before payload transfer. A server that rejects all
+  Range requests with an error can therefore fail a download that a plain GET
+  could complete. No focused test was found for Metalink `<size>` plus a
+  chunked server that rejects Range.
+
+### Follow-up evidence needed
+
+1. Add a loopback test with a stable URL that returns a short-lived signed
+   redirect, expire it after the probe, and assert later Range requests re-enter
+   the stable URL and succeed.
+2. Add a Metalink `<size>` test against a chunked server that rejects Range,
+   asserting that a plain whole-file GET completes or that the probe failure is
+   explicitly classified as a compatibility decision.
+3. Decide whether an unauthenticated remote RPC deployment should be rejected
+   at startup. If not, document the arbitrary-write consequence next to
+   `rpc-listen-all` and test that `dir`/`out` confinement is deliberately out
+   of scope for aria2 compatibility.

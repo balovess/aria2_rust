@@ -241,16 +241,15 @@ server:
 | --- | ---: | ---: | ---: | ---: |
 | jsDelivr / Cloudflare | 32,129,114 bytes | 14,616 / 11,263 ms | 11,912 / 9,226 ms | 5/5 |
 | Mozilla / Fastly | 80,269,118 bytes | 28,348 / 23,780 ms | 23,384 / 22,545 ms | 4/5 |
-| Google | 152,702,276 bytes | 64,512 / 39,447 ms | 41,235 / 39,883 ms | 3/5 |
+| Google | 152,702,276 bytes | 59,382 / 49,363 ms | 47,200 / 42,056 ms | 4/5 |
 
-Based on medians, the throughput change was +22.1%, +5.5%, and -1.1% for those
-three CDN paths respectively; their geometric mean was +8.4%, and the option was
-faster in 12 of 15 paired blocks.
+Based on medians, the throughput change was +22.1%, +5.5%, and +27.7% for those
+three CDN paths respectively; their geometric mean was +18.0%, and the option was
+faster in 13 of 15 paired blocks.
 
-All 20 downloads per CDN had the same SHA-256. Google's off state included one
-249,214 ms outlier and its median was nearly unchanged. The client region did
-not change between runs, so these are CDN edge-path results, not a multi-region
-performance guarantee.
+All 20 downloads per CDN had the same SHA-256. Google showed the largest
+run-to-run variance. The client region did not change between runs, so these are
+CDN edge-path results, not a multi-region performance guarantee.
 
 Adaptive concurrency is disabled by default, so the controller does not reduce
 the Range target unless enabled. To let aria2-rust respond to HTTP 429/503

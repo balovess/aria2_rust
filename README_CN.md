@@ -357,10 +357,11 @@ aria2-rust/
 | RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
 
 CDN 下载的中位数吞吐变化实测约为：Cloudflare/jsDelivr **+22.1%**、
-Fastly/Mozilla **+5.5%**、Google **-1.1%**，三类边缘路径的几何平均约
-**+8.4%**；15 个配对区块中有 12 个开启更快。测试使用 Release 0.3.15，
-每种状态 10 次、ABBA x5 顺序，`split=-x=4`，并由本地 DNS 返回真实 CDN A 记录，
-客户端地区保持不变。因此这是实测的 CDN 边缘路径结果，不是普遍性能保证。
+Fastly/Mozilla **+5.5%**、Google **+27.7%**，
+三类边缘路径的几何平均约 **+18.0%**；15 个配对区块中有 13 个开启更快。
+测试使用 Release 0.3.15，每种状态 10 次、ABBA x5 顺序，`split=-x=4`，
+并由本地 DNS 返回真实 CDN A 记录，客户端地区保持不变。
+因此这是实测的 CDN 边缘路径结果，不是普遍性能保证。
 完整矩阵见[配置指南](docs/configuration-guide-cn.md)和
 [兼容性状态](docs/compatibility-status.md)。
 
