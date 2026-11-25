@@ -1,4 +1,4 @@
-use aria2_core::config::{OptionValue, UriListFile};
+use aria2_core::config::{ConfigManager, OptionValue, UriListFile};
 use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
@@ -40,9 +40,7 @@ impl App {
             .is_some_and(|source| matches!(source, aria2_core::config::ConfigSource::Defaults))
             && let Some(dir) = scoop_cache_dir()
         {
-            conf.set_global_option("dir", OptionValue::Str(dir))
-                .await
-                .map_err(|e| format!("--dir: {}", e))?;
+            set_cli_option(&mut conf, "dir", OptionValue::Str(dir)).await?;
         }
 
         // Helper macros: set option only if value is present and propagate the
@@ -50,21 +48,19 @@ impl App {
         macro_rules! set_str {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    conf.set_global_option($name, OptionValue::Str(v))
-                        .await
-                        .map_err(|e| format!("--{}: {}", $name, e))?;
+                    set_cli_option(&mut conf, $name, OptionValue::Str(v)).await?;
                 }
             };
         }
         macro_rules! set_path {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    conf.set_global_option(
+                    set_cli_option(
+                        &mut conf,
                         $name,
                         OptionValue::Str(v.to_string_lossy().into_owned()),
                     )
-                    .await
-                    .map_err(|e| format!("--{}: {}", $name, e))?;
+                    .await?;
                 }
             };
         }
@@ -73,45 +69,35 @@ impl App {
                 if let Some(v) = $value {
                     let v = i64::try_from(v)
                         .map_err(|_| format!("--{}: value is out of range", $name))?;
-                    conf.set_global_option($name, OptionValue::Int(v))
-                        .await
-                        .map_err(|e| format!("--{}: {}", $name, e))?;
+                    set_cli_option(&mut conf, $name, OptionValue::Int(v)).await?;
                 }
             };
         }
         macro_rules! set_u16 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    conf.set_global_option($name, OptionValue::Int(i64::from(v)))
-                        .await
-                        .map_err(|e| format!("--{}: {}", $name, e))?;
+                    set_cli_option(&mut conf, $name, OptionValue::Int(i64::from(v))).await?;
                 }
             };
         }
         macro_rules! set_f64 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    conf.set_global_option($name, OptionValue::Float(v))
-                        .await
-                        .map_err(|e| format!("--{}: {}", $name, e))?;
+                    set_cli_option(&mut conf, $name, OptionValue::Float(v)).await?;
                 }
             };
         }
         macro_rules! set_bool_true {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    conf.set_global_option($name, OptionValue::Bool(v))
-                        .await
-                        .map_err(|e| format!("--{}: {}", $name, e))?;
+                    set_cli_option(&mut conf, $name, OptionValue::Bool(v)).await?;
                 }
             };
         }
         macro_rules! set_bool_false {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    conf.set_global_option($name, OptionValue::Bool(!v))
-                        .await
-                        .map_err(|e| format!("--{}: {}", $name, e))?;
+                    set_cli_option(&mut conf, $name, OptionValue::Bool(!v)).await?;
                 }
             };
         }
@@ -131,7 +117,7 @@ impl App {
             let level = if verbose { "debug" } else { "notice" };
             conf.set_global_option("console-log-level", OptionValue::Str(level.into()))
                 .await
-                .map_err(|e| format!("--verbose: {}", e))?;
+                .map_err(|error| format!("--verbose: {error}"))?;
         }
 
         // --- General options ---
@@ -247,9 +233,7 @@ impl App {
         set_str!("user-agent", h.user_agent);
         set_str!("referer", h.referer);
         if !h.header.is_empty() {
-            conf.set_global_option("header", OptionValue::List(h.header))
-                .await
-                .map_err(|e| format!("--header: {}", e))?;
+            set_cli_option(&mut conf, "header", OptionValue::List(h.header)).await?;
         }
         set_path!("load-cookies", h.load_cookies);
         set_path!("save-cookies", h.save_cookies);
@@ -423,9 +407,12 @@ impl App {
         set_str!("peer-id-prefix", b.peer_id_prefix);
         set_str!("peer-agent", b.peer_agent);
         if !b.index_out.is_empty() {
-            conf.set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
-                .await
-                .map_err(|e| format!("--index-out: {}", e))?;
+            set_cli_option(
+                &mut conf,
+                "index-out",
+                OptionValue::Str(b.index_out.join("\n")),
+            )
+            .await?;
         }
 
         // --- RPC options ---
@@ -542,6 +529,17 @@ impl App {
             .collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(())
     }
+}
+
+async fn set_cli_option(
+    config: &mut ConfigManager,
+    name: &'static str,
+    value: OptionValue,
+) -> std::result::Result<(), String> {
+    config
+        .set_global_option(name, value)
+        .await
+        .map_err(|error| format!("--{name}: {error}"))
 }
 
 #[cfg(windows)]

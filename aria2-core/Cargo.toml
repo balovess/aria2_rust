@@ -92,13 +92,8 @@ yasna_compat = { package = "yasna", version = "0.5", features = ["std"] }
 rc4 = { version = "0.2", optional = true }
 dashmap = "6.2"
 terminal_size = "0.4"
-# Firefox/Chromium cookie import reads `cookies.sqlite` / `Cookies` directly
-# (C++ `Sqlite3CookieParser`). `bundled` statically compiles SQLite into the
-# binary, so there is no system libsqlite3 requirement on any platform and no
-# version skew between what we test against and what a user happens to have
-# installed. `default-features = false` drops extras we never touch — the
-# parser only ever opens a database read-only and runs a single SELECT.
-rusqlite = { version = "0.43.0", default-features = false, features = ["bundled"] }
+# Read-only, pure-Rust SQLite file reader for Firefox/Chromium cookie jars.
+sqlite-core = "0.12.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -119,12 +114,10 @@ hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 http = "1"
-tempfile.workspace = true
-tokio-test = "0.4"
 socket2 = "0.6"
 criterion.workspace = true
-base64.workspace = true
-aria2-protocol.workspace = true
+# Unit tests use Tokio's paused-time controls.
+tokio = { workspace = true, features = ["test-util"] }
 # Local SFTP E2E fixture. Reuses the production lockfile version and stays
 # test-only so it does not expand the engine's runtime dependency surface.
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }

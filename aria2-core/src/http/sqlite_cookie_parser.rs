@@ -5,46 +5,30 @@
 //!
 //! Both browsers keep their cookie jar in a SQLite database — Firefox in
 //! `cookies.sqlite` (table `moz_cookies`), Chromium in `Cookies` (table
-//! `cookies`). The two schemas differ in column names and in the epoch used
-//! for timestamps, so each gets its own SELECT; everything downstream of the
-//! query is shared.
+//! `cookies`). Their schemas differ in column names and timestamp epochs. This
+//! module reads only the target table and maps the relevant columns by name.
 //!
 //! # Known limitations (same as C++ aria2)
 //!
-//! - The database is opened **read-only**. If the browser is running and holds
-//!   an exclusive lock (typical for Chromium on Windows), the open fails — close
-//!   the browser first.
+//! - The database and optional `-wal` sidecar are read as byte snapshots. WAL
+//!   commits are included, but a browser writing either file during the read can
+//!   still cause a transient parse error; retry after the write completes.
 //! - Chromium encrypts cookie values at rest (`encrypted_value`) on all modern
 //!   versions; the plaintext `value` column is then empty. Such cookies import
 //!   with an empty value. Decryption needs per-platform OS keyring access and is
 //!   out of scope here, exactly as in C++ aria2.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags, Row};
+use sqlite_core::{Database, Row, Value};
 use tracing::debug;
 
 use crate::error::{Aria2Error, Result};
 use crate::http::cookie::parsing::is_numeric_host;
 use crate::http::cookie::{Cookie, SameSite};
 
-/// Firefox `cookies.sqlite` query.
-///
-/// Column order is load-bearing — `row_to_cookie` indexes positionally, and
-/// both browser queries must project the same seven columns in the same order.
-pub const MOZ_QUERY: &str = "SELECT host, path, isSecure, expiry, name, value, lastAccessed \
-     FROM moz_cookies";
-
-/// Chromium `Cookies` query.
-///
-/// Chromium timestamps are microseconds since 1601-01-01 UTC (the Windows FILE
-/// epoch). 11644473600 is the number of seconds between that epoch and the UNIX
-/// epoch, so the arithmetic below normalises both time columns to UNIX seconds.
-/// Done in SQL rather than in Rust to keep `row_to_cookie` schema-agnostic.
-pub const CHROMIUM_QUERY: &str = "SELECT host_key, path, secure, expires_utc / 1000000 - 11644473600 as expires_utc, \
-     name, value, last_access_utc / 1000000 - 11644473600 as last_access_utc \
-     FROM cookies";
+const CHROMIUM_EPOCH_OFFSET: i64 = 11_644_473_600;
 
 /// The 16-byte magic header every SQLite 3 database file starts with.
 ///
@@ -63,12 +47,12 @@ pub struct Sqlite3CookieParser;
 impl Sqlite3CookieParser {
     /// Parse a Firefox `cookies.sqlite` database.
     pub fn parse_firefox(path: &Path) -> Result<Vec<Cookie>> {
-        Self::parse_with_query(path, MOZ_QUERY)
+        parse_cookie_table(path, CookieSchema::Firefox)
     }
 
     /// Parse a Chromium `Cookies` database.
     pub fn parse_chromium(path: &Path) -> Result<Vec<Cookie>> {
-        Self::parse_with_query(path, CHROMIUM_QUERY)
+        parse_cookie_table(path, CookieSchema::Chromium)
     }
 
     /// Try Firefox first, fall back to Chromium.
@@ -96,89 +80,131 @@ impl Sqlite3CookieParser {
             }
         }
     }
+}
 
-    /// Open `path` read-only and map every row of `query` to a [`Cookie`].
-    ///
-    /// Rows that fail validation are skipped rather than aborting the import,
-    /// matching C++ `cookieRowMapper`, which returns 0 (continue) for bad rows.
-    /// A real browser jar routinely contains entries we cannot represent, and
-    /// dropping the whole file over one of them would be worse than useless.
-    fn parse_with_query(path: &Path, query: &str) -> Result<Vec<Cookie>> {
-        // Read-only, and deliberately without `SQLITE_OPEN_URI`: a path
-        // containing `?` must be treated as a literal filename, not a URI with
-        // query parameters. C++ passes bare `SQLITE_OPEN_READONLY` for the same
-        // reason.
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(path, flags).map_err(|e| {
-            Aria2Error::Io(format!(
-                "Failed to open SQLite cookie database {}: {e}",
-                path.display()
+#[derive(Clone, Copy)]
+enum CookieSchema {
+    Firefox,
+    Chromium,
+}
+
+/// Read the main database and its optional WAL overlay, then decode only the
+/// browser cookie table. A present but unreadable WAL is an error: ignoring it
+/// could silently import stale cookies while the browser is running.
+fn parse_cookie_table(path: &Path, schema: CookieSchema) -> Result<Vec<Cookie>> {
+    let main = std::fs::read(path).map_err(|error| {
+        Aria2Error::Io(format!(
+            "Failed to read SQLite cookie database {}: {error}",
+            path.display()
+        ))
+    })?;
+    let wal_path = wal_path(path);
+    let wal = match std::fs::read(&wal_path) {
+        Ok(wal) if !wal.is_empty() => Some(wal),
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Aria2Error::Io(format!(
+                "Failed to read SQLite cookie WAL {}: {error}",
+                wal_path.display()
+            )));
+        }
+    };
+    let database = match wal.as_deref() {
+        Some(wal) => Database::open_with_wal(main, wal),
+        None => Database::open(main),
+    }
+    .map_err(|error| Aria2Error::Parse(format!("Failed to read SQLite3 database: {error:?}")))?;
+
+    let expected_table = match schema {
+        CookieSchema::Firefox => "moz_cookies",
+        CookieSchema::Chromium => "cookies",
+    };
+    let table = database
+        .live_tables()
+        .into_iter()
+        .find(|table| table.name.eq_ignore_ascii_case(expected_table))
+        .ok_or_else(|| {
+            Aria2Error::Parse(format!(
+                "Failed to read SQLite3 database: no such table: {expected_table}"
             ))
         })?;
-
-        let mut stmt = conn
-            .prepare(query)
-            .map_err(|e| Aria2Error::Parse(format!("Failed to read SQLite3 database: {e}")))?;
-
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| Aria2Error::Parse(format!("Failed to read SQLite3 database: {e}")))?;
-
-        let mut cookies = Vec::new();
-        loop {
-            let row = rows
-                .next()
-                .map_err(|e| Aria2Error::Parse(format!("Failed to read SQLite3 database: {e}")))?;
-            match row {
-                Some(row) => {
-                    if let Some(cookie) = row_to_cookie(row) {
-                        cookies.push(cookie);
-                    }
-                }
-                None => break,
-            }
-        }
-        Ok(cookies)
+    let columns = table.column_names.ok_or_else(|| {
+        Aria2Error::Parse(format!(
+            "Failed to read SQLite3 database: unable to read columns for {expected_table}"
+        ))
+    })?;
+    let index = |name: &str| {
+        columns
+            .iter()
+            .position(|column| column.eq_ignore_ascii_case(name))
+    };
+    let (host, path_col, secure, expiry, name, value, last_access) = match schema {
+        CookieSchema::Firefox => (
+            index("host"),
+            index("path"),
+            index("isSecure"),
+            index("expiry"),
+            index("name"),
+            index("value"),
+            index("lastAccessed"),
+        ),
+        CookieSchema::Chromium => (
+            index("host_key"),
+            index("path"),
+            index("is_secure").or_else(|| index("secure")),
+            index("expires_utc"),
+            index("name"),
+            index("value"),
+            index("last_access_utc"),
+        ),
+    };
+    let indices = [host, path_col, secure, expiry, name, value, last_access];
+    if indices.iter().any(Option::is_none) {
+        return Err(Aria2Error::Parse(format!(
+            "Failed to read SQLite3 database: required columns missing from {expected_table}"
+        )));
     }
+    let indices = indices.map(Option::unwrap);
+    let rows = database
+        .read_table(table.rootpage, columns.len())
+        .map_err(|error| {
+            Aria2Error::Parse(format!("Failed to read SQLite3 database: {error:?}"))
+        })?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row_to_cookie(row, indices, matches!(schema, CookieSchema::Chromium)))
+        .collect())
 }
 
-/// Read a column as text, treating NULL and non-text values as absent.
-///
-/// C++ receives every column as `char*` from `sqlite3_exec`, so an INTEGER
-/// `host` would arrive stringified. In practice these columns are always TEXT;
-/// coercing integers here would only invent domains out of numbers.
-fn column_text(row: &Row<'_>, idx: usize) -> Option<String> {
-    match row.get_ref(idx).ok()? {
-        ValueRef::Text(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+fn wal_path(path: &Path) -> PathBuf {
+    let mut sidecar = OsString::from(path.as_os_str());
+    sidecar.push("-wal");
+    PathBuf::from(sidecar)
+}
+
+fn value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Text(text) => Some(text.clone()),
         _ => None,
     }
 }
 
-/// Read a column as an integer, accepting both INTEGER and TEXT storage.
-///
-/// C++ stringifies via `sqlite3_exec` and then runs `parseLLIntNoThrow`, so a
-/// timestamp stored as TEXT parses fine there. Accepting both keeps behaviour
-/// identical for hand-edited or migrated databases. REAL is accepted and
-/// truncated because Chromium's SQL division can yield a float when the source
-/// column has REAL affinity.
-fn column_i64(row: &Row<'_>, idx: usize) -> Option<i64> {
-    match row.get_ref(idx).ok()? {
-        ValueRef::Integer(v) => Some(v),
-        ValueRef::Real(v) if v.is_finite() => Some(v as i64),
-        ValueRef::Text(bytes) => std::str::from_utf8(bytes).ok()?.trim().parse::<i64>().ok(),
+fn value_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) => Some(*value),
+        Value::Real(value) if value.is_finite() => Some(*value as i64),
+        Value::Text(value) => value.trim().parse().ok(),
         _ => None,
     }
 }
 
-/// Convert one result row into a [`Cookie`], or `None` if it is unusable.
-///
-/// Port of C++ `cookieRowMapper`. Column order (shared by both queries):
-/// `0 host, 1 path, 2 secure, 3 expiry, 4 name, 5 value, 6 last_access`.
-fn row_to_cookie(row: &Row<'_>) -> Option<Cookie> {
+/// Convert one database row into a [`Cookie`], or `None` if it is unusable.
+fn row_to_cookie(row: &Row, indices: [usize; 7], chromium: bool) -> Option<Cookie> {
     // C++ rejects the row outright when host / path / name are NULL.
-    let raw_host = column_text(row, 0)?;
-    let path = column_text(row, 1)?;
-    let name = column_text(row, 4)?;
+    let raw_host = value_text(row.values.get(indices[0])?)?;
+    let path = value_text(row.values.get(indices[1])?)?;
+    let name = value_text(row.values.get(indices[4])?)?;
 
     // A leading dot is the legacy "include subdomains" marker; the stored
     // domain never keeps it, but whether it was present decides host_only below.
@@ -192,18 +218,26 @@ fn row_to_cookie(row: &Row<'_>) -> Option<Cookie> {
 
     // A row with an unparseable timestamp is dropped rather than defaulted —
     // guessing an expiry could resurrect a cookie the user expected to lapse.
-    let expiry_time = column_i64(row, 3)?;
-    let last_access_time = column_i64(row, 6)?;
+    let mut expiry_time = value_i64(row.values.get(indices[3])?)?;
+    let mut last_access_time = value_i64(row.values.get(indices[6])?)?;
+    if chromium {
+        expiry_time = (expiry_time / 1_000_000).checked_sub(CHROMIUM_EPOCH_OFFSET)?;
+        last_access_time = (last_access_time / 1_000_000).checked_sub(CHROMIUM_EPOCH_OFFSET)?;
+    }
 
     // NULL value is legal and means empty (C++ `toString(nullptr)` -> "").
-    let value = column_text(row, 5).unwrap_or_default();
+    let value = row
+        .values
+        .get(indices[5])
+        .and_then(value_text)
+        .unwrap_or_default();
 
     // Numeric hosts can never have subdomains, so they are always host-only
     // regardless of the leading dot.
     let host_only = is_numeric_host(&domain) || !had_leading_dot;
 
     // C++ compares the stringified column against "1".
-    let secure = column_i64(row, 2) == Some(1);
+    let secure = row.values.get(indices[2]).and_then(value_i64) == Some(1);
 
     Some(Cookie {
         name,
@@ -229,243 +263,274 @@ fn row_to_cookie(row: &Row<'_>) -> Option<Cookie> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
     use tempfile::TempDir;
 
-    /// Build a Firefox-shaped database and return its path (the `TempDir` must
-    /// outlive it, hence returning both).
-    #[allow(clippy::type_complexity)]
-    fn make_moz_db(
-        rows: &[(&str, &str, i64, i64, &str, Option<&str>, i64)],
-    ) -> (TempDir, std::path::PathBuf) {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("cookies.sqlite");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute(
-            "CREATE TABLE moz_cookies (
-                 host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
-                 name TEXT, value TEXT, lastAccessed INTEGER)",
-            [],
+    const FIREFOX_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/firefox.sqlite");
+    const FIREFOX_STORAGE_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/firefox_storage.sqlite");
+    const FIREFOX_TEXT_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/firefox_text.sqlite");
+    const CHROMIUM_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/chromium.sqlite");
+    const CHROMIUM_LEGACY_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/chromium_legacy.sqlite");
+    const CHROMIUM_WAL_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/chromium_wal.sqlite");
+    const CHROMIUM_WAL: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/chromium_wal.sqlite-wal");
+    const UNKNOWN_FIXTURE: &[u8] =
+        include_bytes!("../../tests/fixtures/sqlite_cookie_parser/unknown.sqlite");
+
+    type CookieSignature = (String, String, String, String, i64, i64, bool);
+
+    fn fixture(data: &[u8], filename: &str) -> (TempDir, PathBuf) {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join(filename);
+        std::fs::write(&path, data).unwrap();
+        (directory, path)
+    }
+
+    fn signature(cookie: &Cookie) -> CookieSignature {
+        (
+            cookie.domain.clone(),
+            cookie.path.clone(),
+            cookie.name.clone(),
+            cookie.value.clone(),
+            cookie.expiry_time,
+            cookie.last_access_time,
+            cookie.secure,
         )
-        .unwrap();
-        for (host, path_col, secure, expiry, name, value, last) in rows {
-            conn.execute(
-                "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![host, path_col, secure, expiry, name, value, last],
-            )
-            .unwrap();
-        }
-        drop(conn);
-        (dir, path)
     }
 
-    fn make_chromium_db(
-        rows: &[(&str, &str, i64, i64, &str, &str, i64)],
-    ) -> (TempDir, std::path::PathBuf) {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("Cookies");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute(
-            "CREATE TABLE cookies (
-                 host_key TEXT, path TEXT, secure INTEGER, expires_utc INTEGER,
-                 name TEXT, value TEXT, last_access_utc INTEGER)",
-            [],
-        )
-        .unwrap();
-        for (host, path_col, secure, expires, name, value, last) in rows {
-            conn.execute(
-                "INSERT INTO cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![host, path_col, secure, expires, name, value, last],
-            )
-            .unwrap();
-        }
-        drop(conn);
-        (dir, path)
+    fn signatures(cookies: &[Cookie]) -> Vec<CookieSignature> {
+        cookies.iter().map(signature).collect()
     }
 
     #[test]
-    fn parses_firefox_database() {
-        let (_dir, path) = make_moz_db(&[(
-            ".example.org",
-            "/",
-            0,
-            1_500_000_000,
-            "JSESSIONID",
-            Some("123456789"),
-            1_400_000_000,
-        )]);
+    fn firefox_fixture_covers_schema_mapping_and_invalid_rows() {
+        let (_directory, path) = fixture(FIREFOX_FIXTURE, "cookies.sqlite");
         let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
-        assert_eq!(cookies.len(), 1);
-        let c = &cookies[0];
-        assert_eq!(c.name, "JSESSIONID");
-        assert_eq!(c.value, "123456789");
-        assert_eq!(c.domain, "example.org", "leading dot must be stripped");
-        assert_eq!(c.path, "/");
-        assert_eq!(c.expiry_time, 1_500_000_000);
-        assert_eq!(c.last_access_time, 1_400_000_000);
-        assert_eq!(
-            c.creation_time, 1_400_000_000,
-            "C++ passes lastAccessed as creation time"
-        );
-        assert!(c.persistent);
-        assert!(!c.secure);
-        assert!(
-            !c.host_only,
-            "leading dot means the cookie spans subdomains"
-        );
-    }
-
-    #[test]
-    fn host_without_leading_dot_is_host_only() {
-        let (_dir, path) = make_moz_db(&[("example.org", "/", 1, 100, "k", Some("v"), 50)]);
-        let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
-        assert!(cookies[0].host_only);
-        assert!(cookies[0].secure, "isSecure=1 must map to secure");
-    }
-
-    #[test]
-    fn numeric_host_is_always_host_only() {
-        // Leading dot present, but an IP literal can have no subdomains.
-        let (_dir, path) = make_moz_db(&[(".192.168.0.1", "/", 0, 100, "k", Some("v"), 50)]);
-        let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
-        assert_eq!(cookies[0].domain, "192.168.0.1");
-        assert!(cookies[0].host_only);
-    }
-
-    #[test]
-    fn null_value_becomes_empty_string() {
-        let (_dir, path) = make_moz_db(&[(".example.org", "/", 0, 100, "k", None, 50)]);
-        let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
-        assert_eq!(cookies[0].value, "");
-    }
-
-    /// Bad rows are skipped, not fatal — one malformed entry must not discard
-    /// an otherwise valid browser jar.
-    #[test]
-    fn invalid_rows_are_skipped_without_failing_the_import() {
-        let (_dir, path) = make_moz_db(&[
-            ("", "/", 0, 100, "empty-host", Some("v"), 50),
+        let expected = vec![
             (
-                ".example.org",
-                "relative",
-                0,
-                100,
-                "bad-path",
-                Some("v"),
-                50,
+                "example.org".into(),
+                "/".into(),
+                "JSESSIONID".into(),
+                "123456789".into(),
+                1_500_000_000,
+                1_400_000_000,
+                false,
             ),
-            (".example.org", "/", 0, 100, "", Some("v"), 50),
-            (".example.org", "/", 0, 100, "good", Some("v"), 50),
-        ]);
-        let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
-        assert_eq!(cookies.len(), 1);
-        assert_eq!(cookies[0].name, "good");
+            (
+                "example.org".into(),
+                "/".into(),
+                "hostonly".into(),
+                "v".into(),
+                100,
+                50,
+                true,
+            ),
+            (
+                "192.168.0.1".into(),
+                "/".into(),
+                "numeric".into(),
+                "v".into(),
+                100,
+                50,
+                false,
+            ),
+            (
+                "example.org".into(),
+                "/".into(),
+                "nullvalue".into(),
+                "".into(),
+                100,
+                50,
+                false,
+            ),
+            (
+                "example.org".into(),
+                "/".into(),
+                "good".into(),
+                "v".into(),
+                100,
+                50,
+                false,
+            ),
+            (
+                "moz.test".into(),
+                "/".into(),
+                "k".into(),
+                "v".into(),
+                100,
+                50,
+                false,
+            ),
+        ];
+        assert_eq!(signatures(&cookies), expected);
+
+        let jsession = cookies
+            .iter()
+            .find(|cookie| cookie.name == "JSESSIONID")
+            .unwrap();
+        assert_eq!(jsession.creation_time, 1_400_000_000);
+        assert!(jsession.persistent);
+        assert!(
+            !jsession.host_only,
+            "leading dot means subdomains are included"
+        );
+        assert!(
+            cookies
+                .iter()
+                .find(|cookie| cookie.name == "hostonly")
+                .unwrap()
+                .host_only
+        );
+        assert!(
+            cookies
+                .iter()
+                .find(|cookie| cookie.name == "numeric")
+                .unwrap()
+                .host_only
+        );
+        assert_eq!(cookies.len(), 6, "malformed rows should be skipped");
     }
 
     #[test]
-    fn parses_chromium_database_and_converts_epoch() {
-        // Chromium stores microseconds since 1601-01-01. 13e15 µs = 13e9 s since
-        // 1601, i.e. 13_000_000_000 - 11_644_473_600 = 1_355_526_400 UNIX seconds
-        // (2012-12-15) — a plausible value, which is the point: an off-by-1000
-        // conversion bug would land far outside the representable date range and
-        // has to be caught here rather than by a user with an expired jar.
-        let (_dir, path) = make_chromium_db(&[(
-            "example.com",
-            "/app",
-            1,
-            13_000_000_000_000_000,
-            "SID",
-            "abc",
-            12_900_000_000_000_000,
-        )]);
+    fn firefox_text_timestamps_are_accepted() {
+        let (_directory, path) = fixture(FIREFOX_TEXT_FIXTURE, "cookies.sqlite");
+        let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].expiry_time, 999);
+        assert_eq!(cookies[0].last_access_time, 888);
+        assert!(cookies[0].secure);
+    }
+
+    #[test]
+    fn chromium_is_secure_fixture_matches_expected_values_and_epoch() {
+        let (_directory, path) = fixture(CHROMIUM_FIXTURE, "Cookies");
+        let cookies = Sqlite3CookieParser::parse_chromium(&path).unwrap();
+        assert_eq!(
+            signatures(&cookies),
+            vec![
+                (
+                    "example.org".into(),
+                    "/".into(),
+                    "SID".into(),
+                    "abc".into(),
+                    1_355_526_400,
+                    1_255_526_400,
+                    true
+                ),
+                (
+                    "example.net".into(),
+                    "/app".into(),
+                    "empty".into(),
+                    "".into(),
+                    1_455_526_400,
+                    1_305_526_400,
+                    false
+                ),
+            ]
+        );
+        assert!(cookies[0].host_only);
+        assert_eq!(cookies[0].creation_time, 1_255_526_400);
+    }
+
+    #[test]
+    fn chromium_legacy_secure_column_remains_supported() {
+        let (_directory, path) = fixture(CHROMIUM_LEGACY_FIXTURE, "Cookies");
         let cookies = Sqlite3CookieParser::parse_chromium(&path).unwrap();
         assert_eq!(cookies.len(), 1);
-        let c = &cookies[0];
-        assert_eq!(c.name, "SID");
-        assert_eq!(c.domain, "example.com");
-        assert_eq!(c.path, "/app");
-        assert!(c.secure);
-        assert!(c.host_only, "no leading dot -> host only");
-        assert_eq!(c.expiry_time, 1_355_526_400);
-        assert_eq!(c.last_access_time, 1_255_526_400);
+        assert_eq!(cookies[0].name, "legacy");
+        assert!(cookies[0].secure);
+    }
+
+    #[test]
+    fn chromium_wal_fixture_reads_committed_rows_without_mutating_main_file() {
+        let (_directory, path) = fixture(CHROMIUM_WAL_FIXTURE, "Cookies");
+        let main_before = std::fs::read(&path).unwrap();
+        let wal_file = wal_path(&path);
+        std::fs::write(&wal_file, CHROMIUM_WAL).unwrap();
+        assert!(std::fs::metadata(&wal_file).unwrap().len() > 32);
+
+        let cookies = Sqlite3CookieParser::parse_chromium(&path).unwrap();
         assert_eq!(
-            c.creation_time, 1_255_526_400,
-            "C++ passes last_access_utc as the creation time"
+            signatures(&cookies),
+            vec![
+                (
+                    "base.example".into(),
+                    "/".into(),
+                    "base".into(),
+                    "1".into(),
+                    1_355_526_400,
+                    1_255_526_400,
+                    false
+                ),
+                (
+                    "wal.example".into(),
+                    "/".into(),
+                    "from_wal".into(),
+                    "2".into(),
+                    1_455_526_400,
+                    1_305_526_400,
+                    true
+                ),
+            ]
         );
+        assert_eq!(std::fs::read(&path).unwrap(), main_before);
     }
 
     #[test]
-    fn parse_auto_detects_firefox() {
-        let (_dir, path) = make_moz_db(&[(".moz.test", "/", 0, 100, "k", Some("v"), 50)]);
-        let cookies = Sqlite3CookieParser::parse_auto(&path).unwrap();
-        assert_eq!(cookies[0].domain, "moz.test");
+    fn parse_auto_detects_firefox_and_falls_back_to_chromium() {
+        let (_firefox_directory, firefox_path) = fixture(FIREFOX_FIXTURE, "cookies.sqlite");
+        let firefox = Sqlite3CookieParser::parse_auto(&firefox_path).unwrap();
+        assert!(firefox.iter().any(|cookie| cookie.domain == "moz.test"));
+
+        let (_chromium_directory, chromium_path) = fixture(CHROMIUM_FIXTURE, "Cookies");
+        let chromium = Sqlite3CookieParser::parse_auto(&chromium_path).unwrap();
+        assert_eq!(chromium[0].domain, "example.org");
     }
 
-    #[test]
-    fn parse_auto_falls_back_to_chromium() {
-        let (_dir, path) =
-            make_chromium_db(&[("chrome.test", "/", 0, 13_000_000_000_000_000, "k", "v", 0)]);
-        let cookies = Sqlite3CookieParser::parse_auto(&path).unwrap();
-        assert_eq!(cookies[0].domain, "chrome.test");
-    }
-
-    /// A SQLite file with neither schema must surface the Firefox error, which
-    /// is the more useful of the two.
     #[test]
     fn parse_auto_reports_error_for_unknown_schema() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("random.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE unrelated (a INTEGER)", [])
-            .unwrap();
-        drop(conn);
-
-        let err = Sqlite3CookieParser::parse_auto(&path).unwrap_err();
+        let (_directory, path) = fixture(UNKNOWN_FIXTURE, "random.db");
+        let error = Sqlite3CookieParser::parse_auto(&path).unwrap_err();
         assert!(
-            err.to_string().contains("moz_cookies"),
-            "expected the Firefox error to be surfaced, got: {err}"
+            error.to_string().contains("moz_cookies"),
+            "expected the Firefox error to be surfaced, got: {error}"
         );
     }
 
     #[test]
     fn missing_file_is_an_error_not_a_panic() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("does-not-exist.sqlite");
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("does-not-exist.sqlite");
         assert!(Sqlite3CookieParser::parse_firefox(&path).is_err());
     }
 
-    /// End-to-end: `CookieStorage::load_file` must route by file magic, not by
-    /// filename — Chromium's jar is literally named `Cookies` with no extension.
     #[test]
     fn cookie_storage_load_file_detects_sqlite_by_magic() {
         use crate::http::cookie::CookieStorage;
 
-        let (_dir, path) = make_moz_db(&[
-            (".example.org", "/", 0, 4_000_000_000, "a", Some("1"), 50),
-            (".example.net", "/", 0, 4_000_000_000, "b", Some("2"), 50),
-        ]);
-
+        let (_directory, path) = fixture(FIREFOX_STORAGE_FIXTURE, "cookies.sqlite");
         let storage = CookieStorage::new();
-        let n = storage.load_file(&path).unwrap();
-        assert_eq!(n, 2);
+        assert_eq!(storage.load_file(&path).unwrap(), 2);
         assert_eq!(storage.count(), 2);
     }
 
-    /// The Netscape path must keep working unchanged — switching `load_file`
-    /// from `read_to_string` to `read` + lossy conversion must not regress it.
     #[test]
     fn cookie_storage_load_file_still_reads_netscape() {
         use crate::http::cookie::CookieStorage;
 
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("cookies.txt");
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("cookies.txt");
         std::fs::write(
             &path,
             "# Netscape HTTP Cookie File\n\
-             .example.org\tTRUE\t/\tFALSE\t4000000000\tk\tv\n",
+.example.org\tTRUE\t/\tFALSE\t4000000000\tk\tv\n",
         )
         .unwrap();
-
         let storage = CookieStorage::new();
         assert_eq!(storage.load_file(&path).unwrap(), 1);
     }
@@ -476,32 +541,5 @@ mod tests {
         assert!(!is_sqlite_file(b"SQLite format 3"), "15 bytes is too short");
         assert!(!is_sqlite_file(b"# Netscape HTTP Cookie File"));
         assert!(!is_sqlite_file(b""));
-    }
-
-    /// Real browser databases store timestamps as INTEGER, but hand-migrated
-    /// ones sometimes use TEXT. C++ parses the stringified column either way.
-    #[test]
-    fn text_timestamps_are_accepted() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("cookies.sqlite");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute(
-            "CREATE TABLE moz_cookies (
-                 host TEXT, path TEXT, isSecure TEXT, expiry TEXT,
-                 name TEXT, value TEXT, lastAccessed TEXT)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO moz_cookies VALUES ('.t.example', '/', '1', '999', 'k', 'v', '888')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let cookies = Sqlite3CookieParser::parse_firefox(&path).unwrap();
-        assert_eq!(cookies[0].expiry_time, 999);
-        assert_eq!(cookies[0].last_access_time, 888);
-        assert!(cookies[0].secure);
     }
 }

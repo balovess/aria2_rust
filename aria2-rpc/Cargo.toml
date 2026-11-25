@@ -45,12 +45,8 @@ tower-service = "0.3"
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json", "rustls-no-provider"] }
 tokio-tungstenite.workspace = true
-futures.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
-
-[target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 default = []

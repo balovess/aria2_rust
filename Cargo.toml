@@ -84,7 +84,7 @@ consolidate-commits = false
 shared-version = false
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"

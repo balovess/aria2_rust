@@ -514,6 +514,23 @@ behavior. An unlisted behavior has not been audited here.
   temporary directory on Windows; two storage tests were denied file access by
   the current sandbox.
 
+## Firefox and Chromium SQLite cookie import
+
+- **Supported scope:** Firefox `moz_cookies` and Chromium `cookies` are read by
+  table and column name. Chromium prefers the current `is_secure` column and
+  accepts the older `secure` spelling used by the `aria2_original` query. Its
+  Windows-epoch timestamps are converted to Unix seconds. A sibling `-wal`
+  file is applied as a read-only overlay so committed cookies not yet
+  checkpointed into the main file are visible. Encrypted Chromium values remain
+  empty, matching the existing aria2 limitation.
+- **Verification:** focused parser tests compare Firefox and Chromium fixture
+  rows against expected cookie values, including the current Chromium column
+  spelling, and read a committed WAL fixture while verifying the main database
+  bytes remain unchanged. `cargo test --offline -p aria2-core
+  http::sqlite_cookie_parser --lib` passed (11 tests). Compatibility with a
+  browser writing either file during the byte snapshot is not guaranteed; a
+  transient parse error is returned.
+
 ## HTTP Digest authentication
 
 - **Layering:** Authentication scheme-token parsing plus Digest challenge
