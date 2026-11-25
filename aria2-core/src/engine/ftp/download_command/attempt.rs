@@ -1,5 +1,6 @@
 //! FTP control-plane attempt preparation.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::checksum::checksum::Checksum;
@@ -15,6 +16,22 @@ use super::control::RawFtpControl;
 use super::execution::FtpAttemptError;
 use super::transfer::FtpReceiveTransfer;
 use super::types::FtpDownloadCommand;
+
+pub(super) fn truncate_target(
+    path: &Path,
+    description: &str,
+) -> std::result::Result<(), FtpAttemptError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_len(0))
+        .map_err(|error| {
+            FtpAttemptError::from(Aria2Error::FileIo(format!(
+                "{description} {}: {error}",
+                path.display()
+            )))
+        })
+}
 
 impl FtpDownloadCommand {
     pub(super) async fn execute_single_attempt(
@@ -288,17 +305,7 @@ impl FtpDownloadCommand {
                     path = %self.output_path.display(),
                     "FTP target checksum mismatch; restarting from byte zero"
                 );
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&self.output_path)
-                    .and_then(|file| file.set_len(0))
-                    .map_err(|error| {
-                        FtpAttemptError::from(Aria2Error::FileIo(format!(
-                            "truncate checksum-mismatched FTP target {}: {}",
-                            self.output_path.display(),
-                            error
-                        )))
-                    })?;
+                truncate_target(&self.output_path, "truncate checksum-mismatched FTP target")?;
                 self.resume_offset = 0;
                 self.flush_checkpoint().await;
                 restart_from_zero = true;
@@ -307,17 +314,7 @@ impl FtpDownloadCommand {
             if in_memory_download {
                 self.resume_offset = 0;
             } else if local_size > actual_size {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&self.output_path)
-                    .and_then(|file| file.set_len(0))
-                    .map_err(|error| {
-                        FtpAttemptError::from(Aria2Error::FileIo(format!(
-                            "truncate oversized FTP target {}: {}",
-                            self.output_path.display(),
-                            error
-                        )))
-                    })?;
+                truncate_target(&self.output_path, "truncate oversized FTP target")?;
                 self.resume_offset = 0;
                 self.flush_checkpoint().await;
             } else if !restart_from_zero {
@@ -377,17 +374,10 @@ impl FtpDownloadCommand {
             // REST rejection means RETR will send the complete object. Make
             // the restart explicit so stale bytes cannot survive past EOF.
             self.resume_offset = 0;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&self.output_path)
-                .and_then(|file| file.set_len(0))
-                .map_err(|error| {
-                    FtpAttemptError::from(Aria2Error::FileIo(format!(
-                        "truncate FTP target after REST rejection {}: {}",
-                        self.output_path.display(),
-                        error
-                    )))
-                })?;
+            truncate_target(
+                &self.output_path,
+                "truncate FTP target after REST rejection",
+            )?;
         }
 
         // Step 9: Initiate file transfer (RETR command).
