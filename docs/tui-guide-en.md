@@ -10,7 +10,7 @@ The TUI is optional. Default builds do not include the terminal UI; enable the `
 cargo build --release -p aria2 --features tui
 ```
 
-Binary releases provide `*-minimal`, `*-standard`, `*-tui`, and `*-full` packages. TUI users should choose `*-tui` or `*-full`.
+The prebuilt TUI package is `*-full`. To build a smaller TUI binary without Metalink and SFTP, build from source with `--features tui`.
 
 ## Start
 

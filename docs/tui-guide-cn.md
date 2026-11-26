@@ -10,7 +10,7 @@ TUI 是可选功能。默认构建不包含终端 UI；需要使用 TUI 时请�
 cargo build --release -p aria2 --features tui
 ```
 
-发行版同时提供 `*-minimal`、`*-standard`、`*-tui` 和 `*-full` 四类二进制包。TUI 用户请选择 `*-tui` 或 `*-full`。
+预编译 TUI 包为 `*-full`。如果希望构建不含 Metalink 和 SFTP 的较小 TUI 二进制，可从源码启用 `--features tui`。
 
 ## 启动
 

@@ -6,16 +6,15 @@ English: [`release-artifacts-en.md`](release-artifacts-en.md)
 
 ## 版本类型
 
-每个平台发布四种二进制包：
+每个平台发布三种二进制包：
 
 | 后缀 | 内容 | 适合用户 |
 | --- | --- | --- |
 | `-minimal` | HTTP/FTP + RPC，不含 BitTorrent 和 TUI | 服务器、脚本、低依赖部署 |
 | `-standard` | HTTP/FTP + BitTorrent + RPC，不含 TUI | 常规下载和远程控制 |
-| `-tui` | 包含本地 TUI、RPC TUI 和多语言资源 | 交互式终端用户 |
-| `-full` | standard + Metalink + SFTP + TUI | 需要完整协议支持的用户 |
+| `-full` | standard + TUI + Metalink + SFTP | 需要完整协议支持的用户 |
 
-`-minimal` 构建启用 HTTP/FTP，同时保留 JSON-RPC/XML-RPC/WebSocket 服务；它不包含 BitTorrent、TUI 及 TUI 的额外依赖。RPC 在 `-standard` 中也可用；Cargo 的 `rpc` feature 是档位标记，不是源码裁剪开关。`-standard` 增加 BitTorrent；`-tui` 增加本地 TUI 及其依赖；`-full` 再增加 Metalink 和 SFTP。
+`-minimal` 构建启用 HTTP/FTP，同时保留 JSON-RPC/XML-RPC/WebSocket 服务；它不包含 BitTorrent 和 TUI 依赖。RPC 在 `-standard` 中也可用；Cargo 的 `rpc` feature 是档位标记，不是源码裁剪开关。`-standard` 增加 BitTorrent。预编译的 `-full` 包增加 TUI、Metalink 和 SFTP。如需不带 Metalink/SFTP 的 TUI 版本，可从源码用 `--features tui` 构建。
 
 ## 当前平台
 
@@ -32,7 +31,6 @@ English: [`release-artifacts-en.md`](release-artifacts-en.md)
 ```text
 aria2-x86_64-linux-minimal.tar.gz
 aria2-x86_64-linux-standard.tar.gz
-aria2-x86_64-linux-tui.tar.gz
 aria2-x86_64-linux-full.tar.gz
 ```
 
@@ -42,7 +40,7 @@ aria2-x86_64-linux-full.tar.gz
 
 - Dev CI 只支持手动触发（GitHub Actions 的 `workflow_dispatch`），不会因提交或创建 Pull Request 自动运行。
 - Release 工作流在每次推送到 `master` 时运行，也可从 `master` 手动触发。只有版本号生成的 tag 尚不存在时才创建新二进制 Release；已有 Release 可通过手动触发重试包管理器更新。
-- Release 页面会自动生成四档产物选择表，并附带每个平台的校验文件。
+- Release 页面会自动生成三档产物选择表，并附带每个平台的校验文件。
 
 ## 从源码构建
 

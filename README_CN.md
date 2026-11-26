@@ -76,8 +76,8 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 生命周期边界，以及与 aria2 C++ 的可比性能基线。这些不是核心协议实现缺失，
 而是兼容性矩阵中明确保留的最终验收边界。
 
-二进制 Release 提供 `minimal`、`standard`、`tui` 和 `full` 四种功能档位，
-详见 [Release 产物说明](docs/release-artifacts-cn.md)。
+二进制 Release 提供 `minimal`、`standard` 和 `full` 三种预编译档位；
+`tui` feature 仍可用于源码构建。详见 [Release 产物说明](docs/release-artifacts-cn.md)。
 
 ## 特性
 
@@ -109,8 +109,9 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 ### 安装 Release
 
 预编译产物发布在 [GitHub Releases](https://github.com/balovess/aria2_rust/releases)。
-每个平台提供 `minimal`、`standard`、`tui` 和 `full` 四种版本，并附带对应的
-SHA-256 校验文件。选择版本前请先阅读 [Release 产物说明](docs/release-artifacts-cn.md)。
+每个平台提供 `minimal`、`standard` 和 `full` 三种版本，并附带对应的
+SHA-256 校验文件。`tui` feature 仍可用于源码构建。选择版本前请先阅读
+[Release 产物说明](docs/release-artifacts-cn.md)。
 
 ### 一键安装
 

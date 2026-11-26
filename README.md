@@ -67,9 +67,10 @@ and RPC services.
 Phosona Manager will also ship a new P2P network model focused on sharing and
 incentive mechanisms, inspired by BitTorrent, eMule, and similar systems.
 
-Binary releases are available in four feature tiers; see the
+Binary releases are available in three feature tiers; see the
 [release artifact guide](docs/release-artifacts-en.md) to choose between
-`minimal`, `standard`, `tui`, and `full`.
+`minimal`, `standard`, and `full`. The `tui` feature remains available for
+source builds.
 
 ## Implemented Capabilities
 
@@ -108,7 +109,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 
 ### Install a Release
 
-Prebuilt artifacts are published on the [GitHub Releases](https://github.com/balovess/aria2_rust/releases) page. Each platform has `minimal`, `standard`, `tui`, and `full` variants with matching SHA-256 files. See the [release artifact guide](docs/release-artifacts-en.md) before choosing a variant.
+Prebuilt artifacts are published on the [GitHub Releases](https://github.com/balovess/aria2_rust/releases) page. Each platform has `minimal`, `standard`, and `full` variants with matching SHA-256 files. The `tui` feature remains available for source builds. See the [release artifact guide](docs/release-artifacts-en.md) before choosing a variant.
 
 ### One-Line Installation
 
