@@ -137,7 +137,7 @@ authentication and firewall rules before publishing it on other interfaces.
 |----------|---------|
 | Homebrew (macOS/Linux) | `brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git && brew install balovess/aria2_rust/aria2-rust` |
 | Scoop (Windows x64) | `scoop bucket add aria2 https://github.com/balovess/aria2_rust.git && scoop install aria2/aria2-rust` |
-| Cargo (from source) | `cargo install --path aria2` |
+| Cargo (from source) | `cargo install --path aria2 --features standard` |
 
 The Homebrew formula builds the full feature set from the tagged source archive
 and works on supported macOS and Linux Intel/ARM hosts. The Scoop manifest
@@ -200,25 +200,28 @@ cookies, DHT state, and server statistics are enabled only by explicit options.
 - Windows / macOS / Linux
 
 **Build Commands:**
+
+Workspace defaults are empty: a plain workspace build compiles the libraries but does not produce `aria2c`. Select a binary feature set explicitly; `http` is the minimal CLI, and `standard` enables HTTP, BitTorrent, and RPC.
+
 ```bash
 # Clone the repository
 git clone https://github.com/balovess/aria2_rust.git
 cd aria2_rust
 
-# Build all crates
-cargo build --release
+# Build the standard aria2c binary (HTTP, BitTorrent, and RPC)
+cargo build --release -p aria2 --features standard
 
 # Download a file (HTTP)
-cargo run --release -- http://example.com/file.zip
+cargo run --release -p aria2 --features standard -- http://example.com/file.zip
 
 # Download with custom options
-cargo run --release -- -d ./downloads -s 4 http://example.com/large.iso
+cargo run --release -p aria2 --features standard -- -d ./downloads -s 4 http://example.com/large.iso
 
 # Show help
-cargo run --release -- --help
+cargo run --release -p aria2 --features standard -- --help
 
 # Show version
-cargo run --release -- --version
+cargo run --release -p aria2 --features standard -- --version
 ```
 
 </details>
@@ -556,21 +559,23 @@ async fn main() {
 
 ### Build Commands
 
+Workspace defaults are empty: a plain workspace build compiles the libraries but does not produce `aria2c`. Select a binary feature set explicitly; `http` is the minimal CLI, and `standard` enables HTTP, BitTorrent, and RPC.
+
 ```bash
 # Debug build (fast compilation)
-cargo build
+cargo build -p aria2 --features standard
 
 # Release build (optimized)
-cargo build --release
+cargo build --release -p aria2 --features standard
 
 # Run tests
-cargo test --workspace
+cargo test --workspace --features aria2/standard
 
 # Generate documentation
 cargo doc --workspace --no-deps
 
 # Run a specific example
-cargo run -p aria2 --example simple_download -- http://example.com/test.bin
+cargo run -p aria2 --features standard --example simple_download -- http://example.com/test.bin
 ```
 
 ## Testing
@@ -579,19 +584,19 @@ cargo run -p aria2 --example simple_download -- http://example.com/test.bin
 
 ```bash
 # Run all tests in workspace
-cargo test --workspace
+cargo test --workspace --features aria2/standard
 
 # Run tests for specific crate
 cargo test -p aria2-core
 
 # Run tests with verbose output
-cargo test --workspace -- --nocapture
+cargo test --workspace --features aria2/standard -- --nocapture
 
 # Run specific test category
-cargo test "test_e2e"      # E2E tests
-cargo test "test_stress"   # Stress tests
-cargo test "test_edge"     # Edge case tests
-cargo test "test_error"    # Error path tests
+cargo test --workspace --features aria2/standard test_e2e
+cargo test --workspace --features aria2/standard test_stress
+cargo test --workspace --features aria2/standard test_edge
+cargo test --workspace --features aria2/standard test_error
 ```
 
 ### Test Categories

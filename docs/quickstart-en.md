@@ -5,13 +5,13 @@
 The repository currently supports building from Rust source. Install Rust stable and Cargo, then run:
 
 ```text
-cargo build -p aria2 --release
+cargo build -p aria2 --release --features standard
 ```
 
 The binary is `target/release/aria2c` (`target/release/aria2c.exe` on Windows). The default build includes HTTP, BitTorrent, and RPC. Enable Metalink or SFTP explicitly when needed:
 
 ```text
-cargo build -p aria2 --release --features "metalink,sftp"
+cargo build -p aria2 --release --features "standard,metalink,sftp"
 ```
 
 ## 2. First download

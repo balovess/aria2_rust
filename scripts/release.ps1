@@ -28,7 +28,7 @@ Write-Host ""
 # Step 1: Run tests
 Write-Host "Step 1: Running tests..."
 Push-Location $PROJECT_ROOT
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features aria2/standard
 Write-Host "  ✓ Tests passed"
 Write-Host ""
 

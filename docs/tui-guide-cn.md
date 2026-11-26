@@ -74,5 +74,5 @@ RPC 模式每页读取 100 个 waiting 和 100 个 stopped 历史任务，active
 资源在编译后嵌入程序并缓存解析结果。完整性测试会检查 TOML 可解析、字段非空、表头和状态数量正确，以及 `{page}`、`{next}`、`{message}` 占位符可用：
 
 ```bash
-cargo test -p aria2 --lib resources::tests
+cargo test -p aria2 --features tui --lib resources::tests
 ```

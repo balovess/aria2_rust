@@ -9,7 +9,7 @@ aria2c --version
 aria2c --help
 ```
 
-Build from source with `cargo build -p aria2 --release`. The Windows executable is `aria2c.exe`. Relative paths for ports, logs, sessions, and downloads are resolved from the current working directory.
+Build the standard binary from source with `cargo build -p aria2 --release --features standard`. The Windows executable is `aria2c.exe`. Relative paths for ports, logs, sessions, and downloads are resolved from the current working directory.
 
 ## Configuration errors or ignored settings
 

@@ -74,5 +74,5 @@ Translation resources live in `aria2/src/ui/resources/`, with one TOML file per 
 Resources are embedded into the binary and parsed once, then cached. The completeness test checks TOML parsing, non-empty fields, required array sizes, and the `{page}`, `{next}`, and `{message}` placeholders:
 
 ```bash
-cargo test -p aria2 --lib resources::tests
+cargo test -p aria2 --features tui --lib resources::tests
 ```
