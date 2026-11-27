@@ -2,7 +2,6 @@
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
-use std::fmt;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,24 +71,13 @@ pub(crate) enum RetryOutcome<T> {
     Exhausted(T),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum WorkScheduleError {
+    #[error("duplicate work item {}", .0.value())]
     DuplicateId(WorkId),
+    #[error("work item {} has no active lease", .0.value())]
     InvalidLease(WorkId),
 }
-
-impl fmt::Display for WorkScheduleError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateId(id) => write!(formatter, "duplicate work item {}", id.value()),
-            Self::InvalidLease(id) => {
-                write!(formatter, "work item {} has no active lease", id.value())
-            }
-        }
-    }
-}
-
-impl std::error::Error for WorkScheduleError {}
 
 struct ReadyWork<T> {
     item: WorkItem<T>,

@@ -1,6 +1,5 @@
 //! Public BEP 9 metadata exchange interface backed by torrent peer actors.
 
-use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,52 +17,39 @@ const PIECE_SIZE_MIN: u32 = 1024;
 const PIECE_SIZE_MAX: u32 = 65536;
 const DEFAULT_MAX_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum MetadataExchangeError {
+    #[error("No peers available for metadata fetch")]
     NoPeersAvailable,
-    AllPeersFailed {
-        attempts: usize,
-        last_error: String,
-    },
-    PeerConnectFailed {
-        addr: String,
-        reason: String,
-    },
-    PeerTimeout {
-        addr: String,
-    },
-    UnsupportedPeer {
-        addr: String,
-        reason: String,
-    },
-    InvalidMetadataSize {
-        size: u64,
-    },
-    InvalidPieceSize {
-        size: u32,
-    },
-    MetadataTooLarge {
-        size: u64,
-        max: u64,
-    },
+    #[error("All {attempts} peers failed, last error: {last_error}")]
+    AllPeersFailed { attempts: usize, last_error: String },
+    #[error("Connect to {addr} failed: {reason}")]
+    PeerConnectFailed { addr: String, reason: String },
+    #[error("Connect to {addr} timed out")]
+    PeerTimeout { addr: String },
+    #[error("Peer {addr} unsupported: {reason}")]
+    UnsupportedPeer { addr: String, reason: String },
+    #[error("Invalid metadata_size: {size}")]
+    InvalidMetadataSize { size: u64 },
+    #[error("Invalid metadata piece size: {size}")]
+    InvalidPieceSize { size: u32 },
+    #[error("metadata_size too large: {size} (max {max})")]
+    MetadataTooLarge { size: u64, max: u64 },
+    #[error("Invalid metadata piece {piece} length: {size} bytes (expected {expected})")]
     InvalidMetadataPiece {
         piece: u32,
         size: u64,
         expected: u64,
     },
-    BencodeDecodeFailed {
-        detail: String,
-    },
-    PieceRejected {
-        piece: u32,
-    },
-    PieceTimeout {
-        piece: u32,
-    },
-    IncompleteMetadata {
-        expected: u64,
-        received: u64,
-    },
+    #[error("Bencode decode failed: {detail}")]
+    BencodeDecodeFailed { detail: String },
+    #[error("Piece {piece} rejected by peer")]
+    PieceRejected { piece: u32 },
+    #[error("ut_metadata timeout for piece {piece}")]
+    PieceTimeout { piece: u32 },
+    #[error("Incomplete metadata collection: expected {expected} bytes, received {received}")]
+    IncompleteMetadata { expected: u64, received: u64 },
+    #[error("IO error: {0}")]
     IoError(String),
 }
 
@@ -77,48 +63,6 @@ impl MetadataExchangeError {
         }
     }
 }
-
-impl fmt::Display for MetadataExchangeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoPeersAvailable => write!(f, "No peers available for metadata fetch"),
-            Self::AllPeersFailed {
-                attempts,
-                last_error,
-            } => write!(f, "All {attempts} peers failed, last error: {last_error}"),
-            Self::PeerConnectFailed { addr, reason } => {
-                write!(f, "Connect to {addr} failed: {reason}")
-            }
-            Self::PeerTimeout { addr } => write!(f, "Connect to {addr} timed out"),
-            Self::UnsupportedPeer { addr, reason } => {
-                write!(f, "Peer {addr} unsupported: {reason}")
-            }
-            Self::InvalidMetadataSize { size } => write!(f, "Invalid metadata_size: {size}"),
-            Self::InvalidPieceSize { size } => write!(f, "Invalid metadata piece size: {size}"),
-            Self::MetadataTooLarge { size, max } => {
-                write!(f, "metadata_size too large: {size} (max {max})")
-            }
-            Self::InvalidMetadataPiece {
-                piece,
-                size,
-                expected,
-            } => write!(
-                f,
-                "Invalid metadata piece {piece} length: {size} bytes (expected {expected})"
-            ),
-            Self::BencodeDecodeFailed { detail } => write!(f, "Bencode decode failed: {detail}"),
-            Self::PieceRejected { piece } => write!(f, "Piece {piece} rejected by peer"),
-            Self::PieceTimeout { piece } => write!(f, "ut_metadata timeout for piece {piece}"),
-            Self::IncompleteMetadata { expected, received } => write!(
-                f,
-                "Incomplete metadata collection: expected {expected} bytes, received {received}"
-            ),
-            Self::IoError(message) => write!(f, "IO error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for MetadataExchangeError {}
 
 #[derive(Clone, Copy)]
 pub struct MetadataExchangeConfig {

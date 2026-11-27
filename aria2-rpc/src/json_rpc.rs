@@ -1,38 +1,28 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum JsonRpcError {
+    #[error("Parse error: {0}")]
     ParseError(String),
+    #[error("Invalid Request: {0}")]
     InvalidRequest(String),
+    #[error("Method not found: {0}")]
     MethodNotFound(String),
+    #[error("Invalid params: {0}")]
     InvalidParams(String),
+    #[error("Internal error: {0}")]
     InternalError(String),
+    #[error("Server error ({0}): {1}")]
     ServerError(i32, String),
     /// Domain error (e.g. "GID not found", "No such method") — code: 1 (matches C++).
+    #[error("Error: {0}")]
     RpcExecution(String),
     /// Authentication failure; aria2 reports this as execution error code 1.
+    #[error("Unauthorized: {0}")]
     Unauthorized(String),
 }
-
-impl fmt::Display for JsonRpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ParseError(s) => write!(f, "Parse error: {}", s),
-            Self::InvalidRequest(s) => write!(f, "Invalid Request: {}", s),
-            Self::MethodNotFound(s) => write!(f, "Method not found: {}", s),
-            Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
-            Self::InternalError(s) => write!(f, "Internal error: {}", s),
-            Self::ServerError(code, s) => write!(f, "Server error ({}): {}", code, s),
-            Self::RpcExecution(s) => write!(f, "Error: {}", s),
-            Self::Unauthorized(s) => write!(f, "Unauthorized: {}", s),
-        }
-    }
-}
-
-impl std::error::Error for JsonRpcError {}
 
 impl JsonRpcError {
     pub fn code(&self) -> i32 {

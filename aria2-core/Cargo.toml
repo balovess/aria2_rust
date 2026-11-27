@@ -20,11 +20,11 @@ crate-type = ["rlib", "cdylib"]
 # All io_uring code is Linux-only behind this feature flag.
 # Enabling `io_uring` on non-Linux platforms will fail to compile because
 # `tokio-uring` only builds on Linux. This is expected and documented.
-default = []
+default = ["sqlite-cookie"]
 io_uring = ["dep:tokio-uring"]
+sqlite-cookie = ["dep:sqlite-core"]
 bittorrent = [
     "aria2-protocol/bittorrent",
-    "dep:rc4",
     "dep:tokio-tungstenite",
     "dep:webpki-roots",
 ]
@@ -89,11 +89,10 @@ p12_q3 = { workspace = true }
 pkcs5 = { version = "0.8.1", default-features = false, features = ["alloc", "pbes2", "sha1-insecure"] }
 yasna = { version = "0.6", features = ["std"] }
 yasna_compat = { package = "yasna", version = "0.5", features = ["std"] }
-rc4 = { version = "0.2", optional = true }
 dashmap = "6.2"
 terminal_size = "0.4"
 # Read-only, pure-Rust SQLite file reader for Firefox/Chromium cookie jars.
-sqlite-core = "0.12.0"
+sqlite-core = { version = "0.12.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

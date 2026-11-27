@@ -16,87 +16,32 @@ use serde_json::Value;
 // =========================================================================
 
 /// Error type for option validation failures.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum OptionError {
-    TypeMismatch {
-        expected: String,
-        got: String,
-    },
+    #[error("type mismatch for option: expected '{expected}', got '{got}'")]
+    TypeMismatch { expected: String, got: String },
+    #[error("value '{value}' is out of range [{min}..{max}]")]
     OutOfRange {
         value: String,
         min: String,
         max: String,
     },
-    InvalidChoice {
-        value: String,
-        allowed: Vec<String>,
-    },
-    InvalidUrl {
-        url: String,
-        reason: String,
-    },
-    InvalidPath {
-        path: String,
-        reason: String,
-    },
-    PatternMismatch {
-        value: String,
-        pattern: String,
-    },
+    #[error("invalid choice '{value}', allowed values: {}", .allowed.join(", "))]
+    InvalidChoice { value: String, allowed: Vec<String> },
+    #[error("invalid URL '{url}': {reason}")]
+    InvalidUrl { url: String, reason: String },
+    #[error("invalid path '{path}': {reason}")]
+    InvalidPath { path: String, reason: String },
+    #[error("value '{value}' does not match pattern '{pattern}'")]
+    PatternMismatch { value: String, pattern: String },
+    #[error("option '{option}' conflicts with '{conflicts_with}'")]
     DependencyConflict {
         option: String,
         conflicts_with: String,
     },
-    MissingDependency {
-        option: String,
-        requires: String,
-    },
+    #[error("option '{option}' requires '{requires}' to be set")]
+    MissingDependency { option: String, requires: String },
 }
-
-impl fmt::Display for OptionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TypeMismatch { expected, got } => {
-                write!(
-                    f,
-                    "type mismatch for option: expected '{}', got '{}'",
-                    expected, got
-                )
-            }
-            Self::OutOfRange { value, min, max } => {
-                write!(f, "value '{}' is out of range [{}..{}]", value, min, max)
-            }
-            Self::InvalidChoice { value, allowed } => {
-                write!(
-                    f,
-                    "invalid choice '{}', allowed values: {}",
-                    value,
-                    allowed.join(", ")
-                )
-            }
-            Self::InvalidUrl { url, reason } => {
-                write!(f, "invalid URL '{}': {}", url, reason)
-            }
-            Self::InvalidPath { path, reason } => {
-                write!(f, "invalid path '{}': {}", path, reason)
-            }
-            Self::PatternMismatch { value, pattern } => {
-                write!(f, "value '{}' does not match pattern '{}'", value, pattern)
-            }
-            Self::DependencyConflict {
-                option,
-                conflicts_with,
-            } => {
-                write!(f, "option '{}' conflicts with '{}'", option, conflicts_with)
-            }
-            Self::MissingDependency { option, requires } => {
-                write!(f, "option '{}' requires '{}' to be set", option, requires)
-            }
-        }
-    }
-}
-
-impl std::error::Error for OptionError {}
 
 // =========================================================================
 // Validator Trait

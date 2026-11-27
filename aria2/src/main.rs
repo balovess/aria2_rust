@@ -22,6 +22,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // one runtime worker per logical CPU while retaining responsiveness when a
 // protocol path performs a bounded synchronous operation.
 fn main() {
+    if let Some(result) = update_check::run_update_helper_if_requested() {
+        if let Err(error) = result {
+            eprintln!("Update installation failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let result = std::thread::Builder::new()
         .name("aria2-main".into())
         .stack_size(8 * 1024 * 1024)
@@ -71,7 +78,12 @@ async fn async_main() {
 
     if matches!(cli.command, Some(Commands::CheckUpdate)) {
         match update_check::check_now().await {
-            Ok(Some(version)) => println!("A newer aria2-rust release is available: {version}"),
+            Ok(Some(version)) => {
+                println!("A newer aria2-rust release is available: {version}");
+                if let Err(error) = update_check::offer_update(&version).await {
+                    eprintln!("Update action failed: {error}");
+                }
+            }
             Ok(None) => println!("aria2-rust is up to date."),
             Err(error) => {
                 eprintln!("Update check failed: {error}");

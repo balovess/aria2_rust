@@ -202,7 +202,7 @@ cookies, DHT state, and server statistics are enabled only by explicit options.
 
 **Build Commands:**
 
-Workspace defaults are empty: a plain workspace build compiles the libraries but does not produce `aria2c`. Select a binary feature set explicitly; `http` is the minimal CLI, and `standard` enables HTTP, BitTorrent, and RPC.
+Workspace defaults are empty: a plain workspace build compiles the libraries but does not produce `aria2c`. Select a binary feature set explicitly; `http` is the minimal CLI, and `standard` enables HTTP, BitTorrent, RPC, and browser SQLite cookie import. The minimal CLI can opt into browser cookie import with `--features http,sqlite-cookie`; core library users can disable its default `sqlite-cookie` feature with `--no-default-features`.
 
 ```bash
 # Clone the repository

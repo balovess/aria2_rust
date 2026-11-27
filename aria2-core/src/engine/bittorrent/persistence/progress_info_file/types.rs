@@ -199,24 +199,15 @@ impl BtProgress {
 // ===========================================================================
 
 /// Error type for [`hex_to_info_hash`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HexInfoHashError {
     /// The input string is not exactly 40 characters.
+    #[error("info hash must be 40 hex characters")]
     InvalidLength,
     /// A hex digit could not be parsed.
+    #[error("invalid hex digit in info hash")]
     InvalidHex,
 }
-
-impl std::fmt::Display for HexInfoHashError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HexInfoHashError::InvalidLength => write!(f, "info hash must be 40 hex characters"),
-            HexInfoHashError::InvalidHex => write!(f, "invalid hex digit in info hash"),
-        }
-    }
-}
-
-impl std::error::Error for HexInfoHashError {}
 
 /// Parse a 40-character hex string into a 20-byte info hash.
 pub fn hex_to_info_hash(hex: &str) -> std::result::Result<[u8; 20], HexInfoHashError> {

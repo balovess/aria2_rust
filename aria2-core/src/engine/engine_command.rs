@@ -114,22 +114,13 @@ struct QueuedEngineCommand {
     command: EngineCommand,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EngineCommandSendError {
+    #[error("engine command queue is full")]
     Full,
+    #[error("engine command queue is closed")]
     Closed,
 }
-
-impl std::fmt::Display for EngineCommandSendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Full => f.write_str("engine command queue is full"),
-            Self::Closed => f.write_str("engine command queue is closed"),
-        }
-    }
-}
-
-impl std::error::Error for EngineCommandSendError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineCommandTryRecvError {

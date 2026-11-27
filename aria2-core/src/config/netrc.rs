@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -34,24 +33,15 @@ pub struct NetRcFile {
     path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum NetRcError {
+    #[error("netrc file not found: {0}")]
     FileNotFound(String),
+    #[error("netrc parse error: {0}")]
     ParseError(String),
+    #[error("netrc io error: {0}")]
     IoError(String),
 }
-
-impl fmt::Display for NetRcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FileNotFound(p) => write!(f, "netrc file not found: {}", p),
-            Self::ParseError(e) => write!(f, "netrc parse error: {}", e),
-            Self::IoError(e) => write!(f, "netrc io error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for NetRcError {}
 
 impl NetRcFile {
     pub fn new() -> Self {

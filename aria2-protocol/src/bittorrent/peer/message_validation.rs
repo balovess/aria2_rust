@@ -6,31 +6,16 @@
 //! consistency, and info-hash matching. This is protocol validation against
 //! torrent geometry; download scheduling and piece policy remain in core.
 
-use std::fmt;
-
 use crate::bittorrent::message::types::BtMessage;
 
 /// Message received without the peer capability required to send it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PeerMessageCapabilityError {
+    #[error("peer sent a Fast Extension message without negotiating Fast Extension")]
     FastExtensionNotNegotiated,
+    #[error("peer sent an extended message without negotiating extended messaging")]
     ExtendedMessagingNotNegotiated,
 }
-
-impl fmt::Display for PeerMessageCapabilityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FastExtensionNotNegotiated => {
-                f.write_str("peer sent a Fast Extension message without negotiating Fast Extension")
-            }
-            Self::ExtendedMessagingNotNegotiated => {
-                f.write_str("peer sent an extended message without negotiating extended messaging")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PeerMessageCapabilityError {}
 
 /// Validate that a message is permitted by the capabilities in the peer handshake.
 pub fn validate_message_capabilities(
@@ -67,11 +52,15 @@ pub const MAX_BLOCK_LENGTH: u32 = 64 * 1024;
 
 /// Errors produced by [`BtMessageValidator`] when a message fails domain
 /// validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BtMessageValidationError {
     /// Piece index exceeds the total number of pieces in the torrent.
+    #[error("piece index {index} out of range (num_pieces={num_pieces})")]
     IndexOutOfRange { index: u32, num_pieces: u32 },
     /// `begin + length` exceeds the piece length for the given piece index.
+    #[error(
+        "block out of range: index={index}, begin={begin}, length={length}, piece_length={piece_length}"
+    )]
     BlockOutOfRange {
         index: u32,
         begin: u32,
@@ -79,65 +68,21 @@ pub enum BtMessageValidationError {
         piece_length: u32,
     },
     /// Bitfield byte count does not match the expected number of pieces.
+    #[error(
+        "bitfield length {bitfield_len} does not match expected {} bytes ({expected_pieces} pieces)",
+        (*expected_pieces as usize).div_ceil(8)
+    )]
     BitfieldLengthMismatch {
         bitfield_len: usize,
         expected_pieces: u32,
     },
     /// Received info-hash does not match the expected hash.
+    #[error("info-hash mismatch")]
     InfoHashMismatch,
     /// Block length exceeds the configured maximum.
+    #[error("block length {length} exceeds maximum {max_block_length}")]
     InvalidBlockLength { length: u32, max_block_length: u32 },
 }
-
-impl fmt::Display for BtMessageValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::IndexOutOfRange { index, num_pieces } => {
-                write!(
-                    f,
-                    "piece index {} out of range (num_pieces={})",
-                    index, num_pieces
-                )
-            }
-            Self::BlockOutOfRange {
-                index,
-                begin,
-                length,
-                piece_length,
-            } => {
-                write!(
-                    f,
-                    "block out of range: index={}, begin={}, length={}, piece_length={}",
-                    index, begin, length, piece_length
-                )
-            }
-            Self::BitfieldLengthMismatch {
-                bitfield_len,
-                expected_pieces,
-            } => {
-                let expected_bytes = (*expected_pieces as usize).div_ceil(8);
-                write!(
-                    f,
-                    "bitfield length {} does not match expected {} bytes ({} pieces)",
-                    bitfield_len, expected_bytes, expected_pieces
-                )
-            }
-            Self::InfoHashMismatch => write!(f, "info-hash mismatch"),
-            Self::InvalidBlockLength {
-                length,
-                max_block_length,
-            } => {
-                write!(
-                    f,
-                    "block length {} exceeds maximum {}",
-                    length, max_block_length
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for BtMessageValidationError {}
 
 // ---------------------------------------------------------------------------
 // Validator

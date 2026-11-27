@@ -153,6 +153,7 @@ impl App {
                 _ => None,
             });
         let tui_enabled = cli.general.tui || matches!(cli.command, Some(Commands::Tui { .. }));
+        let non_interactive = cli.general.non_interactive;
 
         // Apply --no-color flag + TTY detection: disable colored output when
         // the user requests it OR when stdout is not a terminal (e.g. piped).
@@ -308,9 +309,17 @@ impl App {
 
         let quiet = self.get_opt_bool("quiet").await.unwrap_or(false);
         let output_to_stderr = self.get_opt_bool("stderr").await.unwrap_or(false);
+        let input_file = self.get_opt_str("input-file").await;
+        let reads_stdin = input_file.as_deref().is_some_and(|path| {
+            path == "-" || path == "/dev/stdin" || path.eq_ignore_ascii_case("CON")
+        });
 
         if !quiet
             && !daemon_mode
+            && !non_interactive
+            && !tui_enabled
+            && !reads_stdin
+            && std::io::stdin().is_terminal()
             && std::io::stdout().is_terminal()
             && self.get_opt_bool("update-check").await.unwrap_or(true)
         {

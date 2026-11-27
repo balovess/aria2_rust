@@ -207,6 +207,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
@@ -248,7 +249,6 @@ dependencies = [
  "pbkdf2 0.13.0",
  "pkcs5",
  "rand 0.10.4",
- "rc4",
  "regex",
  "reqwest",
  "ring",
@@ -3570,15 +3570,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62c64daa8e9438b84aaae55010a93f396f8e60e3911590fcba770d04643fc1dd"
 dependencies = [
  "cipher 0.4.4",
-]
-
-[[package]]
-name = "rc4"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840038b674daa9f7a7957440d937951d15c0143c056e631e529141fd780e0c92"
-dependencies = [
- "cipher 0.5.2",
 ]
 
 [[package]]

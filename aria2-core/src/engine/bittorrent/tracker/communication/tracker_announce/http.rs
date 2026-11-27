@@ -2,24 +2,17 @@ use super::*;
 
 const MAX_TRACKER_HTTP_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Debug, thiserror::Error)]
 enum TrackerBodyReadError {
+    #[error(
+        "HTTP tracker response exceeds {} byte limit",
+        MAX_TRACKER_HTTP_RESPONSE_BYTES
+    )]
     TooLarge,
+    #[error("HTTP tracker response size overflow")]
     SizeOverflow,
-    Transport(reqwest::Error),
-}
-
-impl std::fmt::Display for TrackerBodyReadError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TooLarge => write!(
-                formatter,
-                "HTTP tracker response exceeds {} byte limit",
-                MAX_TRACKER_HTTP_RESPONSE_BYTES
-            ),
-            Self::SizeOverflow => formatter.write_str("HTTP tracker response size overflow"),
-            Self::Transport(error) => write!(formatter, "Read body failed: {error}"),
-        }
-    }
+    #[error("Read body failed: {0}")]
+    Transport(#[source] reqwest::Error),
 }
 
 fn ensure_tracker_response_size(size: usize) -> Result<(), TrackerBodyReadError> {

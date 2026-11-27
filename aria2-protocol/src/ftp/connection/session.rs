@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 use std::time::SystemTime;
-use std::{error::Error, fmt};
-
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 use tracing::debug;
 
@@ -16,54 +14,32 @@ use super::parsing::{
     parse_pwd_response, parse_size_response, split_decoded_remote_path,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FtpControlSessionError {
-    Read(FtpControlReadError),
+    #[error("{0}")]
+    Read(#[source] FtpControlReadError),
+    #[error("FTP response timeout after {0:?}")]
     ReadTimeout(Duration),
-    Write(FtpControlWriteError),
+    #[error("{0}")]
+    Write(#[source] FtpControlWriteError),
+    #[error("{0}")]
     InvalidResponse(String),
+    #[error("incomplete FTP response")]
     IncompleteResponse,
+    #[error("Max FTP recv buffer reached. length={0}")]
     ResponseTooLarge(usize),
+    #[error(
+        "{} rejected with {} {}",
+        .command,
+        .response.code,
+        .response.message
+    )]
     Rejected {
         command: &'static str,
         response: FtpControlResponse,
     },
+    #[error("{0}")]
     InvalidValue(String),
-}
-
-impl fmt::Display for FtpControlSessionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read(error) => error.fmt(formatter),
-            Self::ReadTimeout(timeout) => {
-                write!(formatter, "FTP response timeout after {timeout:?}")
-            }
-            Self::Write(error) => error.fmt(formatter),
-            Self::InvalidResponse(message) | Self::InvalidValue(message) => {
-                formatter.write_str(message)
-            }
-            Self::IncompleteResponse => formatter.write_str("incomplete FTP response"),
-            Self::ResponseTooLarge(bytes) => {
-                write!(formatter, "Max FTP recv buffer reached. length={bytes}")
-            }
-            Self::Rejected { command, response } => write!(
-                formatter,
-                "{command} rejected with {} {}",
-                response.code, response.message
-            ),
-        }
-    }
-}
-
-impl Error for FtpControlSessionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Read(error) => Some(error),
-            Self::ReadTimeout(_) => None,
-            Self::Write(error) => Some(error),
-            _ => None,
-        }
-    }
 }
 
 /// Parsed FTP response. Multiline response text is joined with newline bytes.

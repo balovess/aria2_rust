@@ -53,7 +53,8 @@ pub(crate) struct AnnounceResponse {
     pub(crate) leechers: Option<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 pub(crate) struct AnnounceError {
     pub(crate) kind: TrackerFailureKind,
     message: String,
@@ -65,12 +66,6 @@ impl AnnounceError {
             kind,
             message: message.into(),
         }
-    }
-}
-
-impl std::fmt::Display for AnnounceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
     }
 }
 
