@@ -703,20 +703,63 @@ jobs:
         run: |
           ./scripts/update-scoop.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
           ./scripts/update-scoop.ps1 -Check
+      - name: Verify both manifests target this release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./scripts/check-package-manifest-version.ps1 -Repository $env:REPOSITORY -LatestVersion $env:RELEASE_TAG
       - name: Commit package-manager manifests
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/aria2-rust.rb bucket/aria2-rust.json
-          if (git diff --cached --quiet) {
-            Write-Host "Package-manager manifests are already up to date."
-            exit 0
+
+          function Invoke-Git {
+            param([string[]]$Arguments)
+            & git @Arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+            }
           }
-          git commit -m "chore: update package-manager manifests for $env:RELEASE_TAG"
-          git push origin HEAD:master
+
+          $manifestSnapshot = Join-Path $env:RUNNER_TEMP "aria2-package-manifests"
+          $checkerSnapshot = Join-Path $env:RUNNER_TEMP "check-package-manifest-version.ps1"
+          New-Item -ItemType Directory -Path $manifestSnapshot -Force | Out-Null
+          Copy-Item Formula/aria2-rust.rb, bucket/aria2-rust.json $manifestSnapshot
+          Copy-Item scripts/check-package-manifest-version.ps1 $checkerSnapshot
+
+          Invoke-Git -Arguments @("add", "Formula/aria2-rust.rb", "bucket/aria2-rust.json")
+          & git diff --cached --quiet
+          $masterDiffStatus = $LASTEXITCODE
+          if ($masterDiffStatus -eq 1) {
+            Invoke-Git -Arguments @("commit", "-m", "chore: update package-manager manifests for $env:RELEASE_TAG")
+            Invoke-Git -Arguments @("push", "origin", "HEAD:master")
+          } elseif ($masterDiffStatus -ne 0) {
+            throw "git diff --cached failed with exit code $masterDiffStatus"
+          } else {
+            Write-Host "Package-manager manifests are already up to date."
+          }
+
+          Invoke-Git -Arguments @("fetch", "origin", "+refs/heads/dev:refs/remotes/origin/dev")
+          Invoke-Git -Arguments @("switch", "--create", "package-manifest-dev", "refs/remotes/origin/dev")
+          Copy-Item (Join-Path $manifestSnapshot "aria2-rust.rb") Formula/aria2-rust.rb -Force
+          Copy-Item (Join-Path $manifestSnapshot "aria2-rust.json") bucket/aria2-rust.json -Force
+          & $checkerSnapshot -Repository $env:REPOSITORY -LatestVersion $env:RELEASE_TAG -Root $env:GITHUB_WORKSPACE
+          Invoke-Git -Arguments @("add", "Formula/aria2-rust.rb", "bucket/aria2-rust.json")
+          & git diff --cached --quiet
+          $devDiffStatus = $LASTEXITCODE
+          if ($devDiffStatus -eq 1) {
+            Invoke-Git -Arguments @("commit", "-m", "chore: sync package-manager manifests for $env:RELEASE_TAG")
+            Invoke-Git -Arguments @("push", "origin", "HEAD:dev")
+          } elseif ($devDiffStatus -ne 0) {
+            throw "git diff --cached failed with exit code $devDiffStatus"
+          } else {
+            Write-Host "Dev package-manager manifests are already up to date."
+          }
 
   package-manager-smoke:
     name: Verify package managers (${{ matrix.name }})

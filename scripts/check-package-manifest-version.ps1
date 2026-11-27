@@ -2,11 +2,12 @@
 [CmdletBinding()]
 param(
     [string]$Repository = $env:GITHUB_REPOSITORY,
-    [string]$LatestVersion
+    [string]$LatestVersion,
+    [string]$Root = (Split-Path -Parent $PSScriptRoot)
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = $Root
 
 function Get-LatestStableReleaseVersion {
     param([string]$Repo)
