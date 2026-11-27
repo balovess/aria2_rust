@@ -78,7 +78,6 @@ metalink = ["dep:quick-xml"]
 sftp = ["dep:russh", "dep:dirs"]
 
 [dev-dependencies]
-anyhow.workspace = true
 getrandom = "0.4"
 tempfile.workspace = true
 mockito = "1.7"

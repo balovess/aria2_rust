@@ -224,7 +224,6 @@ version = "0.3.15"
 dependencies = [
  "adler32",
  "aes-gcm",
- "anyhow",
  "aria2-protocol",
  "async-trait",
  "base64 0.23.1",
@@ -285,7 +284,6 @@ dependencies = [
 name = "aria2-protocol"
 version = "0.3.11"
 dependencies = [
- "anyhow",
  "async-trait",
  "base32",
  "base64 0.23.1",

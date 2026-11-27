@@ -105,7 +105,6 @@ tokio-uring = { version = "0.5", optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
-anyhow.workspace = true
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
 # for serving test HTTP responses. reqwest 0.13 already depends on hyper 1.x
 # as a transitive dep, so no additional version conflicts are introduced.

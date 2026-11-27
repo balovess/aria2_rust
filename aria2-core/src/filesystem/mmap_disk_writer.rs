@@ -84,7 +84,7 @@ enum Inner {
 /// use aria2_core::filesystem::mmap_disk_writer::MmapDiskWriter;
 /// use aria2_core::filesystem::disk_writer::SeekableDiskWriter;
 ///
-/// # async fn example() -> anyhow::Result<()> {
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut writer = MmapDiskWriter::new(std::path::Path::new("output.bin"), Some(4096));
 /// writer.open().await?;
 /// writer.write_at(0, b"hello mmap").await?;

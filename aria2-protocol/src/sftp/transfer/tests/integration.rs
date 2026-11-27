@@ -116,7 +116,7 @@ impl server::Server for StalledSubsystemServer {
 }
 
 impl server::Handler for StalledSubsystemSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
@@ -152,7 +152,7 @@ impl server::Server for StalledChannelOpenServer {
 }
 
 impl server::Handler for StalledChannelOpenSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
@@ -169,7 +169,7 @@ impl server::Handler for StalledChannelOpenSession {
 }
 
 impl server::Handler for TestSshSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)

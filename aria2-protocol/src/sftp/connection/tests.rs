@@ -282,7 +282,7 @@ impl russh::server::Server for StalledAuthenticationServer {
 }
 
 impl russh::server::Handler for StalledAuthenticationSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(
         &mut self,
