@@ -3,7 +3,7 @@
 //! Protocol implementations for the aria2-rust download utility.
 //!
 //! Provides reusable protocol implementations and protocol-level utilities
-//! for HTTP/HTTPS, FTP, SFTP, BitTorrent, and Metalink. HTTP, FTP, SOCKS,
+//! for HTTP/HTTPS, HLS playlist syntax, FTP, SFTP, BitTorrent, and Metalink. HTTP, FTP, SOCKS,
 //! proxy URL parsing, URI component encoding, and identity defaults are always
 //! available; BitTorrent, Metalink, and SFTP are enabled by their respective
 //! crate features. The download engine owns task policy, network routing, and
@@ -17,6 +17,8 @@
 //!   content-decoding, redirect, and header-parsing operations. The standalone
 //!   `HttpClient` does not configure proxies; the download engine composes proxy
 //!   and network policy around its task-facing clients.
+//!
+//! - **[`hls`]** — HLS/M3U8 media-playlist parsing and segment URL resolution.
 //!
 //! - **[`ftp`]** — FTP client: control connection (USER/PASS/CWD/SIZE/PASV/EPSV),
 //!   passive mode data transfer, anonymous and authenticated login, REST-based resume.
@@ -49,6 +51,7 @@
 //!   higher-level configuration boundary.
 
 pub mod ftp;
+pub mod hls;
 pub mod http;
 pub mod identity;
 pub mod proxy;

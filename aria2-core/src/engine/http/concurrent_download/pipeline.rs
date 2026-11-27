@@ -27,6 +27,8 @@ use work::{http_work_scheduler_error, record_http_work_failure};
 pub async fn execute_with_coordinator(
     dl: &mut ConcurrentDownloader,
     uris: &[String],
+    authority_uris: &[String],
+    refresh_urls: &[Option<String>],
     total_length: u64,
     resume_state: &ResumeState,
     max_retries_per_segment: u32,
@@ -77,6 +79,8 @@ pub async fn execute_with_coordinator(
     } = scheduler::create(
         dl,
         uris,
+        authority_uris,
+        refresh_urls,
         &options,
         max_retries_per_segment,
         split,

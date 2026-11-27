@@ -15,6 +15,7 @@ on:
           - feature-standard
           - feature-tui
           - feature-full
+          - feature-tests
           - test-x86_64-unknown-linux-gnu
           - test-aarch64-unknown-linux-gnu
           - test-x86_64-pc-windows-msvc
@@ -60,6 +61,42 @@ jobs:
       - name: Check feature build
         run: cargo check --package aria2 --no-default-features --features "${{ matrix.features }}"
 
+  # ── Feature-combination tests ──────────────────────────────
+  feature-tests:
+    name: Feature tests (${{ matrix.name }})
+    if: >-
+      github.ref != 'refs/heads/master' &&
+      (inputs.job == 'all' || inputs.job == 'feature-tests')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            features: ''
+          - name: metalink
+            features: metalink
+          - name: bittorrent
+            features: bittorrent
+          - name: sftp
+            features: sftp
+          - name: all-protocols
+            features: bittorrent metalink sftp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-tests-${{ matrix.name }}
+      - name: Run core library tests
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo test -p aria2-core --features "${{ matrix.features }}" --lib
+          else
+            cargo test -p aria2-core --lib
+          fi
+
   # ── Lint & format (fast, single platform) ─────────────────
   lint:
     name: Lint & Format
@@ -74,7 +111,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy check
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features aria2/full -- -D warnings
       - name: Format check
         run: cargo fmt --all -- --check
 
@@ -143,9 +180,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "aarch64-unknown-linux-gnu" ]; then
-            cargo check --workspace --all-targets --target "${{ matrix.os }}"
+            cargo check --workspace --all-targets --features aria2/standard --target "${{ matrix.os }}"
           else
-            cargo test --workspace -j 1 --lib --tests -- --test-threads=1
+            cargo test --workspace -j 1 --lib --tests --features aria2/standard -- --test-threads=1
           fi
 
   # ── Dev package manager verification (manual CI on dev) ────

@@ -11,6 +11,7 @@ English: [`README-en.md`](README-en.md)
 - [TUI 使用指南](tui-guide-cn.md)：本地与远程模式、分页、筛选、详情和快捷键
 - [Release 产物说明](release-artifacts-cn.md)：平台、minimal/TUI 版本、校验文件和选择建议
 - [常见问题](troubleshooting-cn.md)：启动、配置、RPC、feature 和恢复问题
+- [HLS/M3U8 下载指南（英文）](hls-guide-en.md)：播放列表支持、输出方式和当前限制
 
 ## 开发者文档
 

@@ -76,13 +76,14 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 生命周期边界，以及与 aria2 C++ 的可比性能基线。这些不是核心协议实现缺失，
 而是兼容性矩阵中明确保留的最终验收边界。
 
-二进制 Release 提供 `minimal`、`standard`、`tui` 和 `full` 四种功能档位，
-详见 [Release 产物说明](docs/release-artifacts-cn.md)。
+二进制 Release 提供 `minimal`、`standard` 和 `full` 三种预编译档位；
+`tui` feature 仍可用于源码构建。详见 [Release 产物说明](docs/release-artifacts-cn.md)。
 
 ## 特性
 
 - **多协议下载**: 默认构建支持 HTTP/HTTPS、FTP、BitTorrent；SFTP 和 Metalink 由 feature 控制
 - **多源镜像**: 自动从多个 URI 分段并行下载，最大化带宽利用率
+- **CDN 多地址分发**: 默认启用；当 CDN 域名解析到多个可用地址时，直连 HTTP/HTTPS Range 请求优先连接不同地址。设置 `use-multiple-ips=false` 可恢复单地址连接选择。
 - **断点续传**: HTTP/HTTPS 等主要路径支持控制文件续传；不同协议、并发控制文件和多 URI 失败回退仍按兼容性矩阵逐项验证
 - **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
@@ -108,8 +109,9 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 ### 安装 Release
 
 预编译产物发布在 [GitHub Releases](https://github.com/balovess/aria2_rust/releases)。
-每个平台提供 `minimal`、`standard`、`tui` 和 `full` 四种版本，并附带对应的
-SHA-256 校验文件。选择版本前请先阅读 [Release 产物说明](docs/release-artifacts-cn.md)。
+每个平台提供 `minimal`、`standard` 和 `full` 三种版本，并附带对应的
+SHA-256 校验文件。`tui` feature 仍可用于源码构建。选择版本前请先阅读
+[Release 产物说明](docs/release-artifacts-cn.md)。
 
 ### 一键安装
 
@@ -140,25 +142,27 @@ RPC 默认不要求认证。此命令仅将端口发布到宿主机回环地址�
 
 ### 构建和运行
 
+工作区默认 feature 为空：直接构建工作区会编译库，但不会生成 `aria2c`。构建二进制时需显式选择 feature；`http` 是最小 CLI，`standard` 启用 HTTP、BitTorrent 和 RPC。
+
 ```bash
 # 克隆仓库
 git clone https://github.com/balovess/aria2_rust.git
 cd aria2-rust
 
-# 构建所有子项目
-cargo build --release
+# 构建标准 aria2c（二进制 HTTP、BitTorrent 和 RPC）
+cargo build --release -p aria2 --features standard
 
 # 下载文件 (HTTP)
-cargo run --release -- http://example.com/file.zip
+cargo run --release -p aria2 --features standard -- http://example.com/file.zip
 
 # 使用自定义选项下载
-cargo run --release -- -d ./downloads -s 4 http://example.com/large.iso
+cargo run --release -p aria2 --features standard -- -d ./downloads -s 4 http://example.com/large.iso
 
 # 显示帮助
-cargo run --release -- --help
+cargo run --release -p aria2 --features standard -- --help
 
 # 显示版本
-cargo run --release -- --version
+cargo run --release -p aria2 --features standard -- --version
 ```
 
 ### 包管理器状态
@@ -355,6 +359,15 @@ aria2-rust/
 | 文件预分配 | Linux `fallocate`、Windows `SetFileValidData`、macOS `F_PREALLOCATE` 的平台适配，以及不会阻塞 reactor 的 fallback。 |
 | RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
 
+CDN 下载的中位数吞吐变化实测约为：Cloudflare/jsDelivr **+22.1%**、
+Fastly/Mozilla **+5.5%**、Google **+27.7%**，
+三类边缘路径的几何平均约 **+18.0%**；15 个配对区块中有 13 个开启更快。
+测试使用 Release 0.3.15，每种状态 10 次、ABBA x5 顺序，`split=-x=4`，
+并由本地 DNS 返回真实 CDN A 记录，客户端地区保持不变。
+因此这是实测的 CDN 边缘路径结果，不是普遍性能保证。
+完整矩阵见[配置指南](docs/configuration-guide-cn.md)和
+[兼容性状态](docs/compatibility-status.md)。
+
 ### 当前版本与原版对比
 
 以下数据来自同一台 Windows 11 x64 机器上的 Release 构建和空闲 RPC 进程测试：
@@ -483,21 +496,23 @@ async fn main() {
 
 ### 构建命令
 
+工作区默认 feature 为空：直接构建工作区会编译库，但不会生成 `aria2c`。构建二进制时需显式选择 feature；`http` 是最小 CLI，`standard` 启用 HTTP、BitTorrent 和 RPC。
+
 ```bash
 # 调试构建（快速编译）
-cargo build
+cargo build -p aria2 --features standard
 
 # 发布构建（优化）
-cargo build --release
+cargo build --release -p aria2 --features standard
 
 # 运行测试
-cargo test --workspace
+cargo test --workspace --features aria2/standard
 
 # 生成文档
 cargo doc --workspace --no-deps
 
 # 运行特定示例
-cargo run -p aria2 --example simple_download -- http://example.com/test.bin
+cargo run -p aria2 --features standard --example simple_download -- http://example.com/test.bin
 ```
 
 ## 测试
@@ -506,19 +521,19 @@ cargo run -p aria2 --example simple_download -- http://example.com/test.bin
 
 ```bash
 # 运行工作区所有测试
-cargo test --workspace
+cargo test --workspace --features aria2/standard
 
 # 运行特定 crate 的测试
 cargo test -p aria2-core
 
 # 运行测试并显示详细输出
-cargo test --workspace -- --nocapture
+cargo test --workspace --features aria2/standard -- --nocapture
 
 # 运行特定测试类别
-cargo test "test_e2e"      # E2E 测试
-cargo test "test_stress"   # 压力测试
-cargo test "test_edge"     # 边缘情况测试
-cargo test "test_error"    # 错误路径测试
+cargo test --workspace --features aria2/standard test_e2e
+cargo test --workspace --features aria2/standard test_stress
+cargo test --workspace --features aria2/standard test_edge
+cargo test --workspace --features aria2/standard test_error
 ```
 
 ### 测试类别

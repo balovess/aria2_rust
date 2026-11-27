@@ -18,10 +18,12 @@ use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer}
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::attempt::truncate_target;
 use super::execution::FtpAttemptError;
 use super::types::FtpDownloadCommand;
 
 impl FtpDownloadCommand {
+    #[inline(never)]
     pub(super) async fn execute_proxy_get_attempt(
         &mut self,
         proxy: &crate::ftp::connection::FtpProxyConfig,
@@ -78,17 +80,7 @@ impl FtpDownloadCommand {
         let resumed = requested_offset > 0 && status == 206;
         let write_offset = if resumed { requested_offset } else { 0 };
         if requested_offset > 0 && !resumed && !in_memory_download {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&self.output_path)
-                .and_then(|file| file.set_len(0))
-                .map_err(|error| {
-                    FtpAttemptError::from(Aria2Error::FileIo(format!(
-                        "truncate FTP proxy target {}: {}",
-                        self.output_path.display(),
-                        error
-                    )))
-                })?;
+            truncate_target(&self.output_path, "truncate FTP proxy target")?;
         }
 
         let body_length = response.head.content_length();

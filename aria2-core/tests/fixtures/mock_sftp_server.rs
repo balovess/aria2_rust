@@ -286,7 +286,7 @@ impl MockSftpHandler {
 }
 
 impl server::Handler for MockSftpHandler {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         if user == USERNAME && password == PASSWORD {

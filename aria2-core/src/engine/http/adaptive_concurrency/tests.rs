@@ -1,7 +1,18 @@
 use super::*;
 
 fn controller() -> HttpAdaptiveConcurrency {
-    HttpAdaptiveConcurrency::new(16, 16, 4, 4, 0)
+    HttpAdaptiveConcurrency::new_with_settings(
+        16,
+        16,
+        4,
+        4,
+        0,
+        HttpAdaptiveOptions {
+            enabled: true,
+            reduction_percent: 50,
+            ..HttpAdaptiveOptions::default()
+        },
+    )
 }
 
 #[test]
@@ -122,6 +133,19 @@ fn configured_reduction_and_backoff_reach_the_controller() {
 
     assert_eq!(controller.range_target(false), 8);
     assert!(wait >= Duration::from_secs(3) && wait <= Duration::from_millis(4500));
+}
+
+#[test]
+fn enabled_default_reduction_lowers_target_by_a_quarter() {
+    let settings = HttpAdaptiveOptions {
+        enabled: true,
+        ..HttpAdaptiveOptions::default()
+    };
+    let mut controller = HttpAdaptiveConcurrency::new_with_settings(16, 16, 4, 4, 0, settings);
+
+    controller.record_capacity_rejection(false, None);
+
+    assert_eq!(controller.range_target(false), 12);
 }
 
 #[test]

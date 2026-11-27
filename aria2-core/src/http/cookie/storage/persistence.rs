@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::error::{Aria2Error, Result};
 use crate::http::ns_cookie_parser::NsCookieParser;
+#[cfg(feature = "sqlite-cookie")]
 use crate::http::sqlite_cookie_parser::{Sqlite3CookieParser, is_sqlite_file};
 
 use super::CookieStorage;
@@ -16,12 +17,7 @@ impl CookieStorage {
     pub fn load_file(&self, path: &Path) -> Result<usize> {
         let bytes = fs::read(path).map_err(|error| Aria2Error::Io(error.to_string()))?;
 
-        let parsed = if is_sqlite_file(&bytes) {
-            Sqlite3CookieParser::parse_auto(path)?
-        } else {
-            let text = String::from_utf8_lossy(&bytes);
-            NsCookieParser::parse_str(&text)?
-        };
+        let parsed = parse_cookie_file(path, &bytes)?;
 
         let count = parsed.len();
         for cookie in parsed {
@@ -67,4 +63,21 @@ impl CookieStorage {
         fs::rename(&temp_path, path).map_err(|error| Aria2Error::Io(error.to_string()))?;
         Ok(())
     }
+}
+
+fn parse_cookie_file(_path: &Path, bytes: &[u8]) -> Result<Vec<crate::http::cookie::Cookie>> {
+    #[cfg(feature = "sqlite-cookie")]
+    if is_sqlite_file(bytes) {
+        return Sqlite3CookieParser::parse_auto(_path);
+    }
+
+    #[cfg(not(feature = "sqlite-cookie"))]
+    if bytes.starts_with(b"SQLite format 3\0") {
+        return Err(Aria2Error::Parse(
+            "SQLite cookie support requires the sqlite-cookie feature".to_string(),
+        ));
+    }
+
+    let text = String::from_utf8_lossy(bytes);
+    NsCookieParser::parse_str(&text)
 }

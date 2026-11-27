@@ -136,7 +136,7 @@ pub struct HttpFtpArgs {
     )]
     pub http_adaptive_enabled: Option<bool>,
 
-    /// Reduce Range concurrency by this percentage after server capacity rejection
+    /// Reduce Range concurrency by this percentage after server capacity rejection (default: 25)
     #[arg(long = "http-adaptive-reduction-percent")]
     pub http_adaptive_reduction_percent: Option<u64>,
 
@@ -151,6 +151,16 @@ pub struct HttpFtpArgs {
     /// HTTP version: prefer HTTP/2 with HTTP/1.1 fallback, or force one version
     #[arg(long = "http-version", value_parser = ["auto", "1.1", "2"])]
     pub http_version: Option<String>,
+
+    /// Distribute direct HTTP Range connections across usable DNS answers (default: true)
+    #[arg(
+        long = "use-multiple-ips",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub use_multiple_ips: Option<bool>,
 
     /// Max pipelined HTTP requests per connection
     #[arg(long = "max-http-pipelining", hide = true)]

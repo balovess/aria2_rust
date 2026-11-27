@@ -79,6 +79,7 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "max-mmap-limit",
     "max-http2-streams-per-session",
     "http-version",
+    "use-multiple-ips",
     "http-adaptive-enabled",
     "http-adaptive-reduction-percent",
     "http-adaptive-backoff-base",

@@ -4,11 +4,9 @@
 // DownloadCommand instances to reduce connection establishment overhead
 // and improve memory efficiency.
 
-use once_cell::sync::Lazy;
 use reqwest::Client;
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::sync::Once;
+use std::sync::{Arc, LazyLock, Once};
 use std::time::Duration;
 
 use crate::http::HttpVersion;
@@ -55,7 +53,7 @@ pub fn ensure_rustls_provider() {
 /// - Feed redirect results back to the URI selector
 /// - Track redirect count per-request
 /// - Apply method change rules (301/302/303 → GET; 307/308 → preserve)
-static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
+static GLOBAL_CLIENT: LazyLock<Arc<Client>> = LazyLock::new(|| {
     ensure_rustls_provider();
     Arc::new(build_bound_client(
         None,
@@ -80,8 +78,8 @@ type BoundClients = DashMap<BoundClientKey, Arc<Client>>;
 type BoundDownloadClientKey = (Option<IpAddr>, bool, usize, HttpVersion, Duration);
 type BoundDownloadClients = DashMap<BoundDownloadClientKey, Arc<Vec<Client>>>;
 
-static BOUND_CLIENTS: Lazy<BoundClients> = Lazy::new(DashMap::new);
-static BOUND_DOWNLOAD_CLIENTS: Lazy<BoundDownloadClients> = Lazy::new(DashMap::new);
+static BOUND_CLIENTS: LazyLock<BoundClients> = LazyLock::new(DashMap::new);
+static BOUND_DOWNLOAD_CLIENTS: LazyLock<BoundDownloadClients> = LazyLock::new(DashMap::new);
 
 /// Return a process-wide reusable reqwest client for a source address.
 ///

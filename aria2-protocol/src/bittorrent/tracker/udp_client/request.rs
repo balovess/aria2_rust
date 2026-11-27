@@ -1,4 +1,3 @@
-use std::fmt;
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -20,23 +19,16 @@ pub struct UdpAnnounceParams<'a> {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UdpError {
+    #[error("tracker_error")]
     TrackerError,
+    #[error("malformed_response")]
     MalformedResponse,
+    #[error("timeout")]
     Timeout,
+    #[error("network")]
     Network,
-}
-
-impl fmt::Display for UdpError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TrackerError => write!(f, "tracker_error"),
-            Self::MalformedResponse => write!(f, "malformed_response"),
-            Self::Timeout => write!(f, "timeout"),
-            Self::Network => write!(f, "network"),
-        }
-    }
 }
 
 /// Internal request representation for UDP tracker operations.

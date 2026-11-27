@@ -5,7 +5,7 @@
 //! engine injects address-bound, proxied, or TLS-protected streams.
 
 use std::time::Duration;
-use std::{borrow::Cow, fmt, io};
+use std::{borrow::Cow, io};
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
@@ -29,53 +29,22 @@ pub(super) enum BoundedControlReadError {
     TooLarge(usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FtpControlReadError {
+    #[error("FTP control response timed out")]
     Timeout,
-    Io(io::Error),
+    #[error("{0}")]
+    Io(#[source] io::Error),
 }
 
-impl fmt::Display for FtpControlReadError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Timeout => formatter.write_str("FTP control response timed out"),
-            Self::Io(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for FtpControlReadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Timeout => None,
-            Self::Io(error) => Some(error),
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FtpControlWriteError {
-    Command(io::Error),
-    Terminator(io::Error),
-    Flush(io::Error),
-}
-
-impl fmt::Display for FtpControlWriteError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Command(error) | Self::Terminator(error) | Self::Flush(error) => {
-                error.fmt(formatter)
-            }
-        }
-    }
-}
-
-impl std::error::Error for FtpControlWriteError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Command(error) | Self::Terminator(error) | Self::Flush(error) => Some(error),
-        }
-    }
+    #[error("{0}")]
+    Command(#[source] io::Error),
+    #[error("{0}")]
+    Terminator(#[source] io::Error),
+    #[error("{0}")]
+    Flush(#[source] io::Error),
 }
 
 /// Read one FTP control line under the caller's timeout policy.

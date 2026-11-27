@@ -68,6 +68,16 @@ struct TestSshSession {
     close_status_code: u32,
 }
 
+struct SftpTestScenario {
+    read_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    close_seen: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    observed_packets: Arc<Mutex<Vec<SftpPacket>>>,
+    remote_file_size: u64,
+    eof_on_read: bool,
+    stall_on_stat: bool,
+    close_status_code: u32,
+}
+
 struct StalledSubsystemServer;
 
 struct StalledSubsystemSession {
@@ -116,7 +126,7 @@ impl server::Server for StalledSubsystemServer {
 }
 
 impl server::Handler for StalledSubsystemSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
@@ -152,7 +162,7 @@ impl server::Server for StalledChannelOpenServer {
 }
 
 impl server::Handler for StalledChannelOpenSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
@@ -169,7 +179,7 @@ impl server::Handler for StalledChannelOpenSession {
 }
 
 impl server::Handler for TestSshSession {
-    type Error = anyhow::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
@@ -208,8 +218,7 @@ impl server::Handler for TestSshSession {
         let stall_on_stat = self.stall_on_stat;
         let close_status_code = self.close_status_code;
         tokio::spawn(async move {
-            let _ = run_test_sftp(
-                channel.into_stream(),
+            let scenario = SftpTestScenario {
                 read_started,
                 close_seen,
                 observed_packets,
@@ -217,8 +226,8 @@ impl server::Handler for TestSshSession {
                 eof_on_read,
                 stall_on_stat,
                 close_status_code,
-            )
-            .await;
+            };
+            let _ = run_test_sftp(channel.into_stream(), scenario).await;
         });
 
         Ok(())
@@ -259,19 +268,19 @@ where
     stream.flush().await
 }
 
-async fn run_test_sftp<S>(
-    mut stream: S,
-    read_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    close_seen: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    observed_packets: Arc<Mutex<Vec<SftpPacket>>>,
-    remote_file_size: u64,
-    eof_on_read: bool,
-    stall_on_stat: bool,
-    close_status_code: u32,
-) -> std::io::Result<()>
+async fn run_test_sftp<S>(mut stream: S, scenario: SftpTestScenario) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let SftpTestScenario {
+        read_started,
+        close_seen,
+        observed_packets,
+        remote_file_size,
+        eof_on_read,
+        stall_on_stat,
+        close_status_code,
+    } = scenario;
     let mut buffer = Vec::new();
     match read_test_packet(&mut stream, &mut buffer).await? {
         SftpPacket::Init { version } => {

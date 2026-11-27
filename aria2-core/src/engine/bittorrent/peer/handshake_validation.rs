@@ -47,11 +47,12 @@ use crate::engine::bittorrent::peer::connection::BtPeerConn;
 ///
 /// Matches the two abort conditions in C++
 /// `DefaultBtInteractive::receiveHandshake()`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HandshakeValidationError {
     /// Remote peer ID matches our own static peer ID — drop the connection.
     ///
     /// C++: `throw DL_ABORT_EX("Drop connection from the same Peer ID")`
+    #[error("Drop connection from the same Peer ID: {}", hex::encode(.peer_id))]
     SelfConnection {
         /// The peer ID that matched our own.
         peer_id: [u8; 20],
@@ -60,30 +61,12 @@ pub enum HandshakeValidationError {
     /// Same peer ID already exists in an active connection — drop the connection.
     ///
     /// C++: `throw DL_ABORT_EX("Same Peer ID has been already seen.")`
+    #[error("Same Peer ID has been already seen: {}", hex::encode(.peer_id))]
     DuplicatePeerId {
         /// The peer ID that was already present in another connection.
         peer_id: [u8; 20],
     },
 }
-
-impl std::fmt::Display for HandshakeValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SelfConnection { peer_id } => write!(
-                f,
-                "Drop connection from the same Peer ID: {}",
-                hex::encode(peer_id)
-            ),
-            Self::DuplicatePeerId { peer_id } => write!(
-                f,
-                "Same Peer ID has been already seen: {}",
-                hex::encode(peer_id)
-            ),
-        }
-    }
-}
-
-impl std::error::Error for HandshakeValidationError {}
 
 // ---------------------------------------------------------------------------
 // Validation function

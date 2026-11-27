@@ -9,7 +9,7 @@ aria2c --version
 aria2c --help
 ```
 
-源码构建使用 `cargo build -p aria2 --release`。Windows 程序名是 `aria2c.exe`。端口、日志、session 和下载目录使用相对路径时，都相对于当前工作目录。
+源码构建标准二进制使用 `cargo build -p aria2 --release --features standard`。Windows 程序名是 `aria2c.exe`。端口、日志、session 和下载目录使用相对路径时，都相对于当前工作目录。
 
 ## 配置报错或没有生效
 

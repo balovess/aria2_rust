@@ -49,7 +49,8 @@ Start with the [documentation index](docs/README-en.md). The main user paths are
 compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
 users and tools can migrate easily, while its architecture, safety,
 performance, and product direction are its own. The default build supports
-HTTP/HTTPS, FTP, BitTorrent, and JSON-RPC/XML-RPC/WebSocket paths;
+HTTP/HTTPS (including HLS/M3U8 downloads), FTP, BitTorrent, and
+JSON-RPC/XML-RPC/WebSocket paths;
 Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
@@ -66,9 +67,10 @@ and RPC services.
 Phosona Manager will also ship a new P2P network model focused on sharing and
 incentive mechanisms, inspired by BitTorrent, eMule, and similar systems.
 
-Binary releases are available in four feature tiers; see the
+Binary releases are available in three feature tiers; see the
 [release artifact guide](docs/release-artifacts-en.md) to choose between
-`minimal`, `standard`, `tui`, and `full`.
+`minimal`, `standard`, and `full`. The `tui` feature remains available for
+source builds.
 
 ## Implemented Capabilities
 
@@ -76,8 +78,9 @@ The capability inventory below describes code paths, not a claim that every
 feature has passed the complete cross-platform E2E matrix. See the
 [compatibility status](docs/compatibility-status.md) for the current gate.
 
-- **Multi-Protocol Download**: HTTP/HTTPS, FTP, and BitTorrent by default; SFTP and Metalink are feature-gated
+- **Multi-Protocol Download**: HTTP/HTTPS, HLS/M3U8 (requires a user-installed FFmpeg), FTP, and BitTorrent by default; SFTP and Metalink are feature-gated. See the [HLS guide](docs/hls-guide-en.md) for the supported scope.
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
+- **CDN Multi-Address Distribution**: Enabled by default; direct HTTP/HTTPS Range requests prefer different usable DNS answers when a CDN hostname resolves to multiple addresses. Set `use-multiple-ips=false` to restore single-address selection.
 - **Resume Support**: Checkpoint-based resume for the main download paths; protocol-specific compatibility is tracked in the matrix
 - **BitTorrent**:
   - ✅ DHT network (KRPC + routing table + bootstrap)
@@ -106,7 +109,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 
 ### Install a Release
 
-Prebuilt artifacts are published on the [GitHub Releases](https://github.com/balovess/aria2_rust/releases) page. Each platform has `minimal`, `standard`, `tui`, and `full` variants with matching SHA-256 files. See the [release artifact guide](docs/release-artifacts-en.md) before choosing a variant.
+Prebuilt artifacts are published on the [GitHub Releases](https://github.com/balovess/aria2_rust/releases) page. Each platform has `minimal`, `standard`, and `full` variants with matching SHA-256 files. The `tui` feature remains available for source builds. See the [release artifact guide](docs/release-artifacts-en.md) before choosing a variant.
 
 ### One-Line Installation
 
@@ -135,7 +138,7 @@ authentication and firewall rules before publishing it on other interfaces.
 |----------|---------|
 | Homebrew (macOS/Linux) | `brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git && brew install balovess/aria2_rust/aria2-rust` |
 | Scoop (Windows x64) | `scoop bucket add aria2 https://github.com/balovess/aria2_rust.git && scoop install aria2/aria2-rust` |
-| Cargo (from source) | `cargo install --path aria2` |
+| Cargo (from source) | `cargo install --path aria2 --features standard` |
 
 The Homebrew formula builds the full feature set from the tagged source archive
 and works on supported macOS and Linux Intel/ARM hosts. The Scoop manifest
@@ -198,25 +201,28 @@ cookies, DHT state, and server statistics are enabled only by explicit options.
 - Windows / macOS / Linux
 
 **Build Commands:**
+
+Workspace defaults are empty: a plain workspace build compiles the libraries but does not produce `aria2c`. Select a binary feature set explicitly; `http` is the minimal CLI, and `standard` enables HTTP, BitTorrent, RPC, and browser SQLite cookie import. The minimal CLI can opt into browser cookie import with `--features http,sqlite-cookie`; core library users can disable its default `sqlite-cookie` feature with `--no-default-features`.
+
 ```bash
 # Clone the repository
 git clone https://github.com/balovess/aria2_rust.git
 cd aria2_rust
 
-# Build all crates
-cargo build --release
+# Build the standard aria2c binary (HTTP, BitTorrent, and RPC)
+cargo build --release -p aria2 --features standard
 
 # Download a file (HTTP)
-cargo run --release -- http://example.com/file.zip
+cargo run --release -p aria2 --features standard -- http://example.com/file.zip
 
 # Download with custom options
-cargo run --release -- -d ./downloads -s 4 http://example.com/large.iso
+cargo run --release -p aria2 --features standard -- -d ./downloads -s 4 http://example.com/large.iso
 
 # Show help
-cargo run --release -- --help
+cargo run --release -p aria2 --features standard -- --help
 
 # Show version
-cargo run --release -- --version
+cargo run --release -p aria2 --features standard -- --version
 ```
 
 </details>
@@ -407,6 +413,16 @@ Rust-specific differences are:
 | File allocation | Platform-aware Linux `fallocate`, Windows `SetFileValidData`, macOS `F_PREALLOCATE`, and cooperative fallbacks that keep long allocation work off the reactor. |
 | RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
 
+For CDN downloads, the measured median-based throughput change was about
+**+22.1%** on Cloudflare/jsDelivr, **+5.5%** on Fastly/Mozilla, and **+27.7%**
+on Google. The geometric mean across the
+three edge paths was **+18.0%**, and the option was faster in 13 of 15 paired
+blocks. Measurements used Release 0.3.15, 10 trials per state in ABBA x5 order,
+`split=-x=4`, real CDN A records, and a fixed client region, so this is an
+observed CDN edge-path result rather than a universal guarantee. See the
+[configuration guide](docs/configuration-guide-en.md) and
+[compatibility status](docs/compatibility-status.md) for the full matrix.
+
 ### Current Version Compared with Original
 
 The following data comes from a Release build and idle-RPC process measurement on the same Windows 11 x64 machine:
@@ -544,21 +560,23 @@ async fn main() {
 
 ### Build Commands
 
+Workspace defaults are empty: a plain workspace build compiles the libraries but does not produce `aria2c`. Select a binary feature set explicitly; `http` is the minimal CLI, and `standard` enables HTTP, BitTorrent, and RPC.
+
 ```bash
 # Debug build (fast compilation)
-cargo build
+cargo build -p aria2 --features standard
 
 # Release build (optimized)
-cargo build --release
+cargo build --release -p aria2 --features standard
 
 # Run tests
-cargo test --workspace
+cargo test --workspace --features aria2/standard
 
 # Generate documentation
 cargo doc --workspace --no-deps
 
 # Run a specific example
-cargo run -p aria2 --example simple_download -- http://example.com/test.bin
+cargo run -p aria2 --features standard --example simple_download -- http://example.com/test.bin
 ```
 
 ## Testing
@@ -567,19 +585,19 @@ cargo run -p aria2 --example simple_download -- http://example.com/test.bin
 
 ```bash
 # Run all tests in workspace
-cargo test --workspace
+cargo test --workspace --features aria2/standard
 
 # Run tests for specific crate
 cargo test -p aria2-core
 
 # Run tests with verbose output
-cargo test --workspace -- --nocapture
+cargo test --workspace --features aria2/standard -- --nocapture
 
 # Run specific test category
-cargo test "test_e2e"      # E2E tests
-cargo test "test_stress"   # Stress tests
-cargo test "test_edge"     # Edge case tests
-cargo test "test_error"    # Error path tests
+cargo test --workspace --features aria2/standard test_e2e
+cargo test --workspace --features aria2/standard test_stress
+cargo test --workspace --features aria2/standard test_edge
+cargo test --workspace --features aria2/standard test_error
 ```
 
 ### Test Categories
@@ -640,6 +658,7 @@ cross-platform evidence is incomplete.
 | NetRC auth | Implemented path | machine/default/macdef parsing |
 | Session save/load | Implemented path | Round-trip tests exist; complete control-file parity remains open |
 | Metalink V3/V4 | Implemented path | Parsing and downloads exist; torrent metaurl lifecycle is partial |
+| HLS / M3U8 | Supported extension | User-supplied FFmpeg handles media retrieval and muxing; see the HLS guide for limits |
 | BitTorrent DHT | Implemented path | KRPC + routing table + bootstrap; live interoperability remains open |
 | FTP/SFTP | Implemented path | Passive mode + auth; live-server evidence remains open |
 | Rate limiting | Implemented path | Shared token bucket and runtime updates are tested |

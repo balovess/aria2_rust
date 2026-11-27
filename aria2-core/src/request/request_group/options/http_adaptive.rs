@@ -23,8 +23,8 @@ impl HttpAdaptiveOptions {
             enabled: options
                 .get("http-adaptive-enabled")
                 .and_then(|value| value.parse::<bool>().ok())
-                .unwrap_or(true),
-            reduction_percent: parse("http-adaptive-reduction-percent", 50).clamp(1, 90) as u8,
+                .unwrap_or(false),
+            reduction_percent: parse("http-adaptive-reduction-percent", 25).clamp(1, 90) as u8,
             backoff_base_secs: parse("http-adaptive-backoff-base", 20).clamp(1, 3600),
             backoff_max_secs: parse("http-adaptive-backoff-max", 300).clamp(1, 86_400),
         }
@@ -43,8 +43,8 @@ impl HttpAdaptiveOptions {
 impl Default for HttpAdaptiveOptions {
     fn default() -> Self {
         Self {
-            enabled: true,
-            reduction_percent: 50,
+            enabled: false,
+            reduction_percent: 25,
             backoff_base_secs: 20,
             backoff_max_secs: 300,
         }

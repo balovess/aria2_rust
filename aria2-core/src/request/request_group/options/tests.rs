@@ -71,12 +71,12 @@ fn adaptive_http_options_parse_and_normalize_external_values() {
 }
 
 #[test]
-fn adaptive_http_concurrency_defaults_to_enabled_with_half_reduction() {
+fn adaptive_http_concurrency_defaults_to_disabled_with_quarter_reduction() {
     let defaults = HttpAdaptiveOptions::default();
-    assert!(defaults.enabled);
-    assert_eq!(defaults.reduction_percent, 50);
+    assert!(!defaults.enabled);
+    assert_eq!(defaults.reduction_percent, 25);
     assert!(
-        DownloadOptions::from_option_strings(&HashMap::new())
+        !DownloadOptions::from_option_strings(&HashMap::new())
             .http_adaptive
             .enabled
     );

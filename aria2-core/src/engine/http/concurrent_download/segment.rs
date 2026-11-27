@@ -70,6 +70,7 @@ fn fail_work(
 pub async fn execute(
     dl: &mut ConcurrentDownloader,
     uri: &str,
+    refresh_url: Option<&str>,
     total_length: u64,
     resume_state: &ResumeState,
     max_retries_per_segment: u32,
@@ -163,7 +164,7 @@ pub async fn execute(
         mut executor,
         connection_guard,
         lifecycle_notify,
-    } = executor::create(dl, split, max_conn, &authority_key, &adaptive);
+    } = executor::create(dl, split, max_conn, &authority_key, &adaptive, refresh_url);
 
     loop {
         let lifecycle_changed = lifecycle_notify.notified();

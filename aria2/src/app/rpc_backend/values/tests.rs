@@ -320,11 +320,14 @@ async fn global_http_and_connection_options_are_stored_from_rpc_updates() {
         "http-adaptive-reduction-percent",
         "http-adaptive-backoff-base",
         "http-adaptive-backoff-max",
+        "use-multiple-ips",
     ];
     let changes = option_names
         .iter()
         .map(|name| {
-            let value = if *name == "http-adaptive-enabled" {
+            let value = if *name == "use-multiple-ips" {
+                serde_json::json!("true")
+            } else if *name == "http-adaptive-enabled" {
                 serde_json::json!("false")
             } else if *name == "connect-timeout" {
                 serde_json::json!(47)
@@ -339,7 +342,9 @@ async fn global_http_and_connection_options_are_stored_from_rpc_updates() {
 
     let config = config.read().await;
     for name in option_names {
-        if name == "http-adaptive-enabled" {
+        if name == "use-multiple-ips" {
+            assert_eq!(config.get_global_bool(name).await, Some(true), "{name}");
+        } else if name == "http-adaptive-enabled" {
             assert_eq!(config.get_global_bool(name).await, Some(false), "{name}");
         } else {
             let expected = if name == "connect-timeout" { 47 } else { 1 };

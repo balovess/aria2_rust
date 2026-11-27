@@ -44,15 +44,16 @@ impl HttpSegmentDownloader {
             write_tx,
             &write_budget,
             expected_entity_length,
+            None,
         )
         .await
         .map_err(|failure| failure.error)
     }
 
-    /// Streaming range download with lock-free progress aggregation for the
-    /// concurrent HTTP scheduler.
+    /// Streaming range download that retries from `refresh_url` when the
+    /// preferred URL answers with an authentication or authorization failure.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn download_range_streaming_with_progress(
+    pub(crate) async fn download_range_streaming_with_progress_and_refresh(
         &self,
         url: &str,
         offset: u64,
@@ -63,6 +64,7 @@ impl HttpSegmentDownloader {
         write_tx: &mpsc::Sender<QueuedWriteChunk>,
         write_budget: &WriteBudget,
         expected_entity_length: u64,
+        refresh_url: Option<&str>,
     ) -> std::result::Result<u64, RangeDownloadFailure> {
         self.download_range_streaming_inner(
             url,
@@ -74,6 +76,7 @@ impl HttpSegmentDownloader {
             write_tx,
             write_budget,
             expected_entity_length,
+            refresh_url,
         )
         .await
     }
@@ -90,6 +93,7 @@ impl HttpSegmentDownloader {
         write_tx: &mpsc::Sender<QueuedWriteChunk>,
         write_budget: &WriteBudget,
         expected_entity_length: u64,
+        refresh_url: Option<&str>,
     ) -> std::result::Result<u64, RangeDownloadFailure> {
         if length == 0 {
             return Ok(0);
@@ -100,9 +104,22 @@ impl HttpSegmentDownloader {
 
         let collect_timing = progress.is_some() && tracing::enabled!(tracing::Level::DEBUG);
         let request_started = collect_timing.then(Instant::now);
-        let (response, effective_url, _) = self
+        let mut attempt = self
             .send_range_request(url, &range_header, cookie_header, headers)
             .await?;
+        if let Some(refresh_url) = refresh_url
+            && refresh_url != url
+            && matches!(attempt.0.status().as_u16(), 401 | 403)
+        {
+            debug!(
+                range = %range_header,
+                "Preferred redirect target rejected the range request; retrying from the original URL"
+            );
+            attempt = self
+                .send_range_request(refresh_url, &range_header, cookie_header, headers)
+                .await?;
+        }
+        let (response, effective_url, _) = attempt;
         let response_headers_wait = request_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
@@ -392,7 +409,7 @@ mod range_size_rejection_tests {
         let downloader = HttpSegmentDownloader::new(&client);
         let (write_tx, _write_rx) = mpsc::channel(1);
         let failure = downloader
-            .download_range_streaming_with_progress(
+            .download_range_streaming_with_progress_and_refresh(
                 &format!("http://{address}/file"),
                 0,
                 32 * 1024 * 1024,
@@ -402,6 +419,7 @@ mod range_size_rejection_tests {
                 &write_tx,
                 &WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
                 64 * 1024 * 1024,
+                None,
             )
             .await
             .expect_err("413 should reject the Range request");

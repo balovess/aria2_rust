@@ -5,7 +5,7 @@
 //! - Generator = 2
 //! - Private key bits = 160
 
-use num_bigint_dig::BigUint;
+use num_bigint::BigUint;
 use num_traits::{Num, Zero};
 use std::fmt;
 

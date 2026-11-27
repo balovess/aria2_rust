@@ -1,0 +1,48 @@
+name: Package manifest versions
+
+on:
+  push:
+    branches: [master, dev]
+    paths:
+      - "Formula/aria2-rust.rb"
+      - "bucket/aria2-rust.json"
+      - "scripts/check-package-manifest-version.ps1"
+      - ".github/workflows/package-manifest-version.yml"
+  pull_request:
+    branches: [master, dev]
+    paths:
+      - "Formula/aria2-rust.rb"
+      - "bucket/aria2-rust.json"
+      - "scripts/check-package-manifest-version.ps1"
+      - ".github/workflows/package-manifest-version.yml"
+  schedule:
+    - cron: "17 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-current-branch:
+    name: Check published release manifests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare manifests with the latest stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: ./scripts/check-package-manifest-version.ps1
+      - name: Check the dev branch on schedule
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@v5
+        with:
+          ref: dev
+          path: dev-branch
+      - name: Compare dev manifests with the latest stable release
+        if: github.event_name == 'schedule'
+        working-directory: dev-branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: ./scripts/check-package-manifest-version.ps1

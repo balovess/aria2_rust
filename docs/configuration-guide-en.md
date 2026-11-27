@@ -182,6 +182,7 @@ and ignored; explicit CLI or per-task values are rejected.
 | `connect-timeout`, `timeout`, `max-tries`, `retry-wait` | Connect timeout, total timeout, attempts, and retry wait (seconds) |
 | `split`, `min-split-size`, `max-connection-per-server` | Range budget, minimum split size, and per-server HTTP/1.1 connection limit |
 | `http-version`, `max-http2-sessions-per-server`, `max-http2-streams-per-session` | HTTP version, per-server HTTP/2 sessions, and Range streams per session |
+| `use-multiple-ips` | Distribute direct HTTP Range connections across usable DNS answers (default `true`) |
 | `min-http-range-size` | Minimum Range size used after an explicit server size rejection |
 | `http-adaptive-enabled`, `http-adaptive-reduction-percent`, `http-adaptive-backoff-base`, `http-adaptive-backoff-max` | Adaptive concurrency switch, reduction percentage, and capacity backoff bounds |
 | `check-certificate`, `ca-certificate`, `certificate`, `private-key`, `min-tls-version` | TLS verification, CA, client certificate/key, and minimum TLS version |
@@ -208,6 +209,7 @@ preserved on resume.
 | `piece-length` | `1M` | Durable parent-piece boundary for new downloads; resume prefers the control-file layout |
 | `max-connection-per-server` (`-x`) | `16` | Per-download, per-server HTTP/1.1 connection ceiling, `1..=16` |
 | `http-version` | `auto` | Prefer HTTP/2 and fall back to HTTP/1.1 when needed |
+| `use-multiple-ips` | `true` | Prefer a different usable DNS answer for each concurrent Range client |
 | `max-http2-sessions-per-server` | `2` | HTTP/2 sessions per download and server |
 | `max-http2-streams-per-session` | `8` | Concurrent Range streams per HTTP/2 session |
 | `min-http-range-size` | `64K` | Minimum Range size after an explicit server size rejection |
@@ -216,6 +218,38 @@ For HTTP/1.1, active Ranges are limited by the smaller of `split` and `-x`; `-x=
 allows only one active Range even if `split` is larger. HTTP/2 concurrency is
 limited by the smaller of `split` and
 `max-http2-sessions-per-server × max-http2-streams-per-session`.
+
+`use-multiple-ips` is a CDN-oriented Rust extension enabled by default; set it
+to `false` to restore single-address connection selection. It targets direct
+HTTP/HTTPS downloads whose hostname resolves to multiple usable addresses. For
+each download it creates one Range client per usable DNS answer, up to the
+effective Range concurrency, and gives each client a different preferred
+address. The original URL is unchanged, so `Host`, TLS SNI, certificate
+verification, authentication, and redirects continue to use the configured
+hostname. When any HTTP/HTTPS or all-proxy is configured, the proxy owns DNS
+resolution and this option is ignored. Direct tasks resolve the origin once for
+this feature even when `async-dns=false`.
+If mixed A and AAAA answers are returned, the resolver-preferred family is used
+alone when it already provides at least two addresses; the other family is only
+used when the preferred family cannot provide two candidates.
+
+Measured CDN results used Release 0.3.15, 10 trials per switch state in ABBA x5
+order, `split=-x=4`, and real public A records supplied by a temporary local DNS
+server:
+
+| CDN / edge operator | Payload | Off mean / median | On mean / median | On faster in paired blocks |
+| --- | ---: | ---: | ---: | ---: |
+| jsDelivr / Cloudflare | 32,129,114 bytes | 14,616 / 11,263 ms | 11,912 / 9,226 ms | 5/5 |
+| Mozilla / Fastly | 80,269,118 bytes | 28,348 / 23,780 ms | 23,384 / 22,545 ms | 4/5 |
+| Google | 152,702,276 bytes | 59,382 / 49,363 ms | 47,200 / 42,056 ms | 4/5 |
+
+Based on medians, the throughput change was +22.1%, +5.5%, and +27.7% for those
+three CDN paths respectively; their geometric mean was +18.0%, and the option was
+faster in 13 of 15 paired blocks.
+
+All 20 downloads per CDN had the same SHA-256. Google showed the largest
+run-to-run variance. The client region did not change between runs, so these are
+CDN edge-path results, not a multi-region performance guarantee.
 
 Adaptive concurrency is disabled by default, so the controller does not reduce
 the Range target unless enabled. To let aria2-rust respond to HTTP 429/503

@@ -624,6 +624,9 @@ fn build_resolver(timeout: Duration, server: Option<SocketAddr>) -> Option<Tokio
         None => hickory_resolver::system_conf::read_system_conf().ok()?,
     };
     opts.use_hosts_file = ResolveHosts::Always;
+    // DnsCache owns the TTL and negative cache for all engine callers. Keep
+    // Hickory's response cache disabled so the same answer is not cached twice.
+    opts.cache_size = 0;
     // Each resolver owns one nameserver, so Hickory never duplicates A/AAAA queries across
     // configured primary/backup servers. DnsCache tries these resolvers in order.
     opts.num_concurrent_reqs = 1;

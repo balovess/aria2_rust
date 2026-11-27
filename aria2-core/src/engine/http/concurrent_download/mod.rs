@@ -45,6 +45,48 @@ pub(crate) fn effective_segment_count(
     usize::try_from(requested.min(max_by_minimum)).unwrap_or(usize::MAX)
 }
 
+/// Build aligned request, authority, and refresh URI lists for the active attempt.
+///
+/// The request URI uses the probed final URL so an unexpired redirect is reused
+/// without another round trip. The original stable URL is kept as a refresh
+/// target for authorization failures. Authority URIs use the final URL so
+/// per-server limits remain associated with the host that serves the payload.
+fn active_uri_sets(
+    source_uris: &[String],
+    source_uri: &str,
+    effective_uri: &str,
+) -> (Vec<String>, Vec<String>, Vec<Option<String>>) {
+    let mut request_uris = Vec::with_capacity(source_uris.len().max(1));
+    let mut authority_uris = Vec::with_capacity(source_uris.len().max(1));
+    let mut refresh_uris = Vec::with_capacity(source_uris.len().max(1));
+
+    for source in source_uris {
+        let effective = if source == source_uri {
+            effective_uri
+        } else {
+            source.as_str()
+        };
+        if request_uris.iter().any(|existing| existing == effective) {
+            continue;
+        }
+        request_uris.push(effective.to_owned());
+        authority_uris.push(effective.to_owned());
+        refresh_uris
+            .push((source == source_uri && source != effective_uri).then(|| source.clone()));
+    }
+
+    if !request_uris
+        .iter()
+        .any(|existing| existing == effective_uri)
+    {
+        request_uris.push(effective_uri.to_owned());
+        authority_uris.push(effective_uri.to_owned());
+        refresh_uris.push((source_uri != effective_uri).then(|| source_uri.to_owned()));
+    }
+
+    (request_uris, authority_uris, refresh_uris)
+}
+
 /// Map a completed HTTP attempt to the status code recorded by mirror stats.
 ///
 /// The download error remains the source of truth for callers. This helper
@@ -337,25 +379,11 @@ impl ConcurrentDownloader {
             let g = self.group.recover();
             g.uris().iter().map(|uri| uri.to_string()).collect()
         };
-        // Redirect targets can be appended to RequestGroup's URI list so the
-        // next attempt can use them. For this active attempt, replace its
-        // source URI with the already-probed final URL and collapse duplicate
-        // entries; otherwise the redirect source and target are scheduled as
-        // two mirrors, wasting a Range request per segment.
-        let mut all_uris = Vec::with_capacity(source_uris.len().max(1));
-        for source in source_uris {
-            let effective = if source == source_uri {
-                effective_uri
-            } else {
-                source.as_str()
-            };
-            if !all_uris.iter().any(|existing| existing == effective) {
-                all_uris.push(effective.to_owned());
-            }
-        }
-        if !all_uris.iter().any(|existing| existing == effective_uri) {
-            all_uris.insert(0, effective_uri.to_owned());
-        }
+        // Prefer the already-probed final URL so valid redirects are reused
+        // without another round trip per Range. Keep the original source URI
+        // beside it as a refresh target when CDN authorization expires.
+        let (all_uris, all_authority_uris, all_refresh_uris) =
+            active_uri_sets(&source_uris, source_uri, effective_uri);
 
         if all_uris.len() > 1 {
             tracing::info!(
@@ -365,6 +393,8 @@ impl ConcurrentDownloader {
             pipeline::execute_with_coordinator(
                 self,
                 &all_uris,
+                &all_authority_uris,
+                &all_refresh_uris,
                 total_length,
                 resume_state,
                 max_retries_per_segment,
@@ -374,6 +404,7 @@ impl ConcurrentDownloader {
             segment::execute(
                 self,
                 effective_uri,
+                all_refresh_uris.first().and_then(|url| url.as_deref()),
                 total_length,
                 resume_state,
                 max_retries_per_segment,
@@ -386,8 +417,8 @@ impl ConcurrentDownloader {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_segment_count, is_capacity_limited_error, server_stat_error_code,
-        should_retry_segment,
+        active_uri_sets, effective_segment_count, is_capacity_limited_error,
+        server_stat_error_code, should_retry_segment,
     };
     use crate::engine::retry_policy::RetryPolicy;
     use crate::error::{Aria2Error, RecoverableError};
@@ -515,5 +546,20 @@ mod tests {
     #[test]
     fn zero_min_split_size_keeps_requested_segment_count() {
         assert_eq!(effective_segment_count(10 * 1024 * 1024, 4, 0), 4);
+    }
+
+    #[test]
+    fn active_uri_sets_prefer_final_requests_and_keep_refresh_targets() {
+        let source = "https://stable.example/file".to_string();
+        let mirror = "https://mirror.example/file".to_string();
+        let final_url = "https://cdn.example/signed".to_string();
+        let source_uris = vec![source.clone(), mirror.clone(), final_url.clone()];
+
+        let (requests, authorities, refresh_urls) =
+            active_uri_sets(&source_uris, &source, &final_url);
+
+        assert_eq!(requests, vec![final_url.clone(), mirror.clone()]);
+        assert_eq!(authorities, vec![final_url, mirror]);
+        assert_eq!(refresh_urls, vec![Some(source), None]);
     }
 }

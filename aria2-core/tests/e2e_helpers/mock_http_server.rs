@@ -86,11 +86,18 @@ pub fn partial_body(data: impl Into<Bytes>) -> Body {
 impl MockHttpServer {
     /// Start a new mock server (auto-binds to random port)
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let addr: SocketAddr = "127.0.0.1:0".parse()?;
+        Self::start_bound(addr).await
+    }
+
+    /// Start a mock server bound to a specific socket address.
+    pub async fn start_bound(
+        addr: SocketAddr,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Ensure rustls crypto provider is installed before any reqwest::Client is built.
         // Required because reqwest uses `rustls-no-provider` feature.
         super::ensure_crypto_provider();
 
-        let addr: SocketAddr = "127.0.0.1:0".parse()?;
         let routes: Arc<RwLock<Vec<RouteEntry>>> = Arc::new(RwLock::new(Vec::new()));
         let request_log: Arc<RwLock<Vec<RequestLog>>> = Arc::new(RwLock::new(Vec::new()));
 
@@ -684,6 +691,11 @@ impl MockHttpServer {
     /// Get server base URL
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.addr.port())
+    }
+
+    /// Bound socket address, for tests that pin DNS answers to this server.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
     }
 
     /// Shutdown server gracefully

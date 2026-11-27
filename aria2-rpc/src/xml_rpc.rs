@@ -1,31 +1,21 @@
 use base64::Engine;
-use std::fmt;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum XmlRpcError {
+    #[error("Parse error: {0}")]
     ParseError(String),
+    #[error("Invalid Request: {0}")]
     InvalidRequest(String),
+    #[error("Method not found: {0}")]
     MethodNotFound(String),
+    #[error("Invalid params: {0}")]
     InvalidParams(String),
     /// Domain error — fault_code: 1 (matches C++).
+    #[error("Error: {0}")]
     RpcExecution(String),
+    #[error("Server fault ({0}): {1}")]
     ServerFault(i32, String),
 }
-
-impl fmt::Display for XmlRpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ParseError(s) => write!(f, "Parse error: {}", s),
-            Self::InvalidRequest(s) => write!(f, "Invalid Request: {}", s),
-            Self::MethodNotFound(s) => write!(f, "Method not found: {}", s),
-            Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
-            Self::RpcExecution(s) => write!(f, "Error: {}", s),
-            Self::ServerFault(c, s) => write!(f, "Server fault ({}): {}", c, s),
-        }
-    }
-}
-
-impl std::error::Error for XmlRpcError {}
 
 impl XmlRpcError {
     pub fn fault_code(&self) -> i32 {

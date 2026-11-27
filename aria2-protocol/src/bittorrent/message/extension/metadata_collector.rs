@@ -1,7 +1,5 @@
 //! BEP 9 metadata piece collection and assembly.
 
-use std::fmt;
-
 /// Collect BEP 9 metadata pieces and assemble them in wire order.
 pub struct MetadataCollector {
     total_size: u64,
@@ -9,20 +7,11 @@ pub struct MetadataCollector {
     piece_size: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MetadataCollectorError {
+    #[error("metadata piece size must be non-zero")]
     ZeroPieceSize,
 }
-
-impl fmt::Display for MetadataCollectorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ZeroPieceSize => f.write_str("metadata piece size must be non-zero"),
-        }
-    }
-}
-
-impl std::error::Error for MetadataCollectorError {}
 
 impl MetadataCollector {
     pub fn new(total_size: u64, piece_size: u32) -> Result<Self, MetadataCollectorError> {

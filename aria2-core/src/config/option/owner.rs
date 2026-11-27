@@ -42,6 +42,7 @@ impl OptionRegistry {
             | "max-http2-sessions-per-server"
             | "max-http2-streams-per-session"
             | "http-version"
+            | "use-multiple-ips"
             | "http-adaptive-enabled"
             | "http-adaptive-reduction-percent"
             | "http-adaptive-backoff-base"

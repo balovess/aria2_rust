@@ -15,21 +15,35 @@ use super::super::session::SftpSessionError;
 /// SFTP v3 status codes: `SSH_FX_NO_SUCH_FILE=2`,
 /// `SSH_FX_PERMISSION_DENIED=3`, `SSH_FX_NO_CONNECTION=6`,
 /// `SSH_FX_CONNECTION_LOST=7`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FileOpError {
     /// SSH_FX_NO_SUCH_FILE (code=2)
+    #[error("File not found{suffix}", suffix = optional_path_suffix(.path))]
     NotFound { path: String },
     /// SSH_FX_PERMISSION_DENIED (code=3)
+    #[error("Permission denied{suffix}", suffix = optional_path_suffix(.path))]
     PermissionDenied { path: String },
     /// SSH_FX_NO_CONNECTION (6) or SSH_FX_CONNECTION_LOST (7)
+    #[error("{operation} failed: {message}")]
     Network { operation: String, message: String },
     /// A failure in the SFTP session used to execute this operation.
+    #[error("{operation} request failed: {source}")]
     Session {
         operation: &'static str,
+        #[source]
         source: SftpSessionError,
     },
     /// All other errors
+    #[error("{message}")]
     Other { message: String },
+}
+
+fn optional_path_suffix(path: &str) -> String {
+    if path.is_empty() {
+        String::new()
+    } else {
+        format!(": {path}")
+    }
 }
 
 impl FileOpError {
@@ -61,35 +75,6 @@ impl FileOpError {
             _ => Self::Other {
                 message: format!("{operation} failed (code={code}): {message}"),
             },
-        }
-    }
-}
-
-impl std::fmt::Display for FileOpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FileOpError::NotFound { path } if path.is_empty() => write!(f, "File not found"),
-            FileOpError::NotFound { path } => write!(f, "File not found: {}", path),
-            FileOpError::PermissionDenied { path } if path.is_empty() => {
-                write!(f, "Permission denied")
-            }
-            FileOpError::PermissionDenied { path } => write!(f, "Permission denied: {}", path),
-            FileOpError::Network { operation, message } => {
-                write!(f, "{} failed: {}", operation, message)
-            }
-            FileOpError::Session { operation, source } => {
-                write!(f, "{} request failed: {}", operation, source)
-            }
-            FileOpError::Other { message } => write!(f, "{}", message),
-        }
-    }
-}
-
-impl std::error::Error for FileOpError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            FileOpError::Session { source, .. } => Some(source),
-            _ => None,
         }
     }
 }

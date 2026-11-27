@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -32,6 +33,9 @@ pub struct HttpSegmentRequestExecutor {
     pub(super) tasks: Vec<RunningTask>,
     pub(super) next_task_id: u64,
     pub(super) write_budget: WriteBudget,
+    /// Original stable URL for each authority, used only to refresh an
+    /// authorization failure from a redirect target.
+    pub(super) refresh_by_authority: HashMap<String, String>,
 }
 
 impl HttpSegmentRequestExecutor {
@@ -69,6 +73,10 @@ impl HttpSegmentRequestExecutor {
         auth_factory: Arc<std::sync::Mutex<AuthConfigFactory>>,
     ) {
         self.auth_factory = auth_factory;
+    }
+
+    pub(crate) fn set_refresh_urls(&mut self, refresh_urls: HashMap<String, String>) {
+        self.refresh_by_authority = refresh_urls;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -116,6 +124,7 @@ impl HttpSegmentRequestExecutor {
             tasks: Vec::new(),
             next_task_id: 1,
             write_budget: WriteBudget::new(WRITE_QUEUE_BUDGET_BYTES),
+            refresh_by_authority: HashMap::new(),
         }
     }
 
@@ -164,6 +173,10 @@ impl HttpSegmentRequestExecutor {
         let result_tx = self.result_tx.clone();
         let authority_key = request.authority_key.clone();
         let write_budget = self.write_budget.clone();
+        let refresh_url = self
+            .refresh_by_authority
+            .get(&request.authority_key)
+            .cloned();
         let task_id = self.next_task_id;
         self.next_task_id = self.next_task_id.wrapping_add(1).max(1);
 
@@ -245,7 +258,7 @@ impl HttpSegmentRequestExecutor {
                     (Err(error), false, None)
                 } else {
                     match downloader
-                        .download_range_streaming_with_progress(
+                        .download_range_streaming_with_progress_and_refresh(
                             &request.url,
                             request.offset,
                             request.length,
@@ -255,6 +268,7 @@ impl HttpSegmentRequestExecutor {
                             &request.write_tx,
                             &write_budget,
                             request.expected_entity_length,
+                            refresh_url.as_deref(),
                         )
                         .await
                     {

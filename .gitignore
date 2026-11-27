@@ -20,6 +20,7 @@ bindings/python/tests/__pycache__/
 !docs/tui-guide-en.md
 !docs/release-artifacts-cn.md
 !docs/release-artifacts-en.md
+!docs/hls-guide-en.md
 *.7z
 *.bak
 *.bin

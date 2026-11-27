@@ -23,6 +23,10 @@ pub(super) fn apply(
             options.http_adaptive.enabled = rpc_option_bool(value, key)?;
             Ok(true)
         }
+        "use-multiple-ips" => {
+            options.use_multiple_ips = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
         "http-adaptive-reduction-percent"
         | "http-adaptive-backoff-base"
         | "http-adaptive-backoff-max" => {

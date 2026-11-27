@@ -234,19 +234,6 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.artifact }}-standard.zip aria2c${{ matrix.extension }}
-      - name: Build TUI release binary
-        run: cargo build --release --package aria2 --target ${{ matrix.target }} --no-default-features --features tui
-      - name: Package TUI artifact (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.artifact }}-tui.tar.gz aria2c${{ matrix.extension }}
-      - name: Package TUI artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.artifact }}-tui.zip aria2c${{ matrix.extension }}
       - name: Build full release binary
         run: cargo build --release --package aria2 --target ${{ matrix.target }} --no-default-features --features full
       - name: Package full artifact (Linux/macOS)
@@ -264,7 +251,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-tui.zip", "${{ matrix.artifact }}-full.zip")) {
+          foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-full.zip")) {
             $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
           }
@@ -272,7 +259,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-tui.zip", "${{ matrix.artifact }}-full.zip")) {
+          foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-full.zip")) {
             $checksumPath = "$artifact.sha256"
             if (-not (Test-Path -LiteralPath $artifact) -or -not (Test-Path -LiteralPath $checksumPath)) {
               throw "Missing Windows release artifact or checksum: $artifact"
@@ -287,7 +274,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: pwsh
         run: |
-          foreach ($artifact in @("${{ matrix.artifact }}-minimal.tar.gz", "${{ matrix.artifact }}-standard.tar.gz", "${{ matrix.artifact }}-tui.tar.gz", "${{ matrix.artifact }}-full.tar.gz")) {
+          foreach ($artifact in @("${{ matrix.artifact }}-minimal.tar.gz", "${{ matrix.artifact }}-standard.tar.gz", "${{ matrix.artifact }}-full.tar.gz")) {
             $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
           }
@@ -660,20 +647,19 @@ jobs:
             echo
             echo "## Choose a binary"
             echo
-            echo "| Platform | minimal | standard | tui | full |"
-            echo "| --- | --- | --- | --- | --- |"
-            echo "| Linux x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-full.tar.gz) |"
-            echo "| Linux ARM64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-full.tar.gz) |"
-            echo "| Windows x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-minimal.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-standard.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-tui.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-full.zip) |"
-            echo "| macOS ARM64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-full.tar.gz) |"
-            echo "| macOS x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-full.tar.gz) |"
+            echo "| Platform | minimal | standard | full |"
+            echo "| --- | --- | --- | --- |"
+            echo "| Linux x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-full.tar.gz) |"
+            echo "| Linux ARM64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-full.tar.gz) |"
+            echo "| Windows x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-minimal.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-standard.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-full.zip) |"
+            echo "| macOS ARM64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-full.tar.gz) |"
+            echo "| macOS x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-full.tar.gz) |"
             echo
             echo "### Variants"
             echo
             echo "- **minimal**: HTTP/FTP base download, without TUI"
             echo "- **standard**: HTTP/FTP + BitTorrent + RPC, without TUI"
-            echo "- **tui**: standard + local and RPC TUI"
-            echo "- **full**: standard + Metalink + SFTP + TUI"
+            echo "- **full**: standard + local and RPC TUI + Metalink + SFTP"
             echo
             echo "Each archive has a matching `.sha256` checksum file."
           } > release-notes.md
@@ -717,20 +703,63 @@ jobs:
         run: |
           ./scripts/update-scoop.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
           ./scripts/update-scoop.ps1 -Check
+      - name: Verify both manifests target this release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./scripts/check-package-manifest-version.ps1 -Repository $env:REPOSITORY -LatestVersion $env:RELEASE_TAG
       - name: Commit package-manager manifests
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/aria2-rust.rb bucket/aria2-rust.json
-          if (git diff --cached --quiet) {
-            Write-Host "Package-manager manifests are already up to date."
-            exit 0
+
+          function Invoke-Git {
+            param([string[]]$Arguments)
+            & git @Arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+            }
           }
-          git commit -m "chore: update package-manager manifests for $env:RELEASE_TAG"
-          git push origin HEAD:master
+
+          $manifestSnapshot = Join-Path $env:RUNNER_TEMP "aria2-package-manifests"
+          $checkerSnapshot = Join-Path $env:RUNNER_TEMP "check-package-manifest-version.ps1"
+          New-Item -ItemType Directory -Path $manifestSnapshot -Force | Out-Null
+          Copy-Item Formula/aria2-rust.rb, bucket/aria2-rust.json $manifestSnapshot
+          Copy-Item scripts/check-package-manifest-version.ps1 $checkerSnapshot
+
+          Invoke-Git -Arguments @("add", "Formula/aria2-rust.rb", "bucket/aria2-rust.json")
+          & git diff --cached --quiet
+          $masterDiffStatus = $LASTEXITCODE
+          if ($masterDiffStatus -eq 1) {
+            Invoke-Git -Arguments @("commit", "-m", "chore: update package-manager manifests for $env:RELEASE_TAG")
+            Invoke-Git -Arguments @("push", "origin", "HEAD:master")
+          } elseif ($masterDiffStatus -ne 0) {
+            throw "git diff --cached failed with exit code $masterDiffStatus"
+          } else {
+            Write-Host "Package-manager manifests are already up to date."
+          }
+
+          Invoke-Git -Arguments @("fetch", "origin", "+refs/heads/dev:refs/remotes/origin/dev")
+          Invoke-Git -Arguments @("switch", "--create", "package-manifest-dev", "refs/remotes/origin/dev")
+          Copy-Item (Join-Path $manifestSnapshot "aria2-rust.rb") Formula/aria2-rust.rb -Force
+          Copy-Item (Join-Path $manifestSnapshot "aria2-rust.json") bucket/aria2-rust.json -Force
+          & $checkerSnapshot -Repository $env:REPOSITORY -LatestVersion $env:RELEASE_TAG -Root $env:GITHUB_WORKSPACE
+          Invoke-Git -Arguments @("add", "Formula/aria2-rust.rb", "bucket/aria2-rust.json")
+          & git diff --cached --quiet
+          $devDiffStatus = $LASTEXITCODE
+          if ($devDiffStatus -eq 1) {
+            Invoke-Git -Arguments @("commit", "-m", "chore: sync package-manager manifests for $env:RELEASE_TAG")
+            Invoke-Git -Arguments @("push", "origin", "HEAD:dev")
+          } elseif ($devDiffStatus -ne 0) {
+            throw "git diff --cached failed with exit code $devDiffStatus"
+          } else {
+            Write-Host "Dev package-manager manifests are already up to date."
+          }
 
   package-manager-smoke:
     name: Verify package managers (${{ matrix.name }})

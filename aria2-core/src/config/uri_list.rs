@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, Clone)]
 pub struct UriListEntry {
     pub uris: Vec<String>,
@@ -38,24 +36,15 @@ pub struct UriListFile {
     path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum UriListError {
+    #[error("URI list file not found: {0}")]
     FileNotFound(String),
+    #[error("parse error at line {0}: {1}")]
     ParseError(usize, String),
+    #[error("io error: {0}")]
     IoError(String),
 }
-
-impl fmt::Display for UriListError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FileNotFound(p) => write!(f, "URI list file not found: {}", p),
-            Self::ParseError(line, msg) => write!(f, "parse error at line {}: {}", line, msg),
-            Self::IoError(e) => write!(f, "io error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for UriListError {}
 
 impl UriListFile {
     pub fn new() -> Self {

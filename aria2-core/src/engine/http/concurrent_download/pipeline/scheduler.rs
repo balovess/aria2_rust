@@ -54,6 +54,8 @@ pub(super) struct ActiveRangeWork {
 pub(super) fn create(
     dl: &ConcurrentDownloader,
     uris: &[String],
+    authority_uris: &[String],
+    refresh_urls: &[Option<String>],
     options: &DownloadOptions,
     max_retries_per_segment: u32,
     split: usize,
@@ -62,7 +64,17 @@ pub(super) fn create(
     initial_range_size_limit: u64,
     coordinator: &MirrorCoordinator,
 ) -> RangeScheduler {
-    let uri_authorities: Vec<String> = uris
+    debug_assert_eq!(
+        uris.len(),
+        authority_uris.len(),
+        "request URIs and authority URIs must stay aligned"
+    );
+    debug_assert_eq!(
+        uris.len(),
+        refresh_urls.len(),
+        "request URIs and refresh URLs must stay aligned"
+    );
+    let uri_authorities: Vec<String> = authority_uris
         .iter()
         .map(|uri| authority_key(uri).unwrap_or_else(|| uri.clone()))
         .collect();
@@ -88,7 +100,7 @@ pub(super) fn create(
             ),
         );
     }
-    let range_size_limits = vec![initial_range_size_limit; uris.len()];
+    let range_size_limits = vec![initial_range_size_limit; authority_uris.len()];
     let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
         dl.range_clients.as_slice(),
@@ -102,6 +114,16 @@ pub(super) fn create(
     );
     executor.set_shared_auth_factory(Arc::clone(&dl.auth_factory));
     executor.set_origin_sensitive_headers_allowed(dl.origin_sensitive_headers_allowed);
+    let refresh_by_authority: HashMap<String, String> = uri_authorities
+        .iter()
+        .zip(refresh_urls.iter())
+        .filter_map(|(authority, refresh_url)| {
+            refresh_url
+                .as_ref()
+                .map(|url| (authority.clone(), url.clone()))
+        })
+        .collect();
+    executor.set_refresh_urls(refresh_by_authority);
     if let Some((known_authority, version)) = &dl.initial_http_protocol {
         executor.set_protocol(known_authority, *version);
     }

@@ -3,6 +3,72 @@
 This file records compatibility evidence for externally observable download
 behavior. An unlisted behavior has not been audited here.
 
+## HTTP Live Streaming (HLS)
+
+- **Supported extension:** HTTP(S) URLs whose path ends in `.m3u8` are parsed
+  with `aria2_protocol::hls`. A master playlist selects the variant with the
+  highest `AVERAGE-BANDWIDTH` (falling back to `BANDWIDTH`). The engine then
+  delegates media retrieval, decryption, segment handling, and muxing to a
+  user-installed FFmpeg executable. The final output is written through a
+  staging file and renamed only after FFmpeg exits successfully.
+- **External dependency:** aria2 does not bundle, download, or install FFmpeg.
+  The executable must be on `PATH`, or `ARIA2C_FFMPEG` must point to it. A
+  missing executable is a fatal task error with setup instructions.
+- **Compatibility:** original aria2 documents HTTP(S), FTP, SFTP, BitTorrent,
+  and Metalink, without native HLS support. HLS is an intentional Rust
+  extension; ordinary non-M3U8 HTTP behavior remains on the existing path.
+- **Known limits:** HLS output cannot resume from an arbitrary byte offset;
+  variant/rendition choice is not user-selectable; video and audio are copied
+  without transcoding; FFmpeg's default rendition selection is retained;
+  neither per-task nor process-wide aria2 download limits can govern FFmpeg's
+  sockets; detection requires a `.m3u8` URL path; live playlists need
+  `--timeout` or manual cancellation to stop.
+- **Verification:** `cargo test -p aria2-protocol --lib hls` passes 4 parser
+  tests; `cargo test -p aria2-core --lib hls` passes 6 adapter tests. The E2E
+  test `test_e2e_hls_download` covers clear TS, AES-128 encrypted TS, and fMP4
+  playlists: each fixture is served over HTTP, downloaded through
+  `DownloadCommand`, and decoded from the resulting MP4 with FFmpeg. All three
+  passed with a portable FFmpeg 9.1 build supplied only to the test
+  environment. Live playlists are captured to MPEG-TS and remuxed after the
+  `--timeout` limit, but have no committed E2E fixture.
+
+## Empty-password PKCS#12 client identity dependency
+
+- **Decision:** keep the existing `p12_q3` + `pkcs5` + `yasna` adapter. The
+  duplicate legacy RustCrypto stack is a known cost, but no lighter replacement
+  preserves the current compatibility surface and pure-Rust portability.
+- **Evaluation:** RustCrypto `pkcs12 0.2.0-rc.0` is parser-only and still marks
+  decryption and RC2 support as TODO; `keystore-pkcs12 1.0.0` adds a larger
+  keystore/crypto stack; upstream `p12 0.6.3` uses the same old crypto versions
+  as `p12_q3`; `openssl` requires either a system library or a vendored native
+  build, changing deployment assumptions.
+- **Compatibility impact:** none from this decision. The supported empty-password
+  PKCS#12 variants, certificate-chain selection, error messages, and mutual-TLS
+  behavior remain unchanged. No new dependency was added.
+- **Verification:** the PKCS#12 adapter tests, including AES-CBC, AES-GCM,
+  alternative PBKDF2 PRFs, plaintext key bags, unknown bags, and live mTLS,
+  remain covered by the all-features `aria2-core` library suite.
+
+## Async DNS resolver dependency
+
+- **Decision:** keep `hickory-resolver`. It remains part of the public library
+  surface through `DnsCache::with_resolver(TokioResolver)` and owns the system
+  resolver configuration, hosts-file handling, explicit `--async-dns-server`
+  behavior, and record TTL needed by `DnsCache`.
+- **Evaluation:** replacing it with `tokio::net::lookup_host` would make the
+  default path blocking and remove explicit nameserver support; moving to
+  `hickory-proto` would require reimplementing system resolver configuration,
+  search rules, hosts files, and the public injection API. Neither is a
+  behavior-preserving dependency reduction.
+- **Runtime reduction:** Hickory's internal response cache is disabled because
+  `DnsCache` already owns positive TTL caching, negative caching, and
+  single-flight lookup coordination. No resolver, TTL, or fallback behavior
+  changes; the `moka` crate remains compiled because it is a non-optional
+  dependency of `hickory-resolver`.
+- **Verification:** the DNS cache suite passes 28/28 with default and
+  all-protocol features; the full `aria2-core` library suites remain at 2702
+  passed (default) and 3681 passed + 1 ignored (all protocols).
+
 ## CLI build-tier feature behavior
 
 - **External behavior:** the minimal artifact (`--no-default-features
@@ -17,6 +83,14 @@ behavior. An unlisted behavior has not been audited here.
   of the RPC crate. The CLI `http`/`rpc` features and `aria2-protocol/http` are
   retained tier markers, not source-code gates. BitTorrent, Metalink, and SFTP
   are actual optional features propagated to the crates that own their code.
+- **Feature-gated options:** with BitTorrent disabled, BitTorrent definitions
+  are absent from the core option registry, and runtime updates reject those
+  names through the feature-availability policy before registry parsing instead
+  of silently accepting an unvalidated value. CLI and configuration continue to
+  treat feature-gated keys according to their existing unknown/unsupported
+  rules. `select-file` is supported when either Metalink or BitTorrent is
+  enabled. The core library suite is verified with default, Metalink-only,
+  BitTorrent-only, SFTP-only, and all protocol features enabled.
 - **Verification:** source cfg inspection found no `http` or `rpc` feature
   gates for the RPC server or method parsing. Cargo feature-tree inspection
   confirms the minimal and standard artifacts both include `aria2-rpc`; the
@@ -69,7 +143,7 @@ behavior. An unlisted behavior has not been audited here.
   by one Range after the cooldown ends and eight successful ranges complete
   without an intervening failure.
   There is no time-based start or recovery pacing. Capacity feedback reduces
-  the target by 50% and uses jittered exponential backoff from 20 seconds to
+  the target by 25% and uses jittered exponential backoff from 20 seconds to
   300 seconds. The reduction percentage and backoff bounds can be adjusted per
   download with the `http-adaptive-*` options. The default
   `http-adaptive-enabled=false` fixes each protocol's Range target at its
@@ -95,6 +169,70 @@ behavior. An unlisted behavior has not been audited here.
   HTTP Range boundaries, the adaptive-disabled default and explicit CLI enable,
   and reuse of the
   control-file piece layout ahead of a new configuration.
+
+## CDN multi-address connection distribution
+
+- **Setting:** `use-multiple-ips` is a Rust extension, default `true`. It is
+  available through CLI flags, configuration files, JSON-RPC/XML-RPC option
+  maps, and session restore. `changeOption` marks an active task for restart
+  because its HTTP client pool is built when the task starts.
+- **Scope:** this is a CDN-oriented feature for direct HTTP/HTTPS downloads
+  whose hostname resolves to multiple usable addresses. It is not a mirror
+  mechanism, does not change the client source IP, and does not bypass
+  client-IP rate limits. Multiple DNS answers that reach the same edge or
+  backend provide no expected benefit.
+- **Behavior:** when enabled for a direct HTTP/HTTPS download with at least two
+  outbound-policy-compatible DNS answers, each concurrent Range client gets a
+  different preferred address. The full DNS answer list is retained in rotated
+  order so a failed first address can still fall through. The number of
+  clients is capped by `split`, `-x`, and the HTTP/2 session setting, and the
+  option is ignored for one address, sequential downloads, and proxied tasks.
+  It is also ignored when any proxy option is configured, including a URI that
+  would match `no-proxy`.
+  Direct tasks resolve the origin once for this feature even when
+  `async-dns=false`.
+  With mixed A/AAAA answers, the resolver-preferred family is used alone when
+  it has at least two addresses; the other family is only used when the
+  preferred family cannot provide two candidates.
+- **Compatibility impact:** the request URL and authority remain unchanged, so
+  `Host`, TLS SNI, certificate hostname verification, credentials, cookies,
+  redirects, URI selection, and session/control-file semantics are unchanged.
+  This distributes connections across DNS answers; it does not change the
+  client source IP or promise any bandwidth gain, and CDN answers that map to
+  the same backend receive no benefit. Original aria2 resolves all addresses
+  but prefers one per connection, so this is an intentional extension.
+- **Verification:** focused unit tests cover switch behavior, concurrency
+  bounds, and deterministic address rotation. A loopback regression binds two
+  distinct 127/8 addresses to the same port, injects them as DNS answers for a
+  synthetic hostname, verifies both addresses receive Range requests, and
+  compares the assembled output with the source bytes. That local test does not
+  cover external CDNs; the measured matrix is recorded below.
+- **TLS verification:** a local rustls regression binds the two addresses,
+  records the ClientHello SNI at both servers, enables certificate
+  verification against a test CA, and confirms both servers see the original
+  hostname `foobar.com` while the assembled output matches the source.
+- **Measured result:** a Release 0.3.15 binary ran 10 trials per switch state
+  for three CDN edge operators in ABBA x5 order, with `split=-x=4` and a
+  temporary local DNS server supplying each hostname's real public A records.
+  Mixed-family filtering was already active. Each CDN produced one unique byte
+  size and SHA-256 hash across all 20 runs.
+
+  | CDN / edge operator | Payload | Off mean / median | On mean / median | On faster in paired blocks |
+  | --- | ---: | ---: | ---: | ---: |
+  | jsDelivr / Cloudflare | 32,129,114 bytes | 14,616 / 11,263 ms | 11,912 / 9,226 ms | 5/5 |
+  | Mozilla / Fastly | 80,269,118 bytes | 28,348 / 23,780 ms | 23,384 / 22,545 ms | 4/5 |
+  | Google | 152,702,276 bytes | 59,382 / 49,363 ms | 47,200 / 42,056 ms | 4/5 |
+
+  Google showed the largest run-to-run variance; all 20 outputs had identical
+  SHA-256 hashes.
+- **Decision:** `use-multiple-ips` is enabled by default because all three CDN
+  edge operators showed a median throughput benefit after family filtering, and
+  no correctness or byte-integrity regression was observed. Median-based changes
+  were +22.1%, +5.5%, and +27.7% for the three edge paths, with a geometric mean
+  of +18.0% and 13/15 paired blocks favoring the option. The client's physical
+  region did not change, so this is not a universal performance guarantee. Users
+  can set `use-multiple-ips=false` to restore original single-address connection
+  selection.
 
 ## HTTP Range capacity retries
 
@@ -237,7 +375,7 @@ behavior. An unlisted behavior has not been audited here.
   use `bt-tracker-timeout`. Rustls only negotiates TLS 1.2 or newer, so a
   configured TLS 1.1 minimum is enforced as TLS 1.2.
 - **Response resource bound:** `announce_over_stream_with_connector` passes no
-  explicit WebSocket config, so the locked Tungstenite 0.30.0 defaults apply:
+  explicit WebSocket config, so the locked Tungstenite 0.29.0 defaults apply:
   64 MiB per complete message and 16 MiB per frame. This bounds the text/binary
   response copied into the JSON decoder, but the bound currently follows the
   dependency default rather than a protocol-owned constant.
@@ -375,6 +513,23 @@ behavior. An unlisted behavior has not been audited here.
   syntax; 58 core cookie policy tests pass. Cookie persistence tests require a writable
   temporary directory on Windows; two storage tests were denied file access by
   the current sandbox.
+
+## Firefox and Chromium SQLite cookie import
+
+- **Supported scope:** Firefox `moz_cookies` and Chromium `cookies` are read by
+  table and column name. Chromium prefers the current `is_secure` column and
+  accepts the older `secure` spelling used by the `aria2_original` query. Its
+  Windows-epoch timestamps are converted to Unix seconds. A sibling `-wal`
+  file is applied as a read-only overlay so committed cookies not yet
+  checkpointed into the main file are visible. Encrypted Chromium values remain
+  empty, matching the existing aria2 limitation.
+- **Verification:** focused parser tests compare Firefox and Chromium fixture
+  rows against expected cookie values, including the current Chromium column
+  spelling, and read a committed WAL fixture while verifying the main database
+  bytes remain unchanged. `cargo test --offline -p aria2-core
+  http::sqlite_cookie_parser --lib` passed (11 tests). Compatibility with a
+  browser writing either file during the byte snapshot is not guaranteed; a
+  transient parse error is returned.
 
 ## HTTP Digest authentication
 
@@ -1702,17 +1857,20 @@ behavior. An unlisted behavior has not been audited here.
   BitTorrent-only RPC peer-port and peer-ID tests also pass with that feature
   enabled. These checks establish configuration and unit behavior, not remote
   server interoperability.
-  The full `aria2` library suite with `--no-default-features --features
-  metalink` passes 122/122; DHT and BitTorrent-only CLI tests are gated by the
-  feature they exercise. The matching `aria2-core` library suite passes
-  2734/2734. Runtime availability treats `select-file` as supported when
+  The default `aria2-core` library suite passes 2702/2702. The full `aria2`
+  library suite with `--no-default-features --features metalink` passes
+  123/123; DHT and BitTorrent-only CLI tests are gated by the feature they
+  exercise. The matching `aria2-core` library suite passes 2757/2757.
+  Runtime availability treats `select-file` as supported when
   either Metalink or BitTorrent is enabled, matching its shared registry
   definition. The `--no-default-features --features bittorrent` tier also
-  passes its full `aria2` (153/153) and `aria2-core` (3547 passed, 1 ignored)
-  library suites. With all three protocol features enabled, the full protocol
-  crate suite passes 1357 tests (2 ignored), the core suite passes 3652 (1
-  ignored), and the application suite passes 162. No remote-server
-  interoperability is implied by these local tests.
+  passes its full `aria2` (155/155) and `aria2-core` (3573 passed, 1 ignored)
+  library suites. The `--no-default-features --features sftp` tier passes its
+  `aria2` (122/122) and `aria2-core` (2732/2732) library suites. With all three
+  protocol features enabled, the full protocol crate suite passes 1380 tests
+  (2 ignored), the core suite passes 3681 (1 ignored), and the application
+  suite passes 170. No remote-server interoperability is implied by these
+  local tests.
 
 ## Pause and unpause lifecycle status
 
@@ -2152,3 +2310,192 @@ behavior. An unlisted behavior has not been audited here.
   formula produced 78.555 MiB/s and 23,085,056 bytes. Samples were noisy and
   used a loopback, no-TLS workload, so this is supporting evidence only, not
   a general performance claim.
+
+## Upstream issues 2402, 2197, and 2051: static source audit
+
+- **Scope:** read-only audit on `dev` at `7205cfed9fdd382adc939968dbebccee662c87d1`.
+  Upstream facts come from the issue bodies and comments for
+  [aria2/aria2#2402](https://github.com/aria2/aria2/issues/2402),
+  [aria2/aria2#2197](https://github.com/aria2/aria2/issues/2197), and
+  [aria2/aria2#2051](https://github.com/aria2/aria2/issues/2051), retrieved on
+  2026-11-22. No runtime reproduction, `aria2_original` comparison, or test run
+  was performed for this audit. The shell runner repeatedly failed with Windows
+  error 8, so the evidence below is source-only.
+
+### #2402: unauthenticated RPC and arbitrary file write
+
+- **Upstream claim:** JSON-RPC on port 6800 has no authentication by default;
+  `aria2.addUri` with attacker-controlled `dir` and `out` can write anywhere,
+  with a cron file used to claim RCE. The issue is open, has no comments, and
+  contains no maintainer-confirmed CVE or patch.
+- **Default posture: not reproduced.** RPC is disabled by default
+  (`aria2-core/src/config/option_definitions/rpc.rs:9-14`). When enabled, the
+  default address is `127.0.0.1:6800` and `rpc-listen-all` is false
+  (`aria2-core/src/config/option_definitions/rpc.rs:18-44`,
+  `aria2-rpc/src/server/config.rs:23-33`). RPC dispatch only starts from an
+  explicit startup plan (`aria2/src/app/rpc.rs:205-207`). `rpc-listen-all`
+  deliberately changes the host to `0.0.0.0`
+  (`aria2/src/app/rpc.rs:217-222`), and the documentation warns not to expose
+  unauthenticated RPC publicly (`docs/rpc-guide-en.md:13-47`).
+- **Authentication: optional by design.** If `rpc-secret` is absent, the app
+  constructs an empty `AuthConfig` (`aria2/src/app/rpc.rs:225-238`), and
+  `RpcAuthMiddleware::validate` accepts every request when its secret is empty
+  (`aria2-rpc/src/server/auth.rs:171-192`). When a secret exists, every method
+  except `system.listMethods` and `system.listNotifications` must present it,
+  including nested `system.multicall` entries
+  (`aria2-rpc/src/engine/policy.rs:1-3`, `aria2-rpc/src/engine.rs:173-178`,
+  `aria2-rpc/src/engine.rs:420-429`). HTTP Basic Auth, when configured, is
+  enforced at the transport seam (`aria2-rpc/src/server/http_handlers.rs:87-105`).
+- **Destination confinement: absent.** RPC options flow into the same
+  `DownloadOptions` as CLI options. The HTTP command builds its target with a
+  plain `PathBuf::from(dir).join(filename)` and uses an explicit `out` value
+  without path sanitization (`aria2-core/src/engine/http/download_command/constructor.rs:181-193`).
+  An absolute `out` replaces the base directory under Rust `Path::join` semantics,
+  and `../` components are not confined. `ActiveOutputRegistry` only prevents
+  collisions and chooses numbered names; it is not a security boundary
+  (`aria2-core/src/engine/active_output_registry.rs:18-47`, `:180-217`).
+  The `dir`/`out` option definitions contain no path validator
+  (`aria2-core/src/config/option_definitions/general/basic.rs:8-25`).
+- **Verdict:** the upstream "reachable by default" premise does not apply, but
+  an operator who enables remote RPC without a secret retains an arbitrary
+  write primitive within the process user's permissions. RCE is deployment
+  dependent, for example writing a cron or startup file, not a built-in
+  command-execution primitive. Forcing `rpc-secret` would break the documented
+  aria2 compatibility contract, so a secure default change needs explicit user
+  direction; a directory allowlist would likewise be an intentional deviation.
+
+### #2197: expiring CDN redirect URLs reused by later pieces
+
+- **Upstream claim:** a stable URL redirects to a signed URL with a short
+  expiry. The final signed URL is resolved once, cached, and reused for later
+  pieces. A slow or large download then receives authorization failures after
+  expiry. The issue is open with no comments.
+- **Per-request redirect handling exists.** The standalone protocol client
+  starts a fresh bounded redirect loop for every request
+  (`aria2-protocol/src/http/client.rs:197-275`). The core segment downloader
+  also starts from the URL passed to `send_range_request` and follows redirects
+  itself (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:32-49`,
+  `:250-266`). Thus a request that starts from the original stable URL can
+  obtain a fresh signed URL.
+- **Historical finding before the fix:** the active download did not start from the stable URL. A metadata GET or
+  HEAD produces `effective_uri` (`aria2-core/src/engine/http/download_command/execute.rs:51-73`).
+  The Range probe is sent to that URL and its final `effective_url` replaces the
+  value (`aria2-core/src/engine/http/download_command/execute.rs:203-219`).
+  The redirect target is added to the group URI pool
+  (`aria2-core/src/engine/http/download_command/execute.rs:220-224`).
+  `execute_with_retry` then replaces the source URI with that already-probed
+  final URL for the current attempt and deduplicates the pool
+  (`aria2-core/src/engine/http/concurrent_download/mod.rs:336-358`); a single
+  mirror passes `effective_uri` directly (`:373-381`). Segment requests copy
+  that string into `HttpSegmentRequest.url`
+  (`aria2-core/src/engine/http/concurrent_download/pipeline.rs:172-199`,
+  `aria2-core/src/engine/http/concurrent_download/segment/admission.rs:58-79`)
+  and send each Range request to it
+  (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:32-40`,
+  `:335-340`). Failed segments are rescheduled, but the audited retry path
+  chooses from the same URI strings rather than re-resolving the stable source
+  (`aria2-core/src/engine/http/concurrent_download/segment/completion.rs:321-339`).
+- **Unused reset seam.** `Request` keeps `uri` separate from `current_uri` and
+  has `reset_uri()` specifically to return to the original URI
+  (`aria2-core/src/download/request/request_impl.rs:76-129`). A static search
+  found calls only in `aria2-core/src/download/request/tests.rs:117-125`, not
+  in production code.
+- **Implemented fix:** `execute_with_retry` keeps the probed final URL as the
+  preferred request URL, so a valid redirect is reused without another round
+  trip per Range. When a Range receives HTTP 401 or 403, the streaming
+  downloader retries once from the original URL and follows its redirect again.
+  The original URL is configured once per download through an authority-keyed
+  map in `HttpSegmentRequestExecutor`, not copied into every
+  `HttpSegmentRequest`. User-supplied mirrors remain available. Metadata probe,
+  auth, cookie, and HTTP-version handling still use `effective_uri`. Parallel
+  authority and refresh URI lists keep per-server limits associated with the
+  host that actually serves the payload.
+- **Verdict:** fixed in the concurrent HTTP path with lower overhead than a
+  forced refresh per Range. The old behavior was reproducible: a loopback
+  fixture expired the probe-time signed URL and both payload Range requests
+  returned HTTP 403. With the fix, those requests refresh from the stable URL
+  and complete. A valid final URL is reused without re-entering the stable URL.
+- **Verification:** `expiring_redirect_target_is_refreshed_for_later_range_requests`
+  and `valid_redirect_target_is_reused_by_later_range_requests` in
+  `aria2-core/tests/test_e2e_http_request_policy.rs` cover both paths. The
+  multi-mirror configured test
+  `primary_redirect_refresh_with_secondary_mirror_configured` confirms that the
+  primary expired redirect refreshes from its own stable source. It also shows
+  that two mirrors resolving to the same authority are treated as one mirror by
+  the current coordinator, so the authority-keyed refresh map is sufficient for
+  the reachable paths. The
+  existing redirect test
+  `head_redirect_reuses_final_url_for_payload_ranges` in
+  `aria2-core/tests/test_e2e_concurrent_http_range.rs` covers normal reuse. The
+  unit test `active_uri_sets_prefer_final_requests_and_keep_refresh_targets`
+  pins the aligned request, authority, and refresh mapping.
+- **Local sample:** on this Windows host with a 64 MiB loopback payload, 16
+  split ranges, and a valid redirect, the stable URL was hit once and three
+  download samples were 592, 593, and 634 ms. The earlier forced-refresh
+  implementation hit the stable URL 65 times and sampled 632, 574, and 691 ms.
+  This is a directional loopback sample, not a production CDN benchmark.
+- **Real CDN validation status:** not completed. Direct HTTPS from local
+  processes failed for both `api.github.com` and `github.com` in this
+  environment, and the browser channel blocked the release-asset download URL.
+  After network escalation, a real GitHub release asset was resolved and a
+  16-segment throttled download was started. The signed URL carried
+  `se=2026-11-22T06:22:03Z`, roughly 54 minutes after the probe, not the
+  300-second expiry described in the 2024 issue. The run was stopped before
+  expiry because forcing a long wait was not representative of ordinary
+  downloads. No real CDN expiry status code was observed, so no additional
+  refresh status codes were added without evidence.
+
+### #2051: Metalink `<size>` causing Range requests for a whole file
+
+- **Upstream claim:** Metalink `<size>` makes aria2 send
+  `Range: bytes=0-(size-1)` for a whole-file download. Some servers reject any
+  Range request, especially with chunked encoding. Removing `<size>` avoids
+  the failure. One comment identifies `aria2c https://httpbin.org/anything` as
+  a failing server. The issue is open.
+- **Declared size reaches the engine.** `<size>` parsing stores `file.size`
+  (`aria2-protocol/src/metalink/parser/parse.rs:263`,
+  `aria2-protocol/src/metalink/parser/model.rs:225` and `:283`). The Metalink
+  HTTP command writes it into the request group and passes the file name as an
+  explicit output name (`aria2-core/src/engine/http/download_command/constructor.rs:82-98`),
+  so the initial metadata GET is skipped for that path
+  (`aria2-core/src/engine/http/download_command/execute.rs:51-59`).
+- **A declared size triggers a Range probe.** `known_total_length` becomes the
+  download total when no response length is available
+  (`aria2-core/src/engine/http/download_command/execute.rs:40-45`, `:115-128`),
+  and a positive known length satisfies the probe condition
+  (`:164-169`). The probe itself is a one-byte `Range: bytes=0-0` request
+  (`aria2-core/src/engine/http/segment_downloader/downloader/range.rs:270-317`),
+  not the exact full-file header in the upstream report. If the server responds
+  200, the engine treats Range as unsupported and can continue sequentially;
+  if it rejects the probe with 401, 403, 416, or 5xx, `classify_range_status`
+  turns that into an error
+  (`aria2-core/src/engine/http/segment_downloader/downloader/mod.rs:247-272`).
+  Concurrent mode additionally requires a successful probe and `split > 1`
+  (`aria2-core/src/engine/http/download_command/constructor.rs:476-492`), so
+  the Rust engine does not normally emit `Range: bytes=0-(size-1)` for a
+  whole-file single-segment download.
+- **Size verification remains.** Actual range responses are checked against
+  expected totals and offsets
+  (`aria2-core/src/engine/http/segment_downloader/downloader/mod.rs:235-244`),
+  and a later mismatch is treated as `CannotResume` rather than silently
+  accepted. This preserves the integrity rationale for keeping `<size>`.
+- **Verdict:** partially present, with a different wire-level symptom. The
+  exact upstream full-file header was not found, but a Metalink-declared size
+  does cause a Range probe before payload transfer. A server that rejects all
+  Range requests with an error can therefore fail a download that a plain GET
+  could complete. No focused test was found for Metalink `<size>` plus a
+  chunked server that rejects Range.
+
+### Follow-up evidence needed
+
+1. Regression coverage for expiring signed redirects is now in place. Remaining
+   work is to decide whether the sequential gap-fill path needs the same
+   freshness policy for URLs that expire during long single-connection
+   downloads.
+2. Add a Metalink `<size>` test against a chunked server that rejects Range,
+   asserting that a plain whole-file GET completes or that the probe failure is
+   explicitly classified as a compatibility decision.
+3. Decide whether an unauthenticated remote RPC deployment should be rejected
+   at startup. If not, document the arbitrary-write consequence next to
+   `rpc-listen-all` and test that `dir`/`out` confinement is deliberately out
+   of scope for aria2 compatibility.

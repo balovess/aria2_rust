@@ -189,8 +189,13 @@ resume metadata.
 
 aria2-rust performs at most one lightweight release check every seven days in
 an interactive, non-quiet session. The check runs in the background, uses a
-two-second timeout, and does not affect downloads. Failed checks also wait for
-the next interval, so an offline machine is not probed repeatedly.
+two-second timeout, and does not affect downloads. When a newer release is
+found, an interactive terminal offers to open the GitHub release page or
+download and update a portable copy. The downloaded archive is SHA-256 checked
+and staged; replacement happens after the current process exits. Homebrew and
+Scoop installations show their package-manager upgrade command instead. Failed
+checks also wait for the next interval, so an offline machine is not probed
+repeatedly.
 
 Disable the automatic check or change the interval:
 

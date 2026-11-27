@@ -126,6 +126,7 @@ async fn read_http_response(port: u16, request: &str) -> String {
     String::from_utf8(response).expect("RPC response should be UTF-8")
 }
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn test_cli_metalink_options_reach_download_options() {
     let cli = CliArgs::try_parse_from([
@@ -427,7 +428,7 @@ async fn test_cli_connect_timeout_reaches_download_options() {
 }
 
 #[tokio::test]
-async fn test_cli_http_adaptive_defaults_to_enabled_and_accepts_override() {
+async fn test_cli_http_adaptive_defaults_to_disabled_and_accepts_override() {
     let cli = CliArgs::try_parse_from(["aria2"])
         .expect("CLI without an adaptive HTTP concurrency switch should parse");
 
@@ -437,8 +438,8 @@ async fn test_cli_http_adaptive_defaults_to_enabled_and_accepts_override() {
         .expect("CLI options should load into ConfigManager");
     let (options, _) = app.download_options_with_snapshot().await;
 
-    assert!(options.http_adaptive.enabled);
-    assert_eq!(options.http_adaptive.reduction_percent, 50);
+    assert!(!options.http_adaptive.enabled);
+    assert_eq!(options.http_adaptive.reduction_percent, 25);
 
     let cli = CliArgs::try_parse_from([
         "aria2",
@@ -470,6 +471,26 @@ async fn test_cli_http_adaptive_defaults_to_enabled_and_accepts_override() {
     let (options, _) = app.download_options_with_snapshot().await;
 
     assert!(!options.http_adaptive.enabled);
+}
+
+#[tokio::test]
+async fn test_cli_use_multiple_ips_defaults_to_enabled_and_accepts_override() {
+    let cli = CliArgs::try_parse_from(["aria2"]).expect("default CLI options should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(options.use_multiple_ips);
+
+    let cli = CliArgs::try_parse_from(["aria2", "--use-multiple-ips=false"])
+        .expect("multi-IP override should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI override should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+    assert!(!options.use_multiple_ips);
 }
 
 #[tokio::test]

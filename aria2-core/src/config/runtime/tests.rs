@@ -180,9 +180,9 @@ fn initial_option_projection_keeps_request_options_only() {
 fn task_policy_matches_runtime_changeability_axes() {
     assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
     #[cfg(feature = "bittorrent")]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 126);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 127);
     #[cfg(not(feature = "bittorrent"))]
-    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 125);
+    assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 126);
     assert_eq!(
         is_option_changeable("max-download-limit", true),
         ChangeableKind::Immediate

@@ -1,28 +1,21 @@
 use std::collections::HashMap;
-use std::fmt;
 
 use super::option::{OptionRegistry, OptionType, OptionValue};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ConfigSource {
+    #[error("defaults")]
     Defaults,
+    #[error("environment")]
     Environment,
+    #[error("config-file")]
     ConfigFile,
+    #[error("command-line")]
     CommandLine,
 }
 
-impl fmt::Display for ConfigSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Defaults => write!(f, "defaults"),
-            Self::Environment => write!(f, "environment"),
-            Self::ConfigFile => write!(f, "config-file"),
-            Self::CommandLine => write!(f, "command-line"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("[{source}] {option}: {message}")]
 pub struct ConfigError {
     pub source: ConfigSource,
     pub option: String,
@@ -34,12 +27,6 @@ pub struct ConfigError {
 pub struct ConfigErrorContext {
     pub line: usize,
     pub content: String,
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}: {}", self.source, self.option, self.message)
-    }
 }
 
 pub struct ConfigParser {

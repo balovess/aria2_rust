@@ -5,13 +5,13 @@
 仓库当前提供 Rust 源码构建方式。需要 Rust stable 和 Cargo：
 
 ```text
-cargo build -p aria2 --release
+cargo build -p aria2 --release --features standard
 ```
 
 生成的程序位于 `target/release/aria2c`（Windows 为 `target/release/aria2c.exe`）。默认构建包含 HTTP、BitTorrent 和 RPC；需要 Metalink 或 SFTP 时启用对应 feature：
 
 ```text
-cargo build -p aria2 --release --features "metalink,sftp"
+cargo build -p aria2 --release --features "standard,metalink,sftp"
 ```
 
 ## 2. 第一个下载

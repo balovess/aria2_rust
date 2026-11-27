@@ -74,7 +74,12 @@ still claims the `sftp:` scheme and returns `UnsupportedProtocol`; this keeps
 core, RPC, and C API task creation from accidentally treating SFTP URIs as
 HTTP. The CLI rejects the same unsupported protocol at input validation. The
 HTTP adapter delegates construction to `engine::http::command_factory`, which
-resolves target and proxy addresses.
+resolves target and proxy addresses. HLS playlist URLs enter through that same
+HTTP adapter: the HLS branch parses the playlist with the configured HTTP
+client, then delegates media transfer and muxing to a user-supplied FFmpeg
+process. aria2 owns request headers, proxy selection, output collision policy,
+progress reporting, cancellation, and atomic publication of the final file.
+The [HLS guide](hls-guide-en.md) records the supported scope and limits.
 
 Cargo feature propagation follows the same ownership boundary. BitTorrent,
 Metalink, and SFTP are real optional features: the CLI forwards each to core and
