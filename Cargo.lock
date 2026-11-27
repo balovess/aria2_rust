@@ -203,6 +203,7 @@ dependencies = [
  "futures",
  "libc",
  "mimalloc",
+ "rand 0.10.4",
  "ratatui",
  "reqwest",
  "serde",
@@ -215,6 +216,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "tracing",
+ "url",
  "windows-sys 0.61.2",
 ]
 

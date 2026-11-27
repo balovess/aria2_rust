@@ -63,9 +63,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 futures.workspace = true
+rand.workspace = true
 socket2 = "0.6"
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
+url = "2.5"
 
 [features]
 default = []

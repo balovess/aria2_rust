@@ -111,7 +111,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy check
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features aria2/full -- -D warnings
       - name: Format check
         run: cargo fmt --all -- --check
 

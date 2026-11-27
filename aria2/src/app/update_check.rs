@@ -382,7 +382,7 @@ fn replace_binary(target: &Path, staged: &Path) -> Result<(), String> {
     if backup.exists() {
         return Err("an update backup already exists; refusing to overwrite it".into());
     }
-    fs::rename(&target, &backup)
+    fs::rename(target, &backup)
         .map_err(|error| format!("cannot back up current executable: {error}"))?;
     if let Err(error) = fs::rename(staged, target) {
         let _ = fs::rename(&backup, target);

@@ -2365,16 +2365,13 @@ async fn cli_magnet_persists_resolved_metadata_for_process_restart() {
     let torrent = two_piece_upload_torrent(&tracker.announce_url());
     let source_path = output_dir.path().join("exact-source.torrent");
     std::fs::write(&source_path, &torrent).expect("write initial magnet exact source");
-    let source_path = source_path.to_string_lossy().replace('\\', "/");
-    let source_uri = if cfg!(windows) {
-        format!("file:///{}", source_path.replace(' ', "%20"))
-    } else {
-        format!("file://{}", source_path.replace(' ', "%20"))
-    };
-    let magnet_uri = format!(
-        "magnet:?xt=urn:btih:{}&xs={source_uri}",
-        meta.info_hash.as_hex()
-    );
+    let source_uri = url::Url::from_file_path(&source_path)
+        .expect("temporary torrent path converts to a file URL");
+    let magnet_query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("xt", &format!("urn:btih:{}", meta.info_hash.as_hex()))
+        .append_pair("xs", source_uri.as_str())
+        .finish();
+    let magnet_uri = format!("magnet:?{magnet_query}");
     let session_path = output_dir.path().join("magnet-session.txt");
     let listen_port = reserve_loopback_port();
     let common_args = || {
