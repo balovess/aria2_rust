@@ -89,7 +89,10 @@ async fn cli_isolates_a_backpressured_peer_and_force_removes_the_swarm() {
         "--enable-peer-exchange=false".to_owned(),
         "--bt-enable-web-seed=false".to_owned(),
         "--bt-max-peers=32".to_owned(),
-        "--bt-timeout=5".to_owned(),
+        // The stalled peers stop sending messages once their request window is
+        // full. Keep them alive long enough for the OS TCP receive window to
+        // close on slower CI hosts before checking upload backpressure.
+        "--bt-timeout=60".to_owned(),
         "--check-integrity=true".to_owned(),
         "--bt-hash-check-seed=true".to_owned(),
         "--seed-time=60".to_owned(),
@@ -200,7 +203,7 @@ async fn cli_isolates_a_backpressured_peer_and_force_removes_the_swarm() {
     // The bounded receive window makes each stalled peer stop accepting Piece
     // data after a few blocks. Wait until that saturation is observable over
     // two samples, then check that it does not stop the remaining peer.
-    let saturation_deadline = Instant::now() + Duration::from_secs(15);
+    let saturation_deadline = Instant::now() + Duration::from_secs(30);
     let mut previous = vec![0u64; stalled_ports.len()];
     let mut stable_samples = 0;
     loop {
